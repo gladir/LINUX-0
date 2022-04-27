@@ -11,6 +11,10 @@ Voici la liste des différents fichiers proposés dans Corail :
 			<th>Description</th>	
 		</tr>
 		<tr>
+			<td><b>AWK.PAS</b></td>
+			<td>Cette commande permet de lancer le langage de programmation AWK.</td>
+		</tr>
+		<tr>
 			<td><b>BANNER.PAS</b></td>
 			<td>Cette commande permet d'afficher une bannière. Cette commande est un équivalent de la commande UNIX.</td>
 		</tr>
@@ -89,7 +93,11 @@ Voici la liste des différents fichiers proposés dans Corail :
 	        <tr>
 			<td><b>HEXDUMP.PAS</b></td>
 			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal. Cette commande est inspiré de la commande de Linux.</td>
-		</tr>	
+		</tr>
+		<tr>
+			<td><b>KSH.PAS</b></td>
+			<td>Cette commande permet de lancer un interpréteur de commande Korn SHell.</td>
+		</tr>
 		<tr>
 			<td><b>LESS.PAS</b></td>
 			<td>Cette commande permet d'afficher un fichier de la fin vers le début.</td>
