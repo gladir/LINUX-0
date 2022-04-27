@@ -115,6 +115,10 @@ Voici la liste des différents fichiers proposés dans Corail :
 			<td>Cette commande permet de déplacer un fichier.</td>
 		</tr>
 		<tr>
+			<td><b>OD.PAS</b></td>
+			<td>Cette commande permet d'afficher le contenu d'un fichier selon un format spécifique. Cette commande est un équivalent de UNIX.</td>
+		</tr>
+		<tr>
 			<td><b>PWD.PAS</b></td>
 			<td>Cette commande permet d'afficher le chemin du répertoire courant. Cette commande est un équivalent de UNIX.</td>
 		</tr>
