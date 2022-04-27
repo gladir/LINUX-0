@@ -50,17 +50,9 @@ Voici la liste des différents fichiers proposés dans Corail :
 			<td><b>CPP.PAS</b></td>
 			<td>Cette commande permet d'effectuer un traitement de préprocesseur de langage de porgrammation <a href="https://www.gladir.com/CODER/C/intro.htm">C</a>.</td>
 		</tr>
-	         <tr>
-			 <td><b>CPUTEST.PAS</b></td>
-			 <td>Cette commande permet de détecter le type de microprocesseur. Cette commande est un clone de la commande CPUTEST du Turbo Pascal 6.</td>
-		</tr>
-	         <tr>
-			 <td><b>CREATE.PAS</b></td>
-			 <td>Cette commande permet de créer un fichier. Cette commande est originaire du <a href="https://www.gladir.com/OS/LDOS/intro.htm">LDOS</a> de TRS-80.</td>
-		 </tr>	
      <tr>
 			<td><b>CUT.PAS</b></td>
-			<td>Cette commande permet de supprimer des sections de chaque ligne des fichiers. Cette commande est inspiré de la commande <a href="https://www.gladir.com/OS/LINUX/cut.htm">cut</a> de Linux.</td>
+			<td>Cette commande permet de supprimer des sections de chaque ligne des fichiers.</td>
 		</tr>
     <tr>
 			<td><b>DF.PAS</b></td>
@@ -90,10 +82,18 @@ Voici la liste des différents fichiers proposés dans Corail :
 			<td><b>GREP.PAS</b></td>
 			<td>Cette commande permet d'effectuer des recherches dans des fichiers. Cette commande est un équivalent de UNIX.</td>
 		</tr>
+	        <tr>
+			<td><b>HD.PAS</b></td>
+			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal. Cette commande est inspiré de la commande HD du compilateur Aztec C86 ou de Linux.</td>
+		</tr>
 		<tr>
 			<td><b>HEAD.PAS</b>
 			<td>Cette commande permet d'afficher le début d'un fichier texte. Cette commande est un équivalent de UNIX ou Linux.</td>
 		</tr>
+	        <tr>
+			<td><b>HEXDUMP.PAS</b></td>
+			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal. Cette commande est inspiré de la commande de Linux.</td>
+		</tr>	
 		<tr>
 			<td><b>LESS.PAS</b></td>
 			<td>Cette commande permet d'afficher un fichier de la fin vers le début.</td>
