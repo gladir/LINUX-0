@@ -89,7 +89,11 @@ Voici la liste des différents fichiers proposés dans Corail :
 	        <tr>
 			<td><b>HEXDUMP.PAS</b></td>
 			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal. Cette commande est inspiré de la commande de Linux.</td>
-		</tr>	
+		</tr>
+		<tr>
+			<td><b>KSH.PAS</b></td>
+			<td>Cette commande permet de lancer un interpréteur de commande Korn SHell.</td>
+		</tr>
 		<tr>
 			<td><b>LESS.PAS</b></td>
 			<td>Cette commande permet d'afficher un fichier de la fin vers le début.</td>
