@@ -102,6 +102,10 @@ Voici la liste des différents fichiers proposés dans Corail :
 			<td><b>LESS.PAS</b></td>
 			<td>Cette commande permet d'afficher un fichier de la fin vers le début.</td>
 		</tr>
+		<tr>
+			<td><b>LOGNAME.PAS</b></td>
+			<td>Cette comamnde permet de demander le nom de connexion.</td>
+		</tr>
 	        <tr>
 			<td><b>LOOK.PAS</b></td>
 			<td>Cette commande permet de rechercher les lignes commençant par un texte spécifié.</td>
