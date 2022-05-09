@@ -75,6 +75,10 @@ Voici la liste des différents fichiers proposés dans Corail :
 			<td>Cette commande permet de fixer ou de demander le contenu des variables d'environnement du système d'exploitaiton.</td>
 		</tr>
 		<tr>
+			<td><b>FALSE.PAS</b></td>
+			<td>Cette commande permet de retourner faux. Cette command est inspiré de UNIX et Linux.</td>
+		</tr>
+		<tr>
 			<td><b>FREE.PAS</b></td>
 			<td>Cette commande permet de demander les ressources de disponible (style Linux) ou les statistiques d'un unite de disque (style 4DOS).</td>
 		</tr>
