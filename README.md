@@ -84,19 +84,19 @@ Voici la liste des différents fichiers proposés dans Corail :
 		</tr>
 		<tr>
 			<td><b>GREP.PAS</b></td>
-			<td>Cette commande permet d'effectuer des recherches dans des fichiers. Cette commande est un équivalent de UNIX.</td>
+			<td>Cette commande permet d'effectuer des recherches dans des fichiers.</td>
 		</tr>
 	        <tr>
 			<td><b>HD.PAS</b></td>
-			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal. Cette commande est inspiré de la commande HD du compilateur Aztec C86 ou de Linux.</td>
+			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal.</td>
 		</tr>
 		<tr>
 			<td><b>HEAD.PAS</b>
-			<td>Cette commande permet d'afficher le début d'un fichier texte. Cette commande est un équivalent de UNIX ou Linux.</td>
+			<td>Cette commande permet d'afficher le début d'un fichier texte.</td>
 		</tr>
 	        <tr>
 			<td><b>HEXDUMP.PAS</b></td>
-			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal. Cette commande est inspiré de la commande de Linux.</td>
+			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal.</td>
 		</tr>
 		<tr>
 			<td><b>KSH.PAS</b></td>
@@ -116,11 +116,11 @@ Voici la liste des différents fichiers proposés dans Corail :
 		</tr>
 		<tr>
 			<td><b>LP.PAS</b></td>
-			<td>Cette commande permet d'imprimer le contenu d'un fichier. Cette commande est équivalent de UNIX.</td>
+			<td>Cette commande permet d'imprimer le contenu d'un fichier.</td>
 		</tr>	
 		<tr>
 			<td><b>LS.PAS</b></td>
-			<td>Cette commande permet d'afficher les fichiers d'un répertoire. Cette commande est équivalent de UNIX.</td>
+			<td>Cette commande permet d'afficher les fichiers d'un répertoire.</td>
 		</tr>
 		<tr>
 			<td><b>MORE.PAS</b></td>
@@ -132,11 +132,11 @@ Voici la liste des différents fichiers proposés dans Corail :
 		</tr>
 		<tr>
 			<td><b>OD.PAS</b></td>
-			<td>Cette commande permet d'afficher le contenu d'un fichier selon un format spécifique. Cette commande est un équivalent de UNIX.</td>
+			<td>Cette commande permet d'afficher le contenu d'un fichier selon un format spécifique.</td>
 		</tr>
 		<tr>
 			<td><b>PWD.PAS</b></td>
-			<td>Cette commande permet d'afficher le chemin du répertoire courant. Cette commande est un équivalent de UNIX.</td>
+			<td>Cette commande permet d'afficher le chemin du répertoire courant.</td>
 		</tr>
 		<tr>
 			<td><b>REBOOT.PAS</b></td>
@@ -144,7 +144,7 @@ Voici la liste des différents fichiers proposés dans Corail :
 		</tr>
      <tr>
 			<td><b>RM.PAS</b></td>
-			<td>Cette commande permet de supprimer un fichier. Cette commande est un équivalent de Linux.</td>
+			<td>Cette commande permet de supprimer un fichier.</td>
 		</tr>
 		<tr>
 			<td><b>SH.PAS</b></td>
@@ -152,27 +152,27 @@ Voici la liste des différents fichiers proposés dans Corail :
 		</tr>
 		<tr>
 			<td><b>SLEEP.PAS</b></td>
-			<td>Cette commande permet d'attendre le nombre de secondes spécifiés. Cette commande est un équivalent de UNIX et LINUX.</td>
+			<td>Cette commande permet d'attendre le nombre de secondes spécifiés. </td>
 		</tr>
 		<tr>
 			<td><b>SORT.PAS</b></td>
-			<td>Cette commande permet de trier une fichier texte ASCII et de retourner le résultat. Cette commande est un équivalent de la commande du DOS.</td>
+			<td>Cette commande permet de trier une fichier texte ASCII et de retourner le résultat.</td>
 		</tr>	
 		<tr>
 			<td><b>SPLIT.PAS</b></td>
-			<td>Cette commande permet de séparer un fichier en plusieurs fichiers. Cette commande est un équivalent de UNIX.</td>
+			<td>Cette commande permet de séparer un fichier en plusieurs fichiers.</td>
 		</tr>
 		<tr>
 			<td><b>STAT.PAS</b></td>
-			<td>Cette commande permet d'afficher des informations sur des fichiers. Cettte commande est un équivalent de UNIX et LINUX.</td>
+			<td>Cette commande permet d'afficher des informations sur des fichiers.</td>
 		</tr>
 		<tr>
 			<td><b>TAIL.PAS</b></td>
-			<td>Cette commande permet d'afficher la fin d'un fichier texte. Cette commande est un équivalent de UNIX ou Linux.</td>
+			<td>Cette commande permet d'afficher la fin d'un fichier texte.</td>
 		</tr>
      <tr>
 			<td><b>TEE.PAS</b></td>
-			<td>Cette commande permet d'envoyer l'entrée standard vers la sortie standard. Cette commande est un équivalent de UNIX ou Linux.</td>
+			<td>Cette commande permet d'envoyer l'entrée standard vers la sortie standard.</td>
 		</tr>
 		<tr>
 			<td><b>TIME.PAS</b></td>
@@ -180,11 +180,15 @@ Voici la liste des différents fichiers proposés dans Corail :
 		</tr>
     <tr>
 			<td><b>TOUCH.PAS</b></td>
-			<td>Cette commande permet de changer la date et l'heure d'un fichier. Cette commande est un équivalent de UNIX, AIX et Linux.</td>
+			<td>Cette commande permet de changer la date et l'heure d'un fichier.</td>
 	   </tr>
 	   <tr>
 			<td><b>TREE.PAS</b></td>
 			<td>Cette commande permet d'afficher un arbre de répertoire.</td>
+		</tr>
+	<tr>
+			<td><b>TRUE.PAS</b></td>
+			<td>Cette commande permet de retourner vrai. </td>
 		</tr>
      <tr>
 			<td><b>UNAME.PAS</b></td>
