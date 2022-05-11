@@ -39,6 +39,10 @@ Voici la liste des différents fichiers proposés dans Corail :
 			<td>Cette commande permet d'afficher le contenu d'un/des fichiers. </td>
 		</tr>
 		<tr>
+			<td><b>CHMOD.PAS</b></td>
+			<td>Cette commande permet de changer le mode des fichiers. Cette commande est inspiré de UNIX et Linux.</td>
+		</tr>
+		<tr>
 			<td><b>CLEAR.PAS</b></td>
 			<td>Cette commande permet d'effacer l'écran.</td>
 		</tr>
