@@ -202,6 +202,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>UNIQ.PAS</b></td>
 			<td>Cette commande permet de sortir le contenu d'un fichier sans duplication du contenu de ses lignes.</td>
 		</tr>
+	        <tr>
+			<td><b>VI.PAS</b></td>
+			<td>Cette commande permet de lancer l'éditeur de texte VI.</td>
+		</tr>
     <tr>
 			<td><b>WC.PAS</b></td>
 			<td>Cette commande permet de compter le nombre de mots, de lignes ou de caractères.</td>
