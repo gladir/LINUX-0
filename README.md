@@ -147,10 +147,14 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher le chemin du répertoire courant.</td>
 		</tr>
 		<tr>
+			<td><b>READELF.PAS</b></td>
+			<td>Cette commande permet d'afficher des informations sur un ELF.</td>
+		</tr>
+		<tr>
 			<td><b>REBOOT.PAS</b></td>
 			<td>Cette commande permet de redémarrer l'ordinateur.</td>
 		</tr>
-     <tr>
+     		<tr>
 			<td><b>RM.PAS</b></td>
 			<td>Cette commande permet de supprimer un fichier.</td>
 		</tr>
