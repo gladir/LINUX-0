@@ -214,6 +214,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>UNIQ.PAS</b></td>
 			<td>Cette commande permet de sortir le contenu d'un fichier sans duplication du contenu de ses lignes.</td>
 		</tr>
+			<tr>
+			<td><b>UUDECODE.PAS</b></td>
+			<td>Cette commande permet d'effectuer le décodage d'un fichier binaire de format UUE.</td>
+		</tr>
 		<tr>
 			<td><b>UUENCODE.PAS</b></td>
 			<td>Cette commande permet d'effectuer un encodage d'un fichier binaire.</td>
