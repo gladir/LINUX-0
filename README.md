@@ -162,6 +162,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>RM.PAS</b></td>
 			<td>Cette commande permet de supprimer un fichier.</td>
 		</tr>
+	<tr>
+			<td><b>SEQ.PAS</b></td>
+			<td>Cette commande permet de générer des nombres selon l'intervalle et le saut spécifié.</td>
+		</tr>
 		<tr>
 			<td><b>SH.PAS</b></td>
 			<td>Cette commande permet de lancer l'interpréteur de commande UNIX.</td>
