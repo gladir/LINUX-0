@@ -238,6 +238,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>WHICH.PAS</b></td>
 			<td>Cette commande permet de localiser l'emplacement d'une commande.</td>
 		</tr>
+		<tr>
+			<td><b>YES.PAS</b></td>
+			<td>Cette commande permet d'effectuer des répétitions de réponses affirmatives.</td>
+		</tr>
 	</table>
 	
 <h2>Compilation</h2>
