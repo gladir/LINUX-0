@@ -199,6 +199,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher la sommation de chaque fichier.</td>
 		</tr>
 		<tr>
+			<td><b>TAC.PAS</b></td>
+			<td>Cette commande permet d'afficher le contenu du fichier dans le sens inverse.</td>
+		</tr>
+		<tr>
 			<td><b>TAIL.PAS</b></td>
 			<td>Cette commande permet d'afficher la fin d'un fichier texte.</td>
 		</tr>
