@@ -268,6 +268,16 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 		</tr>
 	</table>
 
+<h2>Langage humain</h3>
+
+Pour changer la langue des commandes, vous devez fixer la valeur de la variable d'environnement LANGUAGE, par exemple, pour passer à l'allemand :
+
+SET LANGUAGE=GR	
+	
+Pour l'anglais :
+	
+SET LANGUAGE=EN 
+
 <h3>Remarque</h3>
 
 <ul>
