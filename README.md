@@ -278,9 +278,10 @@ Pour l'anglais :
 	
 SET LANGUAGE=EN 
 
-<h3>Remarque</h3>
+<h3>Remarques</h3>
 
 <ul>
+	<li>La commande BANNER a été bonifié par rapport à la version originales des paramètres /CHAR:, /FILE:, /FONT: et /OUTPUT:</li>
 	<li>La commande CAT a été bonifié par rapport à la version originale des paramètres --hex, --c, --hex et --html, --lower, --pascal, --uniq et --upper.</li>
 </ul>
 
