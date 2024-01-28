@@ -267,7 +267,27 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer des répétitions de réponses affirmatives.</td>
 		</tr>
 	</table>
+
+<h2>Langage humain</h3>
+
+Pour changer la langue des commandes, vous devez fixer la valeur de la variable d'environnement LANGUAGE, par exemple, pour passer à l'allemand :
+
+SET LANGUAGE=GR	
 	
+Pour l'anglais :
+	
+SET LANGUAGE=EN 
+
+<h3>Remarque</h3>
+
+<ul>
+	<li>La commande CAT a été bonifié par rapport à la version originale des paramètres --hex, --c, --hex et --html, --lower, --pascal, --uniq et --upper.</li>
+</ul>
+
+<h3>Manifeste</h3>
+
+Le projet LINUX-0 a été créé dans le but d'offrir un code source dans un langage de programmation supportant une compilation sous DOS, Windows ou Linux. Un langage de programmation précis et facile à comprendre. Aussi, la possibilité d'améliorer la commande originale avec des paramètres supplémentaires et des fonctionnalités sans avoir une trop grande compréhension du code source Pascal est également un objectif. Ainsi, les syntaxes plus modernes ou aux tendances C qu'utilise le Free Pascal ne sont pas utilisé dans le code source de se projet. Enfin, la possibilité de supporté différents langage humain (francais, anglais,...) est également un objectif souhaitable dans la mesure du possible. Finalement, le terme "-0" dans le nom du projet est un terme pour indiqué que des personnes souhaitant faire des fork du projet pour l'adapter ou le reconstruire selon leur vision, sont donc les bienvenue.
+ 
 <h2>Compilation</h2>
 	
 Les fichiers Pascal n'ont aucune dépendances, il suffit de télécharger le fichier désiré et de le compiler avec Free Pascal avec la syntaxe de commande  :
