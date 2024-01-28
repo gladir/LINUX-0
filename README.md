@@ -82,6 +82,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>ENV.PAS</b></td>
 			<td>Cette commande permet de fixer ou de demander le contenu des variables d'environnement du système d'exploitaiton.</td>
 		</tr>
+			<tr>
+			<td><b>EXPAND.PAS</b></td>
+			<td>Cette commande permet de convertir des tabulations en espaces.</td>
+		</tr>
 		<tr>
 			<td><b>FALSE.PAS</b></td>
 			<td>Cette commande permet de retourner faux. Cette command est inspiré de UNIX et Linux.</td>
