@@ -104,7 +104,7 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 		</tr>
 		<tr>
 			<td><b>FOLD.PAS</b></td>
-			<td>Cette commande permet d''envelopper les lignes d'entrée pour s'adapter à la largeur spécifié.</td>
+			<td>Cette commande permet d'envelopper les lignes d'entrée pour s'adapter à la largeur spécifié.</td>
 		</tr>	
 		<tr>
 			<td><b>FREE.PAS</b></td>
