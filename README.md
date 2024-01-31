@@ -58,10 +58,18 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>CPP.PAS</b></td>
 			<td>Cette commande permet d'effectuer un traitement de préprocesseur de langage de porgrammation <a href="https://www.gladir.com/CODER/C/intro.htm">C</a>.</td>
 		</tr>
+		<tr>
+			<td><b>CSPLIT.PAS</b></td>
+			<td>Cette commande permet de séparer un fichier en plusieurs sections déterminé par des lignes de contextes.</td>
+		</tr>	
      <tr>
 			<td><b>CUT.PAS</b></td>
 			<td>Cette commande permet de supprimer des sections de chaque ligne des fichiers.</td>
 		</tr>
+		<tr>
+			<td><b>DD.PAS</b></td>
+			<td>Cette commande permet de convertir un fichier tant qu'il se copie.</td>
+		</tr>	
     <tr>
 			<td><b>DF.PAS</b></td>
 			<td>Cette commande permet d'afficher l'espace libre sur le système de fichiers. C'est commande est inspiré de Linux et de cygwin.</td>
@@ -90,6 +98,14 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>FALSE.PAS</b></td>
 			<td>Cette commande permet de retourner faux. Cette command est inspiré de UNIX et Linux.</td>
 		</tr>
+		<tr>
+			<td><b>FMT.PAS</b></td>
+			<td>Cette commande permet de reformater le texte de paragraphe.</td>
+		</tr>
+		<tr>
+			<td><b>FOLD.PAS</b></td>
+			<td>Cette commande permet d''envelopper les lignes d'entrée pour s'adapter à la largeur spécifié.</td>
+		</tr>	
 		<tr>
 			<td><b>FREE.PAS</b></td>
 			<td>Cette commande permet de demander les ressources de disponible (style Linux) ou les statistiques d'un unite de disque (style 4DOS).</td>
