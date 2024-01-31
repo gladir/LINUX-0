@@ -95,6 +95,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet de convertir des tabulations en espaces.</td>
 		</tr>
 		<tr>
+			<td><b>FACTOR.PAS</b></td>
+			<td>Cette commande permet de calculer le facteur d'un nombre. Cette commande est inspiré de la commande factor de UNIX.</td>
+		</tr>	
+		<tr>
 			<td><b>FALSE.PAS</b></td>
 			<td>Cette commande permet de retourner faux. Cette command est inspiré de UNIX et Linux.</td>
 		</tr>
