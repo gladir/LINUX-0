@@ -82,6 +82,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>DOS2UNIX.PAS</b></td>
 			<td>Cette commande permet d'effectuer la conversion des caractères de saut de ligne du système d'exploitation DOS en leur équivalent UNIX.</td>
 		</tr>
+		<tr>
+			<td><b>DU.PAS</b></td>
+			<td>Cette commande permet de comptabilisé l'espace occupé par un répertoire et ses enfants.</td>
+		</tr>
     <tr>
 			<td><b>ECHO.PAS</b></td>
 			<td>Cette commande permet d'afficher un message.</td>
