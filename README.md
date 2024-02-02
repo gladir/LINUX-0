@@ -275,6 +275,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet de supprimer un lien symbolique.</td>
 		</tr>	
 			<tr>
+			<td><b>USERDEL.PAS</b></td>
+			<td>Cette commande permet de supprimer un utilisateur du système.</td>
+		</tr>  
+			<tr>
 			<td><b>UUDECODE.PAS</b></td>
 			<td>Cette commande permet d'effectuer le décodage d'un fichier binaire de format UUE.</td>
 		</tr>
