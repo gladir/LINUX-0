@@ -323,6 +323,7 @@ SET LANGUAGE=EN
 <ul>
 	<li>La commande BANNER a été bonifié par rapport à la version originales des paramètres /CHAR:, /FILE:, /FONT: et /OUTPUT:</li>
 	<li>La commande CAT a été bonifié par rapport à la version originale des paramètres --hex, --c, --hex et --html, --lower, --pascal, --uniq et --upper.</li>
+	<li>La commande CHSH a été bonifié par rapport à la version originale du paramètre --dos.</li>
 </ul>
 
 <h3>Manifeste</h3>
