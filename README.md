@@ -130,6 +130,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>GREP.PAS</b></td>
 			<td>Cette commande permet d'effectuer des recherches dans des fichiers.</td>
 		</tr>
+		<tr>
+			<td><b>HALT.PAS</b></td>
+			<td>Cette commande permet d'arrêter l'ordinateur.</td>
+		</tr>
 	        <tr>
 			<td><b>HD.PAS</b></td>
 			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal.</td>
