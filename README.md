@@ -123,6 +123,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet de demander les ressources de disponible (style Linux) ou les statistiques d'un unite de disque (style 4DOS).</td>
 		</tr>
 		<tr>
+			<td><b>GETENT.PAS</b></td>
+			<td>Cette commande permet de demander les entrées de la base de données administrative.</td>
+		</tr>
+		<tr>
 			<td><b>GREP.PAS</b></td>
 			<td>Cette commande permet d'effectuer des recherches dans des fichiers.</td>
 		</tr>
