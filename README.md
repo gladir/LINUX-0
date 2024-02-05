@@ -127,6 +127,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet de demander les entrées de la base de données administrative.</td>
 		</tr>
 		<tr>
+			<td><b>GETTEXT.PAS</b></td>
+			<td>Cette commande permet d'afficher les traductions de langages humains natif dans un message textuel.</td>
+		</tr>
+		<tr>
 			<td><b>GREP.PAS</b></td>
 			<td>Cette commande permet d'effectuer des recherches dans des fichiers.</td>
 		</tr>
