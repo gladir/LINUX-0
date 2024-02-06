@@ -135,6 +135,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer des recherches dans des fichiers.</td>
 		</tr>
 		<tr>
+			<td><b>GROUPDEL.PAS</b></td>
+			<td>Cette commande permet de supprimer un groupe système.</td>
+		</tr>	
+		<tr>
 			<td><b>HALT.PAS</b></td>
 			<td>Cette commande permet d'arrêter l'ordinateur.</td>
 		</tr>
