@@ -286,6 +286,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>TRUE.PAS</b></td>
 			<td>Cette commande permet de retourner vrai. </td>
 		</tr>
+		<tr>
+			<td><b>UMASK.PAS</b></td>
+			<td>Cette commande permet de fixer les droits d'accès par défaut de la création d'un fichier.</td>
+		</tr>
      <tr>
 			<td><b>UNAME.PAS</b></td>
 			<td>Cette commande permet d'afficher des informations sur le système d'exploitation.</td>
