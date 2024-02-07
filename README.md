@@ -139,6 +139,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet de supprimer un groupe système.</td>
 		</tr>	
 		<tr>
+			<td><b>GROUPS.PAS</b></td>
+			<td>Cette commande permet d'afficher les groupes d'un utilisateur.</td>
+		</tr>	
+		<tr>
 			<td><b>HALT.PAS</b></td>
 			<td>Cette commande permet d'arrêter l'ordinateur.</td>
 		</tr>
