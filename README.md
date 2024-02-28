@@ -159,6 +159,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal.</td>
 		</tr>
 		<tr>
+			<td><b>ICONV.PAS</b></td>
+			<td>Cette commande permet de convertir un fichier d'un format à un autre.</td>
+		</tr>
+		<tr>
 			<td><b>ID.PAS</b></td>
 			<td>Cette commande permet d'afficher les informations d'utilisateur ou de groupe pour l'utilisateur spécifié ou (ou quand il est omis) pour l'utilisateur courant.</td>
 		</tr>
