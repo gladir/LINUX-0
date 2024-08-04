@@ -238,6 +238,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td><b>RM.PAS</b></td>
 			<td>Cette commande permet de supprimer un fichier.</td>
 		</tr>
+		<tr>
+			<td><b>SDIFF.PAS</b></td>
+			<td>Cette commande permet de rechercher les différences côte à côte  du programme.</td>
+		</tr>		
 	<tr>
 			<td><b>SEQ.PAS</b></td>
 			<td>Cette commande permet de générer des nombres selon l'intervalle et le saut spécifié.</td>
