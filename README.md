@@ -1,5 +1,5 @@
 # LINUX-0
-Clone des commandes Linux écrit en Pascal
+Clone des commandes Linux écrit en Pascal (Turbo Pascal ou Free Pascal)
 
 <h2>Liste des fichiers</h2>
 
