@@ -267,6 +267,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher des informations sur des fichiers.</td>
 		</tr>
 		<tr>
+			<td><b>STRINGS.PAS</b></td>
+			<td>Cette commande permet de trouver les chaines de caractères affichable dans un objet ou un fichier binaire.</td>
+		</tr>		
+		<tr>
 			<td><b>SUM.PAS</b></td>
 			<td>Cette commande permet d'afficher la sommation de chaque fichier.</td>
 		</tr>
