@@ -215,6 +215,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher le contenu d'un fichier selon un format spécifique.</td>
 		</tr>
 		<tr>
+			<td><b>PR.PAS</b></td>
+			<td>Cette commande permet d'afficher un/des fichier(s) pour l'impression.</td> 
+		</tr>	
+		<tr>
 			<td><b>PRINTF.PAS</b></td>
 			<td>Cette commande permet d'afficher un message avec le format spécifié.</td>
 		</tr>
