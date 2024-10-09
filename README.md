@@ -55,6 +55,10 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet d'effacer l'écran.</td>
 		</tr>
 		<tr>
+			<td><b>COLUMN.PAS</b></td>
+			<td>Cette commande permet de visualiser proprement un fichier CSV dans un terminal.</td>
+		</tr>
+		<tr>
 			<td><b>CP.PAS</b></td>
 			<td>Cette commande permet de copier un fichier. </td>
 		</tr>
