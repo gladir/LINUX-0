@@ -383,7 +383,11 @@ Voici la liste des différents fichiers de bibliothèques proposés dans LINUX-0
 	</tr>
 	<tr>
 		<td><b>STDIO.PAS</b></td>
-		<td>Cette bibliothèque renferme les routines de traitement d'entrée/sortie fichier.</td>
+		<td>Cette unité renferme les routines de traitement d'entrée/sortie fichier.</td>
+	</tr>
+	<tr>
+		<td><b>STDLIB.PAS</b></td>
+		<td>Cette unité renferme les routines Standard.</td>
 	</tr>
 </table>
 
