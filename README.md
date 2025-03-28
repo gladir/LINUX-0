@@ -1,7 +1,7 @@
 # LINUX-0
 Clone des commandes Linux écrit en Pascal (Turbo Pascal ou Free Pascal)
 
-<h2>Liste des fichiers</h2>
+<h2>Liste des fichiers de commande</h2>
 
 Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 
@@ -364,7 +364,7 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 		</tr>
 	</table>
 
-<h2>Liste des fichiers</h2>
+<h2>Liste des fichiers de bibliothèque</h2>
 
 Voici la liste des différents fichiers de bibliothèques proposés dans LINUX-0 :
 
