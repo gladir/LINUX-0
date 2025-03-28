@@ -374,6 +374,10 @@ Voici la liste des différents fichiers de bibliothèques proposés dans LINUX-0
 			<th>Description</th>	
 		</tr>
 	<tr>
+		<td><b>ASSERT.PAS</b></td>
+		<td>Cette unité renferme les routines de terminaison de programme anormale.</td>
+	</tr>
+	<tr>
 		<td><b>CTYPE.PAS</b></td>
 		<td>Cette unité contient les routines de vérification et de conversion de caractères.</td>
 	</tr>
