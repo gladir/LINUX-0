@@ -378,6 +378,10 @@ Voici la liste des différents fichiers de bibliothèques proposés dans LINUX-0
 		<td>Cette unité renferme les routines de terminaison de programme anormale.</td>
 	</tr>
 	<tr>
+		<td><b>COMPLEX.PAS</b></td>
+		<td>Cette unité renferme les routines de traitement mathématique de nombre complexe.</td>
+	</tr>
+	<tr>
 		<td><b>CTYPE.PAS</b></td>
 		<td>Cette unité contient les routines de vérification et de conversion de caractères.</td>
 	</tr>
