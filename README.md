@@ -3,7 +3,7 @@ Clone des commandes Linux écrit en Pascal (Turbo Pascal ou Free Pascal)
 
 <h2>Liste des fichiers</h2>
 
-Voici la liste des différents fichiers proposés dans LINUX-0 :
+Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 
 <table>
 		<tr>
@@ -363,6 +363,21 @@ Voici la liste des différents fichiers proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer des répétitions de réponses affirmatives.</td>
 		</tr>
 	</table>
+
+<h2>Liste des fichiers</h2>
+
+Voici la liste des différents fichiers de bibliothèques proposés dans LINUX-0 :
+
+<table>
+		<tr>
+			<th>Nom</th>
+			<th>Description</th>	
+		</tr>
+	<tr>
+		<td><b>ERRNO.PAS</b></td>
+		<td>Cette unité contient les constantes et les variables des traitements d'erreurs de Linux.</td>
+	</tr>
+</table>
 
 <h2>Langage humain</h3>
 
