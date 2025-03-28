@@ -19,6 +19,9 @@ Const
  _IOLBF=1;   { Mis en m‚moire tampon par ligne }
  _IONBF=2;   { Pas de mise en m‚moire tampon }
 
+Type
+ FileOfChar=File Of Char;
+
 Procedure ClearErr(Var F:File);
 Function  CTermID(S:PChar):PChar;
 Function  CUserID(S:PChar):PChar;
@@ -27,6 +30,10 @@ Function  FClose(Var F:File):Integer;
 Function  FEOF(Var F:File):Integer;
 Function  FError(Var F:File):Integer;
 Function  FFlush(Var F:Text):Integer;
+Function  FGetC(Var F:FileOfChar):Char;
+Function  FGetPos(Var F:File;Pos:LongInt):LongInt;
+Function  FGetS(Var S:String;Size:Integer;Var F:Text):String;
+Function  FileNo(Var F:File):Integer;
 
 IMPLEMENTATION
 
@@ -109,6 +116,26 @@ End;
 Function FFlush(Var F:Text):Integer;Begin
  Flush(F);
  FFlush:=IOResult;
+End;
+
+Function FGetC(Var F:FileOfChar):Char;
+Var
+ C:Char;
+Begin
+ System.Read(F,C);
+End;
+
+Function FGetPos(Var F:File;Pos:LongInt):LongInt;Begin
+ FGetPos:=FilePos(F);
+End;
+
+Function FGetS(Var S:String;Size:Integer;Var F:Text):String;Begin
+ ReadLn(F,S);
+ FGetS:=S;
+End;
+
+Function FileNo(Var F:File):Integer;Begin
+ FileNo:=FileRec(F).Handle;
 End;
 
 END.
