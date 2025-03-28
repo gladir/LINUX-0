@@ -381,6 +381,10 @@ Voici la liste des différents fichiers de bibliothèques proposés dans LINUX-0
 		<td><b>ERRNO.PAS</b></td>
 		<td>Cette unité contient les constantes et les variables des traitements d'erreurs de Linux.</td>
 	</tr>
+	<tr>
+		<td><b>STDIO.PAS</b></td>
+		<td>Cette bibliothèque renferme les routines de traitement d'entrée/sortie fichier.</td>
+	</tr>
 </table>
 
 <h2>Langage humain</h3>
