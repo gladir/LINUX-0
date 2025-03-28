@@ -389,6 +389,10 @@ Voici la liste des différents fichiers de bibliothèques proposés dans LINUX-0
 		<td><b>STDLIB.PAS</b></td>
 		<td>Cette unité renferme les routines Standard.</td>
 	</tr>
+	<tr>
+		<td><b>TIME.PAS</b></td>
+		<td>Cette unité renferme les routines de traitement du temps.</td>
+	</tr>
 </table>
 
 <h2>Langage humain</h3>
