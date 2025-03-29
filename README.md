@@ -394,6 +394,10 @@ Voici la liste des différents fichiers de bibliothèques proposés dans LINUX-0
 		<td>Cette unité renferme les routines de traitement mathématique.</td>
 	</tr>
 	<tr>
+		<td><b>MC146818.PAS</b></td>
+		<td>Cette unité contient les définitions et les routines pour la manipulation de MC146818RTC de Motorola.</td>
+	</tr>
+	<tr>
 		<td><b>STDIO.PAS</b></td>
 		<td>Cette unité renferme les routines de traitement d'entrée/sortie fichier.</td>
 	</tr>
