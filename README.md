@@ -409,6 +409,10 @@ Voici la liste des différents fichiers de bibliothèques proposés dans LINUX-0
 		<td><b>TIME.PAS</b></td>
 		<td>Cette unité renferme les routines de traitement du temps.</td>
 	</tr>
+	<tr>
+		<td><b>UNISTD.PAS</b></td>
+		<td>Cette unité renferme des fonctions utilitaires, des constantes et des types symboliques.</td>
+	</tr>
 </table>
 
 <h2>Langage humain</h3>
