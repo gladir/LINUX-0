@@ -402,6 +402,10 @@ Voici la liste des différents fichiers de bibliothèques proposés dans LINUX-0
 		<td>Cette unité contient les définitions et les routines pour la manipulation de MC146818RTC de Motorola.</td>
 	</tr>
 	<tr>
+		<td><b>PWD.PAS</b></td>
+		<td>Cette unité renferme les définitions de structure de mots de passe.</td>
+	</tr>
+	<tr>
 		<td><b>STDIO.PAS</b></td>
 		<td>Cette unité renferme les routines de traitement d'entrée/sortie fichier.</td>
 	</tr>
