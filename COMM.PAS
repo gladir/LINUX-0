@@ -2,7 +2,6 @@
   @created: 2025
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Free Pascal 3.2, Turbo Pascal 7)
-  @type: Library
 }
 
 Program COMM;
