@@ -11,6 +11,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<th>Description</th>	
 		</tr>
 		<tr>
+			<td><b>AC.PAS</b></td>
+			<td>Cette commande permet d'afficher les statistiques de temps de connexions d'un utilisateur.</td>
+		</tr>
+		<tr>
 			<td><b>AWK.PAS</b></td>
 			<td>Cette commande permet de lancer le langage de programmation AWK.</td>
 		</tr>
@@ -443,6 +447,7 @@ SET LANGUAGE=EN
 	<li>La commande BANNER a été bonifié par rapport à la version originales des paramètres /CHAR:, /FILE:, /FONT: et /OUTPUT:</li>
 	<li>La commande CAT a été bonifié par rapport à la version originale des paramètres --hex, --c, --hex et --html, --lower, --pascal, --uniq et --upper.</li>
 	<li>La commande CHSH a été bonifié par rapport à la version originale du paramètre --dos.</li>
+	<li>Les commandes AC et LASTLOG ont été bonifié des paramètres --cygwin pour permettre de lire les dossiers cygwin plutôt que du système d'exploitation.</li>
 </ul>
 
 <h3>Manifeste</h3>
