@@ -1,10 +1,23 @@
 { @author: Sylvain Maltais (support@gladir.com)
   @created: 2022
-  @website(https://www.gladir.com/linux-0)
+  @website(https://www.gladir.com/corail)
   @abstract(Target: Free Pascal, Turbo Pascal)
 }
 
 Program AWK;
+
+Uses
+  {$IFDEF WINDOWS}
+  Windows,
+  {$ENDIF}
+  {$IFDEF DARWIN}
+  MacOSAll, { n‚cessaire pour appeler ObjC sous macOS/iOS }
+  CocoaAll,
+  {$ENDIF}
+  {$IFDEF UNIX}
+  BaseUnix,
+  {$ENDIF}
+  DOS;
 
 Const
  TokenList:Array[0..69]of String[20]=(
@@ -27,15 +40,161 @@ Type
 
 Var
  FileAWK:Text;
- Mode:(_None,_F);
+ Mode:(_None,_F,_InStringSimpleQuote);
  Terminated:Boolean;
- CurrCommand:String;
+ CurrCommand,CurrParam:String;
  FileName,CurrLine:String;
  CurrPos:Byte;
  PA:Array[1..MaxLine] of StrPointer;
  CurrLinePtr,NumberLine:Integer;
  CurrNumberLine:Integer;
+ AccoladeBlock:Integer;
  I:Integer;
+
+Function GetRawCommandLine:String;
+{$IFDEF FPC}
+ {$IFDEF WINDOWS}
+  Var
+   pw:PWideChar;
+  Begin
+   pw:=GetCommandLineW();
+   GetRawCommandLine:=UTF8Encode(WideString(pw)); { convertir UTF-16 vers UTF-8 }
+  End;
+ {$ELSE}
+  {$IFDEF LINUX}
+   Var
+     f:File;
+     buffer:RawByteString;
+   Begin
+    Assign(f, '/proc/self/cmdline');
+    Reset(f, 1);
+    SetLength(buffer, FileSize(f));
+    BlockRead(f, buffer[1], Length(buffer));
+    Close(f);
+    { /proc/self/cmdline s‚pare les paramŠtres avec #0 }
+    GetRawCommandLine:= StringReplace(buffer, #0, ' ', [rfReplaceAll]);
+   End;
+  {$ELSE}
+   {$IFDEF DARWIN}
+    Var
+     ProcInfo:NSObject;
+     nsArgs:NSArray;
+     i:Integer;
+     argStr:NSString;
+    Begin
+     procInfo:=NSProcessInfo.processInfo;
+     nsArgs:=NSProcessInfo(procInfo).arguments;
+     GetRawCommandLine:='';
+     For i:=0 to nsArgs.count-1 do Begin
+      argStr:= NSString(nsArgs.objectAtIndex(i));
+      GetRawCommandLine:=GetRawCommandLine+UTF8Encode(argStr.UTF8String)+' ';
+     End;
+    End;
+   {$ELSE}
+    Var
+     S:String;
+    Begin
+     S:='';
+     For I:=1 to ParamCount do Begin
+      S:=S+ParamStr(I);
+     End;
+     GetRawCommandLine:=S;
+    End;
+   {$ENDIF}
+  {$ENDIF}
+ {$ENDIF}
+{$ELSE}
+ Var
+  PtrStr:^String;
+ Begin
+  PtrStr:=Ptr(PrefixSeg,$80);
+  GetRawCommandLine:=PtrStr^;
+ End;
+{$ENDIF}
+
+Function IsDelimiter(C:Char):Boolean;Begin
+ IsDelimiter:=(C=' ')or(C=#9)or(C=#13)or(C=#10);
+End;
+
+Function RawParamCount:Integer;
+Var
+ PC:Integer;
+ I:Integer;
+ InQuote,InApos,InBrace:Boolean;
+ CmdLine:String;
+Begin
+ PC:=0;
+ InQuote:=False;
+ InApos:=False;
+ InBrace:=False;
+ CmdLine:=GetRawCommandLine;
+ I:=1;
+ While I<=Length(CmdLine)do Begin
+  While(I<=Length(CmdLine))and(IsDelimiter(CmdLine[I]))do Inc(I);
+  If I<=Length(CmdLine)Then Begin
+   Inc(PC);
+   While(I<=Length(CmdLine))do Begin
+    Case CmdLine[I]of
+     '"':If Not(InApos)and Not(InBrace)Then InQuote:=Not(InQuote);
+     '''':If Not(InQuote)and Not(InBrace)Then InApos:=Not(InApos);
+     '{':If Not(InQuote)and Not(InApos)Then InBrace:=True;
+     '}':If Not(InQuote)and Not(InApos)Then InBrace:=False;
+     ' ',#9,#13,#10:If Not(InQuote)and Not(InApos)and Not(InBrace)Then Break;
+    End;
+    Inc(I);
+   End;
+  End;
+ End;
+ RawParamCount:=PC-1; { -1 car on ne compte pas le nom du programme }
+End;
+
+Function RawParamStr(Index:Integer):String;
+Var
+ PC,StartPos:Integer;
+ I:Integer;
+ InQuote,InApos,InBrace:Boolean;
+ CmdLine,Param:String;
+Begin
+ PC:=0;
+ InQuote:=False;
+ InApos:=False;
+ InBrace:=False;
+ CmdLine:=GetRawCommandLine;
+ I:=1;
+ While I<=Length(CmdLine)do Begin
+  While(I<=Length(CmdLine))and(IsDelimiter(CmdLine[I]))do Inc(I);
+  If I<=Length(CmdLine)Then Begin
+   Inc(PC);
+   If PC=Index+1 Then Begin
+    StartPos:=I;
+    While(I<=Length(CmdLine))do Begin
+     Case CmdLine[I]of
+      '"':If Not(InApos)and Not(InBrace)Then InQuote:=Not(InQuote);
+      '''':If Not(InQuote)and Not(InBrace)Then InApos:=Not(InApos);
+      '{':If Not(InQuote)and Not(InApos)Then InBrace:=True;
+      '}':If Not(InQuote)and Not(InApos)Then InBrace:=False;
+      ' ',#9,#13,#10:If Not(InQuote)and Not(InApos)and Not(InBrace)Then Break;
+     End;
+     Inc(I);
+    End;
+    RawParamStr:=Copy(CmdLine,StartPos,I-StartPos);
+    Exit;
+   End;
+   While(I<=Length(CmdLine))do Begin
+    Case CmdLine[I]of
+     '"':If Not(InApos)and Not(InBrace)Then InQuote:=Not(InQuote);
+     '''':If Not(InQuote)and Not(InBrace)Then InApos:=Not(InApos);
+     '{':If Not(InQuote)and Not(InApos)Then InBrace:=True;
+     '}':If Not(InQuote)and Not(InApos)Then InBrace:=False;
+     ' ',#9,#13,#10:If Not(InQuote)and Not(InApos)and Not(InBrace)Then Break;
+    End;
+    Inc(I);
+   End;
+  End;
+ End;
+ RawParamStr:='';
+End;
+
 
 Function LTrim(S:String):String;
 Var
@@ -339,6 +498,18 @@ Begin
  End;
 End;
 
+Procedure CosCommand;
+Begin
+ If GetSeparator<>'"'Then Begin
+  WriteLn(Cos(GetNumberValue));
+ End
+  Else
+ Begin
+  WriteLn('Erreur de syntaxe : cos attend une valeur numerique');
+  Halt;
+ End;
+End;
+
 Function RunLine:Boolean;
 Var
  UnknownCommand:Boolean;
@@ -347,6 +518,22 @@ Var
 Begin
  RunLine:=False;
  Repeat
+  If CurrLine[CurrPos]='{'Then  Begin
+   Inc(AccoladeBlock);
+   Inc(CurrPos);
+  End;
+  If CurrLine[CurrPos]='}'Then  Begin
+   If(AccoladeBlock>0)Then Begin
+    Dec(AccoladeBlock);
+    Inc(CurrPos);
+   End
+    Else
+   Begin
+    WriteLn('Une fermeture d''accolade est rencontr‚ ',
+            'sans ouverture d''accolade');
+    Halt(1);
+   End;
+  End;
   If CurrLine[CurrPos]='#'Then Begin
    CurrPos:=Length(CurrLine);
    RunLine:=True;
@@ -369,7 +556,7 @@ Begin
    11: NoImplementation:=True; { close }
    12: NoImplementation:=True; { compl }
    13: NoImplementation:=True; { continue }
-   14: NoImplementation:=True; { cos }
+   14: CosCommand; { cos }
    15: NoImplementation:=True; { dcgettext }
    16: NoImplementation:=True; { dcngettext }
    17: NoImplementation:=True; { default }
@@ -484,16 +671,46 @@ BEGIN
   WriteLn('Syntaxe : AWK [-f nomfichier]');
  End
   Else
- If ParamCount>1Then Begin
+ If ParamCount>=1Then Begin
   NumberLine:=0;CurrNumberLine:=0;
   Mode:=_None;FileName:='';
-  For I:=1 to ParamCount do Begin
+  CurrCommand:='';
+  AccoladeBlock:=0;
+  For I:=1 to RawParamCount do Begin
+   CurrParam:=RawParamStr(I);
+   If Mode=_InStringSimpleQuote Then Begin
+    If CurrParam[Length(CurrParam)]=''''Then Begin
+     CurrCommand:=CurrCommand+' '+Copy(CurrParam,1,Length(CurrParam)-1);
+     Mode:=_None;
+    End
+     Else
+    CurrCommand:=CurrCommand+' '+CurrParam;
+   End
+    Else
    If Mode=_F Then Begin
-    FileName:=ParamStr(I);
+    FileName:=CurrParam;
     Mode:=_None;
    End
     Else
-   If ParamStr(I)='-f'Then Mode:=_F;
+   If(Copy(CurrParam,1,1)='''')and(CurrParam[Length(CurrParam)]='''')Then Begin
+    CurrCommand:=Copy(CurrParam,2,Length(CurrParam)-2);
+   End
+    Else
+   If CurrParam='-f'Then Mode:=_F Else
+   If(Copy(CurrParam,1,1)='''')Then Begin
+    Mode:=_InStringSimpleQuote;
+    CurrCommand:=Copy(CurrParam,2,Length(CurrParam)-1);
+   End
+    Else
+   Begin
+    WriteLn('ParamŠtre non reconnu');
+    Halt(1);
+   End;
+  End;
+  If CurrCommand<>''Then Begin
+   CurrLine:=CurrCommand;
+   CurrPos:=1;
+   RunLine;
   End;
   If FileName<>''Then Begin
    {$I-}Assign(FileAWK,FileName);
