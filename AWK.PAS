@@ -11,7 +11,7 @@ Uses
   Windows,
   {$ENDIF}
   {$IFDEF DARWIN}
-  MacOSAll, { n‚cessaire pour appeler ObjC sous macOS/iOS }
+  MacOSAll, { nï¿½cessaire pour appeler ObjC sous macOS/iOS }
   CocoaAll,
   {$ENDIF}
   {$IFDEF UNIX}
@@ -34,11 +34,15 @@ Const
  );
 
  MaxLine=1024;
+ MaxFields=10;
 
 Type
  StrPointer=^String;
+ FieldArray=Array[0..MaxFields]of String;
 
 Var
+ Fields:FieldArray;
+ NumFields:Integer;
  FileAWK:Text;
  Mode:(_None,_F,_InStringSimpleQuote);
  Terminated:Boolean;
@@ -71,7 +75,7 @@ Function GetRawCommandLine:String;
     SetLength(buffer, FileSize(f));
     BlockRead(f, buffer[1], Length(buffer));
     Close(f);
-    { /proc/self/cmdline s‚pare les paramŠtres avec #0 }
+    { /proc/self/cmdline sï¿½pare les paramï¿½tres avec #0 }
     GetRawCommandLine:= StringReplace(buffer, #0, ' ', [rfReplaceAll]);
    End;
   {$ELSE}
@@ -184,8 +188,8 @@ Begin
     Case CmdLine[I]of
      '"':If Not(InApos)and Not(InBrace)Then InQuote:=Not(InQuote);
      '''':If Not(InQuote)and Not(InBrace)Then InApos:=Not(InApos);
-     '{':If Not(InQuote)and Not(InApos)Then InBrace:=True;
-     '}':If Not(InQuote)and Not(InApos)Then InBrace:=False;
+     '{':If Not(InQuote)and Not(InApos) Then InBrace:=True;
+     '}':If Not(InQuote)and Not(InApos) Then InBrace:=False;
      ' ',#9,#13,#10:If Not(InQuote)and Not(InApos)and Not(InBrace)Then Break;
     End;
     Inc(I);
@@ -405,7 +409,7 @@ Begin
   { Transformation en POSTFIX }
  I:=1;
  Repeat
-  If PostFix[I]in['*','+','-',' ']Then Begin
+  If PostFix[I]in['*','+','-','/']Then Begin
    P:=ResultStackPop;
    P2:=ResultStackPop;
    Case PostFix[I]of
@@ -510,6 +514,65 @@ Begin
  End;
 End;
 
+Procedure SplitIntoFields(Line:String);
+Var
+ I,Start:Integer;
+ InSpace:Boolean;
+Begin
+ NumFields:=0;
+ I:=1;
+ InSpace:=True;
+ Start:=1;
+ While I<=Length(Line)do Begin
+  If(Line[I]in[' ',#9])Then Begin
+   If Not InSpace Then Begin
+    Fields[NumFields]:=Copy(Line,Start,I-Start);
+    Inc(NumFields);
+    InSpace:=True;
+   End;
+  End
+   Else
+  Begin
+   If InSpace Then Begin
+    Start:=I;
+    InSpace:=False;
+   End;
+  End;
+  Inc(I);
+ End;
+ If Not InSpace Then Begin
+  Fields[NumFields]:=Copy(Line,Start,I-Start);
+  Inc(NumFields);
+ End;
+End;
+
+Function EvalExpr(Expr:String):String;
+Var
+ I,FieldNum:Integer;
+ Tmp:String;
+Begin
+ if(Expr[1]='$')Then Begin
+  Val(Copy(Expr,2,255),FieldNum,I);
+  If(I=0)and(FieldNum>=0)and(FieldNum<NumFields)Then Begin
+   EvalExpr:=Fields[FieldNum];
+   Exit;
+  End;
+ End;
+End;
+
+Procedure ProcessAWKCommand(Cmd:String);
+Var
+ Line:String;
+Begin
+ While Not EOF do Begin
+  ReadLn(Line);
+  SplitIntoFields(Line);
+  If Pos('print',Cmd)>0 Then Begin
+   WriteLn(EvalExpr(Copy(Cmd,Pos('print',Cmd)+5,255)));
+  End;
+ End;
+End;
+
 Function RunLine:Boolean;
 Var
  UnknownCommand:Boolean;
@@ -529,7 +592,7 @@ Begin
    End
     Else
    Begin
-    WriteLn('Une fermeture d''accolade est rencontr‚ ',
+    WriteLn('Une fermeture d''accolade est rencontrï¿½ ',
             'sans ouverture d''accolade');
     Halt(1);
    End;
@@ -703,7 +766,7 @@ BEGIN
    End
     Else
    Begin
-    WriteLn('ParamŠtre non reconnu');
+    WriteLn('Paramï¿½tre non reconnu');
     Halt(1);
    End;
   End;
@@ -722,7 +785,7 @@ BEGIN
    While Not EOF(FileAWK) do Begin
     ReadLn(FileAWK,CurrLine);
     If Not AddLine(CurrLine)Then Begin
-     WriteLn('Manque de m‚moire');
+     WriteLn('Manque de mï¿½moire');
      Break;
     End;
    End;
