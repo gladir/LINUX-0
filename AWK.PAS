@@ -33,27 +33,46 @@ Const
   'toupper','typeof','while','xor'
  );
 
+ FunctionList:Array[0..15]of String[12]=(
+  'ATAN2','COS','EXP','GSUB','INDEX','INT','LENGTH','LOG','MATCH',
+  'RAND','SIN','SPLIT','SPRINTF','SQRT','SRAND','SUBSTR'
+ );
+
  MaxLine=1024;
+ MaxVariable=100;
  MaxFields=10;
 
 Type
  StrPointer=^String;
  FieldArray=Array[0..MaxFields]of String;
+ VarTypeEnum=(_None,_Integer,_LongInt,_Real,_String);
+ VarRec=Record
+  Variant:Record Case Integer of
+   0:(I:Integer);
+   1:(L:LongInt);
+   2:(R:Real);
+   3:(S:StrPointer);
+  End;
+  VarType:VarTypeEnum;
+  VarName:String[20];
+ End;
+ VarPointer=^VarRec;
 
 Var
  Fields:FieldArray;
  NumFields:Integer;
  FileAWK:Text;
- Mode:(_None,_F,_InStringSimpleQuote);
+ Mode:(_None_,_F,_InStringSimpleQuote);
  Terminated:Boolean;
  CurrCommand,CurrParam:String;
  FileName,CurrLine:String;
  CurrPos:Byte;
  PA:Array[1..MaxLine] of StrPointer;
+ VarList:Array[1..MaxVariable]of VarPointer;
  CurrLinePtr,NumberLine:Integer;
  CurrNumberLine:Integer;
  AccoladeBlock:Integer;
- I:Integer;
+ I,NumberVariable:Integer;
 
 Function GetRawCommandLine:String;
 {$IFDEF FPC}
@@ -228,6 +247,184 @@ Begin
  StrToUpper:=S;
 End;
 
+ { Traitement des variables }
+Function VariableExist(S:String):Boolean;
+Var
+ I:Integer;
+Begin
+ VariableExist:=False;
+ For I:=1 to NumberVariable do If(StrToUpper(S)=VarList[I]^.VarName)Then Begin
+  VariableExist:=True;
+  Exit;
+ End;
+End;
+
+Function VariableType(S:String):VarTypeEnum;
+Var
+ I:Integer;
+Begin
+ VariableType:=_None;
+ For I:=1 to NumberVariable do If(StrToUpper(S)=VarList[I]^.VarName)Then Begin
+  VariableType:=VarList[I]^.VarType;
+  Exit;
+ End;
+End;
+
+Function AddVariableInt(S:String;Value:Integer):Boolean;
+Var
+ P:VarPointer;
+Begin
+ If NumberVariable>=MaxVariable Then Begin
+  AddVariableInt:=False;
+  Exit;
+ End;
+ Inc(NumberVariable);
+ GetMem(P,SizeOf(VarRec));
+ P^.VarName:=Copy(StrToUpper(S),1,20);
+ P^.VarType:=_Integer;
+ P^.Variant.I:=Value;
+ VarList[NumberVariable]:=P;
+ AddVariableInt:=True;
+End;
+
+Function GetVariableInt(S:String):Integer;
+Var
+ I:Integer;
+Begin
+ GetVariableInt:=0;
+ For I:=1 to NumberVariable do If(StrToUpper(S)=VarList[I]^.VarName)Then Begin
+  GetVariableInt:=VarList[I]^.Variant.I;
+  Exit;
+ End;
+End;
+
+Procedure SetVariableInt(S:String;Value:Integer);
+Var
+ I:Integer;
+Begin
+ For I:=1 to NumberVariable do If(S=VarList[I]^.VarName)Then Begin
+  VarList[I]^.Variant.I:=Value;
+  Exit;
+ End;
+End;
+
+Function AddVariableLongInt(S:String;Value:LongInt):Boolean;
+Var
+ P:VarPointer;
+Begin
+ If NumberVariable>=MaxVariable Then Begin
+  AddVariableLongInt:=False;
+  Exit;
+ End;
+ Inc(NumberVariable);
+ GetMem(P,SizeOf(VarRec));
+ P^.VarName:=Copy(StrToUpper(S),1,20);
+ P^.VarType:=_LongInt;
+ P^.Variant.L:=Value;
+ VarList[NumberVariable]:=P;
+ AddVariableLongInt:=True;
+End;
+
+Function GetVariableLongInt(S:String):LongInt;
+Var
+ I:Integer;
+Begin
+ GetVariableLongInt:=0;
+ For I:=1 to NumberVariable do If(StrToUpper(S)=VarList[I]^.VarName)Then Begin
+  GetVariableLongInt:=VarList[I]^.Variant.L;
+  Exit;
+ End;
+End;
+
+Procedure SetVariableLongInt(S:String;Value:LongInt);
+Var
+ I:Integer;
+Begin
+ For I:=1 to NumberVariable do If(S=VarList[I]^.VarName)Then Begin
+  VarList[I]^.Variant.L:=Value;
+  Exit;
+ End;
+End;
+
+Function AddVariableReal(S:String;Value:Real):Boolean;
+Var
+ P:VarPointer;
+Begin
+ If NumberVariable>=MaxVariable Then Begin
+  AddVariableReal:=False;
+  Exit;
+ End;
+ Inc(NumberVariable);
+ GetMem(P,SizeOf(VarRec));
+ P^.VarName:=Copy(StrToUpper(S),1,20);
+ P^.VarType:=_Real;
+ P^.Variant.R:=Value;
+ VarList[NumberVariable]:=P;
+ AddVariableReal:=True;
+End;
+
+Function GetVariableReal(S:String):Real;
+Var
+ I:Integer;
+Begin
+ GetVariableReal:=0;
+ For I:=1 to NumberVariable do If(StrToUpper(S)=VarList[I]^.VarName)Then Begin
+  GetVariableReal:=VarList[I]^.Variant.R;
+  Exit;
+ End;
+End;
+
+Procedure SetVariableReal(S:String;Value:Real);
+Var
+ I:Integer;
+Begin
+ For I:=1 to NumberVariable do If(S=VarList[I]^.VarName)Then Begin
+  VarList[I]^.Variant.R:=Value;
+  Exit;
+ End;
+End;
+
+Function AddVariableString(S:String;Value:String):Boolean;
+Var
+ P:VarPointer;
+ PS:StrPointer;
+Begin
+ If NumberVariable>=MaxVariable Then Begin
+  AddVariableString:=False;
+  Exit;
+ End;
+ Inc(NumberVariable);
+ GetMem(P,SizeOf(VarRec));
+ P^.VarName:=Copy(StrToUpper(S),1,20);
+ P^.VarType:=_String;
+ GetMem(PS,SizeOf(String));
+ PS^:=Value;
+ P^.Variant.S:=PS;
+ VarList[NumberVariable]:=P;
+ AddVariableString:=True;
+End;
+
+Function GetVariableString(S:String):String;
+Var
+ I:Integer;
+Begin
+ GetVariableString:='';
+ For I:=1 to NumberVariable do If(StrToUpper(S)=VarList[I]^.VarName)Then Begin
+  GetVariableString:=VarList[I]^.Variant.S^;
+  Exit;
+ End;
+End;
+
+Procedure SetVariableString(S:String;Value:String);
+Var
+ I:Integer;
+Begin
+ For I:=1 to NumberVariable do If(S=VarList[I]^.VarName)Then Begin
+  VarList[I]^.Variant.S^:=Value;
+  Exit;
+ End;
+End;
+
  { Traitement de la liste }
 Function AddLine(S:String):Boolean;
 Var
@@ -328,15 +525,32 @@ Function ResultStackPop:Real;Begin
  ResultStackPop:=ResultStack[TopOfStackInt];
 End;
 
-Function GetNumberValue:Real;
+Function GetStringValue:String;
 Var
- I:Byte;
+ S:String;
+Begin
+ GetStringValue:='';
+ S:='';
+ If CurrLine[CurrPos]='"'Then Begin
+  Inc(CurrPos);
+  While(CurrLine[CurrPos]<>'"')and(CurrPos<=Length(CurrLine))do Begin
+   S:=S+CurrLine[CurrPos];
+   Inc(CurrPos);
+  End;
+  If CurrLine[CurrPos]='"'Then Inc(CurrPos);
+  GetStringValue:=S;
+ End;
+End;
+
+Function GetNumberValue(MinTopOfStack:Integer):Real;
+Var
+ I,J:Byte;
  Top,P_2:Char;
- AppendOk:Boolean;
+ AppendOk,FunctionFound:Boolean;
  _Result,P,P2:Real;
  Err:Word;
  PostFix:String;
- Value:String;
+ VarName,Value:String;
  Exposant:Boolean;
  StopChar:Set Of Char;
  Infix:String;
@@ -352,6 +566,93 @@ Begin
   Dec(CurrPos,3);
  End;
  Repeat
+  If(I<=Length(Infix))and(Infix[I]in['A'..'Z','a'..'z'])Then Begin
+   VarName:=Infix[I];
+   Inc(I);
+   While(I<=Length(Infix))and(Infix[I]in['A'..'Z','a'..'z','%','!','#'])do Begin
+    VarName:=VarName+Infix[I];
+    Inc(I);
+   End;
+   VarName:=StrToUpper(VarName);
+   If VariableExist(VarName)Then Begin
+    Case VariableType(VarName)of
+     _Integer:Str(GetVariableInt(VarName),Value);
+     _LongInt:Str(GetVariableLongInt(VarName),Value);
+     _Real:Str(GetVariableReal(VarName),Value);
+     Else Begin
+      WriteLn('Type incompatiable');
+      Exit;
+     End;
+    End;
+   End
+    Else
+   Begin { Fonction ?}
+    FunctionFound:=False;
+    For J:=Low(FunctionList)to High(FunctionList)do Begin
+     If FunctionList[J]=VarName Then Begin
+      FunctionFound:=True;
+      Case J of
+       1:Begin{COS}
+        If Infix[I]<>'('Then Begin
+         WriteLn('"(" attendu');
+         Exit;
+        End;
+        Inc(I);
+        CurrPos:=I;
+        _Result:=GetNumberValue(TopOfStack);
+        Str(Cos(_Result),Value);
+        I:=CurrPos;
+        If Infix[I]<>')'Then Begin
+         WriteLn('")" attendu');
+         Exit;
+        End;
+        Inc(I);
+       End;
+       2:Begin{EXP}
+        If Infix[I]<>'('Then Begin
+         WriteLn('"(" attendu');
+         Exit;
+        End;
+        Inc(I);
+        CurrPos:=I;
+        _Result:=GetNumberValue(TopOfStack);
+        Str(Exp(_Result),Value);
+        I:=CurrPos;
+        If Infix[I]<>')'Then Begin
+         WriteLn('")" attendu');
+         Exit;
+        End;
+        Inc(I);
+       End;
+       7:Begin{LOG}
+        If Infix[I]<>'('Then Begin
+         WriteLn('"(" attendu');
+         Exit;
+        End;
+        Inc(I);
+        CurrPos:=I;
+        _Result:=GetNumberValue(TopOfStack);
+        Str(Ln(_Result),Value);
+        I:=CurrPos;
+        If Infix[I]<>')'Then Begin
+         WriteLn('")" attendu');
+         Exit;
+        End;
+        Inc(I);
+       End;
+      End;
+      Break;
+     End
+      Else
+     Begin { Variable vide }
+      Value:='0';
+     End;
+    End;
+   End;
+   PostFix:=PostFix+'('+LTrim(Value)+')';
+   If I>Length(Infix)Then Break;
+  End
+   Else
   If Infix[I]in['0'..'9']Then Begin
    Value:='';
    Exposant:=False;
@@ -394,8 +695,12 @@ Begin
    StackPushChar(Infix[I]);
    Inc(I);
   End
-  Else If Infix[I]=')'Then Begin
-   While(TopOfStack>1)and(StackPeek<>'(')do PostFix:=PostFix+StackPop;
+   Else
+  If Infix[I]=')'Then Begin
+   If TopOfStack<=MinTopOfStack Then Begin
+    Break;
+   End;
+   While(TopOfStack>MinTopOfStack)and(StackPeek<>'(')do PostFix:=PostFix+StackPop;
    If TopOfStack>1Then StackPop;
    Inc(I);
   End
@@ -467,22 +772,6 @@ Function GetSeparator:Char;Begin
  GetSeparator:=CurrLine[CurrPos];
 End;
 
-Function GetStringValue:String;
-Var
- S:String;
-Begin
- GetStringValue:='';
- S:='';
- If CurrLine[CurrPos]='"'Then Begin
-  Inc(CurrPos);
-  While(CurrLine[CurrPos]<>'"')and(CurrPos<=Length(CurrLine))do Begin
-   S:=S+CurrLine[CurrPos];
-   Inc(CurrPos);
-  End;
-  If CurrLine[CurrPos]='"'Then Inc(CurrPos);
-  GetStringValue:=S;
- End;
-End;
 
 Procedure BeginCommand;Begin
 End;
@@ -496,7 +785,7 @@ Begin
  End
   Else
  Begin
-  R:=GetNumberValue;
+  R:=GetNumberValue(1);
   If Frac(R)=0.0Then WriteLn(R:0:0)
                 Else WriteLn(R);
  End;
@@ -505,7 +794,7 @@ End;
 Procedure CosCommand;
 Begin
  If GetSeparator<>'"'Then Begin
-  WriteLn(Cos(GetNumberValue));
+  WriteLn(Cos(GetNumberValue(1)));
  End
   Else
  Begin
@@ -546,33 +835,6 @@ Begin
  End;
 End;
 
-Function EvalExpr(Expr:String):String;
-Var
- I,FieldNum:Integer;
- Tmp:String;
-Begin
- if(Expr[1]='$')Then Begin
-  Val(Copy(Expr,2,255),FieldNum,I);
-  If(I=0)and(FieldNum>=0)and(FieldNum<NumFields)Then Begin
-   EvalExpr:=Fields[FieldNum];
-   Exit;
-  End;
- End;
-End;
-
-Procedure ProcessAWKCommand(Cmd:String);
-Var
- Line:String;
-Begin
- While Not EOF do Begin
-  ReadLn(Line);
-  SplitIntoFields(Line);
-  If Pos('print',Cmd)>0 Then Begin
-   WriteLn(EvalExpr(Copy(Cmd,Pos('print',Cmd)+5,255)));
-  End;
- End;
-End;
-
 Function RunLine:Boolean;
 Var
  UnknownCommand:Boolean;
@@ -592,7 +854,7 @@ Begin
    End
     Else
    Begin
-    WriteLn('Une fermeture d''accolade est rencontrï¿½ ',
+    WriteLn('Une fermeture d''accolade est rencontr‚ ',
             'sans ouverture d''accolade');
     Halt(1);
    End;
@@ -732,10 +994,143 @@ BEGIN
   WriteLn('AWK : Cette commande permet de lancer le langage de programmation AWK.');
   WriteLn;
   WriteLn('Syntaxe : AWK [-f nomfichier]');
+  WriteLn;
+  WriteLn(' -f   Ce paramŠtre permet d''indiquer un fichier de code source AWK');
  End
   Else
  If ParamCount>=1Then Begin
   NumberLine:=0;CurrNumberLine:=0;
+  Mode:=_None_;FileName:='';
+  CurrCommand:='';
+  AccoladeBlock:=0;
+  For I:=1 to RawParamCount do Begin
+   CurrParam:=RawParamStr(I);
+   If Mode=_InStringSimpleQuote Then Begin
+    If CurrParam[Length(CurrParam)]=''''Then Begin
+     CurrCommand:=CurrCommand+' '+Copy(CurrParam,1,Length(CurrParam)-1);
+     Mode:=_None_;
+    End
+     Else
+    CurrCommand:=CurrCommand+' '+CurrParam;
+   End
+    Else
+   If Mode=_F Then Begin
+    FileName:=CurrParam;
+    Mode:=_None_;
+   End
+    Else
+   If(Copy(CurrParam,1,1)='''')and(CurrParam[Length(CurrParam)]='''')Then Begin
+    CurrCommand:=Copy(CurrParam,2,Length(CurrParam)-2);
+   End
+    Else
+   If CurrParam='-f'Then Mode:=_F Else
+   If(Copy(CurrParam,1,1)='''')Then Begin
+    Mode:=_InStringSimpleQuote;
+    CurrCommand:=Copy(CurrParam,2,Length(CurrParam)-1);
+   End
+    Else
+   Begin
+    WriteLn('ParamŠtre non reconnu');
+    Halt(1);
+   End;
+  End;
+  If CurrCommand<>''Then Begin
+   CurrLine:=CurrCommand;
+   CurrPos:=1;
+   RunLine;
+  End;
+  If FileName<>''Then Begin
+   {$I-}Assign(FileAWK,FileName);
+   Reset(FileAWK);{$I+}
+   If IoResult<>0Then Begin
+    WriteLn('Fichier introuvable');
+    Exit;
+   End;
+   While Not EOF(FileAWK) do Begin
+    ReadLn(FileAWK,CurrLine);
+    If Not AddLine(CurrLine)Then Begin
+     WriteLn('Manque de mï¿½moire');
+     Break;
+    End;
+   End;
+   Close(FileAWK);
+   RunProgram;
+  End;
+ End;
+END.
+   56: NoImplementation:=True; { sqrt }
+   57: NoImplementation:=True; { srand }
+   58: NoImplementation:=True; { strftime }
+   59: NoImplementation:=True; { strtonum }
+   60: NoImplementation:=True; { sub }
+   61: NoImplementation:=True; { substr }
+   62: NoImplementation:=True; { switch }
+   63: NoImplementation:=True; { system }
+   64: NoImplementation:=True; { systime }
+   65: NoImplementation:=True; { tolower }
+   66: NoImplementation:=True; { toupper }
+   67: NoImplementation:=True; { typeof }
+   68: NoImplementation:=True; { while }
+   69: NoImplementation:=True; { xor }
+   Else UnknownCommand:=True;
+  End;
+  If(UnknownCommand)Then Begin
+   WriteLn('Commande non reconnu a la position ',CurrPos,' de la ligne ',CurrNumberLine+1);
+   Exit;
+  End;
+  If(NoImplementation)Then Begin
+   WriteLn('La commande ',CurrCommand,' n''a pas ete implemente');
+   Exit;
+  End;
+  While(CurrLine[CurrPos]in[' ',';'])and(CurrPos<=Length(CurrLine)) do Inc(CurrPos);
+  If CurrPos>=Length(CurrLine)Then Break;
+  If Not(CurrLine[CurrPos]in['A'..'Z','a'..'z','_'])Then Begin
+   WriteLn('Erreur de syntaxe a la position ',CurrPos,' de la ligne ',CurrNumberLine+1);
+   Exit;
+  End;
+ Until CurrPos>Length(CurrLine);
+ RunLine:=True;
+End;
+
+Procedure RunProgram;
+Var
+ J:Integer;
+ Err:Integer;
+Begin
+ If NumberLine>0Then Begin
+  CurrLinePtr:=1;
+  While(CurrLinePtr<=NumberLine) do Begin
+   CurrLine:=PA[CurrLinePtr]^;
+   CurrNumberLine:=0;
+   J:=1;
+   While(J<Length(CurrLine))do Begin
+    If Not(CurrLine[J]in['0'..'9'])Then Begin
+     Val(Copy(CurrLine,1,J-1),CurrNumberLine,Err);
+     Break;
+    End;
+    Inc(J);
+   End;
+   While J<=Length(CurrLine)do Begin
+    If CurrLine[J]in[' ',#9]Then Inc(J)
+                            Else Break;
+   End;
+   CurrPos:=J;
+   If Not RunLine Then Break;
+   Inc(CurrLinePtr);
+  End;
+ End;
+End;
+
+BEGIN
+ If(ParamStr(1)='/?')or(ParamStr(1)='--help')or(ParamStr(1)='-h')Then Begin
+  WriteLn('AWK : Cette commande permet de lancer le langage de programmation AWK.');
+  WriteLn;
+  WriteLn('Syntaxe : AWK [-f nomfichier]');
+ End
+  Else
+ If ParamCount>=1Then Begin
+  NumberLine:=0;CurrNumberLine:=0;
+  NumberVariable:=0;
   Mode:=_None;FileName:='';
   CurrCommand:='';
   AccoladeBlock:=0;
@@ -766,7 +1161,7 @@ BEGIN
    End
     Else
    Begin
-    WriteLn('Paramï¿½tre non reconnu');
+    WriteLn('ParamŠtre non reconnu');
     Halt(1);
    End;
   End;
@@ -785,7 +1180,7 @@ BEGIN
    While Not EOF(FileAWK) do Begin
     ReadLn(FileAWK,CurrLine);
     If Not AddLine(CurrLine)Then Begin
-     WriteLn('Manque de mï¿½moire');
+     WriteLn('Manque de m‚moire');
      Break;
     End;
    End;
