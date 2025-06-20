@@ -1,6 +1,6 @@
 { @author: Sylvain Maltais (support@gladir.com)
   @created: 2022
-  @website(https://www.gladir.com/corail)
+  @website(https://www.gladir.com/linux-0)
   @abstract(Target: Free Pascal, Turbo Pascal)
 }
 
