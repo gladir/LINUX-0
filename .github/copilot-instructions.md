@@ -73,8 +73,8 @@ Fonctions utilitaires communes qui apparaissent dans plusieurs fichiers :
 
 ### Support multi-langue
 - Vérifier la variable d'environnement `LANGUAGE`
-- Support : Français (par défaut), Anglais (`EN`), Allemand (`GR`), Italien (`IT`), Espagnol (`SP`)
-- Utiliser un type énuméré : `Language:(_French,_English,_Germany,_Italian,_Spain);`
+- Support : Français (par défaut), Anglais (`EN`), Allemand (`GR`), Italien (`IT`), Espagnol (`SP`), Albanais (`SQ`/`ALB`), Portugais (`PT`/`PRT`), Suédois (`SE`/`SWE`), Danois (`DK`/`DNK`), Japonais (`JP`/`JPN` - écrit en rōmaji)
+- Utiliser un type énuméré : `Language:(_French,_English,_Germany,_Italian,_Spain,_Albanian,_Portuguese,_Swedish,_Danish,_Japanese);`
 
 ## Modèles d'implémentation clés
 
