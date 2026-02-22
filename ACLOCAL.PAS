@@ -369,7 +369,7 @@ BEGIN
     WriteLn('      --help          kono herupu tekisuto o hyoji');
    End;
    Else Begin
-    WriteLn('ACLOCAL : Generate aclocal.m4 en analysant configure.ac ou configure.in');
+    WriteLn('ACLOCAL : Cette commande permet de g‚n‚rer aclocal.m4 en analysant configure.ac ou configure.in.');
     WriteLn;
     WriteLn('Syntaxe : aclocal [OPTION]...');
     WriteLn;
