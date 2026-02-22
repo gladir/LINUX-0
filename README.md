@@ -11,6 +11,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<th>Description</th>	
 		</tr>
 		<tr>
+			<td><b>A2P.PAS</b></td>
+			<td>Cette commande permet de traduire un script AWK vers un script PERL.</td>
+		</tr>
+		<tr>
 			<td><b>AC.PAS</b></td>
 			<td>Cette commande permet d'afficher les statistiques de temps de connexions d'un utilisateur.</td>
 		</tr>
