@@ -346,7 +346,11 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td><b>UNLINK.PAS</b></td>
 			<td>Cette commande permet de supprimer un lien symbolique.</td>
 		</tr>	
-			<tr>
+		<tr>
+			<td><b>USERADD.PAS</b></td>
+			<td>Cette commande permet d'ajouter un compte utilisateur au système.</td>
+		<tr>
+		<tr>
 			<td><b>USERDEL.PAS</b></td>
 			<td>Cette commande permet de supprimer un utilisateur du système.</td>
 		</tr>  
