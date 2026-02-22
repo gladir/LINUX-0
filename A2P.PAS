@@ -1,16 +1,7 @@
 { @author: Sylvain Maltais (support@gladir.com)
   @created: 2026
   @website(https://www.gladir.com/linux-0)
-  @abstract(Target  If IOResult<>0Then Begin
-   Case Language of
-    _English:WriteLn('Cannot create output file: ',OutputFile);
-    _Germany:WriteLn('Kann Ausgabedatei nicht erstellen: ',OutputFile);
-    _Italian:WriteLn('Impossibile creare il file di output: ',OutputFile);
-    _Spain:WriteLn('No se puede crear el archivo de salida: ',OutputFile);
-    _Albanian:WriteLn('Nuk mund të krijohet skedari dalës: ',OutputFile);
-    _Portuguese:WriteLn('Não é possível criar o arquivo de saída: ',OutputFile);
-    Else WriteLn('Impossible de créer le fichier de sortie : ',OutputFile);
-   End;ascal 3.2, Turbo Pascal 7)
+  @abstract(Target: Free Pascal 3.2, Turbo Pascal 7)
 }
 
 Program A2P;
@@ -21,7 +12,7 @@ Type
  TOption = Set of (OptDebug, OptFieldSep, OptFields, OptNumber, OptOutput);
 
 Var
- Language:(_French,_English,_Germany,_Italian,_Spain,_Albanian,_Portuguese);
+ Language:(_French,_English,_Germany,_Italian,_Spain,_Albanian,_Portuguese,_Swedish,_Danish);
  TmpLanguage:String;
  Options:TOption;
  DebugLevel:Integer;
@@ -127,6 +118,8 @@ Begin
     _Spain:WriteLn('Archivo no encontrado: ',InputFile);
     _Albanian:WriteLn('Skedari nuk u gjet: ',InputFile);
     _Portuguese:WriteLn('Arquivo não encontrado: ',InputFile);
+    _Swedish:WriteLn('Fil inte funnen: ',InputFile);
+    _Danish:WriteLn('Fil ikke fundet: ',InputFile);
     Else WriteLn('Fichier introuvable : ',InputFile);
    End;
    Exit;
@@ -143,7 +136,11 @@ Begin
     _Germany:WriteLn('Kann Ausgabedatei nicht erstellen: ',OutputFile);
     _Italian:WriteLn('Impossibile creare il file di output: ',OutputFile);
     _Spain:WriteLn('No se puede crear el archivo de salida: ',OutputFile);
-    Else WriteLn('Impossible de cr�er le fichier de sortie : ',OutputFile);
+    _Albanian:WriteLn('Nuk mund të krijohet skedari dalës: ',OutputFile);
+    _Portuguese:WriteLn('Não é possível criar o arquivo de saída: ',OutputFile);
+    _Swedish:WriteLn('Kan inte skapa utdatafil: ',OutputFile);
+    _Danish:WriteLn('Kan ikke oprette outputfil: ',OutputFile);
+    Else WriteLn('Impossible de créer le fichier de sortie : ',OutputFile);
    End;
    Exit;
   End;
@@ -188,6 +185,8 @@ Begin
     _Spain:WriteLn('Linea ',LineNumber,': ',CurrLine);
     _Albanian:WriteLn('Rreshti ',LineNumber,': ',CurrLine);
     _Portuguese:WriteLn('Linha ',LineNumber,': ',CurrLine);
+    _Swedish:WriteLn('Rad ',LineNumber,': ',CurrLine);
+    _Danish:WriteLn('Linje ',LineNumber,': ',CurrLine);
     Else WriteLn('Ligne ',LineNumber,': ',CurrLine);
    End;
   End;
@@ -263,7 +262,11 @@ BEGIN
   If(StrToUpper(Copy(TmpLanguage,1,2))='SQ')or
     (StrToUpper(Copy(TmpLanguage,1,3))='ALB')Then Language:=_Albanian Else
   If(StrToUpper(Copy(TmpLanguage,1,2))='PT')or
-    (StrToUpper(Copy(TmpLanguage,1,3))='PRT')Then Language:=_Portuguese;
+    (StrToUpper(Copy(TmpLanguage,1,3))='PRT')Then Language:=_Portuguese Else
+  If(StrToUpper(Copy(TmpLanguage,1,2))='SE')or
+    (StrToUpper(Copy(TmpLanguage,1,3))='SWE')Then Language:=_Swedish Else
+  If(StrToUpper(Copy(TmpLanguage,1,2))='DK')or
+    (StrToUpper(Copy(TmpLanguage,1,3))='DNK')Then Language:=_Danish;
  End;
  If(ParamStr(1)='/?')or(ParamStr(1)='--help')or(ParamStr(1)='-h')or
    (ParamStr(1)='/h')or(ParamStr(1)='/H')Then Begin
@@ -328,6 +331,30 @@ BEGIN
     WriteLn(' -o              Saída para arquivo');
     WriteLn(' arquivo         Nome do arquivo script AWK');
    End;
+   _Swedish:Begin
+    WriteLn('A2P : Detta kommando tillåter översättning av ett AWK-skript till ett PERL-skript.');
+    WriteLn;
+    WriteLn('Syntax : A2P [-Dnummer] [-Ftecken] [-nfältlista] [-nummer] [-o] [filnamn]');
+    WriteLn;
+    WriteLn(' -D<nummer>      Ställ in felsökningsnivå');
+    WriteLn(' -F<tecken>      Ställ in fältavgränsare');
+    WriteLn(' -n<fältlista>   Ange fältlista');
+    WriteLn(' -<nummer>       Maximalt antal poster');
+    WriteLn(' -o              Utdata till fil');
+    WriteLn(' filnamn         AWK-skriptfilnamn');
+   End;
+   _Danish:Begin
+    WriteLn('A2P : Denne kommando tillader oversættelse af et AWK-script til et PERL-script.');
+    WriteLn;
+    WriteLn('Syntaks : A2P [-Dnummer] [-Ftegn] [-nfeltliste] [-nummer] [-o] [filnavn]');
+    WriteLn;
+    WriteLn(' -D<nummer>      Indstil fejlsøgningsniveau');
+    WriteLn(' -F<tegn>        Indstil feltadskiller');
+    WriteLn(' -n<feltliste>   Angiv feltliste');
+    WriteLn(' -<nummer>       Maksimalt antal poster');
+    WriteLn(' -o              Output til fil');
+    WriteLn(' filnavn         AWK-scriptfilnavn');
+   End;
    Else Begin
     WriteLn('A2P : Cette commande permet de traduire un script AWK vers un script PERL.');
     WriteLn;
@@ -360,6 +387,8 @@ BEGIN
     _Spain:WriteLn('Uso: A2P [-Dnumero] [-Fcaracter] [-nlistacampos] [-numero] [-o] [archivo]');
     _Albanian:WriteLn('Përdorimi: A2P [-Dnumër] [-Fkarakter] [-nlistëfushash] [-numër] [-o] [skedari]');
     _Portuguese:WriteLn('Uso: A2P [-Dnumero] [-Fcaracter] [-nlistacampos] [-numero] [-o] [arquivo]');
+    _Swedish:WriteLn('Användning: A2P [-Dnummer] [-Ftecken] [-nfältlista] [-nummer] [-o] [filnamn]');
+    _Danish:WriteLn('Brug: A2P [-Dnummer] [-Ftegn] [-nfeltliste] [-nummer] [-o] [filnavn]');
     Else WriteLn('Utilisation: A2P [-Dnumber] [-Fcharacter] [-nfieldlist] [-number] [-o] [filename]');
    End;
   End
