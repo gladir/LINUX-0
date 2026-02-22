@@ -23,6 +23,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de vérifier si un fichier est disponible pour les actions spécifiés avec les modes de lecture (r), d'écriture (w) ou d'exécution (x).</td>
 		</tr>
 		<tr>
+			<td><b>ACLOCAL.PAS</b></td>
+			<td>Cette commande permet de générer aclocal.m4 en analysant configure.ac ou configure.in</td>
+		</tr>
+		<tr>
 			<td><b>AWK.PAS</b></td>
 			<td>Cette commande permet de lancer le langage de programmation AWK.</td>
 		</tr>
