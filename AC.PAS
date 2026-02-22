@@ -13,7 +13,7 @@ Uses DOS,Strings;
 Const
  EMPTY         = 0;  { Enregistrement vide }
  RUN_LVL       = 1;  { Changement de niveau d'exÇcution }
- BOOT_TIME     = 2;  { Heure de dÔøΩmarrage du systäme }
+ BOOT_TIME     = 2;  { Heure de dÇmarrage du systäme }
  NEW_TIME      = 3;  { Changement d'heure (ancien temps) }
  OLD_TIME      = 4;  { Changement d'heure (nouveau temps) }
  INIT_PROCESS  = 5;  { Processus d'initialisation }
@@ -230,153 +230,153 @@ BEGIN
     WriteLn;
     Writeln('Syntax : AC [options] [people]');
     WriteLn;
-    Writeln('  -a, --all-days        Include all days');
-    Writeln('  -d, --daily-totals    Print daily totals');
-    Writeln('  -y, --print-year      Print year information');
+    Writeln('  -a, --all-days          Include all days');
+    Writeln('  -d, --daily-totals      Print daily totals');
+    Writeln('  -y, --print-year        Print year information');
     Writeln('  -p, --individual-totals Print individual totals');
-    Writeln('  -f, --file <file>     Use alternative wtmp file');
-    Writeln('  -z, --print-zeros     Print zero entries');
-    Writeln('  -V, --version         Display version information');
-    Writeln('  -h, --help            Display this command help');
-    WriteLn(' --cygwin               Search in Cygwin directories');
-    WriteLn(' --cygwin32             Search in 32-bit Cygwin directories');
-    WriteLn(' --cygwin64             Search in 64-bit Cygwin directories');
+    Writeln('  -f, --file <file>       Use alternative wtmp file');
+    Writeln('  -z, --print-zeros       Print zero entries');
+    Writeln('  -V, --version           Display version information');
+    Writeln('  -h, --help              Display this command help');
+    WriteLn(' --cygwin                 Search in Cygwin directories');
+    WriteLn(' --cygwin32               Search in 32-bit Cygwin directories');
+    WriteLn(' --cygwin64               Search in 64-bit Cygwin directories');
    End;
    _Germany:Begin
     WriteLn('AC : Dieser Befehl zeigt Benutzer-Anmeldezeit-Statistiken an.');
     WriteLn;
     Writeln('Syntax : AC [Optionen] [Benutzer]');
     WriteLn;
-    Writeln('  -a, --all-days        Alle Tage einschlie√üen');
-    Writeln('  -d, --daily-totals    T√§gliche Gesamtsummen drucken');
-    Writeln('  -y, --print-year      Jahresinformationen drucken');
+    Writeln('  -a, --all-days          Alle Tage einschlie·en');
+    Writeln('  -d, --daily-totals      TÑgliche Gesamtsummen drucken');
+    Writeln('  -y, --print-year        Jahresinformationen drucken');
     Writeln('  -p, --individual-totals Individuelle Gesamtsummen drucken');
-    Writeln('  -f, --file <Datei>    Alternative wtmp-Datei verwenden');
-    Writeln('  -z, --print-zeros     Null-Eintr√§ge drucken');
-    Writeln('  -V, --version         Versionsinformationen anzeigen');
-    Writeln('  -h, --help            Diese Befehlshilfe anzeigen');
-    WriteLn(' --cygwin               In Cygwin-Verzeichnissen suchen');
-    WriteLn(' --cygwin32             In 32-Bit-Cygwin-Verzeichnissen suchen');
-    WriteLn(' --cygwin64             In 64-Bit-Cygwin-Verzeichnissen suchen');
+    Writeln('  -f, --file <Datei>      Alternative wtmp-Datei verwenden');
+    Writeln('  -z, --print-zeros       Null-EintrÑge drucken');
+    Writeln('  -V, --version           Versionsinformationen anzeigen');
+    Writeln('  -h, --help              Diese Befehlshilfe anzeigen');
+    WriteLn(' --cygwin                 In Cygwin-Verzeichnissen suchen');
+    WriteLn(' --cygwin32               In 32-Bit-Cygwin-Verzeichnissen suchen');
+    WriteLn(' --cygwin64               In 64-Bit-Cygwin-Verzeichnissen suchen');
    End;
    _Italian:Begin
     WriteLn('AC : Questo comando visualizza le statistiche del tempo di accesso utente.');
     WriteLn;
     Writeln('Sintassi : AC [opzioni] [utenti]');
     WriteLn;
-    Writeln('  -a, --all-days        Includi tutti i giorni');
-    Writeln('  -d, --daily-totals    Stampa totali giornalieri');
-    Writeln('  -y, --print-year      Stampa informazioni anno');
+    Writeln('  -a, --all-days          Includi tutti i giorni');
+    Writeln('  -d, --daily-totals      Stampa totali giornalieri');
+    Writeln('  -y, --print-year        Stampa informazioni anno');
     Writeln('  -p, --individual-totals Stampa totali individuali');
-    Writeln('  -f, --file <file>     Usa file wtmp alternativo');
-    Writeln('  -z, --print-zeros     Stampa voci zero');
-    Writeln('  -V, --version         Visualizza informazioni versione');
-    Writeln('  -h, --help            Visualizza aiuto comando');
-    WriteLn(' --cygwin               Cerca nelle directory Cygwin');
-    WriteLn(' --cygwin32             Cerca nelle directory Cygwin 32-bit');
-    WriteLn(' --cygwin64             Cerca nelle directory Cygwin 64-bit');
+    Writeln('  -f, --file <file>       Usa file wtmp alternativo');
+    Writeln('  -z, --print-zeros       Stampa voci zero');
+    Writeln('  -V, --version           Visualizza informazioni versione');
+    Writeln('  -h, --help              Visualizza aiuto comando');
+    WriteLn(' --cygwin                 Cerca nelle directory Cygwin');
+    WriteLn(' --cygwin32               Cerca nelle directory Cygwin 32-bit');
+    WriteLn(' --cygwin64               Cerca nelle directory Cygwin 64-bit');
    End;
    _Spain:Begin
-    WriteLn('AC : Este comando muestra estad√≠sticas de tiempo de conexi√≥n de usuario.');
+    WriteLn('AC : Este comando muestra estadisticas de tiempo de conexi¢n de usuario.');
     WriteLn;
     Writeln('Sintaxis : AC [opciones] [usuarios]');
     WriteLn;
-    Writeln('  -a, --all-days        Incluir todos los d√≠as');
-    Writeln('  -d, --daily-totals    Imprimir totales diarios');
-    Writeln('  -y, --print-year      Imprimir informaci√≥n del a√±o');
+    Writeln('  -a, --all-days          Incluir todos los dias');
+    Writeln('  -d, --daily-totals      Imprimir totales diarios');
+    Writeln('  -y, --print-year        Imprimir informaci¢n del a§o');
     Writeln('  -p, --individual-totals Imprimir totales individuales');
-    Writeln('  -f, --file <archivo>  Usar archivo wtmp alternativo');
-    Writeln('  -z, --print-zeros     Imprimir entradas cero');
-    Writeln('  -V, --version         Mostrar informaci√≥n de versi√≥n');
-    Writeln('  -h, --help            Mostrar ayuda del comando');
-    WriteLn(' --cygwin               Buscar en directorios Cygwin');
-    WriteLn(' --cygwin32             Buscar en directorios Cygwin 32-bit');
-    WriteLn(' --cygwin64             Buscar en directorios Cygwin 64-bit');
+    Writeln('  -f, --file <archivo>    Usar archivo wtmp alternativo');
+    Writeln('  -z, --print-zeros       Imprimir entradas cero');
+    Writeln('  -V, --version           Mostrar informaci¢n de versi¢n');
+    Writeln('  -h, --help              Mostrar ayuda del comando');
+    WriteLn(' --cygwin                 Buscar en directorios Cygwin');
+    WriteLn(' --cygwin32               Buscar en directorios Cygwin 32-bit');
+    WriteLn(' --cygwin64               Buscar en directorios Cygwin 64-bit');
    End;
    _Albanian:Begin
-    WriteLn('AC : Ky komand√´ shfaq statistikat e koh√´s s√´ hyrjes s√´ p√´rdoruesit.');
+    WriteLn('AC : Ky komandâ shfaq statistikat e kohâs sâ hyrjes sâ pârdoruesit.');
     WriteLn;
-    Writeln('Sintaksa : AC [opsione] [njer√´z]');
+    Writeln('Sintaksa : AC [opsione] [njerâz]');
     WriteLn;
-    Writeln('  -a, --all-days        P√´rfshi t√´ gjitha dit√´t');
-    Writeln('  -d, --daily-totals    Shtyp totalet ditore');
-    Writeln('  -y, --print-year      Shtyp informacionin e vitit');
+    Writeln('  -a, --all-days          Pârfshi tâ gjitha ditât');
+    Writeln('  -d, --daily-totals      Shtyp totalet ditore');
+    Writeln('  -y, --print-year        Shtyp informacionin e vitit');
     Writeln('  -p, --individual-totals Shtyp totalet individuale');
-    Writeln('  -f, --file <skedar>   P√´rdor skedar wtmp alternativ');
-    Writeln('  -z, --print-zeros     Shtyp hyrjet zero');
-    Writeln('  -V, --version         Shfaq informacionin e versionit');
-    Writeln('  -h, --help            Shfaq ndihm√´n e komand√´s');
-    WriteLn(' --cygwin               K√´rko n√´ dosjet e Cygwin');
-    WriteLn(' --cygwin32             K√´rko n√´ dosjet e Cygwin 32-bit');
-    WriteLn(' --cygwin64             K√´rko n√´ dosjet e Cygwin 64-bit');
+    Writeln('  -f, --file <skedar>     Pârdor skedar wtmp alternativ');
+    Writeln('  -z, --print-zeros       Shtyp hyrjet zero');
+    Writeln('  -V, --version           Shfaq informacionin e versionit');
+    Writeln('  -h, --help              Shfaq ndihmân e komandâs');
+    WriteLn(' --cygwin                 Kârko nâ dosjet e Cygwin');
+    WriteLn(' --cygwin32               Kârko nâ dosjet e Cygwin 32-bit');
+    WriteLn(' --cygwin64               Kârko nâ dosjet e Cygwin 64-bit');
    End;
    _Portuguese:Begin
-    WriteLn('AC : Este comando exibe estat√≠sticas de tempo de login do usu√°rio.');
+    WriteLn('AC : Este comando exibe estatisticas de tempo de login do usu†rio.');
     WriteLn;
-    Writeln('Sintaxe : AC [op√ß√µes] [pessoas]');
+    Writeln('Sintaxe : AC [opáoes] [pessoas]');
     WriteLn;
-    Writeln('  -a, --all-days        Incluir todos os dias');
-    Writeln('  -d, --daily-totals    Imprimir totais di√°rios');
-    Writeln('  -y, --print-year      Imprimir informa√ß√µes do ano');
+    Writeln('  -a, --all-days          Incluir todos os dias');
+    Writeln('  -d, --daily-totals      Imprimir totais di†rios');
+    Writeln('  -y, --print-year        Imprimir informaáoes do ano');
     Writeln('  -p, --individual-totals Imprimir totais individuais');
-    Writeln('  -f, --file <arquivo>  Usar arquivo wtmp alternativo');
-    Writeln('  -z, --print-zeros     Imprimir entradas zero');
-    Writeln('  -V, --version         Exibir informa√ß√µes da vers√£o');
-    Writeln('  -h, --help            Exibir ajuda do comando');
-    WriteLn(' --cygwin               Procurar em diret√≥rios Cygwin');
-    WriteLn(' --cygwin32             Procurar em diret√≥rios Cygwin 32-bit');
-    WriteLn(' --cygwin64             Procurar em diret√≥rios Cygwin 64-bit');
+    Writeln('  -f, --file <arquivo>    Usar arquivo wtmp alternativo');
+    Writeln('  -z, --print-zeros       Imprimir entradas zero');
+    Writeln('  -V, --version           Exibir informaáoes da versao');
+    Writeln('  -h, --help              Exibir ajuda do comando');
+    WriteLn(' --cygwin                 Procurar em diretorios Cygwin');
+    WriteLn(' --cygwin32               Procurar em diretorios Cygwin 32-bit');
+    WriteLn(' --cygwin64               Procurar em diretorios Cygwin 64-bit');
    End;
    _Swedish:Begin
-    WriteLn('AC : Detta kommando visar anv√§ndarinloggnings-tidsstatistik.');
+    WriteLn('AC : Detta kommando visar anvÑndarinloggnings-tidsstatistik.');
     WriteLn;
     Writeln('Syntax : AC [alternativ] [personer]');
     WriteLn;
-    Writeln('  -a, --all-days        Inkludera alla dagar');
-    Writeln('  -d, --daily-totals    Skriv ut dagliga totaler');
-    Writeln('  -y, --print-year      Skriv ut √•rsinformation');
+    Writeln('  -a, --all-days          Inkludera alla dagar');
+    Writeln('  -d, --daily-totals      Skriv ut dagliga totaler');
+    Writeln('  -y, --print-year        Skriv ut Ürsinformation');
     Writeln('  -p, --individual-totals Skriv ut individuella totaler');
-    Writeln('  -f, --file <fil>      Anv√§nd alternativ wtmp-fil');
-    Writeln('  -z, --print-zeros     Skriv ut nollposter');
-    Writeln('  -V, --version         Visa versionsinformation');
-    Writeln('  -h, --help            Visa kommandohj√§lp');
-    WriteLn(' --cygwin               S√∂k i Cygwin-kataloger');
-    WriteLn(' --cygwin32             S√∂k i 32-bitars Cygwin-kataloger');
-    WriteLn(' --cygwin64             S√∂k i 64-bitars Cygwin-kataloger');
+    Writeln('  -f, --file <fil>        AnvÑnd alternativ wtmp-fil');
+    Writeln('  -z, --print-zeros       Skriv ut nollposter');
+    Writeln('  -V, --version           Visa versionsinformation');
+    Writeln('  -h, --help              Visa kommandohjÑlp');
+    WriteLn(' --cygwin                 Sîk i Cygwin-kataloger');
+    WriteLn(' --cygwin32               Sîk i 32-bitars Cygwin-kataloger');
+    WriteLn(' --cygwin64               Sîk i 64-bitars Cygwin-kataloger');
    End;
    _Danish:Begin
     WriteLn('AC : Denne kommando viser brugerlogin-tidsstatistikker.');
     WriteLn;
     Writeln('Syntaks : AC [muligheder] [personer]');
     WriteLn;
-    Writeln('  -a, --all-days        Inkluder alle dage');
-    Writeln('  -d, --daily-totals    Udskriv daglige totaler');
-    Writeln('  -y, --print-year      Udskriv √•rsinformation');
+    Writeln('  -a, --all-days          Inkluder alle dage');
+    Writeln('  -d, --daily-totals      Udskriv daglige totaler');
+    Writeln('  -y, --print-year        Udskriv Ürsinformation');
     Writeln('  -p, --individual-totals Udskriv individuelle totaler');
-    Writeln('  -f, --file <fil>      Brug alternativ wtmp-fil');
-    Writeln('  -z, --print-zeros     Udskriv nul-poster');
-    Writeln('  -V, --version         Vis versionsinformation');
-    Writeln('  -h, --help            Vis kommandohj√¶lp');
-    WriteLn(' --cygwin               S√∏g i Cygwin-mapper');
-    WriteLn(' --cygwin32             S√∏g i 32-bit Cygwin-mapper');
-    WriteLn(' --cygwin64             S√∏g i 64-bit Cygwin-mapper');
+    Writeln('  -f, --file <fil>        Brug alternativ wtmp-fil');
+    Writeln('  -z, --print-zeros       Udskriv nul-poster');
+    Writeln('  -V, --version           Vis versionsinformation');
+    Writeln('  -h, --help              Vis kommandohjaelp');
+    WriteLn(' --cygwin                 Sog i Cygwin-mapper');
+    WriteLn(' --cygwin32               Sog i 32-bit Cygwin-mapper');
+    WriteLn(' --cygwin64               Sog i 64-bit Cygwin-mapper');
    End;
    _Japanese:Begin
-    WriteLn('AC : Kono komando wa y≈´zƒÅ roguuin jikan no t≈çkei o hy≈çji shimasu.');
+    WriteLn('AC : Kono komando wa yuza roguuin jikan no tokei o hyoji shimasu.');
     WriteLn;
-    Writeln('K≈çbun : AC [opushon] [hito]');
+    Writeln('Kobun : AC [opushon] [hito]');
     WriteLn;
     Writeln('  -a, --all-days        Subete no hi o fukumu');
-    Writeln('  -d, --daily-totals    Mainichi no g≈çkei o insatsu');
-    Writeln('  -y, --print-year      Toshi j≈çh≈ç o insatsu');
-    Writeln('  -p, --individual-totals Kojin no g≈çkei o insatsu');
-    Writeln('  -f, --file <fairu>    Daitai wtmp fairu o shiy≈ç');
-    Writeln('  -z, --print-zeros     Zero entorƒ´ o insatsu');
-    Writeln('  -V, --version         BƒÅjon j≈çh≈ç o hy≈çji');
-    Writeln('  -h, --help            Komando herupu o hy≈çji');
-    WriteLn(' --cygwin               Cygwin direktorƒ´ de kensaku');
-    WriteLn(' --cygwin32             32-bitto Cygwin direktorƒ´ de kensaku');
-    WriteLn(' --cygwin64             64-bitto Cygwin direktorƒ´ de kensaku');
+    Writeln('  -d, --daily-totals    Mainichi no gokei o insatsu');
+    Writeln('  -y, --print-year      Toshi joho o insatsu');
+    Writeln('  -p, --individual-totals Kojin no gokei o insatsu');
+    Writeln('  -f, --file <fairu>    Daitai wtmp fairu o shiyo');
+    Writeln('  -z, --print-zeros     Zero entori o insatsu');
+    Writeln('  -V, --version         Bajon joho o hyoji');
+    Writeln('  -h, --help            Komando herupu o hyoji');
+    WriteLn(' --cygwin               Cygwin direktori de kensaku');
+    WriteLn(' --cygwin32             32-bitto Cygwin direktori de kensaku');
+    WriteLn(' --cygwin64             64-bitto Cygwin direktori de kensaku');
    End;
    Else Begin
     WriteLn('AC : Cette commande permet d''afficher les statistiques ',
@@ -384,17 +384,17 @@ BEGIN
     WriteLn;
     Writeln('Syntaxe : AC [options] [people]');
     WriteLn;
-    Writeln('  -a, --all-days        Inclut tous les jours');
-    Writeln('  -d, --daily-totals    Affiche les totaux quotidiens');
-    Writeln('  -y, --print-year      Affiche les informations ann√©e');
+    Writeln('  -a, --all-days          Inclut tous les jours');
+    Writeln('  -d, --daily-totals      Affiche les totaux quotidiens');
+    Writeln('  -y, --print-year        Affiche les informations annÇe');
     Writeln('  -p, --individual-totals Affiche les totaux individuels');
-    Writeln('  -f, --file <fichier>  Utilise un fichier wtmp alternatif');
-    Writeln('  -z, --print-zeros     Affiche les entr√©es nulles');
-    Writeln('  -V, --version         Affiche les informations version');
-    Writeln('  -h, --help            Affiche l''aide de cette commande');
-    WriteLn(' --cygwin               Recherche dans les dossiers de Cygwin');
-    WriteLn(' --cygwin32             Recherche dans les dossiers de Cygwin en 32 bits');
-    WriteLn(' --cygwin64             Recherche dans les dossiers de Cygwin en 64 bits');
+    Writeln('  -f, --file <fichier>    Utilise un fichier wtmp alternatif');
+    Writeln('  -z, --print-zeros       Affiche les entrÇes nulles');
+    Writeln('  -V, --version           Affiche les informations version');
+    Writeln('  -h, --help              Affiche l''aide de cette commande');
+    WriteLn(' --cygwin                 Recherche dans les dossiers de Cygwin');
+    WriteLn(' --cygwin32               Recherche dans les dossiers de Cygwin en 32 bits');
+    WriteLn(' --cygwin64               Recherche dans les dossiers de Cygwin en 64 bits');
    End;
   End;
  End
@@ -430,14 +430,14 @@ BEGIN
    If(ParamStr(i)='-a')or(ParamStr(i)='--all-days')Then AllDays := True Else
    If(ParamStr(i)='-z')or(ParamStr(i)='--print-zeros')Then PrintZeros := True Else
    If(ParamStr(i)='-V')or(ParamStr(i)='--version')Then begin
-    Writeln('ac - 1.0 - Clone Pascal');
+    Writeln('ac - 1.1 - Clone Pascal');
     Halt(0);
    End
     else
    If People=''Then People:=ParamStr(i)
     Else
    Begin
-    Writeln('ParamÔøΩtre inconnu: ', ParamStr(i));
+    Writeln('Paramätre inconnu : ', ParamStr(i));
     Halt(1);
    End;
    Inc(i);
@@ -447,13 +447,13 @@ BEGIN
   If IOResult<>0 Then Begin
    Case Language of
     _English:WriteLn('Cannot open file ',BaseDir+WtmpFile);
-    _Germany:WriteLn('Datei kann nicht ge√∂ffnet werden ',BaseDir+WtmpFile);
+    _Germany:WriteLn('Datei kann nicht geîffnet werden ',BaseDir+WtmpFile);
     _Italian:WriteLn('Impossibile aprire il file ',BaseDir+WtmpFile);
     _Spain:WriteLn('No se puede abrir el archivo ',BaseDir+WtmpFile);
-    _Albanian:WriteLn('Nuk mund t√´ hapet skedari ',BaseDir+WtmpFile);
-    _Portuguese:WriteLn('N√£o √© poss√≠vel abrir o arquivo ',BaseDir+WtmpFile);
-    _Swedish:WriteLn('Kan inte √∂ppna fil ',BaseDir+WtmpFile);
-    _Danish:WriteLn('Kan ikke √•bne fil ',BaseDir+WtmpFile);
+    _Albanian:WriteLn('Nuk mund tâ hapet skedari ',BaseDir+WtmpFile);
+    _Portuguese:WriteLn('Nao Ç possivel abrir o arquivo ',BaseDir+WtmpFile);
+    _Swedish:WriteLn('Kan inte îppna fil ',BaseDir+WtmpFile);
+    _Danish:WriteLn('Kan ikke Übne fil ',BaseDir+WtmpFile);
     _Japanese:WriteLn('Fairu o hiraku koto ga dekimasen ',BaseDir+WtmpFile);
     Else WriteLn('Impossible d''ouvrir le fichier ',BaseDir+WtmpFile);
    End;
@@ -465,8 +465,8 @@ BEGIN
    If People<>''Then Begin
     If(rec.ut_user=People)Then Begin
      If Not(AllDays)Then Begin
-      Writeln('Utilisateur: ', rec.ut_user, ' ÔøΩ ',
-               rec.ut_line,', hÔøΩte : ',rec.ut_host);
+      Writeln('Utilisateur: ', rec.ut_user, ' Ö ',
+               rec.ut_line,', hìte : ',rec.ut_host);
       WriteLn(DateTimeToStr(rec.ut_tv.tv_sec));
      End;
      Inc(userCount);
@@ -475,8 +475,8 @@ BEGIN
     Else
    If rec.ut_type=USER_PROCESS Then Begin
     If Not(AllDays)Then Begin
-     Writeln('Utilisateur: ', rec.ut_user, ' ÔøΩ ',
-              rec.ut_line,', hÔøΩte : ',rec.ut_host);
+     Writeln('Utilisateur: ', rec.ut_user, ' Ö ',
+              rec.ut_line,', hìte : ',rec.ut_host);
      WriteLn(DateTimeToStr(rec.ut_tv.tv_sec));
     End;
     Inc(userCount);
@@ -484,11 +484,11 @@ BEGIN
   End;
   Close(f);
   If DailyTotals then Writeln('Jours totales actifs.');
-  If PrintYear then Writeln('AnnÔøΩe ayant ÔøΩtÔøΩ affich.');
+  If PrintYear then Writeln('AnnÇe ayant ÇtÇ affichÇ');
   If IndividualTotals then Writeln('Totals individuel active.');
   If AllDays then Begin
    Writeln('  total  ', userCount);
   End;
-  If PrintZeros then Writeln('Affiche les nombres d''entrÔøΩes vide.');
+  If PrintZeros then Writeln('Affiche les nombres d''entrÇes vide.');
  End;
 END.
