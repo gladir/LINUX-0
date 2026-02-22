@@ -1,7 +1,16 @@
 { @author: Sylvain Maltais (support@gladir.com)
   @created: 2026
   @website(https://www.gladir.com/linux-0)
-  @abstract(Target: Free Pascal 3.2, Turbo Pascal 7)
+  @abstract(Target  If IOResult<>0Then Begin
+   Case Language of
+    _English:WriteLn('Cannot create output file: ',OutputFile);
+    _Germany:WriteLn('Kann Ausgabedatei nicht erstellen: ',OutputFile);
+    _Italian:WriteLn('Impossibile creare il file di output: ',OutputFile);
+    _Spain:WriteLn('No se puede crear el archivo de salida: ',OutputFile);
+    _Albanian:WriteLn('Nuk mund të krijohet skedari dalës: ',OutputFile);
+    _Portuguese:WriteLn('Não é possível criar o arquivo de saída: ',OutputFile);
+    Else WriteLn('Impossible de créer le fichier de sortie : ',OutputFile);
+   End;ascal 3.2, Turbo Pascal 7)
 }
 
 Program A2P;
@@ -12,7 +21,7 @@ Type
  TOption = Set of (OptDebug, OptFieldSep, OptFields, OptNumber, OptOutput);
 
 Var
- Language:(_French,_English,_Germany,_Italian,_Spain);
+ Language:(_French,_English,_Germany,_Italian,_Spain,_Albanian,_Portuguese);
  TmpLanguage:String;
  Options:TOption;
  DebugLevel:Integer;
@@ -116,6 +125,8 @@ Begin
     _Germany:WriteLn('Datei nicht gefunden: ',InputFile);
     _Italian:WriteLn('File non trovato: ',InputFile);
     _Spain:WriteLn('Archivo no encontrado: ',InputFile);
+    _Albanian:WriteLn('Skedari nuk u gjet: ',InputFile);
+    _Portuguese:WriteLn('Arquivo não encontrado: ',InputFile);
     Else WriteLn('Fichier introuvable : ',InputFile);
    End;
    Exit;
@@ -132,7 +143,7 @@ Begin
     _Germany:WriteLn('Kann Ausgabedatei nicht erstellen: ',OutputFile);
     _Italian:WriteLn('Impossibile creare il file di output: ',OutputFile);
     _Spain:WriteLn('No se puede crear el archivo de salida: ',OutputFile);
-    Else WriteLn('Impossible de cr�er le fichier de sortie : ',OutputFile);
+    Else WriteLn('Impossible de cr�er le fichier de sortie : ',OutputFile);
    End;
    Exit;
   End;
@@ -175,6 +186,8 @@ Begin
     _Germany:WriteLn('Zeile ',LineNumber,': ',CurrLine);
     _Italian:WriteLn('Riga ',LineNumber,': ',CurrLine);
     _Spain:WriteLn('Linea ',LineNumber,': ',CurrLine);
+    _Albanian:WriteLn('Rreshti ',LineNumber,': ',CurrLine);
+    _Portuguese:WriteLn('Linha ',LineNumber,': ',CurrLine);
     Else WriteLn('Ligne ',LineNumber,': ',CurrLine);
    End;
   End;
@@ -246,7 +259,11 @@ BEGIN
   If StrToUpper(Copy(TmpLanguage,1,2))='EN'Then Language:=_English Else
   If StrToUpper(Copy(TmpLanguage,1,2))='GR'Then Language:=_Germany Else
   If StrToUpper(Copy(TmpLanguage,1,2))='IT'Then Language:=_Italian Else
-  If StrToUpper(Copy(TmpLanguage,1,2))='SP'Then Language:=_Spain;
+  If StrToUpper(Copy(TmpLanguage,1,2))='SP'Then Language:=_Spain Else
+  If(StrToUpper(Copy(TmpLanguage,1,2))='SQ')or
+    (StrToUpper(Copy(TmpLanguage,1,3))='ALB')Then Language:=_Albanian Else
+  If(StrToUpper(Copy(TmpLanguage,1,2))='PT')or
+    (StrToUpper(Copy(TmpLanguage,1,3))='PRT')Then Language:=_Portuguese;
  End;
  If(ParamStr(1)='/?')or(ParamStr(1)='--help')or(ParamStr(1)='-h')or
    (ParamStr(1)='/h')or(ParamStr(1)='/H')Then Begin
@@ -287,17 +304,29 @@ BEGIN
     WriteLn(' -o              Output su file');
     WriteLn(' nomefile        Nome del file script AWK');
    End;
-   _Spain:Begin
-    WriteLn('A2P : Este comando permite traducir un script AWK a un script PERL.');
+   _Albanian:Begin
+    WriteLn('A2P : Ky komandë lejon përkthimin e një skripti AWK në një skript PERL.');
     WriteLn;
-    WriteLn('Sintaxis : A2P [-Dnumero] [-Fcaracter] [-nlistacampos] [-numero] [-o] [archivo]');
+    WriteLn('Sintaksa : A2P [-Dnumër] [-Fkarakter] [-nlistëfushash] [-numër] [-o] [skedari]');
     WriteLn;
-    WriteLn(' -D<numero>      Establece el nivel de depuracion');
-    WriteLn(' -F<caracter>    Establece el separador de campo');
-    WriteLn(' -n<listacampos> Especifica la lista de campos');
-    WriteLn(' -<numero>       Numero maximo de registros');
-    WriteLn(' -o              Salida a archivo');
-    WriteLn(' archivo         Nombre del archivo script AWK');
+    WriteLn(' -D<numër>       Vendos nivelin e korrigjimit');
+    WriteLn(' -F<karakter>    Vendos ndarësin e fushës');
+    WriteLn(' -n<listëfushash> Specifikon listën e fushave');
+    WriteLn(' -<numër>        Numri maksimal i regjistrave');
+    WriteLn(' -o              Dalim në skedar');
+    WriteLn(' skedari         Emri i skedarit skript AWK');
+   End;
+   _Portuguese:Begin
+    WriteLn('A2P : Este comando permite traduzir um script AWK para um script PERL.');
+    WriteLn;
+    WriteLn('Sintaxe : A2P [-Dnumero] [-Fcaracter] [-nlistacampos] [-numero] [-o] [arquivo]');
+    WriteLn;
+    WriteLn(' -D<numero>      Define o nível de debug');
+    WriteLn(' -F<caracter>    Define o separador de campo');
+    WriteLn(' -n<listacampos> Especifica a lista de campos');
+    WriteLn(' -<numero>       Número máximo de registros');
+    WriteLn(' -o              Saída para arquivo');
+    WriteLn(' arquivo         Nome do arquivo script AWK');
    End;
    Else Begin
     WriteLn('A2P : Cette commande permet de traduire un script AWK vers un script PERL.');
@@ -305,8 +334,8 @@ BEGIN
     WriteLn('Syntaxe : A2P [-Dnumber] [-Fcharacter] [-nfieldlist] [-number] [-o] [filename]');
     WriteLn;
     WriteLn(' -D<nombre>      Fixe le niveau de debug');
-    WriteLn(' -F<caractere>   Fixe le s�parateur de champ');
-    WriteLn(' -n<listechamp>  Sp�cifie la liste des champs');
+    WriteLn(' -F<caractere>   Fixe le s�parateur de champ');
+    WriteLn(' -n<listechamp>  Sp�cifie la liste des champs');
     WriteLn(' -<nombre>       Nombre maximum d''enregistrements');
     WriteLn(' -o              Sortie vers fichier');
     WriteLn(' filename        Nom du fichier script AWK');
@@ -329,6 +358,8 @@ BEGIN
     _Germany:WriteLn('Verwendung: A2P [-Dnummer] [-Fzeichen] [-nfeldliste] [-nummer] [-o] [dateiname]');
     _Italian:WriteLn('Uso: A2P [-Dnumero] [-Fcarattere] [-nlistacampi] [-numero] [-o] [nomefile]');
     _Spain:WriteLn('Uso: A2P [-Dnumero] [-Fcaracter] [-nlistacampos] [-numero] [-o] [archivo]');
+    _Albanian:WriteLn('Përdorimi: A2P [-Dnumër] [-Fkarakter] [-nlistëfushash] [-numër] [-o] [skedari]');
+    _Portuguese:WriteLn('Uso: A2P [-Dnumero] [-Fcaracter] [-nlistacampos] [-numero] [-o] [arquivo]');
     Else WriteLn('Utilisation: A2P [-Dnumber] [-Fcharacter] [-nfieldlist] [-number] [-o] [filename]');
    End;
   End
