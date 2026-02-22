@@ -12,7 +12,7 @@ Type
  TOption = Set of (OptDebug, OptFieldSep, OptFields, OptNumber, OptOutput);
 
 Var
- Language:(_French,_English,_Germany,_Italian,_Spain,_Albanian,_Portuguese,_Swedish,_Danish);
+ Language:(_French,_English,_Germany,_Italian,_Spain,_Albanian,_Portuguese,_Swedish,_Danish,_Japanese);
  TmpLanguage:String;
  Options:TOption;
  DebugLevel:Integer;
@@ -120,6 +120,7 @@ Begin
     _Portuguese:WriteLn('Arquivo não encontrado: ',InputFile);
     _Swedish:WriteLn('Fil inte funnen: ',InputFile);
     _Danish:WriteLn('Fil ikke fundet: ',InputFile);
+    _Japanese:WriteLn('Fairu ga mitsukaranai: ',InputFile);
     Else WriteLn('Fichier introuvable : ',InputFile);
    End;
    Exit;
@@ -140,6 +141,7 @@ Begin
     _Portuguese:WriteLn('Não é possível criar o arquivo de saída: ',OutputFile);
     _Swedish:WriteLn('Kan inte skapa utdatafil: ',OutputFile);
     _Danish:WriteLn('Kan ikke oprette outputfil: ',OutputFile);
+    _Japanese:WriteLn('Shutsuryoku fairu o sakusei dekimasen: ',OutputFile);
     Else WriteLn('Impossible de créer le fichier de sortie : ',OutputFile);
    End;
    Exit;
@@ -187,6 +189,7 @@ Begin
     _Portuguese:WriteLn('Linha ',LineNumber,': ',CurrLine);
     _Swedish:WriteLn('Rad ',LineNumber,': ',CurrLine);
     _Danish:WriteLn('Linje ',LineNumber,': ',CurrLine);
+    _Japanese:WriteLn('Gyō ',LineNumber,': ',CurrLine);
     Else WriteLn('Ligne ',LineNumber,': ',CurrLine);
    End;
   End;
@@ -266,7 +269,9 @@ BEGIN
   If(StrToUpper(Copy(TmpLanguage,1,2))='SE')or
     (StrToUpper(Copy(TmpLanguage,1,3))='SWE')Then Language:=_Swedish Else
   If(StrToUpper(Copy(TmpLanguage,1,2))='DK')or
-    (StrToUpper(Copy(TmpLanguage,1,3))='DNK')Then Language:=_Danish;
+    (StrToUpper(Copy(TmpLanguage,1,3))='DNK')Then Language:=_Danish Else
+  If(StrToUpper(Copy(TmpLanguage,1,2))='JP')or
+    (StrToUpper(Copy(TmpLanguage,1,3))='JPN')Then Language:=_Japanese;
  End;
  If(ParamStr(1)='/?')or(ParamStr(1)='--help')or(ParamStr(1)='-h')or
    (ParamStr(1)='/h')or(ParamStr(1)='/H')Then Begin
@@ -355,6 +360,18 @@ BEGIN
     WriteLn(' -o              Output til fil');
     WriteLn(' filnavn         AWK-scriptfilnavn');
    End;
+   _Japanese:Begin
+    WriteLn('A2P : Kono komando wa AWK sukuriputo o PERL sukuriputo ni hon''yaku suru koto o kanō ni shimasu.');
+    WriteLn;
+    WriteLn('Kōbun : A2P [-Dsūji] [-Fmoji] [-nfīrudo-risuto] [-sūji] [-o] [fairu-mei]');
+    WriteLn;
+    WriteLn(' -D<sūji>        Debaggu reberu o settei');
+    WriteLn(' -F<moji>        Fīrudo kubun-shi o settei');
+    WriteLn(' -n<fīrudo-risuto> Fīrudo-risuto o shitei');
+    WriteLn(' -<sūji>         Saidai rekōdo-sū');
+    WriteLn(' -o              Fairu ni shutsuryoku');
+    WriteLn(' fairu-mei       AWK sukuriputo fairu-mei');
+   End;
    Else Begin
     WriteLn('A2P : Cette commande permet de traduire un script AWK vers un script PERL.');
     WriteLn;
@@ -389,6 +406,7 @@ BEGIN
     _Portuguese:WriteLn('Uso: A2P [-Dnumero] [-Fcaracter] [-nlistacampos] [-numero] [-o] [arquivo]');
     _Swedish:WriteLn('Användning: A2P [-Dnummer] [-Ftecken] [-nfältlista] [-nummer] [-o] [filnamn]');
     _Danish:WriteLn('Brug: A2P [-Dnummer] [-Ftegn] [-nfeltliste] [-nummer] [-o] [filnavn]');
+    _Japanese:WriteLn('Shiyōhō: A2P [-Dsūji] [-Fmoji] [-nfīrudo-risuto] [-sūji] [-o] [fairu-mei]');
     Else WriteLn('Utilisation: A2P [-Dnumber] [-Fcharacter] [-nfieldlist] [-number] [-o] [filename]');
    End;
   End
