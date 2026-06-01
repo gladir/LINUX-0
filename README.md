@@ -103,6 +103,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher l'espace libre sur le système de fichiers. C'est commande est inspiré de Linux et de cygwin.</td>
 		</tr>
 		<tr>
+			<td><b>DIFF.PAS</b></td>
+			<td>Cette commande permet de comparer des fichiers ligne par ligne.</td>
+		</tr>
+		<tr>
 			<td><b>DIRNAME.PAS</b></td>
 			<td>Cette commande permet de retourner le chemin seulement à partir d'un chemin complet de nom de fichier. Cette commande est un équivalent de UNIX et Linux.</td>
 		</tr>
