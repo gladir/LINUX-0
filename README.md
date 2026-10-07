@@ -274,6 +274,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td><b>SDIFF.PAS</b></td>
 			<td>Cette commande permet de rechercher les différences côte à côte  du programme.</td>
 		</tr>		
+		<tr>
+			<td><b>SED.PAS</b></td>
+			<td>Cette commande permet de lancer l'editeur de flux pour les scripts de base.</td>
+		</tr>
 	<tr>
 			<td><b>SEQ.PAS</b></td>
 			<td>Cette commande permet de générer des nombres selon l'intervalle et le saut spécifié.</td>
