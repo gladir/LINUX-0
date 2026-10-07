@@ -27,6 +27,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de générer aclocal.m4 en analysant configure.ac ou configure.in</td>
 		</tr>
 		<tr>
+			<td><b>ADDFTINFO.PAS</b></td>
+			<td>Cette commande permet d'ajouter les metriques a un fichier de police troff.</td>
+		</tr>
+		<tr>
 			<td><b>AWK.PAS</b></td>
 			<td>Cette commande permet de lancer le langage de programmation AWK.</td>
 		</tr>
