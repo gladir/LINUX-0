@@ -195,6 +195,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher les informations d'utilisateur ou de groupe pour l'utilisateur spécifié ou (ou quand il est omis) pour l'utilisateur courant.</td>
 		</tr>
 		<tr>
+			<td><b>IFCONFIG.PAS</b></td>
+			<td>Cette commande permet d'effectuer la configuration et l'affichage des interfaces réseau.</td>
+		</tr>
+		<tr>
 			<td><b>KSH.PAS</b></td>
 			<td>Cette commande permet de lancer un interpréteur de commande Korn SHell.</td>
 		</tr>
