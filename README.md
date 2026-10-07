@@ -39,6 +39,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de créer une description de police groff depuis un fichier AFM.</td>
 		</tr>
 		<tr>
+			<td><b>ANSI2KNR.PAS</b></td>
+			<td>Cette commande permet de convertir les définitions ANSI C en K&R C.</td>
+		</tr>
+		<tr>
 			<td><b>AWK.PAS</b></td>
 			<td>Cette commande permet de lancer le langage de programmation AWK.</td>
 		</tr>
