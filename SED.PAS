@@ -543,8 +543,10 @@ BEGIN
       WriteLn('Commands currently supported: s/old/new/[g], d, p, l');
     End
      Else Begin
-      WriteLn('SED : Editeur de flux pour les scripts de base.');
+      WriteLn('SED : Cette commande permet de lancer l''editeur de flux pour les scripts de base.');
+      WriteLn;
       WriteLn('Syntaxe : sed [OPTION]... SCRIPT [FICHIER]...');
+      WriteLn;
       WriteLn(' -e SCRIPT, --expression=SCRIPT  ajouter un script');
       WriteLn(' -f FICHIER, --file=FICHIER      ajouter un fichier de commandes');
       WriteLn(' -i[SUFFIXE], --in-place[=SUFFIXE] modifier les fichiers sur place');
