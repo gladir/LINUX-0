@@ -47,6 +47,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de convertir une image prise en charge en format Netpbm.</td>
 		</tr>
 		<tr>
+			<td><b>AR.PAS</b></td>
+			<td>Cette commande permet de manipuler une archive Unix ar.</td>
+		</tr>
+		<tr>
 			<td><b>AWK.PAS</b></td>
 			<td>Cette commande permet de lancer le langage de programmation AWK.</td>
 		</tr>
