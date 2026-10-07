@@ -35,6 +35,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de convertir les adresses en fichiers et lignes source.</td>
 		</tr>
 		<tr>
+			<td><b>AFMTODIT.PAS</b></td>
+			<td>Cette commande permet de créer une description de police groff depuis un fichier AFM.</td>
+		</tr>
+		<tr>
 			<td><b>AWK.PAS</b></td>
 			<td>Cette commande permet de lancer le langage de programmation AWK.</td>
 		</tr>
