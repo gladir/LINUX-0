@@ -81,6 +81,11 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 		<tr>
 			<td><b>BC.PAS</b></td>
 			<td>Cette commande permet de lancer une calculatrice en ligne de commande.</td>
+		</tr>
+		<tr>
+			<td><b>BDIFF.PAS</b></td>
+			<td>Cette commande permet de comparer de grands fichiers texte par blocs de lignes.</td>
+		</tr>
 		<tr>
 			<td><b>CAL.PAS</b></td>
 			<td>Cette commande permet d'afficher un calendrier.</td>
