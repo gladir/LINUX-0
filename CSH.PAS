@@ -9,8 +9,9 @@ Program CSH;
 Uses DOS;
 
 Const
- CommandList:Array[0..40]of String[16]=(
-  'alias','bg','cd','chdir','dirs','echo','end','eval','exec','exit',
+ CommandList:Array[0..41]of String[16]=(
+  'alias','bg','break','cd','chdir','dirs','echo','end','eval','exec',
+  'exit',
   'fg','foreach','glob','hashstat','history','jobs','kill','limit',
   'login','logout','nice','nohup','notify','popd','pushd','rehash',
   'repeat','set','setenv','source','stop','suspend','time','umask',
@@ -69,6 +70,9 @@ BatchMode,ExecuteString,ExitOnError,IgnoreStartup,QuietMode:Boolean;
  IfDepth:Integer;
  ScriptDepth:Integer;
  LoopDepth:Integer;
+ BreakLoopDepth:Integer;
+ LoopBreak:Boolean;
+ UmaskValue:String[8];
  ShellCommand:String;
 
 Function TrimL(S:String):String;
@@ -406,6 +410,7 @@ End;
 
 Procedure ProcessLine(Const Line:String);Forward;
 Procedure RunExternal;Forward;
+Procedure ExecuteArgumentCommand(FirstArgument:Integer);Forward;
 
 Function AddHistory(S:String):Boolean;
 Var
@@ -492,7 +497,20 @@ Begin
 End;
 
 Procedure BgCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('bg: les processus DOS sont executes de facon synchrone');
+ LastStatus:=1;
+End;
+
+Procedure BreakCommand;
+Begin
+ If LoopDepth=0 Then Begin
+  WriteLn('break: aucun foreach/while actif');
+  LastStatus:=1;
+  Exit;
+ End;
+ LoopBreak:=True;
+ BreakLoopDepth:=LoopDepth;
+ LastStatus:=0;
 End;
 
 Procedure ChdirCommand;
@@ -539,12 +557,29 @@ End;
 
 Procedure EchoCommand;Begin WriteLn(ParamList); LastStatus:=0; End;
 
-Procedure EndCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+Procedure EndCommand;
+Begin
+ If LoopDepth>0 Then Begin
+  LoopBreak:=True;
+  BreakLoopDepth:=LoopDepth;
+  LastStatus:=0;
+ End Else Begin
+  WriteLn('end: aucun bloc foreach/while actif');
+  LastStatus:=1;
+ End;
 End;
 
-Procedure EvalCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+Procedure EvalCommand;
+Var
+ Index:Integer;
+ CommandText:String;
+Begin
+ CommandText:='';
+ For Index:=2 to WordCount Do Begin
+  If CommandText<>''Then CommandText:=CommandText+' ';
+  CommandText:=CommandText+QuoteArgument(WordList[Index]);
+ End;
+ ProcessLine(CommandText);
 End;
 
 Procedure ExecCommand;
@@ -564,7 +599,8 @@ Procedure ExitCommand;Begin
 End;
 
 Procedure FgCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('fg: aucun processus en arriere-plan n''est gere');
+ LastStatus:=1;
 End;
 
 Function FindScriptBlockEnd(StartLine:Integer):Integer;
@@ -618,11 +654,16 @@ Begin
  For Index:=1 to ValueCount Do Begin
   StoreEntry(Variables,VariableCount,VariableName,Values[Index]);
   BodyIndex:=BlockStart+1;
-  While(BodyIndex<EndIndex)and Not Terminated Do Begin
+  While(BodyIndex<EndIndex)and Not Terminated and
+    Not(LoopBreak and(BreakLoopDepth=LoopDepth))Do Begin
    CurrentBodyLine:=ScriptFrames[FrameIndex].Lines^[BodyIndex];
    ScriptFrames[FrameIndex].Position:=BodyIndex;
    ProcessLine(CurrentBodyLine);
    BodyIndex:=ScriptFrames[FrameIndex].Position+1;
+  End;
+  If LoopBreak and(BreakLoopDepth=LoopDepth)Then Begin
+   LoopBreak:=False;
+   Break;
   End;
  End;
  ScriptFrames[FrameIndex].Position:=EndIndex;
@@ -630,12 +671,34 @@ Begin
  LastStatus:=0;
 End;
 
-Procedure GlobCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+Procedure GlobCommand;
+Var
+ Index,MatchCount:Integer;
+ Search:SearchRec;
+ Pattern:String;
+Begin
+ MatchCount:=0;
+ For Index:=2 to WordCount Do Begin
+  Pattern:=WordList[Index];
+  FindFirst(Pattern,AnyFile,Search);
+  While DosError=0 Do Begin
+   If(Search.Attr and Directory)=0 Then Begin
+    WriteLn(Search.Name);
+    Inc(MatchCount);
+   End;
+   FindNext(Search);
+  End;
+  {$IFDEF FPC}FindClose(Search);{$ENDIF}
+ End;
+ If MatchCount=0 Then Begin
+  WriteLn('glob: aucun fichier correspondant');
+  LastStatus:=1;
+ End Else LastStatus:=0;
 End;
 
 Procedure HashstatCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('hashstat: aucune table de hachage; PATH est recherche a chaque commande');
+ LastStatus:=0;
 End;
 
 Procedure HistoryCommand;
@@ -658,19 +721,23 @@ Begin
 End;
 
 Procedure JobsCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('Aucune tache asynchrone');
+ LastStatus:=0;
 End;
 
 Procedure KillCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('kill: les signaux de processus ne sont pas disponibles via DOS');
+ LastStatus:=1;
 End;
 
 Procedure LimitCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('limit: limites de ressources non disponibles via DOS');
+ LastStatus:=1;
 End;
 
 Procedure LoginCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('login: le changement de session n''est pas disponible via DOS');
+ LastStatus:=1;
 End;
 
 Procedure LogoutCommand;
@@ -687,15 +754,18 @@ Begin
 End;
 
 Procedure NiceCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('nice: priorite normale, execution synchrone');
+ ExecuteArgumentCommand(2);
 End;
 
 Procedure NohupCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('nohup: signaux de session indisponibles; execution synchrone');
+ ExecuteArgumentCommand(2);
 End;
 
 Procedure NotifyCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('notify: aucun travail en arriere-plan a surveiller');
+ LastStatus:=0;
 End;
 
 Procedure PopdCommand;
@@ -727,7 +797,7 @@ End;
 Procedure PushdCommand;
 Var
  Error:Word;
- FirstParam,Dir:String;
+ FirstParam,Dir,TargetDirectory:String;
 Begin
  FirstParam:=ExtractParam(1);
  If FirstParam='-h'Then Begin
@@ -755,13 +825,51 @@ Begin
   Else
  Begin
   GetDir(0,Dir);
-  If Not(PushDirectory(Dir))Then WriteLn('Pile pleine');
+    If NumberDirectory=0Then Begin
+     If Not PushDirectory(Dir)Then WriteLn('Pile pleine');
+     LastStatus:=0;
+    End Else Begin
+     TargetDirectory:=PopDirectory;
+     If Not PushDirectory(Dir)Then Begin
+      PushDirectory(TargetDirectory);
+      LastStatus:=1;
+      Exit;
+     End;
+     {$I-}ChDir(TargetDirectory);{$I+}
+     Error:=IOResult;
+     If Error<>0Then Begin
+      WriteLn('Impossible de changer de repertoire');
+      PopDirectory;
+      PushDirectory(TargetDirectory);
+      LastStatus:=1;
+     End Else LastStatus:=0;
+    End;
  End;
 End;
 
-Procedure RehashCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+Procedure ExecuteArgumentCommand(FirstArgument:Integer);
+Var
+ Index:Integer;
+ CommandText:String;
+Begin
+ CommandText:='';
+ For Index:=FirstArgument to WordCount Do Begin
+  If CommandText<>''Then CommandText:=CommandText+' ';
+  CommandText:=CommandText+QuoteArgument(WordList[Index]);
+ End;
+ If CommandText=''Then Begin LastStatus:=0; Exit; End;
+ ProcessLine(CommandText);
 End;
+
+Function ClockTicks:LongInt;
+Var
+ HourValue,MinuteValue,SecondValue,Hundredths:Word;
+Begin
+ GetTime(HourValue,MinuteValue,SecondValue,Hundredths);
+ ClockTicks:=(((LongInt(HourValue)*60+MinuteValue)*60+SecondValue)*100)+Hundredths;
+End;
+
+Procedure RehashCommand;Begin LastStatus:=0; End;
 
 Procedure RepeatCommand;
 Var
@@ -835,19 +943,48 @@ Begin
 End;
 
 Procedure StopCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('stop: suspension de processus indisponible via DOS');
+ LastStatus:=1;
 End;
 
 Procedure SuspendCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('suspend: suspension de processus indisponible via DOS');
+ LastStatus:=1;
 End;
 
-Procedure TimeCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+Procedure TimeCommand;
+Var
+ StartTicks,EndTicks,ElapsedTicks:LongInt;
+ CommandText,SecondsText,FractionText:String;
+ Index:Integer;
+Begin
+ If WordCount<2 Then Begin WriteLn('time: commande requise'); LastStatus:=1; Exit; End;
+ CommandText:='';
+ For Index:=2 to WordCount Do Begin
+  If CommandText<>''Then CommandText:=CommandText+' ';
+  CommandText:=CommandText+QuoteArgument(WordList[Index]);
+ End;
+ StartTicks:=ClockTicks;
+ ProcessLine(CommandText);
+ EndTicks:=ClockTicks;
+ ElapsedTicks:=EndTicks-StartTicks;
+ If ElapsedTicks<0 Then Inc(ElapsedTicks,8640000);
+ Str(ElapsedTicks div 100,SecondsText);
+ Str(ElapsedTicks mod 100,FractionText);
+ If Length(FractionText)<2 Then FractionText:='0'+FractionText;
+ WriteLn('real ',SecondsText,'.',FractionText,'s');
 End;
 
-Procedure UmaskCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+Procedure UmaskCommand;
+Begin
+ If WordCount=1 Then WriteLn(UmaskValue)
+ Else If(WordCount=2)and(Length(WordList[2])<=4)Then Begin
+  UmaskValue:=WordList[2];
+  LastStatus:=0;
+ End Else Begin
+  WriteLn('umask: valeur octale attendue');
+  LastStatus:=1;
+ End;
 End;
 
 Procedure UnaliasCommand;
@@ -858,12 +995,11 @@ Begin
  For Index:=2 to WordCount Do DeleteEntry(Aliases,AliasCount,WordList[Index]);
 End;
 
-Procedure UnhashCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
-End;
+Procedure UnhashCommand;Begin LastStatus:=0; End;
 
 Procedure UnlimitCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+ WriteLn('unlimit: limites de ressources non disponibles via DOS');
+ LastStatus:=1;
 End;
 
 Procedure UnsetCommand;
@@ -875,9 +1011,7 @@ End;
 
 Procedure UnsetenvCommand;Begin UnsetCommand; End;
 
-Procedure WaitCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
-End;
+Procedure WaitCommand;Begin LastStatus:=0; End;
 
 Function EvaluateCondition(Const ConditionText:String):Boolean;Forward;
 
@@ -917,11 +1051,16 @@ Begin
    Break;
   End;
   BodyIndex:=BlockStart+1;
-  While(BodyIndex<EndIndex)and Not Terminated Do Begin
+  While(BodyIndex<EndIndex)and Not Terminated and
+    Not(LoopBreak and(BreakLoopDepth=LoopDepth))Do Begin
    BodyLine:=ScriptFrames[FrameIndex].Lines^[BodyIndex];
    ScriptFrames[FrameIndex].Position:=BodyIndex;
    ProcessLine(BodyLine);
    BodyIndex:=ScriptFrames[FrameIndex].Position+1;
+  End;
+  If LoopBreak and(BreakLoopDepth=LoopDepth)Then Begin
+   LoopBreak:=False;
+   Break;
   End;
 End;
   ScriptFrames[FrameIndex].Position:=EndIndex;
@@ -1056,47 +1195,48 @@ Begin
  Case CurrCommandByte Of
   1:AliasCommand;
   2:BgCommand;
-  3:ChdirCommand;
+  3:BreakCommand;
   4:ChdirCommand;
-  5:DirsCommand;
-  6:EchoCommand;
-  7:EndCommand;
-  8:EvalCommand;
-  9:ExecCommand;
-  10:ExitCommand;
-  11:FgCommand;
-  12:ForeachCommand;
-  13:GlobCommand;
-  14:HashstatCommand;
-  15:HistoryCommand;
-  16:JobsCommand;
-  17:KillCommand;
-  18:LimitCommand;
-  19:LoginCommand;
-  20:LogoutCommand;
-  21:NiceCommand;
-  22:NohupCommand;
-  23:NotifyCommand;
-  24:PopdCommand;
-  25:PushdCommand;
-  26:RehashCommand;
-  27:RepeatCommand;
-  28:SetCommand;
-  29:SetEnvCommand;
-  30:SourceCommand;
-  31:StopCommand;
-  32:SuspendCommand;
-  33:TimeCommand;
-  34:UmaskCommand;
-  35:UnaliasCommand;
-  36:UnhashCommand;
-  37:UnlimitCommand;
-  38:UnsetCommand;
-  39:UnsetenvCommand;
-  40:WaitCommand;
-  41:WhileCommand;
+  5:ChdirCommand;
+  6:DirsCommand;
+  7:EchoCommand;
+  8:EndCommand;
+  9:EvalCommand;
+  10:ExecCommand;
+  11:ExitCommand;
+  12:FgCommand;
+  13:ForeachCommand;
+  14:GlobCommand;
+  15:HashstatCommand;
+  16:HistoryCommand;
+  17:JobsCommand;
+  18:KillCommand;
+  19:LimitCommand;
+  20:LoginCommand;
+  21:LogoutCommand;
+  22:NiceCommand;
+  23:NohupCommand;
+  24:NotifyCommand;
+  25:PopdCommand;
+  26:PushdCommand;
+  27:RehashCommand;
+  28:RepeatCommand;
+  29:SetCommand;
+  30:SetEnvCommand;
+  31:SourceCommand;
+  32:StopCommand;
+  33:SuspendCommand;
+  34:TimeCommand;
+  35:UmaskCommand;
+  36:UnaliasCommand;
+  37:UnhashCommand;
+  38:UnlimitCommand;
+  39:UnsetCommand;
+  40:UnsetenvCommand;
+  41:WaitCommand;
+  42:WhileCommand;
 Else Begin
-  If CurrCommand='true'Then LastStatus:=0 Else
+   If CurrCommand='true'Then LastStatus:=0 Else
   If CurrCommand='false'Then LastStatus:=1 Else
   If CurrCommand='pwd'Then Begin
    GetDir(0,CommandTail);
@@ -1252,6 +1392,7 @@ BEGIN
  NumberHistory:=0; NumberDirectory:=0; VariableCount:=0; AliasCount:=0;
  IfDepth:=0; ScriptDepth:=0; LoopDepth:=0;
  Terminated:=False; LastStatus:=0;
+ UmaskValue:='022';
  BatchMode:=False; ExecuteString:=False; ExitOnError:=False;
  IgnoreStartup:=False; InteractiveMode:=False; SyntaxOnly:=False;
  ReadStandardInput:=False; SingleLine:=False; VerboseInput:=False;
@@ -1261,7 +1402,6 @@ BEGIN
  While ArgumentIndex<=ParamCount Do Begin
   Argument:=ParamStr(ArgumentIndex);
   If(Argument='--help')or(Argument='-h')or(Argument='/?')Then Begin
-   HomeMessage;
    WriteLn('CSH - Cette commande permet de lancer un C Shell.'); 
    WriteLn;
    WriteLn('Syntaxe : csh [-b] [-c commande] [-e] [-f] [-i] [-n] [-s] [-t] [-v] [-V] [-x] [-X] [script]');
