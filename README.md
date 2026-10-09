@@ -162,6 +162,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td><b>CSPLIT.PAS</b></td>
 			<td>Cette commande permet de séparer un fichier en plusieurs sections déterminé par des lignes de contextes.</td>
 		</tr>	
+		<tr>
+			<td><b>CTAGS.PAS</b></td>
+			<td>Cette commande permet de généré des tags pour les fichiers source C et C++.</td>
+		</tr>
      <tr>
 			<td><b>CUT.PAS</b></td>
 			<td>Cette commande permet de supprimer des sections de chaque ligne des fichiers.</td>
