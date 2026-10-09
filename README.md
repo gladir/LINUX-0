@@ -199,6 +199,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de comparer les fichiers de deux répertoires.</td>
 		</tr>
 		<tr>
+			<td><b>DIRCOLORS.PAS</b></td>
+			<td>Cette commande permet de générer les réglages de couleurs LS_COLORS.</td>
+		</tr>
+		<tr>
 			<td><b>DIRNAME.PAS</b></td>
 			<td>Cette commande permet de retourner le chemin seulement à partir d'un chemin complet de nom de fichier. Cette commande est un équivalent de UNIX et Linux.</td>
 		</tr>
