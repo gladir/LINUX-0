@@ -171,6 +171,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de supprimer des sections de chaque ligne des fichiers.</td>
 		</tr>
 		<tr>
+			<td><b>CVS.PAS</b></td>
+			<td>Cette commande permet de gérer un dépot local de revisions de sources.</td>
+		</tr>
+		<tr>
 			<td><b>DD.PAS</b></td>
 			<td>Cette commande permet de convertir un fichier tant qu'il se copie.</td>
 		</tr>	
