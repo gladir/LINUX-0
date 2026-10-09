@@ -669,7 +669,12 @@ Var
   Arg:String[MaxTextLength];
   ErrorCode:Integer;
   EnvLanguage:String[20];
-Begin
+BEGIN
+ {$IFDEF FPC}
+  {$IFDEF WINDOWS}
+   SetUseACP(False);
+  {$ENDIF}
+ {$ENDIF}
   FirstLine:=Nil;
   LastLine:=Nil;
   CurrentLine:=Nil;
