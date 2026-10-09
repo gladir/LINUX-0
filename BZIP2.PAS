@@ -867,7 +867,7 @@ End;
 Procedure PrintHelp;
 Begin
   If Copy(GetEnv('LANGUAGE'),1,2)='EN'Then Begin
-    WriteLn('bzip2 (LINUX-0): compress and decompress bzip2 streams.');
+    WriteLn('bzip2 : compress and decompress bzip2 streams.');
     WriteLn('Syntax: bzip2 [OPTIONS] FILE...');
     WriteLn(' -1..-9              Select the level recorded in the stream header');
     WriteLn(' --fast, --best      Select level 1 or 9');
@@ -887,8 +887,10 @@ Begin
     WriteLn('Native compression uses blocks of up to 512 input bytes.');
     WriteLn('The selected level is written to the stream header.');
   End Else Begin
-    WriteLn('bzip2 (LINUX-0) : compresse et decompresse des flux bzip2.');
+    WriteLn('bzip2 : Cette commande permet de compresser et de decompresser des flux bzip2.');
+    WriteLn;
     WriteLn('Syntaxe : bzip2 [OPTIONS] FICHIER...');
+    WriteLn;
     WriteLn(' -1..-9              Choisir le niveau inscrit dans l''entete');
     WriteLn(' --fast, --best      Choisir le niveau 1 ou 9');
     WriteLn(' -c, --stdout        Ecrire la sortie sur stdout');
@@ -904,6 +906,7 @@ Begin
     WriteLn(' -L, --license       Afficher la licence');
     WriteLn(' -h, --help, /?, /h, /H');
     WriteLn('                     Afficher cette aide');
+    WriteLn;
     WriteLn('La compression native utilise des blocs de 512 octets maximum.');
     WriteLn('Le niveau choisi est inscrit dans l''entete du flux.');
   End;
