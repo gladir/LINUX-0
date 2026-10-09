@@ -58,6 +58,7 @@ Var
  CommandFound,Terminated:Boolean;
  CmdStr,ExpandedCommand,RawCommand,ScriptName,StartupFile,Argument:String;
  CurrCommand,ParamList:String;
+ CurrCommandByte:Byte;
  WordList:TWordArray;
  VariableCount,AliasCount,WordCount,ArgumentIndex:Integer;
  I,J:Byte;
@@ -308,6 +309,24 @@ Begin
  If WordCount=0 Then Begin CurrCommand:=''; ParamList:=''; Exit; End;
  CurrCommand:=LowerText(WordList[1]);
  ParamList:=BuildParameterList;
+End;
+
+Function FindCommandByte(Const Name:String):Byte;
+Var
+ LowIndex,HighIndex,MiddleIndex:Integer;
+Begin
+ FindCommandByte:=0;
+ LowIndex:=Low(CommandList);
+ HighIndex:=High(CommandList);
+ While LowIndex<=HighIndex Do Begin
+  MiddleIndex:=(LowIndex+HighIndex)div 2;
+  If CommandList[MiddleIndex]=Name Then Begin
+   FindCommandByte:=MiddleIndex+1;
+   Exit;
+  End Else If CommandList[MiddleIndex]<Name Then
+   LowIndex:=MiddleIndex+1
+  Else HighIndex:=MiddleIndex-1;
+ End;
 End;
 
 Function ExtractParam(Index:Byte):String;
@@ -744,8 +763,24 @@ Procedure RehashCommand;Begin
  WriteLn('Cette commande n''est pas mise en oeuvre');
 End;
 
-Procedure RepeatCommand;Begin
- WriteLn('Cette commande n''est pas mise en oeuvre');
+Procedure RepeatCommand;
+Var
+ LoopCount,LoopIndex,Index,ErrorNumber:Integer;
+ CommandTail:String;
+Begin
+ Val(ExtractParam(1),LoopCount,ErrorNumber);
+ If(ErrorNumber<>0)or(LoopCount<0)Then Begin
+  LastStatus:=1;
+  WriteLn('repeat: nombre invalide');
+  Exit;
+ End;
+ CommandTail:='';
+ For Index:=3 to WordCount Do Begin
+  If CommandTail<>''Then CommandTail:=CommandTail+' ';
+  CommandTail:=CommandTail+QuoteArgument(WordList[Index]);
+ End;
+ For LoopIndex:=1 to LoopCount Do ProcessLine(CommandTail);
+ LastStatus:=0;
 End;
 
 Procedure SetCommand;
@@ -1017,41 +1052,59 @@ Begin
  If Not CurrentBranchEnabled Then Exit;
  If SyntaxOnly Then Begin LastStatus:=0; Exit; End;
 
- If CurrCommand='alias'Then AliasCommand Else
- If CurrCommand='unalias'Then UnaliasCommand Else
- If CurrCommand='set'Then SetCommand Else
- If CurrCommand='setenv'Then SetEnvCommand Else
- If CurrCommand='unset'Then UnsetCommand Else
- If CurrCommand='unsetenv'Then UnsetenvCommand Else
- If(CurrCommand='cd')or(CurrCommand='chdir')Then ChdirCommand Else
- If CurrCommand='pushd'Then PushdCommand Else
- If CurrCommand='popd'Then PopdCommand Else
- If CurrCommand='dirs'Then DirsCommand Else
- If CurrCommand='echo'Then EchoCommand Else
- If CurrCommand='history'Then HistoryCommand Else
- If CurrCommand='source'Then SourceCommand Else
- If CurrCommand='exit'Then ExitCommand Else
- If CurrCommand='logout'Then LogoutCommand Else
- If CurrCommand='exec'Then ExecCommand Else
- If CurrCommand='eval'Then EvalCommand Else
- If CurrCommand='foreach'Then ForeachCommand Else
- If CurrCommand='while'Then WhileCommand Else
- If CurrCommand='repeat'Then Begin
-  Val(ExtractParam(1),LoopCount,ErrorNumber);
-  If(ErrorNumber<>0)or(LoopCount<0)Then Begin LastStatus:=1; WriteLn('repeat: nombre invalide'); End
-  Else Begin
-   CommandTail:='';
-   For Index:=2 to WordCount-1 Do Begin
-    If CommandTail<>''Then CommandTail:=CommandTail+' ';
-    CommandTail:=CommandTail+QuoteArgument(WordList[Index+1]);
-   End;
-   For LoopIndex:=1 to LoopCount Do ProcessLine(CommandTail);
+ CurrCommandByte:=FindCommandByte(CurrCommand);
+ Case CurrCommandByte Of
+  1:AliasCommand;
+  2:BgCommand;
+  3:ChdirCommand;
+  4:ChdirCommand;
+  5:DirsCommand;
+  6:EchoCommand;
+  7:EndCommand;
+  8:EvalCommand;
+  9:ExecCommand;
+  10:ExitCommand;
+  11:FgCommand;
+  12:ForeachCommand;
+  13:GlobCommand;
+  14:HashstatCommand;
+  15:HistoryCommand;
+  16:JobsCommand;
+  17:KillCommand;
+  18:LimitCommand;
+  19:LoginCommand;
+  20:LogoutCommand;
+  21:NiceCommand;
+  22:NohupCommand;
+  23:NotifyCommand;
+  24:PopdCommand;
+  25:PushdCommand;
+  26:RehashCommand;
+  27:RepeatCommand;
+  28:SetCommand;
+  29:SetEnvCommand;
+  30:SourceCommand;
+  31:StopCommand;
+  32:SuspendCommand;
+  33:TimeCommand;
+  34:UmaskCommand;
+  35:UnaliasCommand;
+  36:UnhashCommand;
+  37:UnlimitCommand;
+  38:UnsetCommand;
+  39:UnsetenvCommand;
+  40:WaitCommand;
+  41:WhileCommand;
+Else Begin
+  If CurrCommand='true'Then LastStatus:=0 Else
+  If CurrCommand='false'Then LastStatus:=1 Else
+  If CurrCommand='pwd'Then Begin
+   GetDir(0,CommandTail);
+   WriteLn(CommandTail);
    LastStatus:=0;
-  End;
- End Else If CurrCommand='true'Then LastStatus:=0 Else
- If CurrCommand='false'Then LastStatus:=1 Else
- If CurrCommand='pwd'Then Begin GetDir(0,CommandTail); WriteLn(CommandTail); LastStatus:=0; End
- Else RunExternal;
+  End Else RunExternal;
+ End;
+ End;
  If ExitOnError and(LastStatus<>0)Then Terminated:=True;
 End;
 
