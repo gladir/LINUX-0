@@ -232,8 +232,12 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 		</tr>	
 		<tr>
 			<td><b>GROUPS.PAS</b></td>
-			<td>Cette commande permet d'afficher les groupes d'un utilisateur.</td>
+			<td>Cette commande permet d'afficher les groupes d'un utilisateur.</td>		
 		</tr>	
+		<tr>
+			<td><b>GZIP.PAS</b></td>
+			<td>Cette commande permet de compresser et décompresser des fichiers au format gzip.</td>
+		</tr>
 		<tr>
 			<td><b>HALT.PAS</b></td>
 			<td>Cette commande permet d'arrêter l'ordinateur.</td>
