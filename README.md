@@ -139,6 +139,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de sélectionner ou rejeter des lignes communes dans deux fichiers.</td>
 		</tr>
 		<tr>
+			<td><b>COMPRESS.PAS</b></td>
+			<td>Cette commande permet de compresser des fichiers au format LZW Unix .Z.</td>
+		</tr>
+		<tr>
 			<td><b>CP.PAS</b></td>
 			<td>Cette commande permet de copier un fichier. </td>
 		</tr>
