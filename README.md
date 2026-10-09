@@ -211,6 +211,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer la conversion des caractères de saut de ligne du système d'exploitation DOS en leur équivalent UNIX.</td>
 		</tr>
 		<tr>
+			<td><b>DPOST.PAS</b></td>
+			<td>Cette commande permet de convertir les sorties ditroff/troff en PostScript.</td>
+		</tr>
+		<tr>
 			<td><b>DU.PAS</b></td>
 			<td>Cette commande permet de comptabilisé l'espace occupé par un répertoire et ses enfants.</td>
 		</tr>
