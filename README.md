@@ -91,6 +91,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de parcourir interactivement un grand fichier texte.</td>
 		</tr>
 		<tr>
+			<td><b>BZIP2.PAS</b></td>
+			<td>Cette commande permet de compresser et de decompresser des flux bzip2.</td>
+		</tr>
+		<tr>
 			<td><b>CAL.PAS</b></td>
 			<td>Cette commande permet d'afficher un calendrier.</td>
 		</tr>
