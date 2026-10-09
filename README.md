@@ -151,6 +151,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer un traitement de préprocesseur de langage de porgrammation <a href="https://www.gladir.com/CODER/C/intro.htm">C</a>.</td>
 		</tr>
 		<tr>
+			<td><b>CRONTAB.PAS</b></td>
+			<td>Cette commande permet d'installer, d'afficher, de modifier ou de supprimer une table cron.</td>
+		</tr>
+		<tr>
 			<td><b>CSPLIT.PAS</b></td>
 			<td>Cette commande permet de séparer un fichier en plusieurs sections déterminé par des lignes de contextes.</td>
 		</tr>	
