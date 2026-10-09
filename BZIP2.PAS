@@ -71,7 +71,9 @@ Var
   OutputBitCount:Integer;
   BlockCRC,StoredBlockCRC,CombinedCRC,StoredCombinedCRC:LongInt;
   DecompressMode,TestMode,WriteStdout,ForceOutput,KeepInput:Boolean;
-  Quiet,Verbose,CompressionRequested,CompressionMode:Boolean;
+  Quiet,CompressionRequested,CompressionMode:Boolean;
+  VerboseLevel:Integer;
+  BlocksProcessed:LongInt;
   InputError,DecodeError:Boolean;
   ValueLong:LongInt;
   WriteCount:Word;
@@ -92,37 +94,33 @@ Begin
   End;
   BlockRead(InputFile,Value,1,Count);
   If Count<>1 Then Begin
-    InputError:=True;
     ReadInputByte:=False;
-  End Else Begin
-    Inc(InputPosition);
-    ReadInputByte:=True;
+    Exit;
   End;
+  Inc(InputPosition);
+  ReadInputByte:=True;
 End;
 
-{$Q-}{$R-}
 Function ReadBits(BitCount:Integer):LongInt;
 Var
-  Value:LongInt;
-  I:Integer;
+  BitIndex:Integer;
+  ResultValue:LongInt;
 Begin
-  Value:=0;
-  For I:=1 to BitCount Do Begin
+  ResultValue:=0;
+  For BitIndex:=1 to BitCount Do Begin
     If BitsLeft=0 Then Begin
       If Not ReadInputByte(BitByte)Then Begin
         InputError:=True;
-        ReadBits:=0;
+        ReadBits:=ResultValue;
         Exit;
       End;
       BitsLeft:=8;
     End;
-    Value:=(Value shl 1)or((BitByte shr 7)and 1);
-    BitByte:=BitByte shl 1;
+    ResultValue:=(ResultValue shl 1)or((BitByte shr (BitsLeft-1))and 1);
     Dec(BitsLeft);
   End;
-  ReadBits:=Value;
+  ReadBits:=ResultValue;
 End;
-{$Q+}{$R+}
 
 Function ReadByteAligned:Byte;
 Var
@@ -142,6 +140,15 @@ Begin
   FindFirst(Name,AnyFile,Search);
   FileExistsTP:=(DosError=0)and((Search.Attr and Directory)=0);
   {$IFDEF FPC}FindClose(Search);{$ENDIF}
+End;
+
+Procedure RemoveInput(Name:String);
+Var
+  FileToRemove:File;
+Begin
+  Assign(FileToRemove,Name);
+  {$I-}Erase(FileToRemove);{$I+}
+  If IOResult<>0 Then Fail('impossible de supprimer '+Name);
 End;
 
 Function HasBZ2Suffix(Const Name:String):Boolean;
@@ -451,6 +458,7 @@ Var
 Begin
   BitsLeft:=0;
   CombinedCRC:=0;
+  BlocksProcessed:=0;
   Repeat
     MagicHigh:=ReadMagic24;
     MagicLow:=ReadMagic24;
@@ -472,8 +480,12 @@ Begin
     {$Q-}
     CombinedCRC:=((CombinedCRC shl 1)or((CombinedCRC shr 31)and 1))xor ExpectedCRC;
     {$Q+}
+    Inc(BlocksProcessed);
+    If(VerboseLevel>1)and(TestMode or Not WriteStdout)Then
+      WriteLn('  bloc ',BlocksProcessed,' valide, ',BlockCount,' octets BWT');
   Until False;
-  If Verbose Then WriteLn('  flux bzip2 verifie');
+  If(VerboseLevel>0)and(TestMode or Not WriteStdout)Then
+    WriteLn('  flux bzip2 verifie');
 End;
 
 Function ParseNumber(Const S:String; Var Value:LongInt):Boolean;
@@ -491,17 +503,6 @@ Begin
   Else OutputNameFor:=Name+'.out';
 End;
 
-Procedure RemoveInput(Const Name:String);
-Var
-  F:File;
-Begin
-  Assign(F,Name);
-  {$I-}Erase(F);{$I+}
-  If IOResult<>0 Then Begin
-    If Not Quiet Then WriteLn('bzip2: avertissement: impossible de supprimer ',Name);
-  End;
-End;
-
 Procedure WriteOutputByte(Value:Byte);
 Begin
   If WriteStdout Then Write(Output,Chr(Value)) Else Begin
@@ -513,10 +514,10 @@ End;
 {$Q-}{$R-}
 Procedure WriteBits(Value:LongInt; BitCount:Integer);
 Var
-  I:Integer;
+  BitIndex:Integer;
 Begin
-  For I:=BitCount-1 downto 0 Do Begin
-    OutputBitBuffer:=(OutputBitBuffer shl 1)or((Value shr I)and 1);
+  For BitIndex:=BitCount-1 downto 0 Do Begin
+    OutputBitBuffer:=(OutputBitBuffer shl 1)or((Value shr BitIndex)and 1);
     Inc(OutputBitCount);
     If OutputBitCount=8 Then Begin
       WriteOutputByte(Byte(OutputBitBuffer));
@@ -629,17 +630,18 @@ Begin
   If I<Right Then SortRotations(I,Right);
 End;
 
-Procedure AppendSymbol(Symbol:Integer);
+Procedure AppendSymbol(Value:Integer);
 Begin
-  If SymbolCount>=MaxEncodedSymbols Then Fail('trop de symboles MTF dans le bloc');
-  EncodedSymbols[SymbolCount]:=Symbol;
+  If(Value<0)or(Value>=MaxAlphabet)or(SymbolCount>=MaxEncodedSymbols)Then
+    Fail('trop de symboles dans le bloc');
+  EncodedSymbols[SymbolCount]:=Value;
   Inc(SymbolCount);
-  Inc(Frequencies[Symbol]);
+  Inc(Frequencies[Value]);
 End;
 
 Procedure EmitZeroRun;
 Var
-  RunValue:LongInt;
+  RunValue:Integer;
 Begin
   If ZeroRun=0 Then Exit;
   RunValue:=ZeroRun-1;
@@ -776,7 +778,7 @@ Begin
   If TestMode Then Begin
     ProcessBzipStream;
     Close(InputFile);
-    If Verbose Then WriteLn(Name,': OK');
+    If(VerboseLevel>0)and Not Quiet Then WriteLn(Name,': OK');
   End Else Begin
     If WriteStdout Then Begin
       ProcessBzipStream;
@@ -798,7 +800,7 @@ Begin
       Close(OutputFile);
       Close(InputFile);
       If Not KeepInput Then RemoveInput(Name);
-      If Verbose Then WriteLn(Name,': decompression vers ',OutputName);
+      If(VerboseLevel>0)and Not Quiet Then WriteLn(Name,': decompression vers ',OutputName);
     End;
   End;
 End;
@@ -830,6 +832,7 @@ Begin
   OutputBitBuffer:=0;
   OutputBitCount:=0;
   CombinedCRC:=0;
+  BlocksProcessed:=0;
   WriteBzipHeader;
   Repeat
     CompressInputCount:=0;
@@ -844,6 +847,9 @@ Begin
       For I:=0 to CompressInputCount-1 Do
         BlockCRC:=CRCUpdateByte(BlockCRC,CompressInput[I]);
       EncodeOneBlock;
+      Inc(BlocksProcessed);
+      If(VerboseLevel>1)and Not WriteStdout and Not Quiet Then
+        WriteLn('  bloc ',BlocksProcessed,' compresse, ',CompressInputCount,' octets');
       {$Q-}
       CombinedCRC:=((CombinedCRC shl 1)or((CombinedCRC shr 31)and 1))xor
                     (BlockCRC xor LongInt($FFFFFFFF));
@@ -854,22 +860,53 @@ Begin
   Close(InputFile);
   If Not WriteStdout Then Close(OutputFile);
   If Not KeepInput and Not WriteStdout Then RemoveInput(Name);
-  If Verbose and Not Quiet Then WriteLn(Name,': compresse');
+  If(VerboseLevel>0)and Not Quiet and Not WriteStdout Then
+    WriteLn(Name,': compresse');
 End;
 
-Procedure PrintHelp;Begin
-  WriteLn('BZIP2 : Cette commande permet de compresser et decompresser des flux bzip2.');
-  WriteLn;
-  WriteLn('Syntaxe : bzip2 [-dctfkqsvV] [fichier ...]');
-  WriteLn(' -d, --decompress  Decompresser');
-  WriteLn(' -t, --test        Tester CRC sans produire de sortie');
-  WriteLn(' -c, --stdout      Ecrire sur stdout');
-  WriteLn(' -k, --keep        Conserver les sources');
-  WriteLn(' -f, --force       Ecraser la sortie');
-  WriteLn(' -q, --quiet       Supprimer les diagnostics');
-  WriteLn(' -z, --compress    Forcer la compression');
-  WriteLn(' -1..-9            Niveau indique dans l''entete (blocs TP7 courts)');
-  WriteLn(' La compression native utilise des blocs de 512 octets.');
+Procedure PrintHelp;
+Begin
+  If Copy(GetEnv('LANGUAGE'),1,2)='EN'Then Begin
+    WriteLn('bzip2 (LINUX-0): compress and decompress bzip2 streams.');
+    WriteLn('Syntax: bzip2 [OPTIONS] FILE...');
+    WriteLn(' -1..-9              Select the level recorded in the stream header');
+    WriteLn(' --fast, --best      Select level 1 or 9');
+    WriteLn(' -c, --stdout        Write output to standard output');
+    WriteLn(' -d, --decompress    Decompress');
+    WriteLn(' -z, --compress      Force compression');
+    WriteLn(' -f, --force         Overwrite existing output files');
+    WriteLn(' -k, --keep          Keep input files');
+    WriteLn(' -q, --quiet         Suppress non-critical diagnostics');
+    WriteLn(' -s, --small         Select the bounded-memory compatibility mode');
+    WriteLn(' -t, --test          Test stream integrity and CRC');
+    WriteLn(' -v, --verbose       Increase verbosity; repeat for block details');
+    WriteLn(' -V, --version       Display version');
+    WriteLn(' -L, --license       Display license information');
+    WriteLn(' -h, --help, /?, /h, /H');
+    WriteLn('                     Display this help');
+    WriteLn('Native compression uses blocks of up to 512 input bytes.');
+    WriteLn('The selected level is written to the stream header.');
+  End Else Begin
+    WriteLn('bzip2 (LINUX-0) : compresse et decompresse des flux bzip2.');
+    WriteLn('Syntaxe : bzip2 [OPTIONS] FICHIER...');
+    WriteLn(' -1..-9              Choisir le niveau inscrit dans l''entete');
+    WriteLn(' --fast, --best      Choisir le niveau 1 ou 9');
+    WriteLn(' -c, --stdout        Ecrire la sortie sur stdout');
+    WriteLn(' -d, --decompress    Decompresser');
+    WriteLn(' -z, --compress      Forcer la compression');
+    WriteLn(' -f, --force         Ecraser les fichiers de sortie existants');
+    WriteLn(' -k, --keep          Conserver les fichiers source');
+    WriteLn(' -q, --quiet         Supprimer les diagnostics non critiques');
+    WriteLn(' -s, --small         Mode de compatibilite a memoire bornee');
+    WriteLn(' -t, --test          Verifier le flux et son CRC');
+    WriteLn(' -v, --verbose       Augmenter le detail; repeter pour les blocs');
+    WriteLn(' -V, --version       Afficher la version');
+    WriteLn(' -L, --license       Afficher la licence');
+    WriteLn(' -h, --help, /?, /h, /H');
+    WriteLn('                     Afficher cette aide');
+    WriteLn('La compression native utilise des blocs de 512 octets maximum.');
+    WriteLn('Le niveau choisi est inscrit dans l''entete du flux.');
+  End;
 End;
 
 BEGIN
@@ -881,7 +918,7 @@ BEGIN
   ForceOutput:=False;
   KeepInput:=False;
   Quiet:=False;
-  Verbose:=False;
+  VerboseLevel:=0;
   CompressionRequested:=False;
   CompressionMode:=False;
   I:=1;
@@ -905,7 +942,7 @@ BEGIN
     If(Argument='--force')Then ForceOutput:=True Else
     If(Argument='--keep')Then KeepInput:=True Else
     If(Argument='--quiet')Then Quiet:=True Else
-    If(Argument='--verbose')Then Verbose:=True Else
+    If(Argument='--verbose')Then Inc(VerboseLevel) Else
     If(Argument='--best')Then BlockFactor:=9 Else
     If(Argument='--fast')Then BlockFactor:=1 Else
     If(Argument='--small')Then Begin
@@ -930,7 +967,7 @@ BEGIN
         If Argument[J]='k'Then KeepInput:=True Else
         If Argument[J]='q'Then Quiet:=True Else
         If Argument[J]='s'Then Begin
-        End Else If Argument[J]='v'Then Verbose:=True Else
+        End Else If Argument[J]='v'Then Inc(VerboseLevel) Else
         If Argument[J]='z'Then CompressionRequested:=True Else
         If Argument[J]in['1'..'9']Then BlockFactor:=Ord(Argument[J])-Ord('0')
         Else Fail('option inconnue: '+Argument);
