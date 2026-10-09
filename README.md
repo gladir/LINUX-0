@@ -215,6 +215,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de convertir les sorties ditroff/troff en PostScript.</td>
 		</tr>
 		<tr>
+			<td><b>DSPLIT.PAS</b></td>
+			<td>Cette commande permet de découper un fichier volumineux en morceaux binaires numérotes.</td>
+		</tr>
+		<tr>
 			<td><b>DU.PAS</b></td>
 			<td>Cette commande permet de comptabilisé l'espace occupé par un répertoire et ses enfants.</td>
 		</tr>
