@@ -87,6 +87,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de comparer de grands fichiers texte par blocs de lignes.</td>
 		</tr>
 		<tr>
+			<td><b>BFS.PAS</b></td>
+			<td>Cette commande permet de parcourir interactivement un grand fichier texte.</td>
+		</tr>
+		<tr>
 			<td><b>CAL.PAS</b></td>
 			<td>Cette commande permet d'afficher un calendrier.</td>
 		</tr>
