@@ -127,6 +127,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'effacer l'écran.</td>
 		</tr>
 		<tr>
+			<td><b>CMP.PAS</b></td>
+			<td>Cette commande permet de comparer deux fichiers octet par octet.</td>
+		</tr>
+		<tr>
 			<td><b>COLUMN.PAS</b></td>
 			<td>Cette commande permet de visualiser proprement un fichier CSV dans un terminal.</td>
 		</tr>
