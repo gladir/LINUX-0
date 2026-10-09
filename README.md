@@ -467,6 +467,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer des répétitions de réponses affirmatives.</td>
 		</tr>
 		<tr>
+			<td><b>ZCAT.PAS</b></td>
+			<td>Cette commande permet de décompresser des fichiers gzip vers la sortie standard.</td>
+		</tr>
+		<tr>
 			<td><b>ZFORCE.PAS</b></td>
 			<td>Cette commande permet de forcer l'ajout d'extension «.gz» s'il n'existe pas sur tous les fichiers de format «gzip».</td>
 		</tr>
