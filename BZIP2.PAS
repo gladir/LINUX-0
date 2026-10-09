@@ -16,6 +16,9 @@ Const
   MaxCodeLength=23;
   BufferSize=4096;
   MaxFiles=32;
+  MaxCompressInput=512;
+  MaxRLEBlock=640;
+  MaxEncodedSymbols=1300;
 
 Type
   TBlockBytes=Array[0..MaxBlockSize-1]Of Byte;
@@ -28,8 +31,12 @@ Type
   TInUse=Array[0..255]Of Boolean;
   TInUseGroups=Array[0..15]Of Boolean;
   TCountArray=Array[0..256]Of LongInt;
-  TBuffer=Array[1..BufferSize]Of Byte;
   TStringArray=Array[1..32]Of String;
+  TCompressInput=Array[0..MaxCompressInput-1]Of Byte;
+  TRLEData=Array[0..MaxRLEBlock-1]Of Byte;
+  TSortIndex=Array[0..MaxRLEBlock-1]Of Word;
+  TEncodedSymbols=Array[0..MaxEncodedSymbols-1]Of Word;
+  TFrequencies=Array[0..MaxAlphabet-1]Of LongInt;
 
 Var
   InputFile,OutputFile:File;
@@ -43,20 +50,28 @@ Var
   InUse:TInUse;
   InUseGroups:TInUseGroups;
   ByteCounts:TCountArray;
+  CompressInput:TCompressInput;
+  RLEBlock:TRLEData;
+  RotationIndex:TSortIndex;
+  EncodedSymbols:TEncodedSymbols;
+  Frequencies:TFrequencies;
   InputFiles:TStringArray;
   OutputName,Argument,ActualCRCText,StoredCRCText:String;
-  FileCount,I,J:Integer;
+  FileCount,I,J,FileIndex:Integer;
   BlockFactor,SelectorCount,SelectorPosition:Integer;
   MaxDecodedBlock:LongInt;
   AlphaSize,InUseCount,GroupCount,CurrentGroup,UsedGroupSymbols:Integer;
+  CompressInputCount,RLELength,SymbolCount,ZeroRun:Integer;
   MinCodeLength,MaxCodeLengthValue:Integer;
   BlockCount,OriginalPointer:LongInt;
   InputLength,InputPosition:LongInt;
   BitByte:Byte;
   BitsLeft:Integer;
+  OutputBitBuffer:LongInt;
+  OutputBitCount:Integer;
   BlockCRC,StoredBlockCRC,CombinedCRC,StoredCombinedCRC:LongInt;
   DecompressMode,TestMode,WriteStdout,ForceOutput,KeepInput:Boolean;
-  Quiet,Verbose,CompressionRequested:Boolean;
+  Quiet,Verbose,CompressionRequested,CompressionMode:Boolean;
   InputError,DecodeError:Boolean;
   ValueLong:LongInt;
   WriteCount:Word;
@@ -120,7 +135,7 @@ Begin
   End Else ReadByteAligned:=B;
 End;
 
-Function FileExistsTP(Const Name:String):Boolean;
+Function FileExistsTP(Name:String):Boolean;
 Var
   Search:SearchRec;
 Begin
@@ -487,6 +502,260 @@ Begin
   End;
 End;
 
+Procedure WriteOutputByte(Value:Byte);
+Begin
+  If WriteStdout Then Write(Output,Chr(Value)) Else Begin
+    BlockWrite(OutputFile,Value,1,WriteCount);
+    If WriteCount<>1 Then Fail('echec d''ecriture du flux compresse');
+  End;
+End;
+
+{$Q-}{$R-}
+Procedure WriteBits(Value:LongInt; BitCount:Integer);
+Var
+  I:Integer;
+Begin
+  For I:=BitCount-1 downto 0 Do Begin
+    OutputBitBuffer:=(OutputBitBuffer shl 1)or((Value shr I)and 1);
+    Inc(OutputBitCount);
+    If OutputBitCount=8 Then Begin
+      WriteOutputByte(Byte(OutputBitBuffer));
+      OutputBitBuffer:=0;
+      OutputBitCount:=0;
+    End;
+  End;
+End;
+{$Q+}{$R+}
+
+Procedure FinishBits;
+Begin
+  If OutputBitCount>0 Then Begin
+    OutputBitBuffer:=OutputBitBuffer shl (8-OutputBitCount);
+    WriteOutputByte(Byte(OutputBitBuffer));
+    OutputBitBuffer:=0;
+    OutputBitCount:=0;
+  End;
+End;
+
+Procedure WriteBzipHeader;
+Begin
+  WriteOutputByte(Ord('B'));
+  WriteOutputByte(Ord('Z'));
+  WriteOutputByte(Ord('h'));
+  WriteOutputByte(Ord('0')+BlockFactor);
+End;
+
+Procedure WriteLongBits(Value:LongInt);
+Begin
+  WriteBits((Value shr 24)and 255,8);
+  WriteBits((Value shr 16)and 255,8);
+  WriteBits((Value shr 8)and 255,8);
+  WriteBits(Value and 255,8);
+End;
+
+{$Q-}
+Function CRCUpdateByte(CRC:LongInt; Value:Byte):LongInt;
+Var
+  BitIndex:Integer;
+Begin
+  CRC:=CRC xor (LongInt(Value) shl 24);
+  For BitIndex:=1 to 8 Do Begin
+    If(CRC and LongInt($80000000))<>0 Then
+      CRC:=(CRC shl 1)xor LongInt($04C11DB7)
+    Else CRC:=CRC shl 1;
+  End;
+  CRCUpdateByte:=CRC;
+End;
+{$Q+}
+
+Procedure AppendRLE(Value:Byte; Count:Integer);
+Var
+  I:Integer;
+Begin
+  If Count>=4 Then Begin
+    For I:=1 to 4 Do Begin
+      If RLELength>=MaxRLEBlock Then Fail('bloc RLE trop volumineux');
+      RLEBlock[RLELength]:=Value;
+      Inc(RLELength);
+    End;
+    If RLELength>=MaxRLEBlock Then Fail('bloc RLE trop volumineux');
+    RLEBlock[RLELength]:=Count-4;
+    Inc(RLELength);
+  End Else
+    For I:=1 to Count Do Begin
+      If RLELength>=MaxRLEBlock Then Fail('bloc RLE trop volumineux');
+      RLEBlock[RLELength]:=Value;
+      Inc(RLELength);
+    End;
+End;
+
+Function CompareRotations(A,B:Integer):Integer;
+Var
+  I,IndexA,IndexB:Integer;
+Begin
+  CompareRotations:=0;
+  For I:=0 to RLELength-1 Do Begin
+    IndexA:=(A+I)mod RLELength;
+    IndexB:=(B+I)mod RLELength;
+    If RLEBlock[IndexA]<RLEBlock[IndexB]Then Begin
+      CompareRotations:=-1;
+      Exit;
+    End Else If RLEBlock[IndexA]>RLEBlock[IndexB]Then Begin
+      CompareRotations:=1;
+      Exit;
+    End;
+  End;
+End;
+
+Procedure SortRotations(Left,Right:Integer);
+Var
+  I,J,Pivot,Temp:Integer;
+Begin
+  I:=Left;
+  J:=Right;
+  Pivot:=RotationIndex[(Left+Right)div 2];
+  Repeat
+    While CompareRotations(RotationIndex[I],Pivot)<0 Do Inc(I);
+    While CompareRotations(RotationIndex[J],Pivot)>0 Do Dec(J);
+    If I<=J Then Begin
+      Temp:=RotationIndex[I];
+      RotationIndex[I]:=RotationIndex[J];
+      RotationIndex[J]:=Temp;
+      Inc(I);
+      Dec(J);
+    End;
+  Until I>J;
+  If Left<J Then SortRotations(Left,J);
+  If I<Right Then SortRotations(I,Right);
+End;
+
+Procedure AppendSymbol(Symbol:Integer);
+Begin
+  If SymbolCount>=MaxEncodedSymbols Then Fail('trop de symboles MTF dans le bloc');
+  EncodedSymbols[SymbolCount]:=Symbol;
+  Inc(SymbolCount);
+  Inc(Frequencies[Symbol]);
+End;
+
+Procedure EmitZeroRun;
+Var
+  RunValue:LongInt;
+Begin
+  If ZeroRun=0 Then Exit;
+  RunValue:=ZeroRun-1;
+  Repeat
+    If(RunValue and 1)<>0 Then AppendSymbol(1)Else AppendSymbol(0);
+    If RunValue<2 Then Break;
+    RunValue:=(RunValue-2)div 2;
+  Until False;
+  ZeroRun:=0;
+End;
+
+Procedure BuildMTFStream;
+Var
+  I,J,CompactIndex,TempValue:Integer;
+Begin
+  For I:=0 to 255 Do InUse[I]:=False;
+  For I:=0 to RLELength-1 Do InUse[RLEBlock[I]]:=True;
+  InUseCount:=0;
+  For I:=0 to 255 Do
+    If InUse[I]Then Begin
+      SequenceToByte[InUseCount]:=I;
+      Inc(InUseCount);
+    End;
+  If InUseCount=0 Then Fail('alphabet vide dans le bloc');
+  AlphaSize:=InUseCount+2;
+  For I:=0 to InUseCount-1 Do MTFList[I]:=I;
+  For I:=0 to MaxAlphabet-1 Do Frequencies[I]:=0;
+  SymbolCount:=0;
+  ZeroRun:=0;
+  For I:=0 to RLELength-1 Do Begin
+    CompactIndex:=0;
+    While(CompactIndex<InUseCount)and
+      (SequenceToByte[MTFList[CompactIndex]]<>BWTData[I])Do Inc(CompactIndex);
+    If CompactIndex=0 Then Inc(ZeroRun) Else Begin
+      EmitZeroRun;
+      AppendSymbol(CompactIndex+1);
+      TempValue:=MTFList[CompactIndex];
+      For J:=CompactIndex downto 1 Do MTFList[J]:=MTFList[J-1];
+      MTFList[0]:=TempValue;
+    End;
+  End;
+  EmitZeroRun;
+  AppendSymbol(InUseCount+1);
+End;
+
+Procedure EncodeOneBlock;
+Var
+  I,J,RunLength,Position:Integer;
+  Value:Byte;
+  SelectorCountValue,SymbolIndex:Integer;
+Begin
+  RLELength:=0;
+  I:=0;
+  While I<CompressInputCount Do Begin
+    Value:=CompressInput[I];
+    RunLength:=1;
+    While(I+RunLength<CompressInputCount)and
+      (CompressInput[I+RunLength]=Value)Do Inc(RunLength);
+    Position:=0;
+    While Position<RunLength Do Begin
+      If RunLength-Position>255 Then J:=255 Else J:=RunLength-Position;
+      AppendRLE(Value,J);
+      Inc(Position,J);
+    End;
+    Inc(I,RunLength);
+  End;
+  For I:=0 to RLELength-1 Do RotationIndex[I]:=I;
+  If RLELength>1 Then SortRotations(0,RLELength-1);
+  OriginalPointer:=0;
+  For I:=0 to RLELength-1 Do Begin
+    Position:=RotationIndex[I];
+    If Position=0 Then OriginalPointer:=I;
+    If Position=0 Then Position:=RLELength;
+    BWTData[I]:=RLEBlock[Position-1];
+  End;
+  BuildMTFStream;
+
+  WriteLongBits($31415926);
+  WriteBits($5359,16);
+  WriteLongBits(BlockCRC xor LongInt($FFFFFFFF));
+  WriteBits(0,1);
+  WriteBits(OriginalPointer,24);
+  For I:=0 to 15 Do Begin
+    Value:=0;
+    For J:=0 to 15 Do
+      If InUse[I*16+J]Then Value:=1;
+    WriteBits(Value,1);
+  End;
+  For I:=0 to 15 Do
+    If InUse[I*16]or InUse[I*16+1]or InUse[I*16+2]or InUse[I*16+3]or
+      InUse[I*16+4]or InUse[I*16+5]or InUse[I*16+6]or InUse[I*16+7]or
+      InUse[I*16+8]or InUse[I*16+9]or InUse[I*16+10]or InUse[I*16+11]or
+      InUse[I*16+12]or InUse[I*16+13]or InUse[I*16+14]or InUse[I*16+15]Then
+      For J:=0 to 15 Do WriteBits(Ord(InUse[I*16+J]),1);
+  WriteBits(2,3);
+  SelectorCountValue:=(SymbolCount+49)div 50;
+  If(SelectorCountValue<1)or(SelectorCountValue>MaxSelectors)Then
+    Fail('trop de selecteurs Huffman');
+  WriteBits(SelectorCountValue,15);
+  For I:=1 to SelectorCountValue Do WriteBits(0,1);
+  For I:=1 to 2 Do Begin
+    WriteBits(9,5);
+    For J:=0 to AlphaSize-1 Do WriteBits(0,1);
+  End;
+  For SymbolIndex:=0 to SymbolCount-1 Do
+    WriteBits(EncodedSymbols[SymbolIndex],9);
+End;
+
+Procedure WriteBzipStreamEnd;
+Begin
+  WriteLongBits($17724538);
+  WriteBits($5090,16);
+  WriteLongBits(CombinedCRC);
+  FinishBits;
+End;
+
 Procedure ProcessOneFile(Const Name:String);
 Var
   InputHeader:Array[1..4]Of Byte;
@@ -534,9 +803,62 @@ Begin
   End;
 End;
 
-Procedure PrintHelp;
+Procedure CompressOneFile(Const Name:String);
+Var
+  Count:Word;
+  OutputExists:Boolean;
 Begin
-  WriteLn('BZIP2 : Cette commande permet de lancer l''outil bzip2 (decompression/test natifs, blocs jusqu''a 8 KiB).');
+  If HasBZ2Suffix(Name)Then Fail('le fichier porte deja le suffixe .bz2: '+Name);
+  Assign(InputFile,Name);
+  {$I-}Reset(InputFile,1);{$I+}
+  If IOResult<>0 Then Fail('impossible de lire '+Name);
+  OutputName:=Name+'.bz2';
+  OutputExists:=FileExistsTP(OutputName);
+  If OutputExists and Not WriteStdout and Not ForceOutput Then Begin
+    Close(InputFile);
+    Fail('le fichier de sortie existe deja: '+OutputName);
+  End;
+  If OutputExists and Not WriteStdout and ForceOutput Then RemoveInput(OutputName);
+  If Not WriteStdout Then Begin
+    Assign(OutputFile,OutputName);
+    {$I-}Rewrite(OutputFile,1);{$I+}
+    If IOResult<>0 Then Begin
+      Close(InputFile);
+      Fail('impossible de creer '+OutputName);
+    End;
+  End;
+  OutputBitBuffer:=0;
+  OutputBitCount:=0;
+  CombinedCRC:=0;
+  WriteBzipHeader;
+  Repeat
+    CompressInputCount:=0;
+    While(CompressInputCount<MaxCompressInput)and
+      (FilePos(InputFile)<FileSize(InputFile))Do Begin
+      BlockRead(InputFile,CompressInput[CompressInputCount],1,Count);
+      If Count<>1 Then Break;
+      Inc(CompressInputCount);
+    End;
+    If CompressInputCount>0 Then Begin
+      BlockCRC:=LongInt($FFFFFFFF);
+      For I:=0 to CompressInputCount-1 Do
+        BlockCRC:=CRCUpdateByte(BlockCRC,CompressInput[I]);
+      EncodeOneBlock;
+      {$Q-}
+      CombinedCRC:=((CombinedCRC shl 1)or((CombinedCRC shr 31)and 1))xor
+                    (BlockCRC xor LongInt($FFFFFFFF));
+      {$Q+}
+    End;
+  Until CompressInputCount=0;
+  WriteBzipStreamEnd;
+  Close(InputFile);
+  If Not WriteStdout Then Close(OutputFile);
+  If Not KeepInput and Not WriteStdout Then RemoveInput(Name);
+  If Verbose and Not Quiet Then WriteLn(Name,': compresse');
+End;
+
+Procedure PrintHelp;Begin
+  WriteLn('BZIP2 : Cette commande permet de compresser et decompresser des flux bzip2.');
   WriteLn;
   WriteLn('Syntaxe : bzip2 [-dctfkqsvV] [fichier ...]');
   WriteLn(' -d, --decompress  Decompresser');
@@ -545,8 +867,9 @@ Begin
   WriteLn(' -k, --keep        Conserver les sources');
   WriteLn(' -f, --force       Ecraser la sortie');
   WriteLn(' -q, --quiet       Supprimer les diagnostics');
-  WriteLn(' -1..-9            Taille de bloc indiquee par l''entete');
-  WriteLn(' Compression non prise en charge dans cette version.');
+  WriteLn(' -z, --compress    Forcer la compression');
+  WriteLn(' -1..-9            Niveau indique dans l''entete (blocs TP7 courts)');
+  WriteLn(' La compression native utilise des blocs de 512 octets.');
 End;
 
 BEGIN
@@ -560,6 +883,7 @@ BEGIN
   Quiet:=False;
   Verbose:=False;
   CompressionRequested:=False;
+  CompressionMode:=False;
   I:=1;
   While I<=ParamCount Do Begin
     Argument:=ParamStr(I);
@@ -618,9 +942,15 @@ BEGIN
     End;
     Inc(I);
   End;
+  If TestMode and CompressionRequested Then
+    Fail('options de compression incompatibles avec -t');
+  If DecompressMode and CompressionRequested Then
+    Fail('options -d et -z incompatibles');
   If TestMode Then DecompressMode:=True;
-  If CompressionRequested or Not DecompressMode Then
-    Fail('compression non prise en charge; utilisez -d pour decompresser');
+  CompressionMode:=Not DecompressMode and Not TestMode;
   If FileCount=0 Then Fail('un fichier bzip2 est requis dans ce sous-ensemble');
-  For I:=1 to FileCount Do ProcessOneFile(InputFiles[I]);
+  For FileIndex:=1 to FileCount Do Begin
+    If CompressionMode Then CompressOneFile(InputFiles[FileIndex])
+                       Else ProcessOneFile(InputFiles[FileIndex]);
+  End;
 END.
