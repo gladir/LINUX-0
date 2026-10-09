@@ -107,6 +107,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de vérifier les séparateurs d'équations dans un fichier troff.</td>
 		</tr>
 		<tr>
+			<td><b>CHECKNR.PAS</b></td>
+			<td>Cette commande permet de vérifier les entrées nroff et troff et signale les erreurs.</td>
+		</tr>
+		<tr>
 			<td><b>CHMOD.PAS</b></td>
 			<td>Cette commande permet de changer le mode des fichiers. Cette commande est inspiré de UNIX et Linux.</td>
 		</tr>
