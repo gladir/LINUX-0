@@ -103,6 +103,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher le contenu d'un/des fichiers. </td>
 		</tr>
 		<tr>
+			<td><b>CHECKEQ.PAS</b></td>
+			<td>Cette commande permet de vérifier les séparateurs d'équations dans un fichier troff.</td>
+		</tr>
+		<tr>
 			<td><b>CHMOD.PAS</b></td>
 			<td>Cette commande permet de changer le mode des fichiers. Cette commande est inspiré de UNIX et Linux.</td>
 		</tr>
