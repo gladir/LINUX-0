@@ -414,6 +414,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td><b>RED.PAS</b></td>
 			<td>Cette commande permet de lancer l'éditeur de texte ligne par ligne restreint.</td>
 		</tr>
+		<tr>
+			<td><b>REF.PAS</b></td>
+			<td>Cette commande permet d'afficher l'entête d'une fonction C.</td>
+		</tr>
    		<tr>
 			<td><b>RM.PAS</b></td>
 			<td>Cette commande permet de supprimer un fichier.</td>
