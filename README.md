@@ -410,7 +410,11 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td><b>REBOOT.PAS</b></td>
 			<td>Cette commande permet de redémarrer l'ordinateur.</td>
 		</tr>
-     		<tr>
+		<tr>
+			<td><b>RED.PAS</b></td>
+			<td>Cette commande permet de lancer l'éditeur de texte ligne par ligne restreint.</td>
+		</tr>
+   		<tr>
 			<td><b>RM.PAS</b></td>
 			<td>Cette commande permet de supprimer un fichier.</td>
 		</tr>
