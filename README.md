@@ -422,6 +422,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td><b>REPEAT.PAS</b></td>
 			<td>Cette commande permet d'exécuter une commande plusieurs fois.</td>
 		</tr>
+		<tr>
+			<td><b>REPLACE.PAS</b></td>
+			<td>Cette commande permet de remplacer toutes les occurrences d'une chaine.</td>
+		</tr>
    		<tr>
 			<td><b>RM.PAS</b></td>
 			<td>Cette commande permet de supprimer un fichier.</td>
