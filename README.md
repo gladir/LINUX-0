@@ -355,6 +355,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de déplacer un fichier.</td>
 		</tr>
 		<tr>
+			<td><b>NANO.PAS</b></td>
+			<td>Cette commande permet de lancer l'editeur de texte ASCII.</td>
+		</tr>
+		<tr>
 			<td><b>NL.PAS</b></td>
 			<td>Cette commande permet d'afficher du texte avec des numéros de ligne. </td>
 		</tr>
