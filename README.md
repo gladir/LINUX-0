@@ -375,6 +375,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher le contenu d'un fichier selon un format spécifique.</td>
 		</tr>
 		<tr>
+			<td><b>PCAT.PAS</b></td>
+			<td>Cette commande permet de compresser un fichier au format Unix .Z (LZW).</td>
+		</tr>
+		<tr>
 			<td><b>PERL.PAS</b></td>
 			<td>Cette commande permet de lancer le langage de programmation Perl.</td>
 		</tr>
