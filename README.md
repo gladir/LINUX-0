@@ -363,6 +363,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de lancer l'editeur de texte ASCII.</td>
 		</tr>
 		<tr>
+			<td><b>NEQN.PAS</b></td>
+			<td>Cette commande permet de lancer le préprocesseur d'équations pour troff.</td>
+		</tr>
+		<tr>
 			<td><b>NL.PAS</b></td>
 			<td>Cette commande permet d'afficher du texte avec des numéros de ligne. </td>
 		</tr>
