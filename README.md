@@ -439,6 +439,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'enlever un ou plusieurs repértoires vides.</td>
 		</tr>
 		<tr>
+			<td><b>S2P.PAS</b></td>
+			<td>Cette commande permet de traduire les scripts sed de base en Perl.</td>
+		</tr>
+		<tr>
 			<td><b>SDIFF.PAS</b></td>
 			<td>Cette commande permet de rechercher les différences côte à côte  du programme.</td>
 		</tr>		
