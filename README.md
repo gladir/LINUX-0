@@ -426,6 +426,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td><b>REPLACE.PAS</b></td>
 			<td>Cette commande permet de remplacer toutes les occurrences d'une chaine.</td>
 		</tr>
+		<tr>
+			<td><b>REV.PAS</b></td>
+			<td>Cette commande permet d'inverser les caractères de chaque ligne.</td>
+		</tr>
    		<tr>
 			<td><b>RM.PAS</b></td>
 			<td>Cette commande permet de supprimer un fichier.</td>
