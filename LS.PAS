@@ -27,14 +27,14 @@ End;
 BEGIN
  If(ParamStr(1)='/?')or(ParamStr(1)='--help')or(ParamStr(1)='-h')or
    (ParamStr(1)='/h')or(ParamStr(1)='/H')Then Begin
-  WriteLn('LS : Cette commande permet d''afficher les fichiers d''un r‚pertoire.');
+  WriteLn('LS : Cette commande permet d''afficher les fichiers d''un r'+#130+'pertoire.');
   WriteLn;
   WriteLn('Syntaxe : LS [-l] [-s] [-t] [repertoire]');
   WriteLn;
-  WriteLn(' repertoire Ce paramŠtre permet d''indiquer le r‚pertoire … afficher.');
-  WriteLn(' -l         Ce paramŠtre permet d''effectuer un affichage d‚tails');
-  WriteLn(' -s         Ce paramŠtre permet d''afficher le nombre de secteurs');
-  WriteLn(' -t         Ce paramŠtre permet d''afficher le contenu d''un r‚pertoire en ',
+  WriteLn(' repertoire Ce param'+#130+'tre permet d''indiquer le r'+#130+'pertoire '+#133+' afficher.');
+  WriteLn(' -l         Ce param'+#138+'tre permet d''effectuer un affichage d'+#130+'tails');
+  WriteLn(' -s         Ce param'+#138+'tre permet d''afficher le nombre de secteurs');
+  WriteLn(' -t         Ce param'+#138+'tre permet d''afficher le contenu d''un r'+#130+'pertoire en ',
                        'ordre de temps.');
  End
   Else
