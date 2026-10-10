@@ -351,6 +351,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de recevoir l'entrée puis l'affichage sur un périphérique un écran à la fois.</td>
 		</tr>
 		<tr>
+			<td><b>MTEST.PAS</b></td>
+			<td>Cette commande permet de lancer le testeur de configuration mtools.</td>
+		</tr>
+		<tr>
 			<td><b>MV.PAS</b></td>
 			<td>Cette commande permet de déplacer un fichier.</td>
 		</tr>
