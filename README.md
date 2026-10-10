@@ -435,6 +435,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de supprimer un fichier.</td>
 		</tr>
 		<tr>
+			<td><b>RMDIR.PAS</b></td>
+			<td>Cette commande permet d'enlever un ou plusieurs repértoires vides.</td>
+		</tr>
+		<tr>
 			<td><b>SDIFF.PAS</b></td>
 			<td>Cette commande permet de rechercher les différences côte à côte  du programme.</td>
 		</tr>		
