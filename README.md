@@ -287,6 +287,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de compresser et décompresser des fichiers au format gzip.</td>
 		</tr>
 		<tr>
+			<td><b>H2PH.PAS</b></td>
+			<td>Cette commande permet de convertir les directives des entêtes C en fichiers Perl .ph.</td>
+		</tr>
+		<tr>
 			<td><b>HALT.PAS</b></td>
 			<td>Cette commande permet d'arrêter l'ordinateur.</td>
 		</tr>
