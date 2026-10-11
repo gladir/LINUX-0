@@ -247,6 +247,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de lancer le preprocesseur de notation mathematique pour roff.</td>
 		</tr>
 		<tr>
+			<td><b>ETAGS.PAS</b></td>
+			<td>Cette commande permet de automatiquement générer et mettre a jour un fichier TAGS pour Emacs.</td>
+		</tr>
+		<tr>
 			<td><b>EXPAND.PAS</b></td>
 			<td>Cette commande permet de convertir des tabulations en espaces.</td>
 		</tr>
