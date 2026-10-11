@@ -275,6 +275,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de reformater le texte de paragraphe.</td>
 		</tr>
 		<tr>
+			<td><b>FGREP.PAS</b></td>
+			<td>Cette commande permet de rechercher des chaines litterales dans les fichiers.</td>
+		</tr>
+		<tr>
 			<td><b>FOLD.PAS</b></td>
 			<td>Cette commande permet d'envelopper les lignes d'entrée pour s'adapter à la largeur spécifié.</td>
 		</tr>	
