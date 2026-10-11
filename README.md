@@ -283,6 +283,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'envelopper les lignes d'entrée pour s'adapter à la largeur spécifié.</td>
 		</tr>	
 		<tr>
+			<td><b>FORMAT.PAS</b></td>
+			<td>Cette commande permet de formater une chaine avec des arguments.</td>
+		</tr>
+		<tr>
 			<td><b>FREE.PAS</b></td>
 			<td>Cette commande permet de demander les ressources de disponible (style Linux) ou les statistiques d'un unite de disque (style 4DOS).</td>
 		</tr>
