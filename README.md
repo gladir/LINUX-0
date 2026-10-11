@@ -263,6 +263,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de calculer le facteur d'un nombre. Cette commande est inspiré de la commande factor de UNIX.</td>
 		</tr>	
 		<tr>
+			<td><b>FALLOCATE.PAS</b></td>
+			<td>Cette commande permet d'allouer une plage dans un fichier.</td>
+		</tr>
+		<tr>
 			<td><b>FALSE.PAS</b></td>
 			<td>Cette commande permet de retourner faux. Cette command est inspiré de UNIX et Linux.</td>
 		</tr>
