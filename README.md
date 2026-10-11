@@ -315,6 +315,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer la configuration et l'affichage des interfaces réseau.</td>
 		</tr>
 		<tr>
+			<td><b>ISPELL.PAS</b></td>
+			<td>Cette commande permet de vérifier l'orthographe avec un lexique intégré.</td>
+		</tr>
+		<tr>
 			<td><b>KSH.PAS</b></td>
 			<td>Cette commande permet de lancer un interpréteur de commande Korn SHell.</td>
 		</tr>
