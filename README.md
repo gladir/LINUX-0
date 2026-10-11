@@ -235,6 +235,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de rechercher des expressions régulières étendues.</td>
 		</tr>
 		<tr>
+			<td><b>EMACS.PAS</b></td>
+			<td>Cette commande permet d'utiliser un editeur de texte avec macros.</td>
+		</tr>
+		<tr>
 			<td><b>ENV.PAS</b></td>
 			<td>Cette commande permet de fixer ou de demander le contenu des variables d'environnement du système d'exploitaiton.</td>
 		</tr>
