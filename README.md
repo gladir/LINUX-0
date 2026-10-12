@@ -542,6 +542,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td><b>TIME.PAS</b></td>
 			<td>Cette commande permet de fixer ou de demander l'heure du système d'exploitation.</td>
 		</tr>
+		<tr>
+			<td><b>TODOS.PAS</b></td>
+			<td>Cette commande permet de convertir les fins de ligne Unix et DOS.</td>
+		</tr>
     <tr>
 			<td><b>TOUCH.PAS</b></td>
 			<td>Cette commande permet de changer la date et l'heure d'un fichier.</td>
