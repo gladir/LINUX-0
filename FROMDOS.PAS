@@ -42,7 +42,7 @@ End;
 
 Procedure ShowHelp;
 Begin
- WriteLn('FROMDOS - Cette commnande permet de convertir automatiquement les fins de ligne DOS et Unix.');
+ WriteLn('FROMDOS - Cette commande permet de convertir automatiquement les fins de ligne DOS et Unix.');
  WriteLn;
  WriteLn('Syntaxe: FROMDOS [options] fichier ...');
  WriteLN;
