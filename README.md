@@ -299,6 +299,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher un calendrier julien ou gregorien.</td>
 		</tr>
 		<tr>
+			<td><b>GEQN.PAS</b></td>
+			<td>Cette commande permet de lancer le preprocesseur GNU d'equations pour troff.</td>
+		</tr>
+		<tr>
 			<td><b>GETENT.PAS</b></td>
 			<td>Cette commande permet de demander les entrées de la base de données administrative.</td>
 		</tr>
