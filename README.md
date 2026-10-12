@@ -307,6 +307,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de demander les entrées de la base de données administrative.</td>
 		</tr>
 		<tr>
+			<td><b>GETOPT.PAS</b></td>
+			<td>Cette commande permet d'analyser les options d'une ligne de commande.</td>
+		</tr>
+		<tr>
 			<td><b>GETTEXT.PAS</b></td>
 			<td>Cette commande permet d'afficher les traductions de langages humains natif dans un message textuel.</td>
 		</tr>
