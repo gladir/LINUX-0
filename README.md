@@ -295,6 +295,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de convertir automatiquement les fins de ligne DOS et Unix.</td>
 		</tr>
 		<tr>
+			<td><b>GCAL.PAS</b></td>
+			<td>Cette commande permet d'afficher un calendrier julien ou gregorien.</td>
+		</tr>
+		<tr>
 			<td><b>GETENT.PAS</b></td>
 			<td>Cette commande permet de demander les entrées de la base de données administrative.</td>
 		</tr>
