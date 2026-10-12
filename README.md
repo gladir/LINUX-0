@@ -291,6 +291,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de demander les ressources de disponible (style Linux) ou les statistiques d'un unite de disque (style 4DOS).</td>
 		</tr>
 		<tr>
+			<td><b>FROMDOS.PAS</b></td>
+			<td>Cette commande permet de convertir automatiquement les fins de ligne DOS et Unix.</td>
+		</tr>
+		<tr>
 			<td><b>GETENT.PAS</b></td>
 			<td>Cette commande permet de demander les entrées de la base de données administrative.</td>
 		</tr>
