@@ -315,6 +315,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher les traductions de langages humains natif dans un message textuel.</td>
 		</tr>
 		<tr>
+			<td><b>GLOOKBIB.PAS</b></td>
+			<td>Cette commande permet d'effectuer une recherche bibliographique dans les bases de données.</td>
+		</tr>
+		<tr>
 			<td><b>GREP.PAS</b></td>
 			<td>Cette commande permet d'effectuer des recherches dans des fichiers.</td>
 		</tr>
