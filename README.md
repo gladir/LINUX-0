@@ -335,6 +335,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer des recherches dans des fichiers.</td>
 		</tr>
 		<tr>
+			<td><b>GROFF.PAS</b></td>
+			<td>Cette commande permet d'effectuer le formatage de document systeme au premier plan.</td>
+		</tr>
+		<tr>
 			<td><b>GRODVI.PAS</b></td>
 			<td>Cette commande permet d'effectuer la conversion de la sortie groff a celle du format TeX dvi.</td>
 		</tr>
