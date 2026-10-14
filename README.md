@@ -323,6 +323,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer la creation d'une fonction hachee a partir d'un ensemble de clefs.</td>
 		</tr>
 		<tr>
+			<td><b>GPIC.PAS</b></td>
+			<td>Cette commande permet de compiler des images pour le troff ou le TeX.</td>
+		</tr>
+		<tr>
 			<td><b>GREP.PAS</b></td>
 			<td>Cette commande permet d'effectuer des recherches dans des fichiers.</td>
 		</tr>
