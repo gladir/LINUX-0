@@ -327,6 +327,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de compiler des images pour le troff ou le TeX.</td>
 		</tr>
 		<tr>
+			<td><b>GREFER.PAS</b></td>
+			<td>Cette commande permet de lancer le preprocesseur des references bibliographiques de groff.</td>
+		</tr>
+		<tr>
 			<td><b>GREP.PAS</b></td>
 			<td>Cette commande permet d'effectuer des recherches dans des fichiers.</td>
 		</tr>
