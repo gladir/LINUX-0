@@ -411,6 +411,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de vérifier l'orthographe avec un lexique intégré.</td>
 		</tr>
 		<tr>
+			<td><b>JOIN.PAS</b></td>
+			<td>Cette commande permet de fusionner des lignes de deux fichiers en un champ commun.</td>
+		</tr>
+		<tr>
 			<td><b>KSH.PAS</b></td>
 			<td>Cette commande permet de lancer un interpréteur de commande Korn SHell.</td>
 		</tr>
