@@ -355,6 +355,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de décompresser des fichiers gzip.</td>
 		</tr>
 		<tr>
+			<td><b>GZEXE.PAS</b></td>
+			<td>Cette commande permet d'effectuer la compression de fichiers executables.</td>
+		</tr>
+		<tr>
 			<td><b>GZIP.PAS</b></td>
 			<td>Cette commande permet de compresser et décompresser des fichiers au format gzip.</td>
 		</tr>
