@@ -391,6 +391,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer la gestion des fichiers utilisateur pour l'authentification "digest" d'Apache.</td>
 		</tr>
 		<tr>
+			<td><b>HTPASSWD.PAS</b></td>
+			<td>Cette commande permet d'encrypter les mots de passe des fichiers ".htpasswd" qu'utilise Apache.</td>
+		</tr>
+		<tr>
 			<td><b>ICONV.PAS</b></td>
 			<td>Cette commande permet de convertir un fichier d'un format à un autre.</td>
 		</tr>
