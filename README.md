@@ -351,6 +351,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher les groupes d'un utilisateur.</td>		
 		</tr>
 		<tr>
+			<td><b>GSOELIM.PAS</b></td>
+			<td>Cette commande permet d'interpreter les requetes .so en sortie groff.</td>
+		</tr>
+		<tr>
 			<td><b>GUNZIP.PAS</b></td>
 			<td>Cette commande permet de décompresser des fichiers gzip.</td>
 		</tr>
