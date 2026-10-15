@@ -387,6 +387,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher le contenu d'un fichier en format hexadecimal.</td>
 		</tr>
 		<tr>
+			<td><b>HTDIGEST.PAS</b></td>
+			<td>Cette commande permet d'effectuer la gestion des fichiers utilisateur pour l'authentification "digest" d'Apache.</td>
+		</tr>
+		<tr>
 			<td><b>ICONV.PAS</b></td>
 			<td>Cette commande permet de convertir un fichier d'un format à un autre.</td>
 		</tr>
