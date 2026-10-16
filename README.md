@@ -459,6 +459,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher les fichiers d'un répertoire.</td>
 		</tr>
 		<tr>
+			<td><b>MACPTOPBM.PAS</b></td>
+			<td>Cette commande permet d'effectuer la conversion d'un fichier d'image MacPaint au format portable Bitmap.</td>
+		</tr>
+		<tr>
 			<td><b>MKTEMP.PAS</b></td>
 			<td>Cette commande permet de créer un fichier ou un répertoire temporaire.</td>
 		</tr>
