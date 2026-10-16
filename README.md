@@ -435,6 +435,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de generer les programmes pour les taches lexicales.</td>
 		</tr>
 		<tr>
+			<td><b>LISPMTOPGM.PAS</b></td>
+			<td>Cette commande permet d'effectuer la conversion d'un fichier de bitmap machine Lisp a un format PGM.</td>
+		</tr>
+		<tr>
 			<td><b>LOGNAME.PAS</b></td>
 			<td>Cette comamnde permet de demander le nom de connexion.</td>
 		</tr>
