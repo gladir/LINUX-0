@@ -423,6 +423,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
    			<td>Cette commande permet d'afficher la dernière connexion d'un utilisateur spécifié ou de tous les utilisateurs.</td>
 		</tr>
 		<tr>
+			<td><b>LDD.PAS</b></td>
+			<td>Cette commande permet d'afficher la liste des dependances dynamiques des fichiers executables ou des objets partages.</td>
+		</tr>
+		<tr>
 			<td><b>LESS.PAS</b></td>
 			<td>Cette commande permet d'afficher un fichier de la fin vers le début.</td>
 		</tr>
