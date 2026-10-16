@@ -463,6 +463,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer la conversion d'un fichier d'image MacPaint au format portable Bitmap.</td>
 		</tr>
 		<tr>
+			<td><b>MAKE.PAS</b></td>
+			<td>Cette commande permet de lancer le moteur de production, lequel effectue des commandes permettant la creation des fichiers.</td>
+		</tr>
+		<tr>
 			<td><b>MKTEMP.PAS</b></td>
 			<td>Cette commande permet de créer un fichier ou un répertoire temporaire.</td>
 		</tr>
