@@ -466,6 +466,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td><b>MAKE.PAS</b></td>
 			<td>Cette commande permet de lancer le moteur de production, lequel effectue des commandes permettant la creation des fichiers.</td>
 		</tr>
+	    <tr>
+			<td><b>MERGE.PAS</b></td>
+			<td>Cette commande permet d'effectuer la fusion de deux fichiers en un nouveau fichier.</td>
+		</tr>
 		<tr>
 			<td><b>MD5SUM.PAS</b></td>
 			<td>Cette commande permet d'effectuer la verification et la generation d'un message MD5.</td>
