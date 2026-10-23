@@ -2,7 +2,7 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7, Free Pascal 3.2)
-  @description: Maintenance MALL et MyISAM 3.23/4.0/4.1/5.0 sans index.
+  @description: Maintenance MALL et MyISAM 3.23/4.0/4.1/5.0/5.1 sans index.
     Slots statiques, lignes dynamiques et BLOB; pas de compression ou RAID.
 }
 
@@ -321,7 +321,7 @@ Begin
  FindForSlot:=True;
 End;
 
-{ Layout commun a MySQL 3.23.58, 4.0.30, 4.1.22 et 5.0.96, mi_open.c.
+{ Layout commun a MySQL 3.23.58, 4.0.30, 4.1.22, 5.0.96 et 5.1.73, mi_open.c.
   Contrairement a MALL, les entiers natifs sont big-endian. }
 Function ReadBE(Var Buffer;Count:Word;AllowEnd:Boolean):Longint;
 Type TBytes=Array[0..175]of Byte;
@@ -383,8 +383,8 @@ Begin
    (BasePos<>176+NativeKeys*8+Blocks*8+Parts*4)Or
    (BasePos+100>HeaderLength)Or(HeaderLength>IndexSize)Then Begin
   Error(BaseName+': '+Msg(
-   'en-tete invalide ou layout incompatible avec MyISAM 3.23/4.0/4.1/5.0',
-   'invalid header or layout incompatible with MyISAM 3.23/4.0/4.1/5.0'));
+   'en-tete invalide ou layout incompatible avec MyISAM 3.23/4.0/4.1/5.0/5.1',
+   'invalid header or layout incompatible with MyISAM 3.23/4.0/4.1/5.0/5.1'));
   Exit;
  End;
  If Not ReadAt(F,BasePos,NativeBase,100)Then Exit;
@@ -754,7 +754,7 @@ Begin
   If LegacyMatches And CRCMatches Then
    WriteLn(Msg('algorithme indetermine (deux sommes valides)',
                'undetermined algorithm (both sums valid)'))
-  Else If CRCMatches Then WriteLn('CRC32 (MySQL 4.1/5.0)')
+  Else If CRCMatches Then WriteLn('CRC32 (MySQL 4.1/5.0/5.1)')
   Else WriteLn('legacy (MySQL 3.23/4.0)');
  End;
 End;
@@ -1574,7 +1574,7 @@ Procedure WorkTable;
 Begin
  If Not LoadHeaders Then Exit;
  If Native Then Begin
-  If Not Silent Then WriteLn(BaseName,': MyISAM (layout 3.23/4.0/4.1/5.0)');
+  If Not Silent Then WriteLn(BaseName,': MyISAM (layout 3.23/4.0/4.1/5.0/5.1)');
   If(Mode=_Describe)Or Verbose Then Begin
    WriteLn('  ',Msg('Options : ','Options: '),NativeOptions);
    WriteLn('  ',Msg('Index : ','Indexes: '),NativeKeys);
@@ -1582,10 +1582,16 @@ Begin
    WriteLn('  ',Msg('Taille de slot : ','Slot size: '),SlotSize);
    WriteLn('  ',Msg('Taille des donnees : ','Data size: '),DataSize);
    WriteLn('  CHECKSUM : ',(NativeOptions And 32)<>0);
-   If ModernVarchar Then WriteLn('  VARCHAR : MySQL 5.0')
+   If ModernVarchar Then WriteLn('  VARCHAR : MySQL 5.0/5.1')
                     Else WriteLn('  VARCHAR : MySQL 3.23/4.0/4.1');
   End;
   If Mode=_Describe Then Exit;
+  If(NativeOptions And 512)<>0Then Begin
+   Error(BaseName+': '+Msg(
+    'MyISAM : dependance a la couche SQL (parseur externe); aucune modification',
+    'MyISAM: SQL-layer dependency (external parser); no changes'));
+   Exit;
+  End;
   If Not NativeSupported Then Begin
    Error(BaseName+': '+Msg(
     'MyISAM : index, compression et RAID non geres; aucune modification',
@@ -1723,26 +1729,28 @@ End;
 
 Procedure ShowHelp;
 Begin
- WriteLn('MYISAMCHK : ',Msg('Maintenance MALL et MyISAM 3.23/4.0/4.1/5.0.',
-                           'MALL and MyISAM 3.23/4.0/4.1/5.0 maintenance.'));
+ WriteLn('MYISAMCHK : ',Msg('Maintenance MALL et MyISAM 3.23/4.0/4.1/5.0/5.1.',
+                           'MALL and MyISAM 3.23/4.0/4.1/5.0/5.1 maintenance.'));
  WriteLn('Syntaxe / Usage: myisamchk [options] tbl_name ...');
  WriteLn;
- WriteLn(Msg('MALLMYD1/MALLMYI1 et layout MyISAM 3.23/4.0/4.1/5.0 (176/100 octets).',
-             'MALLMYD1/MALLMYI1 and MyISAM 3.23/4.0/4.1/5.0 layout (176/100 bytes).'));
+ WriteLn(Msg('MALLMYD1/MALLMYI1 et layout MyISAM 3.23/4.0/4.1/5.0/5.1 (176/100 octets).',
+             'MALLMYD1/MALLMYI1 and MyISAM 3.23/4.0/4.1/5.0/5.1 layout (176/100 bytes).'));
  WriteLn(Msg('Natif : statique ou dynamique sans index; BLOB et CHECKSUM acceptes.',
              'Native: static or dynamic without indexes; BLOB and CHECKSUM accepted.'));
  WriteLn(Msg('Dynamique : blocs fragmentes, champs compactes, chaines libres.',
              'Dynamic: fragmented blocks, packed fields, free block chains.'));
- WriteLn(Msg('CHECKSUM : ancien algorithme 3.23/4.0 ou CRC32 MySQL 4.1/5.0.',
-             'CHECKSUM: legacy 3.23/4.0 algorithm or MySQL 4.1/5.0 CRC32.'));
- WriteLn(Msg('VARCHAR/VARBINARY 5.0 : prefixes 1/2 octets, valeurs vides et 255 octets.',
-             '5.0 VARCHAR/VARBINARY: 1/2-byte prefixes, empty and 255-byte values.'));
+ WriteLn(Msg('CHECKSUM : ancien algorithme 3.23/4.0 ou CRC32 MySQL 4.1/5.0/5.1.',
+             'CHECKSUM: legacy 3.23/4.0 algorithm or MySQL 4.1/5.0/5.1 CRC32.'));
+ WriteLn(Msg('VARCHAR/VARBINARY 5.0/5.1 : prefixes 1/2 octets, vides et 255 octets.',
+             '5.0/5.1 VARCHAR/VARBINARY: 1/2-byte prefixes, empty and 255-byte values.'));
  WriteLn(Msg('Un meme algorithme doit valider toutes les lignes et la somme totale.',
              'One algorithm must validate every row and the table checksum.'));
  WriteLn(Msg('Checksum incoherent : verification en echec et correction refusee.',
              'Checksum mismatch: check fails and repair is refused.'));
  WriteLn(Msg('Indexe, comprime, RAID : verification et correction refusees.',
              'Indexed, compressed, RAID: checking and repair refused.'));
+ WriteLn(Msg('Dependance a la couche SQL (parseur externe) : correction refusee.',
+             'SQL-layer dependency (external parser): repair refused.'));
  WriteLn(Msg('La signature ne permet pas d''identifier la version exacte du serveur.',
              'The signature cannot identify the exact server version.'));
  WriteLn;
@@ -1764,11 +1772,11 @@ Begin
              '  -s, --silent         Hide normal messages, not errors.'));
  WriteLn(Msg('  -v, --verbose        Affiche les compteurs et tailles.',
              '  -v, --verbose        Display counts and sizes.'));
- WriteLn('  --mysql-version=auto|3.23|4.0|4.1|5.0');
+ WriteLn('  --mysql-version=auto|3.23|4.0|4.1|5.0|5.1');
  WriteLn(Msg('                      Checksum et format VARCHAR natifs (defaut: auto).',
              '                      Native checksum and VARCHAR format (default: auto).'));
- WriteLn(Msg('                      Auto : checksum detecte, VARCHAR au format 5.0.',
-             '                      Auto: detected checksum, 5.0 VARCHAR format.'));
+ WriteLn(Msg('                      Auto : checksum detecte, VARCHAR au format 5.0/5.1.',
+             '                      Auto: detected checksum, 5.0/5.1 VARCHAR format.'));
  WriteLn(Msg('                      3.23/4.0/4.1 : ancien decodage VARCHAR interne.',
              '                      3.23/4.0/4.1: legacy internal VARCHAR decoding.'));
  WriteLn(Msg('                      Ne convertit pas les donnees ni les sommes.',
@@ -1781,6 +1789,10 @@ Begin
  WriteLn;
  WriteLn(Msg('Nom avec ou sans .MYI/.MYD; motifs *.MYI et *.MYD acceptes.',
              'Names with or without .MYI/.MYD; *.MYI and *.MYD patterns accepted.'));
+ WriteLn(Msg('Partitions 5.1 : nommer chaque fichier physique .MYI explicitement.',
+             '5.1 partitions: specify each physical .MYI file explicitly.'));
+ WriteLn(Msg('Les metadonnees .par/.frm ne sont ni verifiees ni modifiees.',
+             '.par/.frm metadata is neither checked nor modified.'));
  WriteLn(Msg('ARRETER l''application et le serveur avant toute operation.',
              'STOP the application and server before any operation.'));
  WriteLn(Msg('Reparation prudente : aucune cle inventee ni ligne active supprimee.',
@@ -1820,7 +1832,7 @@ Begin
   ChecksumFormat:=_CRC32Checksum;
   ModernVarchar:=False;
  End
- Else If A='--mysql-version=5.0'Then Begin
+ Else If(A='--mysql-version=5.0')Or(A='--mysql-version=5.1')Then Begin
   ChecksumFormat:=_CRC32Checksum;
   ModernVarchar:=True;
  End
@@ -1849,7 +1861,7 @@ BEGIN
     Halt(0);
    End
    Else If Arg='--version'Then Begin
-    WriteLn('MYISAMCHK 0.6-Pascal - MALL / MyISAM 3.23/4.0/4.1/5.0 static/dynamic/BLOB, no indexes');
+    WriteLn('MYISAMCHK 0.7-Pascal - MALL / MyISAM 3.23/4.0/4.1/5.0/5.1 static/dynamic/BLOB, no indexes');
     Halt(0);
    End
    Else If(Length(Arg)>0)Then
