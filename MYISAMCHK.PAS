@@ -2,7 +2,7 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7, Free Pascal 3.2)
-  @description: Maintenance MALL et MyISAM 3.23/4.0 sans index.
+  @description: Maintenance MALL et MyISAM 3.23/4.0/4.1 sans index.
     Slots statiques, lignes dynamiques et BLOB; pas de compression ou RAID.
 }
 
@@ -39,6 +39,10 @@ Type
   DataOfs:Longint;
  End;
  TMode=(_Check,_Recover,_Optimize,_Describe);
+ TChecksumFormat=(_AutoChecksum,_LegacyChecksum,_CRC32Checksum);
+ TChecksum=Record
+  LegacyHigh,LegacyLow,CRCHigh,CRCLow:Word;
+ End;
  PDynamicBlock=^TDynamicBlock;
  TDynamicBlock=Record
   Offset,Span,Payload,DataLength,RowLength,NextOffset,PrevOffset:Longint;
@@ -49,6 +53,8 @@ Type
 
 Var
  Mode:TMode;
+ ChecksumFormat:TChecksumFormat;
+ LegacyMatches,CRCMatches:Boolean;
  English,Silent,Verbose,EndOptions,AnyTable,AnyError:Boolean;
  Arg,BaseName,DataName,IndexName,TempData,TempIndex,BackupData,BackupIndex:String;
  D,F,TD,TI:File;
@@ -314,7 +320,7 @@ Begin
  FindForSlot:=True;
 End;
 
-{ Layout commun a MySQL 3.23.58 et 4.0.30, mi_open.c et myisampack.h.
+{ Layout commun a MySQL 3.23.58, 4.0.30 et 4.1.22, mi_open.c.
   Contrairement a MALL, les entiers natifs sont big-endian. }
 Function ReadBE(Var Buffer;Count:Word;AllowEnd:Boolean):Longint;
 Type TBytes=Array[0..175]of Byte;
@@ -375,8 +381,8 @@ Begin
    (BasePos<>176+NativeKeys*8+Blocks*8+Parts*4)Or
    (BasePos+100>HeaderLength)Or(HeaderLength>IndexSize)Then Begin
   Error(BaseName+': '+Msg(
-   'en-tete invalide ou layout incompatible avec MyISAM 3.23/4.0',
-   'invalid header or layout incompatible with MyISAM 3.23/4.0'));
+   'en-tete invalide ou layout incompatible avec MyISAM 3.23/4.0/4.1',
+   'invalid header or layout incompatible with MyISAM 3.23/4.0/4.1'));
   Exit;
  End;
  If Not ReadAt(F,BasePos,NativeBase,100)Then Exit;
@@ -667,14 +673,86 @@ Begin
  DynamicScan:=True;
 End;
 
-Procedure ChecksumByte(Value:Byte;Var HighWord,LowWord:Word);
-Var LowValue,HighValue:Longint;
+Procedure ChecksumStart(Var Value:TChecksum);
 Begin
- { Rotation/addition modulo 2^32, sans entier non signe 32 bits. }
- HighValue:=Longint(HighWord Mod 256)*256+LowWord Div 256;
- LowValue:=Longint(LowWord Mod 256)*256+Value+HighWord Div 256;
- HighWord:=(HighValue+LowValue Div 65536)Mod 65536;
- LowWord:=LowValue Mod 65536;
+ FillChar(Value,SizeOf(Value),0);
+ Value.CRCHigh:=$FFFF;
+ Value.CRCLow:=$FFFF;
+End;
+
+Procedure ChecksumByte(Value:Byte;Var Checksum:TChecksum);
+Var LowValue,HighValue:Longint; J:Integer; OddBit:Boolean;
+Begin
+ { Deux moities 16 bits evitent les debordements signes sous TP7. }
+ HighValue:=Longint(Checksum.LegacyHigh Mod 256)*256+
+            Checksum.LegacyLow Div 256;
+ LowValue:=Longint(Checksum.LegacyLow Mod 256)*256+Value+
+           Checksum.LegacyHigh Div 256;
+ Checksum.LegacyHigh:=(HighValue+LowValue Div 65536)Mod 65536;
+ Checksum.LegacyLow:=LowValue Mod 65536;
+ Checksum.CRCLow:=Checksum.CRCLow Xor Value;
+ For J:=1 to 8Do Begin
+  OddBit:=(Checksum.CRCLow And 1)<>0;
+  Checksum.CRCLow:=(Checksum.CRCLow Shr 1)Or
+                   ((Checksum.CRCHigh And 1)Shl 15);
+  Checksum.CRCHigh:=Checksum.CRCHigh Shr 1;
+  If OddBit Then Begin
+   Checksum.CRCHigh:=Checksum.CRCHigh Xor $EDB8;
+   Checksum.CRCLow:=Checksum.CRCLow Xor $8320;
+  End;
+ End;
+End;
+
+Procedure ChecksumFinish(Var Value:TChecksum);
+Begin
+ Value.CRCHigh:=Value.CRCHigh Xor $FFFF;
+ Value.CRCLow:=Value.CRCLow Xor $FFFF;
+End;
+
+Procedure ChecksumAdd(Var Total:TChecksum;Const Value:TChecksum);
+Var Sum:Longint;
+Begin
+ Sum:=Longint(Total.LegacyLow)+Value.LegacyLow;
+ Total.LegacyLow:=Sum Mod 65536;
+ Total.LegacyHigh:=(Longint(Total.LegacyHigh)+Value.LegacyHigh+
+                   Sum Div 65536)Mod 65536;
+ Sum:=Longint(Total.CRCLow)+Value.CRCLow;
+ Total.CRCLow:=Sum Mod 65536;
+ Total.CRCHigh:=(Longint(Total.CRCHigh)+Value.CRCHigh+
+                Sum Div 65536)Mod 65536;
+End;
+
+Procedure ChecksumCandidates;
+Begin
+ LegacyMatches:=ChecksumFormat<>_CRC32Checksum;
+ CRCMatches:=ChecksumFormat<>_LegacyChecksum;
+End;
+
+Procedure ChecksumValidate(Const Total:TChecksum);
+Var J:Integer; HighWord,LowWord:Longint;
+Begin
+ For J:=100 to 103Do
+  If NativeState[J]<>0Then Begin
+   LegacyMatches:=False;
+   CRCMatches:=False;
+  End;
+ HighWord:=ReadBE(NativeState[104],2,False);
+ LowWord:=ReadBE(NativeState[106],2,False);
+ LegacyMatches:=LegacyMatches And(HighWord=Total.LegacyHigh)And
+                (LowWord=Total.LegacyLow);
+ CRCMatches:=CRCMatches And(HighWord=Total.CRCHigh)And(LowWord=Total.CRCLow);
+ If Not(LegacyMatches Or CRCMatches)Then
+  Issue(Msg(
+   'checksum incoherent ou version forcee incompatible; correction refusee',
+   'checksum mismatch or incompatible forced version; repair refused'),False)
+ Else If Verbose Then Begin
+  Write('  CHECKSUM : ');
+  If LegacyMatches And CRCMatches Then
+   WriteLn(Msg('algorithme indetermine (deux sommes valides)',
+               'undetermined algorithm (both sums valid)'))
+  Else If CRCMatches Then WriteLn('CRC32 (MySQL 4.1)')
+  Else WriteLn('legacy (MySQL 3.23/4.0)');
+ End;
 End;
 
 Procedure DynamicStart(P:PDynamicBlock);
@@ -715,7 +793,7 @@ Begin
  DynamicRead:=True;
 End;
 
-Function DynamicConsume(Count:Longint;Var HighWord,LowWord:Word):Boolean;
+Function DynamicConsume(Count:Longint;Var Checksum:TChecksum):Boolean;
 Var Part,J:Word;
 Begin
  DynamicConsume:=False;
@@ -727,29 +805,28 @@ Begin
   Part:=SizeOf(CopyBuffer);
   If Count<Part Then Part:=Count;
   If Not DynamicRead(CopyBuffer,Part)Then Exit;
-  For J:=0 to Part-1Do ChecksumByte(CopyBuffer[J],HighWord,LowWord);
+  For J:=0 to Part-1Do ChecksumByte(CopyBuffer[J],Checksum);
   Count:=Count-Part;
  End;
  DynamicConsume:=True;
 End;
 
-Procedure DynamicFill(Count:Longint;Value:Byte;Var HighWord,LowWord:Word);
+Procedure DynamicFill(Count:Longint;Value:Byte;Var Checksum:TChecksum);
 Begin
  While Count>0Do Begin
-  ChecksumByte(Value,HighWord,LowWord);
+  ChecksumByte(Value,Checksum);
   Dec(Count);
  End;
 End;
 
-Function DynamicRow(P:PDynamicBlock;Var HighWord,LowWord:Word):Boolean;
+Function DynamicRow(P:PDynamicBlock;Var Checksum:TChecksum):Boolean;
 Var J,K,FieldType,FieldLength,Length,FlagIndex,BitValue:Longint;
     Column:Array[0..6]of Byte; Bytes:Array[0..3]of Byte;
     PackedField:Boolean; StoredChecksum:Byte;
 Begin
  DynamicRow:=False;
  DynamicStart(P);
- HighWord:=0;
- LowWord:=0;
+ ChecksumStart(Checksum);
  If Not DynamicRead(DynamicFlags,NativePackBits)Then Exit;
  FlagIndex:=0;
  BitValue:=1;
@@ -806,12 +883,12 @@ Begin
   End
   Else If PackedField Then Length:=0;
   If PackedField And(FieldType=2)Then
-   DynamicFill(FieldLength-Length,32,HighWord,LowWord);
-  If Not DynamicConsume(Length,HighWord,LowWord)Then Exit;
+   DynamicFill(FieldLength-Length,32,Checksum);
+  If Not DynamicConsume(Length,Checksum)Then Exit;
   If PackedField And(FieldType=1)Then
-   DynamicFill(FieldLength-Length,32,HighWord,LowWord);
+   DynamicFill(FieldLength-Length,32,Checksum);
   If PackedField And(FieldType=3)Then
-   DynamicFill(FieldLength,0,HighWord,LowWord);
+   DynamicFill(FieldLength,0,Checksum);
  End;
  If BitValue<>1Then
   If DynamicFlags[FlagIndex]And(256-BitValue)<>0Then Begin
@@ -819,9 +896,12 @@ Begin
                            'nonzero reserved packing bits');
    Exit;
   End;
+ ChecksumFinish(Checksum);
  If(NativeOptions And 32)<>0Then Begin
   If Not DynamicRead(StoredChecksum,1)Then Exit;
-  If StoredChecksum<>LowWord Mod 256Then
+  LegacyMatches:=LegacyMatches And(StoredChecksum=Checksum.LegacyLow Mod 256);
+  CRCMatches:=CRCMatches And(StoredChecksum=Checksum.CRCLow Mod 256);
+  If Not(LegacyMatches Or CRCMatches)Then
    Issue(Msg('checksum de ligne dynamique incoherent',
              'dynamic row checksum mismatch'),False);
  End;
@@ -834,14 +914,14 @@ Begin
 End;
 
 Function DynamicValidate:Boolean;
-Var P,Q:PDynamicBlock; Remaining,Head,Previous,Visited,Sum:Longint;
-    RowHigh,RowLow,SumHigh,SumLow:Word; J:Integer; ChecksumOK:Boolean;
+Var P,Q:PDynamicBlock; Remaining,Head,Previous,Visited:Longint;
+    RowChecksum,Total:TChecksum;
 Begin
  DynamicValidate:=False;
  If Not DynamicScan Then Exit;
  Active:=0;
- SumHigh:=0;
- SumLow:=0;
+ FillChar(Total,SizeOf(Total),0);
+ ChecksumCandidates;
  P:=DynamicBlocks;
  While P<>Nil Do Begin
   If(P^.Kind<>0)And((P^.Kind<=6)Or(P^.Kind=13))Then Begin
@@ -870,10 +950,8 @@ Begin
     DynamicValidate:=DynamicError('chaine dynamique trop longue','overlong dynamic chain');
     Exit;
    End;
-   If Not DynamicRow(P,RowHigh,RowLow)Then Exit;
-   Sum:=Longint(SumLow)+RowLow;
-   SumLow:=Sum Mod 65536;
-   SumHigh:=(Longint(SumHigh)+RowHigh+Sum Div 65536)Mod 65536;
+   If Not DynamicRow(P,RowChecksum)Then Exit;
+   ChecksumAdd(Total,RowChecksum);
   End;
   P:=P^.Following;
  End;
@@ -885,14 +963,7 @@ Begin
   End;
   P:=P^.Following;
  End;
- If(NativeOptions And 32)<>0Then Begin
-  ChecksumOK:=True;
-  For J:=100 to 103Do If NativeState[J]<>0Then ChecksumOK:=False;
-  If(ReadBE(NativeState[104],2,False)<>SumHigh)Or
-    (ReadBE(NativeState[106],2,False)<>SumLow)Then ChecksumOK:=False;
-  If Not ChecksumOK Then Issue(Msg('checksum de table incoherent',
-                                  'table checksum mismatch'),False);
- End;
+ If(NativeOptions And 32)<>0Then ChecksumValidate(Total);
  NativeCompare(28,Active,Msg('compteur actif incorrect','incorrect active count'));
  NativeCompare(36,NativeDeleted,Msg('compteur supprime incorrect','incorrect deleted count'));
  NativeCompare(44,DynamicCount,Msg('compteur de blocs incorrect','incorrect block count'));
@@ -928,29 +999,28 @@ Begin
  DynamicValidate:=True;
 End;
 
-Function NativeRowChecksum(Offset:Longint;Var HighWord,LowWord:Word):Boolean;
+Function NativeRowChecksum(Offset:Longint;Var Checksum:TChecksum):Boolean;
 Var Remaining:Longint; Count,J:Word;
 Begin
  NativeRowChecksum:=False;
- HighWord:=0;
- LowWord:=0;
+ ChecksumStart(Checksum);
  Remaining:=NativeRecLength;
  While Remaining>0Do Begin
   Count:=SizeOf(CopyBuffer);
   If Remaining<Count Then Count:=Remaining;
   If Not ReadAt(D,Offset,CopyBuffer,Count)Then Exit;
-  For J:=0 to Count-1Do ChecksumByte(CopyBuffer[J],HighWord,LowWord);
+  For J:=0 to Count-1Do ChecksumByte(CopyBuffer[J],Checksum);
   Offset:=Offset+Count;
   Remaining:=Remaining-Count;
  End;
+ ChecksumFinish(Checksum);
  NativeRowChecksum:=True;
 End;
 
 Function NativeValidate:Boolean;
 Var N,Head,Next,Visited:Longint; Status:Byte;
     Link:Array[0..7]of Byte;
-    RowHigh,RowLow,SumHigh,SumLow:Word; Sum:Longint; J:Integer;
-    ChecksumOK:Boolean;
+    RowChecksum,Total:TChecksum;
 Begin
  If NativeDynamic Then Begin
   NativeValidate:=DynamicValidate;
@@ -958,31 +1028,19 @@ Begin
  End;
  NativeValidate:=False;
  Active:=0;
- SumHigh:=0;
- SumLow:=0;
+ FillChar(Total,SizeOf(Total),0);
+ ChecksumCandidates;
  For N:=0 to Slots-1Do Begin
   If Not StatusAt(N*SlotSize,Status)Then Exit;
   If Status<>0Then Begin
    Inc(Active);
    If(NativeOptions And 32)<>0Then Begin
-    If Not NativeRowChecksum(N*SlotSize,RowHigh,RowLow)Then Exit;
-    Sum:=Longint(SumLow)+RowLow;
-    SumLow:=Sum Mod 65536;
-    SumHigh:=(Longint(SumHigh)+RowHigh+Sum Div 65536)Mod 65536;
+    If Not NativeRowChecksum(N*SlotSize,RowChecksum)Then Exit;
+    ChecksumAdd(Total,RowChecksum);
    End;
   End;
  End;
- If(NativeOptions And 32)<>0Then Begin
-  ChecksumOK:=True;
-  For J:=100 to 103Do
-   If NativeState[J]<>0Then ChecksumOK:=False;
-  If(ReadBE(NativeState[104],2,False)<>SumHigh)Or
-    (ReadBE(NativeState[106],2,False)<>SumLow)Then ChecksumOK:=False;
-  If Not ChecksumOK Then
-   Issue(Msg(
-    'checksum incoherent : donnees ou somme endommagees; correction refusee',
-    'checksum mismatch: data or checksum damaged; repair refused'),False);
- End;
+ If(NativeOptions And 32)<>0Then ChecksumValidate(Total);
  NativeDeleted:=Slots-Active;
  NativeCompare(28,Active,Msg('compteur actif incorrect','incorrect active count'));
  NativeCompare(36,NativeDeleted,Msg('compteur supprime incorrect','incorrect deleted count'));
@@ -1479,7 +1537,7 @@ Procedure WorkTable;
 Begin
  If Not LoadHeaders Then Exit;
  If Native Then Begin
-  If Not Silent Then WriteLn(BaseName,': MyISAM (layout 3.23/4.0)');
+  If Not Silent Then WriteLn(BaseName,': MyISAM (layout 3.23/4.0/4.1)');
   If(Mode=_Describe)Or Verbose Then Begin
    WriteLn('  ',Msg('Options : ','Options: '),NativeOptions);
    WriteLn('  ',Msg('Index : ','Indexes: '),NativeKeys);
@@ -1626,16 +1684,20 @@ End;
 
 Procedure ShowHelp;
 Begin
- WriteLn('MYISAMCHK : ',Msg('Maintenance MALL et MyISAM 3.23/4.0.',
-                           'MALL and MyISAM 3.23/4.0 maintenance.'));
+ WriteLn('MYISAMCHK : ',Msg('Maintenance MALL et MyISAM 3.23/4.0/4.1.',
+                           'MALL and MyISAM 3.23/4.0/4.1 maintenance.'));
  WriteLn('Syntaxe / Usage: myisamchk [options] tbl_name ...');
  WriteLn;
- WriteLn(Msg('MALLMYD1/MALLMYI1 et layout MyISAM 3.23/4.0 (176/100 octets).',
-             'MALLMYD1/MALLMYI1 and MyISAM 3.23/4.0 layout (176/100 bytes).'));
+ WriteLn(Msg('MALLMYD1/MALLMYI1 et layout MyISAM 3.23/4.0/4.1 (176/100 octets).',
+             'MALLMYD1/MALLMYI1 and MyISAM 3.23/4.0/4.1 layout (176/100 bytes).'));
  WriteLn(Msg('Natif : statique ou dynamique sans index; BLOB et CHECKSUM acceptes.',
              'Native: static or dynamic without indexes; BLOB and CHECKSUM accepted.'));
  WriteLn(Msg('Dynamique : blocs fragmentes, champs compactes, chaines libres.',
              'Dynamic: fragmented blocks, packed fields, free block chains.'));
+ WriteLn(Msg('CHECKSUM : ancien algorithme 3.23/4.0 ou CRC32 MySQL 4.1.',
+             'CHECKSUM: legacy 3.23/4.0 algorithm or MySQL 4.1 CRC32.'));
+ WriteLn(Msg('Un meme algorithme doit valider toutes les lignes et la somme totale.',
+             'One algorithm must validate every row and the table checksum.'));
  WriteLn(Msg('Checksum incoherent : verification en echec et correction refusee.',
              'Checksum mismatch: check fails and repair is refused.'));
  WriteLn(Msg('Indexe, comprime, RAID : verification et correction refusees.',
@@ -1661,6 +1723,11 @@ Begin
              '  -s, --silent         Hide normal messages, not errors.'));
  WriteLn(Msg('  -v, --verbose        Affiche les compteurs et tailles.',
              '  -v, --verbose        Display counts and sizes.'));
+ WriteLn('  --mysql-version=auto|3.23|4.0|4.1');
+ WriteLn(Msg('                      Choix du checksum natif (auto par defaut).',
+             '                      Native checksum selection (default: auto).'));
+ WriteLn(Msg('                      Ne convertit pas les donnees ni les sommes.',
+             '                      Does not convert data or stored checksums.'));
  WriteLn('  --backup             ',Msg('Sauvegarde obligatoire, toujours active.',
                                         'Mandatory backup, always enabled.'));
  WriteLn('  /?, --help, -h, /h, /H');
@@ -1696,6 +1763,10 @@ Begin
  Else If(A='-d')Or(A='--description')Then Mode:=_Describe
  Else If(A='-s')Or(A='--silent')Then Silent:=True
  Else If(A='-v')Or(A='--verbose')Then Verbose:=True
+ Else If A='--mysql-version=auto'Then ChecksumFormat:=_AutoChecksum
+ Else If(A='--mysql-version=3.23')Or(A='--mysql-version=4.0')Then
+  ChecksumFormat:=_LegacyChecksum
+ Else If A='--mysql-version=4.1'Then ChecksumFormat:=_CRC32Checksum
  Else If A='--backup'Then
  Else Option:=False;
 End;
@@ -1707,6 +1778,7 @@ BEGIN
  Silent:=False;
  Verbose:=False;
  Mode:=_Check;
+ ChecksumFormat:=_AutoChecksum;
  EndOptions:=False;
  { Valider toutes les options avant de permettre une modification de table. }
  For ArgIndex:=1 to ParamCount Do Begin
@@ -1719,7 +1791,7 @@ BEGIN
     Halt(0);
    End
    Else If Arg='--version'Then Begin
-    WriteLn('MYISAMCHK 0.4-Pascal - MALL / MyISAM 3.23/4.0 static/dynamic/BLOB, no indexes');
+    WriteLn('MYISAMCHK 0.5-Pascal - MALL / MyISAM 3.23/4.0/4.1 static/dynamic/BLOB, no indexes');
     Halt(0);
    End
    Else If(Length(Arg)>0)Then
