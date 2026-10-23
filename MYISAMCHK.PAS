@@ -2,7 +2,7 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7, Free Pascal 3.2)
-  @description: Maintenance MALL et MyISAM 3.23/4.0/4.1 sans index.
+  @description: Maintenance MALL et MyISAM 3.23/4.0/4.1/5.0 sans index.
     Slots statiques, lignes dynamiques et BLOB; pas de compression ou RAID.
 }
 
@@ -54,6 +54,7 @@ Type
 Var
  Mode:TMode;
  ChecksumFormat:TChecksumFormat;
+ ModernVarchar:Boolean;
  LegacyMatches,CRCMatches:Boolean;
  English,Silent,Verbose,EndOptions,AnyTable,AnyError:Boolean;
  Arg,BaseName,DataName,IndexName,TempData,TempIndex,BackupData,BackupIndex:String;
@@ -70,7 +71,7 @@ Var
  NativeBase:Array[0..99]of Byte;
  NativeRef,NativeOptions,NativeKeys:Word;
  NativeKeyStart,NativeRecLength,NativeDeleted:Longint;
- NativeDynamic:Boolean;
+ NativeDynamic,NativeHasVarchar:Boolean;
  NativeFields,NativeDefinitions,NativePackBits:Longint;
  DynamicBlocks,DynamicCursor:PDynamicBlock;
  DynamicCount,DynamicFree,DynamicPosition,DynamicRemaining:Longint;
@@ -320,7 +321,7 @@ Begin
  FindForSlot:=True;
 End;
 
-{ Layout commun a MySQL 3.23.58, 4.0.30 et 4.1.22, mi_open.c.
+{ Layout commun a MySQL 3.23.58, 4.0.30, 4.1.22 et 5.0.96, mi_open.c.
   Contrairement a MALL, les entiers natifs sont big-endian. }
 Function ReadBE(Var Buffer;Count:Word;AllowEnd:Boolean):Longint;
 Type TBytes=Array[0..175]of Byte;
@@ -365,6 +366,7 @@ Begin
  NativeLoad:=False;
  Native:=True;
  NativeSupported:=False;
+ NativeHasVarchar:=False;
  If IndexSize<176Then Begin
   Error(BaseName+': '+Msg('en-tete MyISAM tronque','truncated MyISAM header'));
   Exit;
@@ -381,8 +383,8 @@ Begin
    (BasePos<>176+NativeKeys*8+Blocks*8+Parts*4)Or
    (BasePos+100>HeaderLength)Or(HeaderLength>IndexSize)Then Begin
   Error(BaseName+': '+Msg(
-   'en-tete invalide ou layout incompatible avec MyISAM 3.23/4.0/4.1',
-   'invalid header or layout incompatible with MyISAM 3.23/4.0/4.1'));
+   'en-tete invalide ou layout incompatible avec MyISAM 3.23/4.0/4.1/5.0',
+   'invalid header or layout incompatible with MyISAM 3.23/4.0/4.1/5.0'));
   Exit;
  End;
  If Not ReadAt(F,BasePos,NativeBase,100)Then Exit;
@@ -434,6 +436,7 @@ Begin
    If Not ReadAt(F,Definitions+J*7,Column,7)Then Exit;
    FieldType:=ReadBE(Column[0],2,False);
    If Not((FieldType=0)Or(FieldType=9)Or
+     ((FieldType=8)And ModernVarchar)Or
      (NativeDynamic And((FieldType=1)Or(FieldType=2)Or
       (FieldType=3)Or(FieldType=4)Or(FieldType=8))))Then Begin
     Error(BaseName+': '+Msg('type de colonne non gere',
@@ -454,10 +457,11 @@ Begin
      Exit;
     End;
    End;
-   If(FieldType=8)And(FieldLength<2)Then Begin
+   If(FieldType=8)And Not ModernVarchar And(FieldLength<2)Then Begin
     Error(BaseName+': '+Msg('description VARCHAR invalide','invalid VARCHAR description'));
     Exit;
    End;
+   If FieldType=8Then NativeHasVarchar:=True;
    TotalLength:=TotalLength+FieldLength;
   End;
   If(TotalLength<>NativeRecLength)Or
@@ -750,7 +754,7 @@ Begin
   If LegacyMatches And CRCMatches Then
    WriteLn(Msg('algorithme indetermine (deux sommes valides)',
                'undetermined algorithm (both sums valid)'))
-  Else If CRCMatches Then WriteLn('CRC32 (MySQL 4.1)')
+  Else If CRCMatches Then WriteLn('CRC32 (MySQL 4.1/5.0)')
   Else WriteLn('legacy (MySQL 3.23/4.0)');
  End;
 End;
@@ -820,7 +824,7 @@ Begin
 End;
 
 Function DynamicRow(P:PDynamicBlock;Var Checksum:TChecksum):Boolean;
-Var J,K,FieldType,FieldLength,Length,FlagIndex,BitValue:Longint;
+Var J,K,FieldType,FieldLength,Length,FlagIndex,BitValue,VarcharPrefix:Longint;
     Column:Array[0..6]of Byte; Bytes:Array[0..3]of Byte;
     PackedField:Boolean; StoredChecksum:Byte;
 Begin
@@ -834,6 +838,8 @@ Begin
   If Not ReadAt(F,NativeDefinitions+J*7,Column,7)Then Exit;
   FieldType:=ReadBE(Column[0],2,False);
   FieldLength:=ReadBE(Column[2],2,False);
+  VarcharPrefix:=2;
+  If ModernVarchar And(FieldLength<=256)Then VarcharPrefix:=1;
   PackedField:=False;
   If(FieldType>=1)And(FieldType<=4)Then Begin
    PackedField:=(DynamicFlags[FlagIndex]And BitValue)<>0;
@@ -866,15 +872,20 @@ Begin
   Else If(FieldType=8)Or(PackedField And((FieldType=1)Or(FieldType=2)))Then Begin
    If Not DynamicRead(Bytes,1)Then Exit;
    Length:=Bytes[0];
-   If(FieldType=8)And(Length=255)Then Begin
+   If(FieldType=8)And(VarcharPrefix=2)And(Length=255)Then Begin
     If Not DynamicRead(Bytes,2)Then Exit;
     Length:=ReadBE(Bytes,2,False);
+    If Length<255Then Begin
+     DynamicRow:=DynamicError('prefixe VARCHAR etendu non canonique',
+                             'noncanonical extended VARCHAR prefix');
+     Exit;
+    End;
    End
    Else If(FieldType<>8)And(FieldLength>255)And(Length>=128)Then Begin
     If Not DynamicRead(Bytes,1)Then Exit;
     Length:=(Length And 127)+Longint(Bytes[0])*128;
    End;
-   If((FieldType=8)And(Length>FieldLength-2))Or
+   If((FieldType=8)And(Length>FieldLength-VarcharPrefix))Or
      ((FieldType<>8)And(Length>=FieldLength))Then Begin
     DynamicRow:=DynamicError('longueur de champ compacte invalide',
                             'invalid packed field length');
@@ -1017,6 +1028,30 @@ Begin
  NativeRowChecksum:=True;
 End;
 
+Function NativeStaticFields(Offset:Longint):Boolean;
+Var J,FieldType,FieldLength,Prefix,Length:Longint;
+    Column:Array[0..6]of Byte; Bytes:Array[0..1]of Byte;
+Begin
+ NativeStaticFields:=False;
+ For J:=0 to NativeFields-1Do Begin
+  If Not ReadAt(F,NativeDefinitions+J*7,Column,7)Then Exit;
+  FieldType:=ReadBE(Column[0],2,False);
+  FieldLength:=ReadBE(Column[2],2,False);
+  If FieldType=8Then Begin
+   Prefix:=2;
+   If ModernVarchar And(FieldLength<=256)Then Prefix:=1;
+   If Not ReadAt(D,Offset,Bytes,Prefix)Then Exit;
+   Length:=Bytes[0];
+   If Prefix=2Then Length:=Length+Longint(Bytes[1])*256;
+   If Length>FieldLength-Prefix Then
+    Issue(Msg('longueur VARCHAR statique invalide',
+              'invalid static VARCHAR length'),False);
+  End;
+  Offset:=Offset+FieldLength;
+ End;
+ NativeStaticFields:=True;
+End;
+
 Function NativeValidate:Boolean;
 Var N,Head,Next,Visited:Longint; Status:Byte;
     Link:Array[0..7]of Byte;
@@ -1034,6 +1069,8 @@ Begin
   If Not StatusAt(N*SlotSize,Status)Then Exit;
   If Status<>0Then Begin
    Inc(Active);
+   If NativeHasVarchar Then
+    If Not NativeStaticFields(N*SlotSize)Then Exit;
    If(NativeOptions And 32)<>0Then Begin
     If Not NativeRowChecksum(N*SlotSize,RowChecksum)Then Exit;
     ChecksumAdd(Total,RowChecksum);
@@ -1537,7 +1574,7 @@ Procedure WorkTable;
 Begin
  If Not LoadHeaders Then Exit;
  If Native Then Begin
-  If Not Silent Then WriteLn(BaseName,': MyISAM (layout 3.23/4.0/4.1)');
+  If Not Silent Then WriteLn(BaseName,': MyISAM (layout 3.23/4.0/4.1/5.0)');
   If(Mode=_Describe)Or Verbose Then Begin
    WriteLn('  ',Msg('Options : ','Options: '),NativeOptions);
    WriteLn('  ',Msg('Index : ','Indexes: '),NativeKeys);
@@ -1545,6 +1582,8 @@ Begin
    WriteLn('  ',Msg('Taille de slot : ','Slot size: '),SlotSize);
    WriteLn('  ',Msg('Taille des donnees : ','Data size: '),DataSize);
    WriteLn('  CHECKSUM : ',(NativeOptions And 32)<>0);
+   If ModernVarchar Then WriteLn('  VARCHAR : MySQL 5.0')
+                    Else WriteLn('  VARCHAR : MySQL 3.23/4.0/4.1');
   End;
   If Mode=_Describe Then Exit;
   If Not NativeSupported Then Begin
@@ -1684,18 +1723,20 @@ End;
 
 Procedure ShowHelp;
 Begin
- WriteLn('MYISAMCHK : ',Msg('Maintenance MALL et MyISAM 3.23/4.0/4.1.',
-                           'MALL and MyISAM 3.23/4.0/4.1 maintenance.'));
+ WriteLn('MYISAMCHK : ',Msg('Maintenance MALL et MyISAM 3.23/4.0/4.1/5.0.',
+                           'MALL and MyISAM 3.23/4.0/4.1/5.0 maintenance.'));
  WriteLn('Syntaxe / Usage: myisamchk [options] tbl_name ...');
  WriteLn;
- WriteLn(Msg('MALLMYD1/MALLMYI1 et layout MyISAM 3.23/4.0/4.1 (176/100 octets).',
-             'MALLMYD1/MALLMYI1 and MyISAM 3.23/4.0/4.1 layout (176/100 bytes).'));
+ WriteLn(Msg('MALLMYD1/MALLMYI1 et layout MyISAM 3.23/4.0/4.1/5.0 (176/100 octets).',
+             'MALLMYD1/MALLMYI1 and MyISAM 3.23/4.0/4.1/5.0 layout (176/100 bytes).'));
  WriteLn(Msg('Natif : statique ou dynamique sans index; BLOB et CHECKSUM acceptes.',
              'Native: static or dynamic without indexes; BLOB and CHECKSUM accepted.'));
  WriteLn(Msg('Dynamique : blocs fragmentes, champs compactes, chaines libres.',
              'Dynamic: fragmented blocks, packed fields, free block chains.'));
- WriteLn(Msg('CHECKSUM : ancien algorithme 3.23/4.0 ou CRC32 MySQL 4.1.',
-             'CHECKSUM: legacy 3.23/4.0 algorithm or MySQL 4.1 CRC32.'));
+ WriteLn(Msg('CHECKSUM : ancien algorithme 3.23/4.0 ou CRC32 MySQL 4.1/5.0.',
+             'CHECKSUM: legacy 3.23/4.0 algorithm or MySQL 4.1/5.0 CRC32.'));
+ WriteLn(Msg('VARCHAR/VARBINARY 5.0 : prefixes 1/2 octets, valeurs vides et 255 octets.',
+             '5.0 VARCHAR/VARBINARY: 1/2-byte prefixes, empty and 255-byte values.'));
  WriteLn(Msg('Un meme algorithme doit valider toutes les lignes et la somme totale.',
              'One algorithm must validate every row and the table checksum.'));
  WriteLn(Msg('Checksum incoherent : verification en echec et correction refusee.',
@@ -1723,9 +1764,13 @@ Begin
              '  -s, --silent         Hide normal messages, not errors.'));
  WriteLn(Msg('  -v, --verbose        Affiche les compteurs et tailles.',
              '  -v, --verbose        Display counts and sizes.'));
- WriteLn('  --mysql-version=auto|3.23|4.0|4.1');
- WriteLn(Msg('                      Choix du checksum natif (auto par defaut).',
-             '                      Native checksum selection (default: auto).'));
+ WriteLn('  --mysql-version=auto|3.23|4.0|4.1|5.0');
+ WriteLn(Msg('                      Checksum et format VARCHAR natifs (defaut: auto).',
+             '                      Native checksum and VARCHAR format (default: auto).'));
+ WriteLn(Msg('                      Auto : checksum detecte, VARCHAR au format 5.0.',
+             '                      Auto: detected checksum, 5.0 VARCHAR format.'));
+ WriteLn(Msg('                      3.23/4.0/4.1 : ancien decodage VARCHAR interne.',
+             '                      3.23/4.0/4.1: legacy internal VARCHAR decoding.'));
  WriteLn(Msg('                      Ne convertit pas les donnees ni les sommes.',
              '                      Does not convert data or stored checksums.'));
  WriteLn('  --backup             ',Msg('Sauvegarde obligatoire, toujours active.',
@@ -1763,10 +1808,22 @@ Begin
  Else If(A='-d')Or(A='--description')Then Mode:=_Describe
  Else If(A='-s')Or(A='--silent')Then Silent:=True
  Else If(A='-v')Or(A='--verbose')Then Verbose:=True
- Else If A='--mysql-version=auto'Then ChecksumFormat:=_AutoChecksum
- Else If(A='--mysql-version=3.23')Or(A='--mysql-version=4.0')Then
-  ChecksumFormat:=_LegacyChecksum
- Else If A='--mysql-version=4.1'Then ChecksumFormat:=_CRC32Checksum
+ Else If A='--mysql-version=auto'Then Begin
+  ChecksumFormat:=_AutoChecksum;
+  ModernVarchar:=True;
+ End
+ Else If(A='--mysql-version=3.23')Or(A='--mysql-version=4.0')Then Begin
+  ChecksumFormat:=_LegacyChecksum;
+  ModernVarchar:=False;
+ End
+ Else If A='--mysql-version=4.1'Then Begin
+  ChecksumFormat:=_CRC32Checksum;
+  ModernVarchar:=False;
+ End
+ Else If A='--mysql-version=5.0'Then Begin
+  ChecksumFormat:=_CRC32Checksum;
+  ModernVarchar:=True;
+ End
  Else If A='--backup'Then
  Else Option:=False;
 End;
@@ -1779,6 +1836,7 @@ BEGIN
  Verbose:=False;
  Mode:=_Check;
  ChecksumFormat:=_AutoChecksum;
+ ModernVarchar:=True;
  EndOptions:=False;
  { Valider toutes les options avant de permettre une modification de table. }
  For ArgIndex:=1 to ParamCount Do Begin
@@ -1791,7 +1849,7 @@ BEGIN
     Halt(0);
    End
    Else If Arg='--version'Then Begin
-    WriteLn('MYISAMCHK 0.5-Pascal - MALL / MyISAM 3.23/4.0/4.1 static/dynamic/BLOB, no indexes');
+    WriteLn('MYISAMCHK 0.6-Pascal - MALL / MyISAM 3.23/4.0/4.1/5.0 static/dynamic/BLOB, no indexes');
     Halt(0);
    End
    Else If(Length(Arg)>0)Then
