@@ -322,7 +322,7 @@ Begin
  FindForSlot:=True;
 End;
 
-{ Layout MySQL 3.23/4.0/4.1/5.0/5.1/5.4/5.5 et MariaDB 5.2/5.3, mi_open.c.
+{ Layout MySQL 3.23/4.0/4.1/5.0/5.1/5.4/5.5/5.6/5.7/8.0 et MariaDB 5.2/5.3.
   Contrairement a MALL, les entiers natifs sont big-endian. }
 Function ReadBE(Var Buffer;Count:Word;AllowEnd:Boolean):Longint;
 Type TBytes=Array[0..175]of Byte;
@@ -772,7 +772,8 @@ Begin
   If LegacyMatches And CRCMatches Then
    WriteLn(Msg('algorithme indetermine (deux sommes valides)',
                'undetermined algorithm (both sums valid)'))
-  Else If CRCMatches Then WriteLn('CRC32 (MySQL 4.1/5.0/5.1/5.4/5.5, MariaDB 5.2/5.3)')
+  Else If CRCMatches Then
+   WriteLn('CRC32 (MySQL 4.1/5.0/5.1/5.4/5.5/5.6/5.7/8.0, MariaDB 5.2/5.3)')
   Else WriteLn('legacy (MySQL 3.23/4.0)');
  End;
 End;
@@ -1663,7 +1664,7 @@ Begin
  If Not LoadHeaders Then Exit;
  If Native Then Begin
   If Not Silent Then WriteLn(BaseName,
-   ': MyISAM (MySQL 3.23/4.0/4.1/5.0/5.1/5.4/5.5, MariaDB 5.2/5.3)');
+   ': MyISAM (MySQL 3.23/4.0/4.1/5.0/5.1/5.4/5.5/5.6/5.7/8.0, MariaDB 5.2/5.3)');
   If(Mode=_Describe)Or Verbose Then Begin
    WriteLn('  ',Msg('Options : ','Options: '),NativeOptions);
    WriteLn('  ',Msg('Index : ','Indexes: '),NativeKeys);
@@ -1671,7 +1672,8 @@ Begin
    WriteLn('  ',Msg('Taille de slot : ','Slot size: '),SlotSize);
    WriteLn('  ',Msg('Taille des donnees : ','Data size: '),DataSize);
    WriteLn('  CHECKSUM : ',(NativeOptions And 32)<>0);
-   If ModernVarchar Then WriteLn('  VARCHAR : MySQL 5.0/5.1/5.4/5.5, MariaDB 5.2/5.3')
+   If ModernVarchar Then
+    WriteLn('  VARCHAR : MySQL 5.0/5.1/5.4/5.5/5.6/5.7/8.0, MariaDB 5.2/5.3')
                     Else WriteLn('  VARCHAR : MySQL 3.23/4.0/4.1');
    WriteLn('  NULL_FIELDS (MariaDB) : ',NativeNullFields);
   End;
@@ -1825,11 +1827,11 @@ End;
 
 Procedure ShowHelp;
 Begin
- WriteLn('MYISAMCHK : ',Msg('Maintenance MALL et MyISAM MySQL/MariaDB.',
+ WriteLn('MYISAMCHK : ',Msg('Cette commande permet de lancer la maintenance MALL et MyISAM MySQL/MariaDB.',
                            'MALL and MySQL/MariaDB MyISAM maintenance.'));
  WriteLn('Syntaxe / Usage: myisamchk [options] tbl_name ...');
  WriteLn;
- WriteLn('MySQL 3.23/4.0/4.1/5.0/5.1/5.4/5.5; MariaDB 5.2/5.3.');
+ WriteLn('MySQL 3.23/4.0/4.1/5.0/5.1/5.4/5.5/5.6/5.7/8.0; MariaDB 5.2/5.3.');
  WriteLn(Msg('MALLMYD1/MALLMYI1 et layout MyISAM commun (176/100 octets).',
              'MALLMYD1/MALLMYI1 and shared MyISAM layout (176/100 bytes).'));
  WriteLn(Msg('Natif : statique ou dynamique sans index; BLOB et CHECKSUM acceptes.',
@@ -1842,6 +1844,10 @@ Begin
              '5.0+ / MariaDB VARCHAR/VARBINARY: 1/2-byte prefixes, empty and 255.'));
  WriteLn(Msg('MariaDB NULL_FIELDS : champs NULL exclus du checksum, meme en statique.',
              'MariaDB NULL_FIELDS: NULL fields excluded from checksums, even static.'));
+ WriteLn(Msg('MySQL 5.6+ : octets des types temporels fractionnaires conserves.',
+             'MySQL 5.6+: fractional temporal field bytes preserved.'));
+ WriteLn(Msg('MySQL 5.7/8.0 : contenu JSON et colonnes generees conserve, non evalue.',
+             'MySQL 5.7/8.0: JSON and generated column contents preserved, not evaluated.'));
  WriteLn(Msg('Un meme algorithme doit valider toutes les lignes et la somme totale.',
              'One algorithm must validate every row and the table checksum.'));
  WriteLn(Msg('Checksum incoherent : verification en echec et correction refusee.',
@@ -1871,7 +1877,7 @@ Begin
              '  -s, --silent         Hide normal messages, not errors.'));
  WriteLn(Msg('  -v, --verbose        Affiche les compteurs et tailles.',
              '  -v, --verbose        Display counts and sizes.'));
- WriteLn('  --mysql-version=auto|3.23|4.0|4.1|5.0|5.1|5.4|5.5');
+ WriteLn('  --mysql-version=auto|3.23|4.0|4.1|5.0|5.1|5.4|5.5|5.6|5.7|8.0');
  WriteLn('  --mariadb-version=5.2|5.3');
  WriteLn(Msg('                      Checksum et format VARCHAR natifs (defaut: auto).',
              '                      Native checksum and VARCHAR format (default: auto).'));
@@ -1893,8 +1899,12 @@ Begin
              'Names with or without .MYI/.MYD; *.MYI and *.MYD patterns accepted.'));
  WriteLn(Msg('Partitions : nommer chaque fichier physique .MYI explicitement.',
              'Partitions: specify each physical .MYI file explicitly.'));
- WriteLn(Msg('Les metadonnees .par/.frm ne sont ni verifiees ni modifiees.',
-             '.par/.frm metadata is neither checked nor modified.'));
+ WriteLn(Msg('Les metadonnees .par/.frm/.sdi et le dictionnaire SQL ne sont pas traites.',
+             '.par/.frm/.sdi metadata and the SQL dictionary are not processed.'));
+ WriteLn(Msg('MySQL 8.0 : fichiers .MYI/.MYD seuls; aucune reconstruction SQL/SDI.',
+             'MySQL 8.0: .MYI/.MYD files only; no SQL/SDI reconstruction.'));
+ WriteLn(Msg('MySQL 8.0 ne permet pas les partitions MyISAM.',
+             'MySQL 8.0 does not support MyISAM partitions.'));
  WriteLn(Msg('ARRETER l''application et le serveur avant toute operation.',
              'STOP the application and server before any operation.'));
  WriteLn(Msg('Reparation prudente : aucune cle inventee ni ligne active supprimee.',
@@ -1938,7 +1948,9 @@ Begin
   AllowMariaDB:=False;
  End
  Else If(A='--mysql-version=5.0')Or(A='--mysql-version=5.1')Or
-        (A='--mysql-version=5.4')Or(A='--mysql-version=5.5')Then Begin
+        (A='--mysql-version=5.4')Or(A='--mysql-version=5.5')Or
+        (A='--mysql-version=5.6')Or(A='--mysql-version=5.7')Or
+        (A='--mysql-version=8.0')Then Begin
   ChecksumFormat:=_CRC32Checksum;
   ModernVarchar:=True;
   AllowMariaDB:=False;
@@ -1974,7 +1986,8 @@ BEGIN
     Halt(0);
    End
    Else If Arg='--version'Then Begin
-    WriteLn('MYISAMCHK 0.8-Pascal - MALL / MyISAM MySQL 3.23/4.0/4.1/5.0/5.1/5.4/5.5, MariaDB 5.2/5.3');
+    WriteLn('MYISAMCHK 0.9-Pascal - MALL / MyISAM MySQL 3.23/4.0/4.1/5.0/5.1/5.4/5.5/5.6/5.7/8.0');
+    WriteLn('MariaDB 5.2/5.3');
     WriteLn('static/dynamic/BLOB, no indexes');
     Halt(0);
    End

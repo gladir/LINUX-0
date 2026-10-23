@@ -503,6 +503,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de déplacer un fichier.</td>
 		</tr>
 		<tr>
+			<td><b>MYISAMCHK.PAS</b></td>
+			<td>Cette commande permet de lancer la maintenance MALLMYD1/MALLMYI1 et support natif partiel MyISAM MySQL 3.23/4.0/4.1/5.0/5.1/5.4/5.5/5.6/5.7/8.0 et MariaDB 5.2/5.3.</td>
+		</tr>
+		<tr>
 			<td><b>NANO.PAS</b></td>
 			<td>Cette commande permet de lancer l'editeur de texte ASCII.</td>
 		</tr>
