@@ -475,6 +475,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'effectuer la verification et la generation d'un message MD5.</td>
 		</tr>
 		<tr>
+			<td><b>MKDIRHIER.PAS</b></td>
+			<td>Cette commande permet de créer un répertoire hiérarchique.</td>
+		</tr>
+		<tr>
 			<td><b>MKTEMP.PAS</b></td>
 			<td>Cette commande permet de créer un fichier ou un répertoire temporaire.</td>
 		</tr>
