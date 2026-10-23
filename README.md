@@ -495,6 +495,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet de lancer le testeur de configuration mtools.</td>
 		</tr>
 		<tr>
+			<td><b>MTVTOPPM.PAS</b></td>
+			<td>Cette commande permet de convertir une image MTV ou PRT en PPM couleur binaire P6.</td>
+		</tr>
+		<tr>
 			<td><b>MV.PAS</b></td>
 			<td>Cette commande permet de déplacer un fichier.</td>
 		</tr>
