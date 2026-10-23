@@ -2,8 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7, Free Pascal 3.2)
-  @description: Maintenance du format MALLMYD1/MALLMYI1.
-    Le format MyISAM natif de MySQL n'est pas encore pris en charge.
+  @description: Maintenance MALL et MyISAM 3.23 statique sans index.
+    Les formats natifs indexes, dynamiques et comprimes restent non geres.
 }
 
 Program MYISAMCHK;
@@ -52,6 +52,11 @@ Var
  DataSize,IndexSize,SlotSize,Slots,Entries,Active,Problems:Longint;
  CopyBuffer:Array[0..4095]of Byte;
  ArgIndex:Integer;
+ Native,NativeSupported:Boolean;
+ NativeState:Array[0..175]of Byte;
+ NativeBase:Array[0..99]of Byte;
+ NativeRef,NativeOptions,NativeKeys:Word;
+ NativeKeyStart,NativeRecLength,NativeDeleted:Longint;
 
 Function Upper(S:String):String;
 Var J:Integer;
@@ -206,6 +211,27 @@ Begin
  OpenSource:=True;
 End;
 
+Function SourceSize(Var H:File;Var Size:Longint):Boolean;
+Var
+ {$IFDEF FPC}
+ Value:Int64;
+ {$ELSE}
+ Value:Longint;
+ {$ENDIF}
+ Code:Integer;
+Begin
+ SourceSize:=False;
+ {$I-}Value:=FileSize(H);{$I+}
+ Code:=IOResult;
+ If(Code<>0)Or(Value<0)Or(Value>MaxLong)Then Begin
+  IOError(Msg('taille inaccessible ou fichier de plus de 2 Gio',
+              'size unavailable or file larger than 2 GiB'));
+  Exit;
+ End;
+ Size:=Value;
+ SourceSize:=True;
+End;
+
 Function CreateTemp(Var H:File;Const Name:String;
                     Var Opened,Made:Boolean):Boolean;
 Begin
@@ -276,34 +302,248 @@ Begin
  FindForSlot:=True;
 End;
 
+{ Layout disque documente par MySQL 3.23.58, mi_open.c et myisampack.h.
+  Contrairement a MALL, les entiers natifs sont big-endian. }
+Function ReadBE(Var Buffer;Count:Word;AllowEnd:Boolean):Longint;
+Type TBytes=Array[0..175]of Byte;
+Var P:^TBytes; J:Word; Value:Longint; AllFF:Boolean;
+Begin
+ P:=@Buffer;
+ AllFF:=True;
+ For J:=0 to Count-1Do If P^[J]<>255Then AllFF:=False;
+ If AllFF And AllowEnd Then Begin
+  ReadBE:=-1;
+  Exit;
+ End;
+ Value:=0;
+ For J:=0 to Count-1Do Begin
+  If Value>(MaxLong-P^[J])Div 256Then Begin
+   ReadBE:=-2;
+   Exit;
+  End;
+  Value:=Value*256+P^[J];
+ End;
+ ReadBE:=Value;
+End;
+
+Procedure StoreBE(Var Buffer;Count:Word;Value:Longint);
+Type TBytes=Array[0..175]of Byte;
+Var P:^TBytes; J:Integer;
+Begin
+ P:=@Buffer;
+ If Value=-1Then FillChar(Buffer,Count,255)
+ Else
+  For J:=Count-1Downto 0Do Begin
+   P^[J]:=Value Mod 256;
+   Value:=Value Div 256;
+  End;
+End;
+
+Function NativeLoad:Boolean;
+Var BasePos,HeaderLength,StateLength,BaseLength,Parts,Blocks:Longint;
+    Fields,Definitions,TotalLength,J,FieldLength:Longint;
+    Column:Array[0..6]of Byte;
+Begin
+ NativeLoad:=False;
+ Native:=True;
+ NativeSupported:=False;
+ If IndexSize<176Then Begin
+  Error(BaseName+': '+Msg('en-tete MyISAM tronque','truncated MyISAM header'));
+  Exit;
+ End;
+ If Not ReadAt(F,0,NativeState,176)Then Exit;
+ HeaderLength:=ReadBE(NativeState[6],2,False);
+ StateLength:=ReadBE(NativeState[8],2,False);
+ BaseLength:=ReadBE(NativeState[10],2,False);
+ BasePos:=ReadBE(NativeState[12],2,False);
+ Parts:=ReadBE(NativeState[14],2,False);
+ NativeKeys:=NativeState[18];
+ Blocks:=NativeState[21];
+ If(StateLength<>176)Or(BaseLength<>100)Or
+   (BasePos<>176+NativeKeys*8+Blocks*8+Parts*4)Or
+   (BasePos+100>HeaderLength)Or(HeaderLength>IndexSize)Then Begin
+  Error(BaseName+': '+Msg(
+   'en-tete invalide ou layout incompatible avec MyISAM 3.23',
+   'invalid header or layout incompatible with MyISAM 3.23'));
+  Exit;
+ End;
+ If Not ReadAt(F,BasePos,NativeBase,100)Then Exit;
+ NativeOptions:=ReadBE(NativeState[4],2,False);
+ NativeKeyStart:=ReadBE(NativeBase[0],8,False);
+ NativeRecLength:=ReadBE(NativeBase[44],4,False);
+ SlotSize:=ReadBE(NativeBase[48],4,False);
+ NativeRef:=NativeBase[72];
+ If(NativeKeyStart<HeaderLength)Or(NativeKeyStart>IndexSize)Or
+   (NativeKeyStart Mod 1024<>0)Or
+   (NativeRecLength<=0)Or(SlotSize<=0)Or
+   (NativeRef<2)Or(NativeRef>8)Or
+   (NativeBase[73]<2)Or(NativeBase[73]>8)Or
+   (NativeKeys<>NativeBase[74])Then Begin
+  Error(BaseName+': '+Msg('description MyISAM invalide ou taille non geree',
+                         'invalid MyISAM description or unsupported size'));
+  Exit;
+ End;
+ If Not OpenSource(D,DataName,DOpen)Then Exit;
+ If Not SourceSize(D,DataSize)Then Exit;
+ { Aucun format indexe ne doit recevoir un verdict d'integrite partiel. }
+ NativeSupported:=(NativeKeys=0)And(NativeState[19]=0)And
+  (Parts=0)And(ReadBE(NativeState[16],2,False)=0)And(Blocks=0)And
+  ((NativeOptions And Not(16+64+128))=0)And
+  (ReadBE(NativeBase[78],2,False)=0)And(NativeBase[87]=0);
+ If NativeSupported Then Begin
+  Fields:=ReadBE(NativeBase[64],4,False);
+  Definitions:=BasePos+100;
+  If(Fields<=0)Or(Fields>(HeaderLength-Definitions)Div 7)Or
+    (Definitions+Fields*7<>HeaderLength)Or
+    (ReadBE(NativeBase[68],4,False)<>0)Or
+    (ReadBE(NativeBase[76],2,False)<>0)Or
+    (NativeBase[75]<>0)Then Begin
+   Error(BaseName+': '+Msg('definitions de colonnes incoherentes',
+                          'inconsistent column definitions'));
+   Exit;
+  End;
+  TotalLength:=0;
+  For J:=0 to Fields-1Do Begin
+   If Not ReadAt(F,Definitions+J*7,Column,7)Then Exit;
+   If(ReadBE(Column[0],2,False)<>0)And
+     (ReadBE(Column[0],2,False)<>9)Then Begin
+    Error(BaseName+': '+Msg('type de colonne statique non gere',
+                           'unsupported static column type'));
+    Exit;
+   End;
+   FieldLength:=ReadBE(Column[2],2,False);
+   If(FieldLength=0)Or(FieldLength>NativeRecLength-TotalLength)Then Begin
+    Error(BaseName+': '+Msg('longueurs de colonnes incoherentes',
+                           'inconsistent column lengths'));
+    Exit;
+   End;
+   TotalLength:=TotalLength+FieldLength;
+  End;
+  If TotalLength<>NativeRecLength Then Begin
+   Error(BaseName+': '+Msg('longueur de ligne incoherente',
+                          'inconsistent row length'));
+   Exit;
+  End;
+  TotalLength:=NativeRecLength;
+  If TotalLength<=NativeRef Then TotalLength:=NativeRef+1;
+  If SlotSize<>TotalLength Then Begin
+   Error(BaseName+': '+Msg('taille de slot statique invalide',
+                          'invalid static slot size'));
+   Exit;
+  End;
+  If DataSize Mod SlotSize<>0Then Begin
+   Error(BaseName+': '+Msg('enregistrement statique tronque',
+                          'truncated static record'));
+   Exit;
+  End;
+  Slots:=DataSize Div SlotSize;
+  If((NativeRef=2)And(Slots>65535))Or
+    ((NativeRef=3)And(Slots>16777215))Then Begin
+   Error(BaseName+': '+Msg('capacite des pointeurs depassee',
+                          'record pointer capacity exceeded'));
+   Exit;
+  End;
+ End;
+ NativeLoad:=True;
+End;
+
+Procedure NativeCompare(Offset:Word;Expected:Longint;Const LabelText:String);
+Begin
+ If ReadBE(NativeState[Offset],8,False)<>Expected Then
+  Issue(LabelText,True);
+End;
+
+Function NativeValidate:Boolean;
+Var N,Head,Next,Visited:Longint; Status:Byte;
+    Link:Array[0..7]of Byte;
+Begin
+ NativeValidate:=False;
+ Active:=0;
+ For N:=0 to Slots-1Do Begin
+  If Not StatusAt(N*SlotSize,Status)Then Exit;
+  If Status<>0Then Inc(Active);
+ End;
+ NativeDeleted:=Slots-Active;
+ NativeCompare(28,Active,Msg('compteur actif incorrect','incorrect active count'));
+ NativeCompare(36,NativeDeleted,Msg('compteur supprime incorrect','incorrect deleted count'));
+ NativeCompare(44,Slots,Msg('compteur de blocs incorrect','incorrect block count'));
+ NativeCompare(60,IndexSize,Msg('taille d''index declaree incorrecte','incorrect stored index size'));
+ NativeCompare(68,DataSize,Msg('taille des donnees declaree incorrecte','incorrect stored data size'));
+ NativeCompare(76,NativeDeleted*SlotSize,Msg('espace libre declare incorrect','incorrect stored free space'));
+ NativeCompare(84,0,Msg('espace libre index incorrect','incorrect free index space'));
+ NativeCompare(136,0,Msg('masque des index incorrect','incorrect index map'));
+ If ReadBE(NativeState[24],2,False)<>0Then
+  Issue(Msg('compteur d''ouverture non nul','nonzero open count'),True);
+ If(NativeState[26]And 7)<>0Then
+  Issue(Msg('table modifiee ou marquee endommagee','table changed or marked crashed'),True);
+ If IndexSize<>NativeKeyStart Then
+  Issue(Msg('octets d''index inexpliques pour une table sans index',
+            'unexplained index bytes in a table without indexes'),False);
+ Head:=ReadBE(NativeState[52],8,True);
+ Visited:=0;
+ While Head<>-1Do Begin
+  If(Head<0)Or(Head>=DataSize)Then Begin
+   Issue(Msg('tete ou lien de suppression hors limites',
+             'deleted-chain head or link out of bounds'),True);
+   Break;
+  End;
+  If Head Mod SlotSize<>0Then Begin
+   Issue(Msg('lien de suppression non aligne','unaligned deleted-chain link'),True);
+   Break;
+  End;
+  If Visited>=NativeDeleted Then Begin
+   Issue(Msg('cycle ou chaine de suppression trop longue',
+             'cycle or overlong deleted chain'),True);
+   Break;
+  End;
+  If Not StatusAt(Head,Status)Then Exit;
+  If Status<>0Then Begin
+   Issue(Msg('ligne active dans la chaine de suppression',
+             'active row in deleted chain'),True);
+   Break;
+  End;
+  Inc(Visited);
+  If Not ReadAt(D,Head+1,Link,NativeRef)Then Exit;
+  Next:=ReadBE(Link,NativeRef,True);
+  If Next=-1Then Head:=-1
+  Else If(Next<0)Or(Next>=Slots)Then Begin
+   Issue(Msg('pointeur de suppression invalide','invalid deleted record pointer'),True);
+   Break;
+  End
+  Else Head:=Next*SlotSize;
+ End;
+ If Visited<>NativeDeleted Then
+  Issue(Msg('slots supprimes absents de la chaine',
+            'deleted slots missing from chain'),True);
+ NativeValidate:=True;
+End;
+
 Function LoadHeaders:Boolean;
 Begin
  LoadHeaders:=False;
  If Not OpenSource(F,IndexName,FOpen)Then Exit;
- {$I-}IndexSize:=FileSize(F);{$I+}
- If(IOResult<>0)Or(IndexSize<0)Then Begin
-  IOError(Msg('taille d''index inaccessible ou trop grande','index size unavailable or too large'));
-  Exit;
- End;
+ If Not SourceSize(F,IndexSize)Then Exit;
  If IndexSize<8Then Begin
   Error(BaseName+': '+Msg('en-tete d''index tronque','truncated index header'));
   Exit;
  End;
  If Not ReadAt(F,0,IH.Magic,8)Then Exit;
  If Not MagicIs(IH.Magic,IndexMagic)Then Begin
-  If(Ord(IH.Magic[0])=$FE)And(Ord(IH.Magic[1])=$FE)Then
+  If(Ord(IH.Magic[0])=$FE)And(Ord(IH.Magic[1])=$FE)And
+    (Ord(IH.Magic[2])=7)And(Ord(IH.Magic[3])=1)Then Begin
+   LoadHeaders:=NativeLoad;
+   Exit;
+  End
+  Else If(Ord(IH.Magic[0])=$FE)And(Ord(IH.Magic[1])=$FE)Then
    Error(BaseName+': '+Msg(
     'MyISAM natif MySQL/MariaDB : pas encore pris en charge; aucune modification',
     'native MySQL/MariaDB MyISAM: not yet supported; no changes'))
   Else Error(BaseName+': '+Msg('format d''index inconnu','unknown index format'));
   Exit;
  End;
+ Native:=False;
  If Not OpenSource(D,DataName,DOpen)Then Exit;
- {$I-}DataSize:=FileSize(D);{$I+}
- If(IOResult<>0)Or(DataSize<0)Then Begin
-  IOError(Msg('taille des donnees inaccessible ou trop grande','data size unavailable or too large'));
-  Exit;
- End;
+ If Not SourceSize(D,DataSize)Then Exit;
  If(DataSize<32)Or(IndexSize<32)Then Begin
   Error(BaseName+': '+Msg('en-tete tronque','truncated header'));
   Exit;
@@ -333,6 +573,10 @@ End;
 Function Validate:Boolean;
 Var N,K,Offset,Matches:Longint; Status,OtherStatus:Byte; E,Other:TEntry;
 Begin
+ If Native Then Begin
+  Validate:=NativeValidate;
+  Exit;
+ End;
  Validate:=False;
  Active:=0;
  For N:=0 to Slots-1Do Begin
@@ -384,25 +628,93 @@ Begin
  Validate:=True;
 End;
 
-Function CopyBytes(Offset,Length:Longint):Boolean;
+Function CopyRange(Var Source,Target:File;Offset,Length:Longint):Boolean;
 Var Count:Word;
 Begin
- CopyBytes:=False;
+ CopyRange:=False;
  While Length>0Do Begin
   Count:=SizeOf(CopyBuffer);
   If Length<Count Then Count:=Length;
-  If Not ReadAt(D,Offset,CopyBuffer,Count)Then Exit;
-  If Not WriteData(TD,CopyBuffer,Count)Then Exit;
+  If Not ReadAt(Source,Offset,CopyBuffer,Count)Then Exit;
+  If Not WriteData(Target,CopyBuffer,Count)Then Exit;
   Offset:=Offset+Count;
   Length:=Length-Count;
  End;
- CopyBytes:=True;
+ CopyRange:=True;
+End;
+
+Function CopyBytes(Offset,Length:Longint):Boolean;
+Begin
+ CopyBytes:=CopyRange(D,TD,Offset,Length);
+End;
+
+Function NativeBuild:Boolean;
+Var N,Offset,NewSize,Deleted,Head,Previous:Longint;
+    Status:Byte; Link:Array[0..7]of Byte;
+Begin
+ NativeBuild:=False;
+ If Not CreateTemp(TD,TempData,TDOpen,MadeTD)Then Exit;
+ If Not CreateTemp(TI,TempIndex,TIOpen,MadeTI)Then Exit;
+ If Not CopyRange(F,TI,0,IndexSize)Then Exit;
+ Head:=-1;
+ Previous:=-1;
+ Deleted:=0;
+ NewSize:=0;
+ For N:=0 to Slots-1Do Begin
+  Offset:=N*SlotSize;
+  If Not StatusAt(Offset,Status)Then Exit;
+  If(Mode<>_Optimize)Or(Status<>0)Then Begin
+   If Not CopyBytes(Offset,SlotSize)Then Exit;
+   NewSize:=NewSize+SlotSize;
+   If Status=0Then Begin
+    StoreBE(Link,NativeRef,Previous);
+    {$I-}Seek(TD,Offset+1);{$I+}
+    If IOResult<>0Then Begin
+     IOError(Msg('positionnement du lien impossible','cannot seek to deleted link'));
+     Exit;
+    End;
+    If Not WriteData(TD,Link,NativeRef)Then Exit;
+    {$I-}Seek(TD,NewSize);{$I+}
+    If IOResult<>0Then Begin
+     IOError(Msg('positionnement du slot impossible','cannot seek to slot'));
+     Exit;
+    End;
+    Previous:=N;
+    Head:=Offset;
+    Inc(Deleted);
+   End;
+  End;
+ End;
+ StoreBE(NativeState[24],2,0);
+ NativeState[26]:=NativeState[26]And $F8;
+ StoreBE(NativeState[28],8,Active);
+ StoreBE(NativeState[36],8,Deleted);
+ StoreBE(NativeState[44],8,NewSize Div SlotSize);
+ StoreBE(NativeState[52],8,Head);
+ StoreBE(NativeState[60],8,IndexSize);
+ StoreBE(NativeState[68],8,NewSize);
+ StoreBE(NativeState[76],8,Deleted*SlotSize);
+ StoreBE(NativeState[84],8,0);
+ StoreBE(NativeState[136],8,0);
+ {$I-}Seek(TI,0);{$I+}
+ If IOResult<>0Then Begin
+  IOError(Msg('positionnement de l''en-tete impossible','cannot seek to header'));
+  Exit;
+ End;
+ If Not WriteData(TI,NativeState,176)Then Exit;
+ CloseFile(TD,TDOpen);
+ CloseFile(TI,TIOpen);
+ NativeBuild:=Not IOFailed;
 End;
 
 Function BuildTables:Boolean;
 Var N,Offset,Matches,NewOffset:Longint; Status:Byte; E:TEntry;
     NewDH:TDataHeader; NewIH:TIndexHeader;
 Begin
+ If Native Then Begin
+  BuildTables:=NativeBuild;
+  Exit;
+ End;
  BuildTables:=False;
  If Not CreateTemp(TD,TempData,TDOpen,MadeTD)Then Exit;
  If Not CreateTemp(TI,TempIndex,TIOpen,MadeTI)Then Exit;
@@ -513,6 +825,24 @@ End;
 Procedure WorkTable;
 Begin
  If Not LoadHeaders Then Exit;
+ If Native Then Begin
+  If Not Silent Then WriteLn(BaseName,': MyISAM (layout 3.23)');
+  If(Mode=_Describe)Or Verbose Then Begin
+   WriteLn('  ',Msg('Options : ','Options: '),NativeOptions);
+   WriteLn('  ',Msg('Index : ','Indexes: '),NativeKeys);
+   WriteLn('  ',Msg('Longueur de ligne : ','Row length: '),NativeRecLength);
+   WriteLn('  ',Msg('Taille de slot : ','Slot size: '),SlotSize);
+   WriteLn('  ',Msg('Taille des donnees : ','Data size: '),DataSize);
+  End;
+  If Mode=_Describe Then Exit;
+  If Not NativeSupported Then Begin
+   Error(BaseName+': '+Msg(
+    'MyISAM : seuls les slots statiques sans index, BLOB, checksum ou RAID sont geres',
+    'MyISAM: only static slots without indexes, BLOB, checksum or RAID are supported'));
+   Exit;
+  End;
+ End
+ Else Begin
  If Not Silent Then
   WriteLn(BaseName,': MALLMYD1/MALLMYI1 (',
    Msg('pas MyISAM natif','not native MyISAM'),')');
@@ -524,12 +854,16 @@ Begin
           DH.RecCount,' / ',DH.ActiveCount,' / ',IH.EntryCount);
  End;
  If Mode=_Describe Then Exit;
+ End;
  If Not Validate Then Exit;
  If(Mode=_Check)Then Begin
   If Problems>0Then Error(BaseName+': '+Number(Problems)+' '+
    Msg('anomalie(s); aucune modification','issue(s); no changes'))
-  Else If Not Silent Then WriteLn(BaseName,': OK (structure MALL; ',Active,' ',
-   Msg('ligne(s) active(s))','active row(s))'));
+  Else If Not Silent Then Begin
+   If Native Then Write(BaseName,': OK (MyISAM static; ')
+             Else Write(BaseName,': OK (structure MALL; ');
+   WriteLn(Active,' ',Msg('ligne(s) active(s))','active row(s))'));
+  End;
   Exit;
  End;
  If Not CanRepair Then Begin
@@ -562,6 +896,7 @@ Var L:Integer;
 Begin
  AnyTable:=True;
  IOFailed:=False;
+ Native:=False;
  CanRepair:=True;
  Problems:=0;
  DOpen:=False;
@@ -631,14 +966,18 @@ End;
 
 Procedure ShowHelp;
 Begin
- WriteLn('MYISAMCHK : ',Msg('Cette commande permet de lancer la maintenance de tables MALL.',
-                           'MALL table maintenance.'));
+ WriteLn('MYISAMCHK : ',Msg('Maintenance MALL et MyISAM 3.23 statique.',
+                           'MALL and static MyISAM 3.23 maintenance.'));
  WriteLn('Syntaxe / Usage: myisamchk [options] tbl_name ...');
  WriteLn;
- WriteLn(Msg('ETAPE 1 : MALLMYD1/MALLMYI1 uniquement, PAS MyISAM natif MySQL 8.4.',
-             'STAGE 1: MALLMYD1/MALLMYI1 only, NOT native MySQL 8.4 MyISAM.'));
- WriteLn(Msg('Les fichiers MySQL/MariaDB sont refuses sans modification.',
-             'MySQL/MariaDB files are rejected without changes.'));
+ WriteLn(Msg('MALLMYD1/MALLMYI1 et layout natif MyISAM 3.23 (176/100 octets).',
+             'MALLMYD1/MALLMYI1 and native MyISAM 3.23 layout (176/100 bytes).'));
+ WriteLn(Msg('Natif : statique sans index, BLOB, checksum ou RAID seulement.',
+             'Native: static, without indexes, BLOB, checksum or RAID only.'));
+ WriteLn(Msg('Indexe, dynamique, comprime : description seule; correction refusee.',
+             'Indexed, dynamic, compressed: description only; repair refused.'));
+ WriteLn(Msg('La signature ne permet pas d''identifier la version exacte du serveur.',
+             'The signature cannot identify the exact server version.'));
  WriteLn;
  WriteLn(Msg('  -c, --check          Verification complete du format MALL (defaut).',
              '  -c, --check          Full MALL structure check (default).'));
@@ -646,6 +985,8 @@ Begin
              '  -e, --extend-check   Same check, without shortcuts.'));
  WriteLn(Msg('  -r, --recover        Corrige compteurs et statuts, reconstruit l''index.',
              '  -r, --recover        Fix counts/statuses and rebuild the index.'));
+ WriteLn(Msg('                      Natif : compteurs et chaine des suppressions.',
+             '                      Native: counts and deleted-record chain.'));
  WriteLn(Msg('  --optimize           Retire aussi les slots supprimes.',
              '  --optimize           Also remove deleted data slots.'));
  WriteLn(Msg('  -d, --description    En-tetes seulement, sans verdict d''integrite.',
@@ -668,6 +1009,8 @@ Begin
              'Conservative repair: no invented keys or discarded active rows.'));
  WriteLn(Msg('Le statut du slot .MYD fait foi; le contenu des champs reste opaque.',
              'The .MYD slot status is authoritative; field contents remain opaque.'));
+ WriteLn(Msg('MyISAM : 0 = supprime, non nul = actif (inverse du format MALL).',
+             'MyISAM: 0 = deleted, nonzero = active (unlike the MALL format).'));
  WriteLn(Msg('Cle absente/ambigue, doublon ou structure invalide : refus de reparer.',
              'Missing/ambiguous keys, duplicates or invalid structure: repair refused.'));
  WriteLn(Msg('Originaux : .DMB/.IMB; temporaires : .TMD/.TMI. Aucun ecrasement.',
@@ -710,7 +1053,7 @@ BEGIN
     Halt(0);
    End
    Else If Arg='--version'Then Begin
-    WriteLn('MYISAMCHK 0.1-Pascal - MALL only; native MyISAM unsupported');
+    WriteLn('MYISAMCHK 0.2-Pascal - MALL / MyISAM 3.23 static, no indexes');
     Halt(0);
    End
    Else If(Length(Arg)>0)Then
