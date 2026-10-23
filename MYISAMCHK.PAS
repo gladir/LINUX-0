@@ -2,8 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7, Free Pascal 3.2)
-  @description: Maintenance MALL et MyISAM 3.23 statique sans index.
-    Les formats natifs indexes, dynamiques et comprimes restent non geres.
+  @description: Maintenance MALL et MyISAM 3.23/4.0 sans index.
+    Slots statiques, lignes dynamiques et BLOB; pas de compression ou RAID.
 }
 
 Program MYISAMCHK;
@@ -39,6 +39,13 @@ Type
   DataOfs:Longint;
  End;
  TMode=(_Check,_Recover,_Optimize,_Describe);
+ PDynamicBlock=^TDynamicBlock;
+ TDynamicBlock=Record
+  Offset,Span,Payload,DataLength,RowLength,NextOffset,PrevOffset:Longint;
+  Kind:Byte;
+  Used:Boolean;
+  Following:PDynamicBlock;
+ End;
 
 Var
  Mode:TMode;
@@ -57,6 +64,11 @@ Var
  NativeBase:Array[0..99]of Byte;
  NativeRef,NativeOptions,NativeKeys:Word;
  NativeKeyStart,NativeRecLength,NativeDeleted:Longint;
+ NativeDynamic:Boolean;
+ NativeFields,NativeDefinitions,NativePackBits:Longint;
+ DynamicBlocks,DynamicCursor:PDynamicBlock;
+ DynamicCount,DynamicFree,DynamicPosition,DynamicRemaining:Longint;
+ DynamicFlags:Array[0..1169]of Byte;
 
 Function Upper(S:String):String;
 Var J:Integer;
@@ -302,7 +314,7 @@ Begin
  FindForSlot:=True;
 End;
 
-{ Layout disque documente par MySQL 3.23.58, mi_open.c et myisampack.h.
+{ Layout commun a MySQL 3.23.58 et 4.0.30, mi_open.c et myisampack.h.
   Contrairement a MALL, les entiers natifs sont big-endian. }
 Function ReadBE(Var Buffer;Count:Word;AllowEnd:Boolean):Longint;
 Type TBytes=Array[0..175]of Byte;
@@ -341,7 +353,7 @@ End;
 
 Function NativeLoad:Boolean;
 Var BasePos,HeaderLength,StateLength,BaseLength,Parts,Blocks:Longint;
-    Fields,Definitions,TotalLength,J,FieldLength:Longint;
+    Fields,Definitions,TotalLength,J,FieldLength,FieldType,PackedFields,Blobs:Longint;
     Column:Array[0..6]of Byte;
 Begin
  NativeLoad:=False;
@@ -363,12 +375,13 @@ Begin
    (BasePos<>176+NativeKeys*8+Blocks*8+Parts*4)Or
    (BasePos+100>HeaderLength)Or(HeaderLength>IndexSize)Then Begin
   Error(BaseName+': '+Msg(
-   'en-tete invalide ou layout incompatible avec MyISAM 3.23',
-   'invalid header or layout incompatible with MyISAM 3.23'));
+   'en-tete invalide ou layout incompatible avec MyISAM 3.23/4.0',
+   'invalid header or layout incompatible with MyISAM 3.23/4.0'));
   Exit;
  End;
  If Not ReadAt(F,BasePos,NativeBase,100)Then Exit;
  NativeOptions:=ReadBE(NativeState[4],2,False);
+ NativeDynamic:=(NativeOptions And 1)<>0;
  NativeKeyStart:=ReadBE(NativeBase[0],8,False);
  NativeRecLength:=ReadBE(NativeBase[44],4,False);
  SlotSize:=ReadBE(NativeBase[48],4,False);
@@ -385,30 +398,40 @@ Begin
  End;
  If Not OpenSource(D,DataName,DOpen)Then Exit;
  If Not SourceSize(D,DataSize)Then Exit;
- { Aucun format indexe ne doit recevoir un verdict d'integrite partiel. }
  NativeSupported:=(NativeKeys=0)And(NativeState[19]=0)And
   (Parts=0)And(ReadBE(NativeState[16],2,False)=0)And(Blocks=0)And
-  ((NativeOptions And Not(16+64+128))=0)And
-  (ReadBE(NativeBase[78],2,False)=0)And(NativeBase[87]=0);
+  (NativeState[22]=0)And(NativeState[23]=0)And
+  ((NativeOptions And Not(1+2+8+16+32+64+128))=0)And
+  (NativeBase[87]=0);
+ If Not NativeDynamic Then
+  NativeSupported:=NativeSupported And
+   (ReadBE(NativeBase[78],2,False)=0)And((NativeOptions And 8)=0);
  If NativeSupported Then Begin
   Fields:=ReadBE(NativeBase[64],4,False);
   Definitions:=BasePos+100;
+  NativeFields:=Fields;
+  NativeDefinitions:=Definitions;
+  NativePackBits:=ReadBE(NativeBase[76],2,False);
   If(Fields<=0)Or(Fields>(HeaderLength-Definitions)Div 7)Or
     (Definitions+Fields*7<>HeaderLength)Or
-    (ReadBE(NativeBase[68],4,False)<>0)Or
-    (ReadBE(NativeBase[76],2,False)<>0)Or
+    (ReadBE(NativeBase[68],4,False)<>NativePackBits)Or
+    (NativePackBits>SizeOf(DynamicFlags))Or
     (NativeBase[75]<>0)Then Begin
    Error(BaseName+': '+Msg('definitions de colonnes incoherentes',
                           'inconsistent column definitions'));
    Exit;
   End;
   TotalLength:=0;
+  PackedFields:=0;
+  Blobs:=0;
   For J:=0 to Fields-1Do Begin
    If Not ReadAt(F,Definitions+J*7,Column,7)Then Exit;
-   If(ReadBE(Column[0],2,False)<>0)And
-     (ReadBE(Column[0],2,False)<>9)Then Begin
-    Error(BaseName+': '+Msg('type de colonne statique non gere',
-                           'unsupported static column type'));
+   FieldType:=ReadBE(Column[0],2,False);
+   If Not((FieldType=0)Or(FieldType=9)Or
+     (NativeDynamic And((FieldType=1)Or(FieldType=2)Or
+      (FieldType=3)Or(FieldType=4)Or(FieldType=8))))Then Begin
+    Error(BaseName+': '+Msg('type de colonne non gere',
+                           'unsupported column type'));
     Exit;
    End;
    FieldLength:=ReadBE(Column[2],2,False);
@@ -417,15 +440,48 @@ Begin
                            'inconsistent column lengths'));
     Exit;
    End;
+   If(FieldType>=1)And(FieldType<=4)Then Inc(PackedFields);
+   If FieldType=4Then Begin
+    Inc(Blobs);
+    If(FieldLength<9)Or(FieldLength>12)Then Begin
+     Error(BaseName+': '+Msg('description BLOB invalide','invalid BLOB description'));
+     Exit;
+    End;
+   End;
+   If(FieldType=8)And(FieldLength<2)Then Begin
+    Error(BaseName+': '+Msg('description VARCHAR invalide','invalid VARCHAR description'));
+    Exit;
+   End;
    TotalLength:=TotalLength+FieldLength;
   End;
-  If TotalLength<>NativeRecLength Then Begin
+  If(TotalLength<>NativeRecLength)Or
+    ((PackedFields+7)Div 8<>NativePackBits)Or
+    (Blobs<>ReadBE(NativeBase[78],2,False))Then Begin
    Error(BaseName+': '+Msg('longueur de ligne incoherente',
                           'inconsistent row length'));
    Exit;
   End;
+  If NativeDynamic Then Begin
+   If(ReadBE(NativeBase[60],4,False)<20)Or
+     (ReadBE(NativeBase[60],4,False)>16777212)Or
+     (ReadBE(NativeBase[60],4,False)Mod 4<>0)Or
+     (DataSize Mod 4<>0)Then Begin
+    Error(BaseName+': '+Msg('alignement dynamique invalide',
+                           'invalid dynamic alignment'));
+    Exit;
+   End;
+   NativeLoad:=True;
+   Exit;
+  End;
   TotalLength:=NativeRecLength;
   If TotalLength<=NativeRef Then TotalLength:=NativeRef+1;
+  If(NativeOptions And 32)<>0Then Begin
+   If TotalLength=MaxLong Then Begin
+    Error(BaseName+': '+Msg('taille de slot trop grande','slot size too large'));
+    Exit;
+   End;
+   Inc(TotalLength);
+  End;
   If SlotSize<>TotalLength Then Begin
    Error(BaseName+': '+Msg('taille de slot statique invalide',
                           'invalid static slot size'));
@@ -453,15 +509,479 @@ Begin
   Issue(LabelText,True);
 End;
 
+Procedure FreeDynamicBlocks;
+Var P:PDynamicBlock;
+Begin
+ While DynamicBlocks<>Nil Do Begin
+  P:=DynamicBlocks;
+  DynamicBlocks:=P^.Following;
+  Dispose(P);
+ End;
+End;
+
+Function DynamicError(Const FR,EN:String):Boolean;
+Begin
+ Error(BaseName+': '+Msg(FR,EN));
+ CanRepair:=False;
+ DynamicError:=False;
+End;
+
+Function DynamicFind(Offset:Longint):PDynamicBlock;
+Var P:PDynamicBlock;
+Begin
+ P:=DynamicBlocks;
+ While P<>Nil Do Begin
+  If P^.Offset=Offset Then Begin
+   DynamicFind:=P;
+   Exit;
+  End;
+  P:=P^.Following;
+ End;
+ DynamicFind:=Nil;
+End;
+
+Function DynamicScan:Boolean;
+Var P,Tail:PDynamicBlock; Offset,HeaderSize:Longint;
+    H:Array[0..19]of Byte;
+    {$IFDEF FPC}SavedReturnNil:Boolean;{$ENDIF}
+Begin
+ DynamicScan:=False;
+ FreeDynamicBlocks;
+ DynamicCount:=0;
+ DynamicFree:=0;
+ NativeDeleted:=0;
+ Tail:=Nil;
+ Offset:=0;
+ While Offset<DataSize Do Begin
+  If DataSize-Offset<20Then Begin
+   DynamicScan:=DynamicError('bloc dynamique tronque','truncated dynamic block');
+   Exit;
+  End;
+  If Not ReadAt(D,Offset,H,20)Then Exit;
+  {$IFDEF FPC}
+  SavedReturnNil:=ReturnNilIfGrowHeapFails;
+  ReturnNilIfGrowHeapFails:=True;
+  GetMem(P,SizeOf(TDynamicBlock));
+  ReturnNilIfGrowHeapFails:=SavedReturnNil;
+  If P=Nil Then Begin
+  {$ELSE}
+  If MaxAvail<SizeOf(TDynamicBlock)Then Begin
+  {$ENDIF}
+   DynamicScan:=DynamicError('memoire insuffisante pour les blocs',
+                            'insufficient memory for block map');
+   Exit;
+  End;
+  {$IFNDEF FPC}
+  New(P);
+  {$ENDIF}
+  FillChar(P^,SizeOf(TDynamicBlock),0);
+  If Tail=Nil Then DynamicBlocks:=P Else Tail^.Following:=P;
+  Tail:=P;
+  P^.Offset:=Offset;
+  P^.Kind:=H[0];
+  P^.NextOffset:=-1;
+  P^.PrevOffset:=-1;
+  HeaderSize:=0;
+  Case H[0]Of
+   0:Begin
+    P^.Span:=ReadBE(H[1],3,False);
+    P^.NextOffset:=ReadBE(H[4],8,True);
+    P^.PrevOffset:=ReadBE(H[12],8,True);
+   End;
+   1,7:Begin
+    HeaderSize:=3;
+    P^.DataLength:=ReadBE(H[1],2,False);
+   End;
+   2,8:Begin
+    HeaderSize:=4;
+    P^.DataLength:=ReadBE(H[1],3,False);
+   End;
+   3,9:Begin
+    HeaderSize:=4;
+    P^.DataLength:=ReadBE(H[1],2,False);
+    P^.Span:=H[3];
+   End;
+   4,10:Begin
+    HeaderSize:=5;
+    P^.DataLength:=ReadBE(H[1],3,False);
+    P^.Span:=H[4];
+   End;
+   5:Begin
+    HeaderSize:=13;
+    P^.RowLength:=ReadBE(H[1],2,False);
+    P^.DataLength:=ReadBE(H[3],2,False);
+    P^.NextOffset:=ReadBE(H[5],8,False);
+   End;
+   6:Begin
+    HeaderSize:=15;
+    P^.RowLength:=ReadBE(H[1],3,False);
+    P^.DataLength:=ReadBE(H[4],3,False);
+    P^.NextOffset:=ReadBE(H[7],8,False);
+   End;
+   11:Begin
+    HeaderSize:=11;
+    P^.DataLength:=ReadBE(H[1],2,False);
+    P^.NextOffset:=ReadBE(H[3],8,False);
+   End;
+   12:Begin
+    HeaderSize:=12;
+    P^.DataLength:=ReadBE(H[1],3,False);
+    P^.NextOffset:=ReadBE(H[4],8,False);
+   End;
+   13:Begin
+    HeaderSize:=16;
+    P^.RowLength:=ReadBE(H[1],4,False);
+    P^.DataLength:=ReadBE(H[5],3,False);
+    P^.NextOffset:=ReadBE(H[8],8,False);
+   End;
+  Else
+   DynamicScan:=DynamicError('type de bloc dynamique invalide',
+                            'invalid dynamic block type');
+   Exit;
+  End;
+  If H[0]<>0Then Begin
+   P^.Span:=P^.Span+HeaderSize+P^.DataLength;
+   P^.Payload:=Offset+HeaderSize;
+   If(H[0]>=1)And(H[0]<=4)Then P^.RowLength:=P^.DataLength;
+   If(P^.DataLength<=0)Or
+     (((H[0]<=6)Or(H[0]=13))And(P^.RowLength<=0))Then Begin
+    DynamicScan:=DynamicError('longueur de bloc ou de ligne invalide',
+                             'invalid block or row length');
+    Exit;
+   End;
+  End;
+  If(P^.Span<ReadBE(NativeBase[60],4,False))Or
+    (P^.Span>16777212)Or(P^.Span Mod 4<>0)Or
+    (P^.Span>DataSize-Offset)Then Begin
+   DynamicScan:=DynamicError('longueur ou alignement de bloc invalide',
+                            'invalid block length or alignment');
+   Exit;
+  End;
+  Inc(DynamicCount);
+  If H[0]=0Then Begin
+   Inc(NativeDeleted);
+   DynamicFree:=DynamicFree+P^.Span;
+  End;
+  Offset:=Offset+P^.Span;
+ End;
+ DynamicScan:=True;
+End;
+
+Procedure ChecksumByte(Value:Byte;Var HighWord,LowWord:Word);
+Var LowValue,HighValue:Longint;
+Begin
+ { Rotation/addition modulo 2^32, sans entier non signe 32 bits. }
+ HighValue:=Longint(HighWord Mod 256)*256+LowWord Div 256;
+ LowValue:=Longint(LowWord Mod 256)*256+Value+HighWord Div 256;
+ HighWord:=(HighValue+LowValue Div 65536)Mod 65536;
+ LowWord:=LowValue Mod 65536;
+End;
+
+Procedure DynamicStart(P:PDynamicBlock);
+Begin
+ DynamicCursor:=P;
+ DynamicPosition:=0;
+ DynamicRemaining:=P^.RowLength;
+End;
+
+Function DynamicRead(Var Buffer;Count:Word):Boolean;
+Type TBuffer=Array[0..4095]of Byte;
+Var B:^TBuffer; Done,Part:Word;
+Begin
+ DynamicRead:=False;
+ If Count>DynamicRemaining Then Begin
+  DynamicRead:=DynamicError('ligne dynamique tronquee','truncated dynamic row');
+  Exit;
+ End;
+ B:=@Buffer;
+ Done:=0;
+ While Done<Count Do Begin
+  If DynamicPosition=DynamicCursor^.DataLength Then Begin
+   DynamicCursor:=DynamicFind(DynamicCursor^.NextOffset);
+   DynamicPosition:=0;
+  End;
+  If DynamicCursor=Nil Then Begin
+   DynamicRead:=DynamicError('chaine dynamique interrompue','broken dynamic chain');
+   Exit;
+  End;
+  Part:=Count-Done;
+  If DynamicCursor^.DataLength-DynamicPosition<Part Then
+   Part:=DynamicCursor^.DataLength-DynamicPosition;
+  If Not ReadAt(D,DynamicCursor^.Payload+DynamicPosition,B^[Done],Part)Then Exit;
+  Inc(Done,Part);
+  DynamicPosition:=DynamicPosition+Part;
+  DynamicRemaining:=DynamicRemaining-Part;
+ End;
+ DynamicRead:=True;
+End;
+
+Function DynamicConsume(Count:Longint;Var HighWord,LowWord:Word):Boolean;
+Var Part,J:Word;
+Begin
+ DynamicConsume:=False;
+ If(Count<0)Or(Count>DynamicRemaining)Then Begin
+  DynamicConsume:=DynamicError('longueur de colonne invalide','invalid column length');
+  Exit;
+ End;
+ While Count>0Do Begin
+  Part:=SizeOf(CopyBuffer);
+  If Count<Part Then Part:=Count;
+  If Not DynamicRead(CopyBuffer,Part)Then Exit;
+  For J:=0 to Part-1Do ChecksumByte(CopyBuffer[J],HighWord,LowWord);
+  Count:=Count-Part;
+ End;
+ DynamicConsume:=True;
+End;
+
+Procedure DynamicFill(Count:Longint;Value:Byte;Var HighWord,LowWord:Word);
+Begin
+ While Count>0Do Begin
+  ChecksumByte(Value,HighWord,LowWord);
+  Dec(Count);
+ End;
+End;
+
+Function DynamicRow(P:PDynamicBlock;Var HighWord,LowWord:Word):Boolean;
+Var J,K,FieldType,FieldLength,Length,FlagIndex,BitValue:Longint;
+    Column:Array[0..6]of Byte; Bytes:Array[0..3]of Byte;
+    PackedField:Boolean; StoredChecksum:Byte;
+Begin
+ DynamicRow:=False;
+ DynamicStart(P);
+ HighWord:=0;
+ LowWord:=0;
+ If Not DynamicRead(DynamicFlags,NativePackBits)Then Exit;
+ FlagIndex:=0;
+ BitValue:=1;
+ For J:=0 to NativeFields-1Do Begin
+  If Not ReadAt(F,NativeDefinitions+J*7,Column,7)Then Exit;
+  FieldType:=ReadBE(Column[0],2,False);
+  FieldLength:=ReadBE(Column[2],2,False);
+  PackedField:=False;
+  If(FieldType>=1)And(FieldType<=4)Then Begin
+   PackedField:=(DynamicFlags[FlagIndex]And BitValue)<>0;
+   BitValue:=BitValue*2;
+   If BitValue=256Then Begin
+    BitValue:=1;
+    Inc(FlagIndex);
+   End;
+  End;
+  Length:=FieldLength;
+  If(FieldType=4)Then Begin
+   Length:=0;
+   If Not PackedField Then Begin
+    K:=FieldLength-8;
+    If Not DynamicRead(Bytes,K)Then Exit;
+    While K>0Do Begin
+     Dec(K);
+     If Length>(MaxLong-Bytes[K])Div 256Then Begin
+      DynamicRow:=DynamicError('BLOB trop grand','BLOB too large');
+      Exit;
+     End;
+     Length:=Length*256+Bytes[K];
+    End;
+    If Length=0Then Begin
+     DynamicRow:=DynamicError('BLOB vide non canonique','noncanonical empty BLOB');
+     Exit;
+    End;
+   End;
+  End
+  Else If(FieldType=8)Or(PackedField And((FieldType=1)Or(FieldType=2)))Then Begin
+   If Not DynamicRead(Bytes,1)Then Exit;
+   Length:=Bytes[0];
+   If(FieldType=8)And(Length=255)Then Begin
+    If Not DynamicRead(Bytes,2)Then Exit;
+    Length:=ReadBE(Bytes,2,False);
+   End
+   Else If(FieldType<>8)And(FieldLength>255)And(Length>=128)Then Begin
+    If Not DynamicRead(Bytes,1)Then Exit;
+    Length:=(Length And 127)+Longint(Bytes[0])*128;
+   End;
+   If((FieldType=8)And(Length>FieldLength-2))Or
+     ((FieldType<>8)And(Length>=FieldLength))Then Begin
+    DynamicRow:=DynamicError('longueur de champ compacte invalide',
+                            'invalid packed field length');
+    Exit;
+   End;
+  End
+  Else If PackedField Then Length:=0;
+  If PackedField And(FieldType=2)Then
+   DynamicFill(FieldLength-Length,32,HighWord,LowWord);
+  If Not DynamicConsume(Length,HighWord,LowWord)Then Exit;
+  If PackedField And(FieldType=1)Then
+   DynamicFill(FieldLength-Length,32,HighWord,LowWord);
+  If PackedField And(FieldType=3)Then
+   DynamicFill(FieldLength,0,HighWord,LowWord);
+ End;
+ If BitValue<>1Then
+  If DynamicFlags[FlagIndex]And(256-BitValue)<>0Then Begin
+   DynamicRow:=DynamicError('bits de compactage reserves non nuls',
+                           'nonzero reserved packing bits');
+   Exit;
+  End;
+ If(NativeOptions And 32)<>0Then Begin
+  If Not DynamicRead(StoredChecksum,1)Then Exit;
+  If StoredChecksum<>LowWord Mod 256Then
+   Issue(Msg('checksum de ligne dynamique incoherent',
+             'dynamic row checksum mismatch'),False);
+ End;
+ If DynamicRemaining<>0Then Begin
+  DynamicRow:=DynamicError('octets inexpliques dans la ligne dynamique',
+                          'unexplained bytes in dynamic row');
+  Exit;
+ End;
+ DynamicRow:=True;
+End;
+
+Function DynamicValidate:Boolean;
+Var P,Q:PDynamicBlock; Remaining,Head,Previous,Visited,Sum:Longint;
+    RowHigh,RowLow,SumHigh,SumLow:Word; J:Integer; ChecksumOK:Boolean;
+Begin
+ DynamicValidate:=False;
+ If Not DynamicScan Then Exit;
+ Active:=0;
+ SumHigh:=0;
+ SumLow:=0;
+ P:=DynamicBlocks;
+ While P<>Nil Do Begin
+  If(P^.Kind<>0)And((P^.Kind<=6)Or(P^.Kind=13))Then Begin
+   Inc(Active);
+   Q:=P;
+   Remaining:=P^.RowLength;
+   While Q<>Nil Do Begin
+    If Q^.Used Or(Q^.Kind=0)Or((Q<>P)And
+      ((Q^.Kind<=6)Or(Q^.Kind=13)))Or
+      (Q^.DataLength>Remaining)Then Begin
+     DynamicValidate:=DynamicError('cycle, bloc partage ou longueur de chaine invalide',
+                                  'cycle, shared block or invalid chain length');
+     Exit;
+    End;
+    Q^.Used:=True;
+    Remaining:=Remaining-Q^.DataLength;
+    If Q^.NextOffset=-1Then Break;
+    If Remaining=0Then Break;
+    Q:=DynamicFind(Q^.NextOffset);
+   End;
+   If(Q=Nil)Or(Remaining<>0)Then Begin
+    DynamicValidate:=DynamicError('chaine dynamique incomplete','incomplete dynamic chain');
+    Exit;
+   End;
+   If Q^.NextOffset<>-1Then Begin
+    DynamicValidate:=DynamicError('chaine dynamique trop longue','overlong dynamic chain');
+    Exit;
+   End;
+   If Not DynamicRow(P,RowHigh,RowLow)Then Exit;
+   Sum:=Longint(SumLow)+RowLow;
+   SumLow:=Sum Mod 65536;
+   SumHigh:=(Longint(SumHigh)+RowHigh+Sum Div 65536)Mod 65536;
+  End;
+  P:=P^.Following;
+ End;
+ P:=DynamicBlocks;
+ While P<>Nil Do Begin
+  If(P^.Kind<>0)And Not P^.Used Then Begin
+   DynamicValidate:=DynamicError('bloc dynamique orphelin','orphan dynamic block');
+   Exit;
+  End;
+  P:=P^.Following;
+ End;
+ If(NativeOptions And 32)<>0Then Begin
+  ChecksumOK:=True;
+  For J:=100 to 103Do If NativeState[J]<>0Then ChecksumOK:=False;
+  If(ReadBE(NativeState[104],2,False)<>SumHigh)Or
+    (ReadBE(NativeState[106],2,False)<>SumLow)Then ChecksumOK:=False;
+  If Not ChecksumOK Then Issue(Msg('checksum de table incoherent',
+                                  'table checksum mismatch'),False);
+ End;
+ NativeCompare(28,Active,Msg('compteur actif incorrect','incorrect active count'));
+ NativeCompare(36,NativeDeleted,Msg('compteur supprime incorrect','incorrect deleted count'));
+ NativeCompare(44,DynamicCount,Msg('compteur de blocs incorrect','incorrect block count'));
+ NativeCompare(60,IndexSize,Msg('taille d''index declaree incorrecte','incorrect stored index size'));
+ NativeCompare(68,DataSize,Msg('taille des donnees declaree incorrecte','incorrect stored data size'));
+ NativeCompare(76,DynamicFree,Msg('espace libre declare incorrect','incorrect stored free space'));
+ NativeCompare(84,0,Msg('espace libre index incorrect','incorrect free index space'));
+ NativeCompare(136,0,Msg('masque des index incorrect','incorrect index map'));
+ If ReadBE(NativeState[24],2,False)<>0Then
+  Issue(Msg('compteur d''ouverture non nul','nonzero open count'),True);
+ If(NativeState[26]And 6)<>0Then
+  Issue(Msg('table marquee endommagee','table marked crashed'),True);
+ If IndexSize<>NativeKeyStart Then
+  Issue(Msg('octets d''index inexpliques pour une table sans index',
+            'unexplained index bytes in a table without indexes'),False);
+ Head:=ReadBE(NativeState[52],8,True);
+ Previous:=-1;
+ Visited:=0;
+ While Head<>-1Do Begin
+  Q:=DynamicFind(Head);
+  If Q=Nil Then Break;
+  If(Q^.Kind<>0)Or Q^.Used Then Break;
+  Q^.Used:=True;
+  If Q^.PrevOffset<>Previous Then
+   Issue(Msg('lien arriere de suppression invalide','invalid backward deleted link'),True);
+  Previous:=Head;
+  Head:=Q^.NextOffset;
+  Inc(Visited);
+ End;
+ If(Head<>-1)Or(Visited<>NativeDeleted)Then
+  Issue(Msg('chaine des blocs supprimes invalide ou incomplete',
+            'invalid or incomplete deleted block chain'),True);
+ DynamicValidate:=True;
+End;
+
+Function NativeRowChecksum(Offset:Longint;Var HighWord,LowWord:Word):Boolean;
+Var Remaining:Longint; Count,J:Word;
+Begin
+ NativeRowChecksum:=False;
+ HighWord:=0;
+ LowWord:=0;
+ Remaining:=NativeRecLength;
+ While Remaining>0Do Begin
+  Count:=SizeOf(CopyBuffer);
+  If Remaining<Count Then Count:=Remaining;
+  If Not ReadAt(D,Offset,CopyBuffer,Count)Then Exit;
+  For J:=0 to Count-1Do ChecksumByte(CopyBuffer[J],HighWord,LowWord);
+  Offset:=Offset+Count;
+  Remaining:=Remaining-Count;
+ End;
+ NativeRowChecksum:=True;
+End;
+
 Function NativeValidate:Boolean;
 Var N,Head,Next,Visited:Longint; Status:Byte;
     Link:Array[0..7]of Byte;
+    RowHigh,RowLow,SumHigh,SumLow:Word; Sum:Longint; J:Integer;
+    ChecksumOK:Boolean;
 Begin
+ If NativeDynamic Then Begin
+  NativeValidate:=DynamicValidate;
+  Exit;
+ End;
  NativeValidate:=False;
  Active:=0;
+ SumHigh:=0;
+ SumLow:=0;
  For N:=0 to Slots-1Do Begin
   If Not StatusAt(N*SlotSize,Status)Then Exit;
-  If Status<>0Then Inc(Active);
+  If Status<>0Then Begin
+   Inc(Active);
+   If(NativeOptions And 32)<>0Then Begin
+    If Not NativeRowChecksum(N*SlotSize,RowHigh,RowLow)Then Exit;
+    Sum:=Longint(SumLow)+RowLow;
+    SumLow:=Sum Mod 65536;
+    SumHigh:=(Longint(SumHigh)+RowHigh+Sum Div 65536)Mod 65536;
+   End;
+  End;
+ End;
+ If(NativeOptions And 32)<>0Then Begin
+  ChecksumOK:=True;
+  For J:=100 to 103Do
+   If NativeState[J]<>0Then ChecksumOK:=False;
+  If(ReadBE(NativeState[104],2,False)<>SumHigh)Or
+    (ReadBE(NativeState[106],2,False)<>SumLow)Then ChecksumOK:=False;
+  If Not ChecksumOK Then
+   Issue(Msg(
+    'checksum incoherent : donnees ou somme endommagees; correction refusee',
+    'checksum mismatch: data or checksum damaged; repair refused'),False);
  End;
  NativeDeleted:=Slots-Active;
  NativeCompare(28,Active,Msg('compteur actif incorrect','incorrect active count'));
@@ -474,8 +994,8 @@ Begin
  NativeCompare(136,0,Msg('masque des index incorrect','incorrect index map'));
  If ReadBE(NativeState[24],2,False)<>0Then
   Issue(Msg('compteur d''ouverture non nul','nonzero open count'),True);
- If(NativeState[26]And 7)<>0Then
-  Issue(Msg('table modifiee ou marquee endommagee','table changed or marked crashed'),True);
+ If(NativeState[26]And 6)<>0Then
+  Issue(Msg('table marquee endommagee','table marked crashed'),True);
  If IndexSize<>NativeKeyStart Then
   Issue(Msg('octets d''index inexpliques pour une table sans index',
             'unexplained index bytes in a table without indexes'),False);
@@ -648,10 +1168,143 @@ Begin
  CopyBytes:=CopyRange(D,TD,Offset,Length);
 End;
 
+Function DynamicBuild:Boolean;
+Var P,Q:PDynamicBlock; Head,Previous,NewSize,Count,Remaining,PartLength:Longint;
+    Span,HeaderSize,Padding:Longint; H:Array[0..19]of Byte;
+    Part:Word; First:Boolean;
+Begin
+ DynamicBuild:=False;
+ If Not CreateTemp(TD,TempData,TDOpen,MadeTD)Then Exit;
+ If Not CreateTemp(TI,TempIndex,TIOpen,MadeTI)Then Exit;
+ If Not CopyRange(F,TI,0,IndexSize)Then Exit;
+ Head:=-1;
+ Previous:=-1;
+ NewSize:=DataSize;
+ Count:=DynamicCount;
+ If Mode<>_Optimize Then Begin
+  If Not CopyBytes(0,DataSize)Then Exit;
+  P:=DynamicBlocks;
+  While P<>Nil Do Begin
+   If P^.Kind=0Then Begin
+    If Head=-1Then Head:=P^.Offset;
+    Q:=P^.Following;
+    While Q<>Nil Do Begin
+     If Q^.Kind=0Then Break;
+     Q:=Q^.Following;
+    End;
+    If Q=Nil Then StoreBE(H[0],8,-1)
+             Else StoreBE(H[0],8,Q^.Offset);
+    StoreBE(H[8],8,Previous);
+    {$I-}Seek(TD,P^.Offset+4);{$I+}
+    If IOResult<>0Then Begin
+     IOError(Msg('positionnement du lien impossible','cannot seek to deleted link'));
+     Exit;
+    End;
+    If Not WriteData(TD,H,16)Then Exit;
+    Previous:=P^.Offset;
+   End;
+   P:=P^.Following;
+  End;
+ End
+ Else Begin
+  NewSize:=0;
+  Count:=0;
+  P:=DynamicBlocks;
+  While P<>Nil Do Begin
+   If(P^.Kind<>0)And((P^.Kind<=6)Or(P^.Kind=13))Then Begin
+    DynamicStart(P);
+    Remaining:=P^.RowLength;
+    First:=True;
+    While Remaining>0Do Begin
+     FillChar(H,SizeOf(H),0);
+     If Remaining<=16777207Then Begin
+      HeaderSize:=5;
+      PartLength:=Remaining;
+      Span:=HeaderSize+PartLength;
+      If Span<20Then Span:=20;
+      If Span Mod 4<>0Then Span:=Span+4-Span Mod 4;
+      If First Then H[0]:=4 Else H[0]:=10;
+      StoreBE(H[1],3,PartLength);
+      H[4]:=Span-HeaderSize-PartLength;
+     End
+     Else Begin
+      PartLength:=16777196;
+      If First Then HeaderSize:=16 Else HeaderSize:=12;
+      Span:=HeaderSize+PartLength;
+      If NewSize>MaxLong-Span Then Begin
+       DynamicBuild:=DynamicError('donnees compactees trop grandes',
+                                 'compacted data too large');
+       Exit;
+      End;
+      If First Then Begin
+       H[0]:=13;
+       StoreBE(H[1],4,P^.RowLength);
+       StoreBE(H[5],3,PartLength);
+       StoreBE(H[8],8,NewSize+Span);
+      End
+      Else Begin
+       H[0]:=12;
+       StoreBE(H[1],3,PartLength);
+       StoreBE(H[4],8,NewSize+Span);
+      End;
+     End;
+     If NewSize>MaxLong-Span Then Begin
+      DynamicBuild:=DynamicError('donnees compactees trop grandes',
+                                'compacted data too large');
+      Exit;
+     End;
+     If Not WriteData(TD,H,HeaderSize)Then Exit;
+     Padding:=Span-HeaderSize-PartLength;
+     Remaining:=Remaining-PartLength;
+     While PartLength>0Do Begin
+      Part:=SizeOf(CopyBuffer);
+      If PartLength<Part Then Part:=PartLength;
+      If Not DynamicRead(CopyBuffer,Part)Then Exit;
+      If Not WriteData(TD,CopyBuffer,Part)Then Exit;
+      PartLength:=PartLength-Part;
+     End;
+     FillChar(H,SizeOf(H),0);
+     If Not WriteData(TD,H,Padding)Then Exit;
+     NewSize:=NewSize+Span;
+     Inc(Count);
+     First:=False;
+    End;
+   End;
+   P:=P^.Following;
+  End;
+  NativeDeleted:=0;
+  DynamicFree:=0;
+ End;
+ StoreBE(NativeState[24],2,0);
+ NativeState[26]:=NativeState[26]And $F8;
+ StoreBE(NativeState[28],8,Active);
+ StoreBE(NativeState[36],8,NativeDeleted);
+ StoreBE(NativeState[44],8,Count);
+ StoreBE(NativeState[52],8,Head);
+ StoreBE(NativeState[60],8,IndexSize);
+ StoreBE(NativeState[68],8,NewSize);
+ StoreBE(NativeState[76],8,DynamicFree);
+ StoreBE(NativeState[84],8,0);
+ StoreBE(NativeState[136],8,0);
+ {$I-}Seek(TI,0);{$I+}
+ If IOResult<>0Then Begin
+  IOError(Msg('positionnement de l''en-tete impossible','cannot seek to header'));
+  Exit;
+ End;
+ If Not WriteData(TI,NativeState,176)Then Exit;
+ CloseFile(TD,TDOpen);
+ CloseFile(TI,TIOpen);
+ DynamicBuild:=Not IOFailed;
+End;
+
 Function NativeBuild:Boolean;
 Var N,Offset,NewSize,Deleted,Head,Previous:Longint;
     Status:Byte; Link:Array[0..7]of Byte;
 Begin
+ If NativeDynamic Then Begin
+  NativeBuild:=DynamicBuild;
+  Exit;
+ End;
  NativeBuild:=False;
  If Not CreateTemp(TD,TempData,TDOpen,MadeTD)Then Exit;
  If Not CreateTemp(TI,TempIndex,TIOpen,MadeTI)Then Exit;
@@ -826,19 +1479,20 @@ Procedure WorkTable;
 Begin
  If Not LoadHeaders Then Exit;
  If Native Then Begin
-  If Not Silent Then WriteLn(BaseName,': MyISAM (layout 3.23)');
+  If Not Silent Then WriteLn(BaseName,': MyISAM (layout 3.23/4.0)');
   If(Mode=_Describe)Or Verbose Then Begin
    WriteLn('  ',Msg('Options : ','Options: '),NativeOptions);
    WriteLn('  ',Msg('Index : ','Indexes: '),NativeKeys);
    WriteLn('  ',Msg('Longueur de ligne : ','Row length: '),NativeRecLength);
    WriteLn('  ',Msg('Taille de slot : ','Slot size: '),SlotSize);
    WriteLn('  ',Msg('Taille des donnees : ','Data size: '),DataSize);
+   WriteLn('  CHECKSUM : ',(NativeOptions And 32)<>0);
   End;
   If Mode=_Describe Then Exit;
   If Not NativeSupported Then Begin
    Error(BaseName+': '+Msg(
-    'MyISAM : seuls les slots statiques sans index, BLOB, checksum ou RAID sont geres',
-    'MyISAM: only static slots without indexes, BLOB, checksum or RAID are supported'));
+    'MyISAM : index, compression et RAID non geres; aucune modification',
+    'MyISAM: indexes, compression and RAID unsupported; no changes'));
    Exit;
   End;
  End
@@ -860,16 +1514,20 @@ Begin
   If Problems>0Then Error(BaseName+': '+Number(Problems)+' '+
    Msg('anomalie(s); aucune modification','issue(s); no changes'))
   Else If Not Silent Then Begin
-   If Native Then Write(BaseName,': OK (MyISAM static; ')
+   If Native And NativeDynamic Then Write(BaseName,': OK (MyISAM dynamic/BLOB; ')
+   Else If Native Then Write(BaseName,': OK (MyISAM static; ')
              Else Write(BaseName,': OK (structure MALL; ');
    WriteLn(Active,' ',Msg('ligne(s) active(s))','active row(s))'));
   End;
   Exit;
  End;
  If Not CanRepair Then Begin
-  Error(BaseName+': '+Msg(
-   'reparation refusee : cle ou structure irrecuperable sans schema; aucune modification',
-   'repair refused: key or structure cannot be recovered without schema; no changes'));
+  If Native Then Error(BaseName+': '+Msg(
+   'correction refusee : integrite des donnees non etablie; aucune modification',
+   'repair refused: data integrity not established; no changes'))
+  Else Error(BaseName+': '+Msg(
+    'reparation refusee : cle ou structure irrecuperable sans schema; aucune modification',
+    'repair refused: key or structure cannot be recovered without schema; no changes'));
   Exit;
  End;
  If Exists(BackupData)Or Exists(BackupIndex)Or
@@ -897,6 +1555,7 @@ Begin
  AnyTable:=True;
  IOFailed:=False;
  Native:=False;
+ NativeDynamic:=False;
  CanRepair:=True;
  Problems:=0;
  DOpen:=False;
@@ -928,6 +1587,7 @@ Begin
  CloseFile(TI,TIOpen);
  RemoveTemp(TempData,MadeTD);
  RemoveTemp(TempIndex,MadeTI);
+ FreeDynamicBlocks;
 End;
 
 Procedure ProcessArgument(Const Name:String);
@@ -966,21 +1626,25 @@ End;
 
 Procedure ShowHelp;
 Begin
- WriteLn('MYISAMCHK : ',Msg('Maintenance MALL et MyISAM 3.23 statique.',
-                           'MALL and static MyISAM 3.23 maintenance.'));
+ WriteLn('MYISAMCHK : ',Msg('Maintenance MALL et MyISAM 3.23/4.0.',
+                           'MALL and MyISAM 3.23/4.0 maintenance.'));
  WriteLn('Syntaxe / Usage: myisamchk [options] tbl_name ...');
  WriteLn;
- WriteLn(Msg('MALLMYD1/MALLMYI1 et layout natif MyISAM 3.23 (176/100 octets).',
-             'MALLMYD1/MALLMYI1 and native MyISAM 3.23 layout (176/100 bytes).'));
- WriteLn(Msg('Natif : statique sans index, BLOB, checksum ou RAID seulement.',
-             'Native: static, without indexes, BLOB, checksum or RAID only.'));
- WriteLn(Msg('Indexe, dynamique, comprime : description seule; correction refusee.',
-             'Indexed, dynamic, compressed: description only; repair refused.'));
+ WriteLn(Msg('MALLMYD1/MALLMYI1 et layout MyISAM 3.23/4.0 (176/100 octets).',
+             'MALLMYD1/MALLMYI1 and MyISAM 3.23/4.0 layout (176/100 bytes).'));
+ WriteLn(Msg('Natif : statique ou dynamique sans index; BLOB et CHECKSUM acceptes.',
+             'Native: static or dynamic without indexes; BLOB and CHECKSUM accepted.'));
+ WriteLn(Msg('Dynamique : blocs fragmentes, champs compactes, chaines libres.',
+             'Dynamic: fragmented blocks, packed fields, free block chains.'));
+ WriteLn(Msg('Checksum incoherent : verification en echec et correction refusee.',
+             'Checksum mismatch: check fails and repair is refused.'));
+ WriteLn(Msg('Indexe, comprime, RAID : verification et correction refusees.',
+             'Indexed, compressed, RAID: checking and repair refused.'));
  WriteLn(Msg('La signature ne permet pas d''identifier la version exacte du serveur.',
              'The signature cannot identify the exact server version.'));
  WriteLn;
- WriteLn(Msg('  -c, --check          Verification complete du format MALL (defaut).',
-             '  -c, --check          Full MALL structure check (default).'));
+ WriteLn(Msg('  -c, --check          Verification MALL ou native geree (defaut).',
+             '  -c, --check          MALL or supported native check (default).'));
  WriteLn(Msg('  -e, --extend-check   Meme verification, sans raccourci.',
              '  -e, --extend-check   Same check, without shortcuts.'));
  WriteLn(Msg('  -r, --recover        Corrige compteurs et statuts, reconstruit l''index.',
@@ -989,6 +1653,8 @@ Begin
              '                      Native: counts and deleted-record chain.'));
  WriteLn(Msg('  --optimize           Retire aussi les slots supprimes.',
              '  --optimize           Also remove deleted data slots.'));
+ WriteLn(Msg('                      Dynamique : regroupe aussi les fragments.',
+             '                      Dynamic: also coalesce row fragments.'));
  WriteLn(Msg('  -d, --description    En-tetes seulement, sans verdict d''integrite.',
              '  -d, --description    Headers only; not an integrity verdict.'));
  WriteLn(Msg('  -s, --silent         Masque les messages ordinaires, pas les erreurs.',
@@ -1053,7 +1719,7 @@ BEGIN
     Halt(0);
    End
    Else If Arg='--version'Then Begin
-    WriteLn('MYISAMCHK 0.2-Pascal - MALL / MyISAM 3.23 static, no indexes');
+    WriteLn('MYISAMCHK 0.4-Pascal - MALL / MyISAM 3.23/4.0 static/dynamic/BLOB, no indexes');
     Halt(0);
    End
    Else If(Length(Arg)>0)Then
