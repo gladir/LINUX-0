@@ -519,6 +519,10 @@ Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
 			<td>Cette commande permet d'afficher du texte avec des numéros de ligne. </td>
 		</tr>
 		<tr>
+			<td><b>NROFF.PAS</b></td>
+			<td>Cette commande permet d'effectuer le formatage de documents pour l'affichage ou l'impression.</td>
+		</tr>
+		<tr>
 			<td><b>OD.PAS</b></td>
 			<td>Cette commande permet d'afficher le contenu d'un fichier selon un format spécifique.</td>
 		</tr>
