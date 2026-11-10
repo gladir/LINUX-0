@@ -1,0 +1,4 @@
+# \ETC\PROFILE - LINUX-0
+# Les commandes sont dans \BIN (disquette A:) et B:\BIN (disquette B:).
+PATH=\BIN;B:\BIN
+export PATH
