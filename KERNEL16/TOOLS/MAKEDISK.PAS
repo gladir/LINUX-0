@@ -2616,11 +2616,6 @@ Begin
   If Not BuildFat(K,ImageName(K),K,Nf,Free)Then Halt(3);
   Say(M_iMade,ImageName(K),NumStr(Nf),NumStr(Free),'');
  End;
- If DoInst Then Begin
-  Assign(Img,InfTmp);
-  Erase(Img);
-  If IOResult<>0 Then;
- End;
  For K:=DiskCnt to MaxDisk-1 do
   If FileFound(ImageName(K))Then Begin
    Assign(Img,ImageName(K));
@@ -2640,6 +2635,12 @@ Begin
   Else If DirPart(IsoName)='' Then IsoName:=OutDir+IsoName;
   If Not BuildIso(IsoName,ImageName(0),FloppyKB,Nf,Kb)Then Halt(3);
   Say(M_iIso,IsoName,NumStr(Nf),NumStr(Kb),'');
+ End;
+ { fichier temporaire de INSTALL.INF : efface en dernier (l'ISO le relit) }
+ If DoInst Then Begin
+  Assign(Img,InfTmp);
+  Erase(Img);
+  If IOResult<>0 Then;
  End;
 End;
 

@@ -18,9 +18,9 @@ Le noyau 32 bits (KERNEL32) viendra plus tard.
 | `MAKER.PAS` | Extrait le code du noyau et écrit `IO.SYS` (programme DOS) |
 | `SH.PAS` | Interpréteur de commandes style Linux, devient `\BIN\SH.EXE` |
 | `SYSTEM\` | Fichiers de la racine : `IO.SYS`, `MSDOS.SYS`, `BIN\SH.EXE`, `ETC\SYSCTL.D\CUSTOM.CFG` (configuration du noyau) |
-| `TOOLS\` | Outils de fabrication des disques : `MAKEDISK.PAS`, `LSIMG.PAS`, `IMAGE.INF`, `ETC\PROFILE` |
+| `TOOLS\` | Outils : `MAKEDISK.PAS` (images), `LSIMG.PAS` (contrôle d'images), **`INSTALL.PAS`** (installation sur disque dur), `IMAGE.INF`, `ETC\PROFILE` |
 | `IMAGE\` | Images prêtes à démarrer (voir `IMAGE\LISEZMOI.TXT`) |
-| `TESTS\` | `TKENV.PAS` : programme de test du noyau (environnement, chemins `/`) ; `DEVENVTEST.PY` : banc d'essai des images dans l'émulateur de `DEVENV` |
+| `TESTS\` | `TKENV.PAS` et `TKDATE.PAS` : programmes de test du noyau (environnement, chemins `/`, date) ; `DEVENVTEST.PY` : banc d'essai des images dans l'émulateur de `DEVENV` |
 | `BUILD.SH`, `MAKEIMG.BAT` | Construction complète sous Linux ou sous DOS/Windows |
 
 ## Essayer
@@ -36,6 +36,47 @@ Les tuyaux `|` créent des fichiers temporaires dans `\TMP` : il faut donc un
 support en écriture (disquette ou disque dur, pas un vrai CD-ROM gravé).
 L'ISO démarre en émulation de disquette 2,88 Mo qui contient les 181 fichiers :
 le noyau n'a pas de pilote CD-ROM, cette disquette est donc le lecteur `A:`.
+
+## Installer sur un disque dur
+
+Démarrer sur `LINUX144A.IMG` (ou sur le CD-ROM) avec un disque dur, puis taper
+`install`. `TOOLS/INSTALL.PAS` (`\BIN\INSTALL.EXE`) fonctionne comme l'installeur
+de MSDOS-0 : écrans bleus plein texte, **partitionne** le disque (MBR et
+partition active, de 4 à 1000 Mo), le **formate** (FAT12 ou FAT16) et **installe**
+le système selon la configuration choisie :
+
+1. bienvenue ; 2. date, heure, pays et langue (`env.LANGUAGE`) ;
+3. nom de machine, utilisateur et `HOME` ;
+4. disque (80h ou 81h), taille de la partition, formatage, avec avertissement et
+   confirmation ; si la partition est déjà une FAT valide, les données peuvent
+   être conservées (IO.SYS est replacé en tête du volume) ;
+5. type d'installation : *Minimale*, *Standard*, *Complète* ou *Personnalisée*
+   (cases à cocher avec la taille de chaque composant) ;
+6. réglages du noyau (`fs.files`, `kernel.buffers`, `kernel.lastdrive`) ;
+7. copie des fichiers (disquette 2 demandée au besoin, en A: ou en B:), puis
+   écriture de `\ETC\SYSCTL.D\CUSTOM.CFG` et `\ETC\PROFILE`, secteur de boot et
+   MBR, redémarrage.
+
+| Composant | Contenu |
+|---|---|
+| 0 Système | `IO.SYS`, `MSDOS.SYS`, `\BIN\SH.EXE`, `\ETC` (toujours installé) |
+| 1 Commandes de base | `cat`, `cp`, `mv`, `rm`, `ls`, `echo`, `date`, `df`... |
+| 2 Traitement de texte | `grep`, `sed`, `awk`, `sort`, `diff`, `cut`... |
+| 3 Éditeurs | `vi`, `ed`, `nano`, `pico`, `emacs`, `less` |
+| 4 Archives et compression | `gzip`, `bzip2`, `ar`, `compress`... |
+| 5 Programmation et scripts | `make`, `perl`, `python`, `bash`, `bc`, `lex`... |
+| 6 Système, utilisateurs, réseau | `useradd`, `groups`, `ifconfig`, `crontab`... |
+| 7 Divers | le reste de `\BIN` (groff, outils netpbm...) |
+
+La liste des fichiers par disquette et par composant est `\INSTALL.INF`, écrit par
+`MAKEDISK` (lignes `INSTALL` et `COMP n liste` d'`IMAGE.INF`). Les textes de
+l'installeur existent en français, anglais, allemand, espagnol et italien
+(`LANGUAGE`, ou choix à l'écran 2). Testé sous QEMU et sous DEVENV : installation
+complète, minimale et personnalisée, partition de 4 Mo (FAT12), de 20 Mo sur
+64 Mo, disque 81h, réinstallation par-dessus un disque installé, et démarrage du
+disque installé. Limites : CHS classique (1024 premiers cylindres, partition
+d'au plus 1000 Mo) ; « conserver » n'accepte que la première partition ;
+`kernel.country` est écrit mais ignoré par le noyau.
 
 ## Construire
 
@@ -101,6 +142,8 @@ aucun fichier d'inclusion ; lignes de 80 caractères au plus ; sources en ASCII.
 - `SH.PAS` ne gère pas `$(...)`, `case`, les fonctions, les documents ici (`<<`),
   ni la complétion par Tab ; 16 arguments et 126 caractères par commande externe.
 - Sur un CD-ROM gravé, `\TMP` est en lecture seule : pas de tuyaux.
+- **Correctifs** : `INT 21h AH=2Bh` (fixer la date) convertit l'année en BCD pour le
+  BIOS ; sans `kernel.shell`, le shell n'est plus lancé avec un argument parasite.
 - Les noms 8.3 de `BIN16` plus longs sont tronqués sur l'image
   (`ADDFTINFO` devient `ADDFTINF`).
 - Testé sous QEMU (disquettes, disque dur, CD-ROM) et DOSBox, pas sur matériel réel.
