@@ -49,7 +49,7 @@ if has kernel; then
  ls -l "$HERE/SYSTEM/IO.SYS"
 fi
 
-# --- 3. shell : SH.PAS -> SYSTEM/BIN/SH.EXE -----------------------------------
+# --- 3. shell et installeur : SH.PAS, TOOLS/INSTALL.PAS -> SYSTEM/BIN -----------------------------------
 if has shell; then
  echo "== Shell (SH.EXE)"
  rm -rf "$W/shell"; mkdir -p "$W/shell"
@@ -58,6 +58,11 @@ if has shell; then
  mkdir -p "$HERE/SYSTEM/BIN"
  cp "$W/shell/SH.EXE" "$HERE/SYSTEM/BIN/SH.EXE"
  ls -l "$HERE/SYSTEM/BIN/SH.EXE"
+ echo "== Programme d'installation (INSTALL.EXE)"
+ cp "$HERE/TOOLS/INSTALL.PAS" "$W/shell/"
+ ( cd "$W/shell" && "$TPC" -Q INSTALL.PAS )
+ cp "$W/shell/INSTALL.EXE" "$HERE/SYSTEM/BIN/INSTALL.EXE"
+ ls -l "$HERE/SYSTEM/BIN/INSTALL.EXE"
 fi
 
 # --- 4. outils : MAKEDISK et LSIMG (natifs) -----------------------------------
