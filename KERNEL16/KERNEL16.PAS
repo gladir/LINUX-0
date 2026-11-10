@@ -9788,14 +9788,14 @@ Var
  Env,Sh: String;
 Begin
  BuildEnvironment:=0;
- Seg:=DOS48h_AllocateMemory(32);
+ Seg:=DOS48h_AllocateMemory(144);
  If Seg=0 Then Exit;
  SetBlockOwner(Seg,Owner);
  Par:=GetCurrentPSP;
  Src:=MemW[Par:$2C];
  If (Par>=$60) And (Src>=$60) And (MemW[Src-1:1]=Par) Then Begin
   O:=0;
-  While (O<400) And ((Mem[Src:O]<>0) Or (Mem[Src:O+1]<>0)) Do Inc(O);
+  While (O<2040) And ((Mem[Src:O]<>0) Or (Mem[Src:O+1]<>0)) Do Inc(O);
   Inc(O);
   Move(Mem[Src:0],Mem[Seg:0],O);
  End
@@ -10357,7 +10357,9 @@ Begin
   Exit;
  End;
  BufParts(Buf,S,O);
- For I:=0 To Count-1 Do ConPutChar(Mem[S:O+I]);
+ { attention : Count=0 (ecriture de 0 octet) ne doit rien afficher }
+ If Count>0 Then
+  For I:=0 To Count-1 Do ConPutChar(Mem[S:O+I]);
  Got:=Count;
  WriteInt21:=0;
 End;

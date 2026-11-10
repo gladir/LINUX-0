@@ -1,10 +1,10 @@
 FILES=30
 BUFFERS=20
 LASTDRIVE=F
-SET PATH=A:\BIN;B:\BIN
-SET HOME=A:\
+SET PATH=\BIN;B:\BIN
+SET HOME=\
 SET USER=root
 SET HOSTNAME=linux0
-REM Langue : EN anglais, GR allemand, SP espagnol, IT italien
-REM (francais par defaut). Exemple : SET LANGUAGE=EN
+REM Langue (francais par defaut) : EN anglais, GR allemand,
+REM SP espagnol, IT italien. Exemple : SET LANGUAGE=EN
 SHELL=\BIN\SH.EXE
