@@ -26,6 +26,10 @@ FREE 16
 ; Fichiers supplementaires : ADD source destination dans l'image.
 ADD ETC\PROFILE \ETC\PROFILE
 
+; Le shell de KERNEL16 remplace le SH.EXE de BIN16 (le dossier SYSTEM\BIN
+; est ignore par la regle precedente : on l'ajoute explicitement).
+ADD ..\SYSTEM\BIN\SH.EXE \BIN\SH.EXE
+
 ; Dossiers vides.
 DIR \TMP
 DIR \HOME

@@ -1,6 +1,10 @@
 # LINUX-0
 Clone des commandes Linux écrit en Pascal (Turbo Pascal ou Free Pascal)
 
+<h2>KERNEL16</h2>
+
+Le dossier [KERNEL16](KERNEL16/README.md) contient un noyau bootable 16 bits écrit en Turbo Pascal 7 (dérivé du noyau de MSDOS-0) qui exécute les commandes de ce projet (fichiers `.EXE` du dossier `BIN16`) sur FAT12 ou FAT16, avec un interpréteur de commandes de style Linux (`SH.PAS`). Il comprend les outils de fabrication des disques (`KERNEL16/TOOLS`) et les images disquettes et CD-ROM prêtes à démarrer (`KERNEL16/IMAGE`).
+
 <h2>Liste des fichiers de commande</h2>
 
 Voici la liste des différents fichiers de commandes proposés dans LINUX-0 :
