@@ -74,8 +74,15 @@ if has images; then
  OPT=""
  [ -n "$HD" ] && OPT="$OPT /HD:$HD"
  [ -n "$FLOPPY" ] && OPT="$OPT /FLOPPY:$FLOPPY"
- ( cd "$HERE/TOOLS" && "$W/tools/MAKEDISK" /INF:IMAGE.INF /ISO $OPT \
+ ( cd "$HERE/TOOLS" && "$W/tools/MAKEDISK" /INF:IMAGE.INF $OPT \
      /DATE:${DATE:-$(date +%F)} )
+ # CD-ROM : demarre en emulation de disquette 2,88 Mo, qui contient tous les
+ # fichiers (le noyau n'a pas de pilote CD-ROM : seule cette disquette est
+ # visible comme A: une fois demarre).
+ rm -rf "$W/iso"; mkdir -p "$W/iso"
+ ( cd "$HERE/TOOLS" && "$W/tools/MAKEDISK" /INF:IMAGE.INF /FLOPPY:2880 /ISO \
+     /OUT:"$W/iso" /DATE:${DATE:-$(date +%F)} )
+ cp "$W/iso/LINUX.ISO" "$HERE/IMAGE/LINUX.ISO"
  # (chemins relatifs : sous Linux "/x" serait pris pour une option)
  ( cd "$HERE/IMAGE" && for I in *.IMG; do
     echo "Controle de $I"; "$W/tools/LSIMG" "$I" /C /Q || true

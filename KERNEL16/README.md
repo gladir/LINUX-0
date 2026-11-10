@@ -20,7 +20,7 @@ Le noyau 32 bits (KERNEL32) viendra plus tard.
 | `SYSTEM\` | Fichiers de la racine : `IO.SYS`, `MSDOS.SYS`, `BIN\SH.EXE`, `ETC\SYSCTL.D\CUSTOM.CFG` (configuration du noyau) |
 | `TOOLS\` | Outils de fabrication des disques : `MAKEDISK.PAS`, `LSIMG.PAS`, `IMAGE.INF`, `ETC\PROFILE` |
 | `IMAGE\` | Images prêtes à démarrer (voir `IMAGE\LISEZMOI.TXT`) |
-| `TESTS\` | `TKENV.PAS` : programme de test du noyau (environnement, chemins `/`) |
+| `TESTS\` | `TKENV.PAS` : programme de test du noyau (environnement, chemins `/`) ; `DEVENVTEST.PY` : banc d'essai des images dans l'émulateur de `DEVENV` |
 | `BUILD.SH`, `MAKEIMG.BAT` | Construction complète sous Linux ou sous DOS/Windows |
 
 ## Essayer
@@ -33,7 +33,9 @@ qemu-system-i386 -cdrom IMAGE/LINUX.ISO -boot d
 Le shell affiche `root@linux0:/#`. La disquette A: contient le système, le shell
 et les commandes de base ; B: contient le reste (`PATH=\BIN;B:\BIN`).
 Les tuyaux `|` créent des fichiers temporaires dans `\TMP` : il faut donc un
-support en écriture (disquette ou disque dur, pas le CD-ROM).
+support en écriture (disquette ou disque dur, pas un vrai CD-ROM gravé).
+L'ISO démarre en émulation de disquette 2,88 Mo qui contient les 181 fichiers :
+le noyau n'a pas de pilote CD-ROM, cette disquette est donc le lecteur `A:`.
 
 ## Construire
 
@@ -98,7 +100,28 @@ aucun fichier d'inclusion ; lignes de 80 caractères au plus ; sources en ASCII.
 - Le noyau est un seul segment de 64 Ko : il reste environ 9 Ko de marge.
 - `SH.PAS` ne gère pas `$(...)`, `case`, les fonctions, les documents ici (`<<`),
   ni la complétion par Tab ; 16 arguments et 126 caractères par commande externe.
-- Sur un CD-ROM démarré, `\TMP` est en lecture seule : pas de tuyaux.
+- Sur un CD-ROM gravé, `\TMP` est en lecture seule : pas de tuyaux.
 - Les noms 8.3 de `BIN16` plus longs sont tronqués sur l'image
   (`ADDFTINFO` devient `ADDFTINF`).
 - Testé sous QEMU (disquettes, disque dur, CD-ROM) et DOSBox, pas sur matériel réel.
+
+## Tests sous l'émulateur DEVENV
+
+`TESTS/DEVENVTEST.PY` amorce une image dans l'émulateur DOS de
+`DEV-COOLS/DEVENV.PAS` (`/KERNELTEST` et `/KTBOOTIMG`, sans interface
+graphique), tape une trentaine de commandes et vérifie l'écran émulé :
+
+```bash
+export DEVENV=/chemin/DEVENV      # exécutable compilé pour Linux
+TESTS/DEVENVTEST.PY IMAGE/LINUX144A.IMG --b IMAGE/LINUX144B.IMG
+TESTS/DEVENVTEST.PY IMAGE/LINUX.ISO --all
+TESTS/DEVENVTEST.PY LINUXHD.IMG --all
+```
+
+Résultat : disquettes 1,44 Mo A+B, ISO et disque dur de 32 Mo, 36 vérifications
+sur 36 ; disquettes de 720 Ko, 1,2 Mo et 2,88 Mo, 9 sur 9. Pour compiler
+`DEVENV.PAS` sous Linux, voir `DEV-COOLS/DOC/KERNELTEST.txt` (unité `cthreads`,
+`fp-units-gfx`, bibliothèques X11 et remplacement des DLL Windows).
+Ces tests ont révélé un bogue de l'émulateur (caractère perdu à l'écran,
+`INT 10h AH=02` ne mettait pas à jour `BdaCurX/Y`), corrigé dans la branche
+`fix/devenv-int10-curseur-bda` de DEV-COOLS.

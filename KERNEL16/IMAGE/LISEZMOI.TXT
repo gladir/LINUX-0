@@ -5,8 +5,9 @@ LINUX144A.IMG  Disquette 1,44 Mo amorcable : noyau (IO.SYS), shell et
                commandes de base (\BIN), \ETC\PROFILE,
                \ETC\SYSCTL.D\CUSTOM.CFG (configuration du noyau).
 LINUX144B.IMG  Disquette 1,44 Mo : suite des commandes (B:\BIN).
-LINUX.ISO      CD-ROM amorcable (El Torito, emulation de disquette A) avec
-               tous les fichiers. Lecture seule : pas de tuyaux dans le shell.
+LINUX.ISO      CD-ROM amorcable (El Torito, emulation de disquette 2,88 Mo qui
+               contient tous les fichiers : c'est le lecteur A:). Lecture seule
+               sur un vrai CD : pas de tuyaux dans le shell.
 
 Demarrage sous QEMU :
   qemu-system-i386 -fda LINUX144A.IMG -fdb LINUX144B.IMG -boot a
