@@ -165,6 +165,31 @@ Résultat : disquettes 1,44 Mo A+B, ISO et disque dur de 32 Mo, 36 vérification
 sur 36 ; disquettes de 720 Ko, 1,2 Mo et 2,88 Mo, 9 sur 9. Pour compiler
 `DEVENV.PAS` sous Linux, voir `DEV-COOLS/DOC/KERNELTEST.txt` (unité `cthreads`,
 `fp-units-gfx`, bibliothèques X11 et remplacement des DLL Windows).
+### Dans l'onglet émulateur de l'IDE
+
+Avec l'interface graphique (sous Linux : `xvfb-run`, `xdotool` pour les frappes,
+`import` pour les captures), l'onglet « Émulateur 8086 » démarre les images ainsi :
+
+```bash
+DEVENV /DISK0:LINUX144A.IMG /DISK1:LINUX144B.IMG /DISK80:hd.img /TERMINALDOS:boot.bat   # boot.bat : BOOT A:
+DEVENV /CDROM:LINUX.ISO /TERMINALDOS:cd.bat   # cd.bat : BOOT puis IMGMOUNT C: hd.img -t hdd
+DEVENV /DISK80:hd.img /TERMINALDOS:bootc.bat  # bootc.bat : BOOT C: (disque installé)
+```
+
+Scénarios vérifiés de bout en bout avec `install` : disquettes A: + B: puis
+démarrage du disque installé (onglet « C: »), CD-ROM, installation *minimale*
+en anglais avec un nom de machine personnalisé, et changement de disquette avec
+un seul lecteur (`mount A:` du banc `/KERNELTEST`). Remarques :
+
+- l'onglet **consomme la touche Échap** pour arrêter l'émulation (« [Esc] Fermer ») ;
+  les flèches et F1 à F12 sont transmises. L'installeur accepte donc **F4 comme
+  équivalent d'Échap** (« ECHAP/F4=Retour ») ;
+- la copie se fait désormais disquette par disquette : avec un seul lecteur,
+  chaque disquette n'est réclamée qu'une fois (avant, l'ordre alphabétique des
+  fichiers réclamait les disquettes 1 et 2 en alternance) ;
+- `BOOT` d'un CD-ROM n'est possible que si aucun disque n'est déjà monté : on
+  monte le disque dur cible ensuite avec `IMGMOUNT C: hd.img -t hdd`.
+
 Ces tests ont révélé un bogue de l'émulateur (caractère perdu à l'écran,
 `INT 10h AH=02` ne mettait pas à jour `BdaCurX/Y`), corrigé dans la branche
 `fix/devenv-int10-curseur-bda` de DEV-COOLS.

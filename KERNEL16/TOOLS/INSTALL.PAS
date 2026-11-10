@@ -69,6 +69,7 @@ Const
  kF1=$3B00;
  kF2=$3C00;
  kF3=$3D00;
+ kF4=$3E00;
  kUp=$4800;
  kDown=$5000;
  CountryCount=10;
@@ -258,11 +259,11 @@ Begin
    'Installazione di LINUX-0',
    'Instalaci`2n de LINUX-0');
   mKeyNav:Raw:=Pick(
-   ' ENTREE=Continuer  ECHAP=Retour  F1=Aide  F3=Quitter',
-   ' ENTER=Continue  ESC=Back  F1=Help  F3=Exit',
-   ' EINGABE=Weiter  ESC=Zur`Uck  F1=Hilfe  F3=Beenden',
-   ' INVIO=Continua  ESC=Indietro  F1=Guida  F3=Esci',
-   ' INTRO=Continuar  ESC=Atr`4s  F1=Ayuda  F3=Salir');
+   ' ENTREE=Continuer  ECHAP/F4=Retour  F1=Aide  F3=Quitter',
+   ' ENTER=Continue  ESC/F4=Back  F1=Help  F3=Exit',
+   ' EINGABE=Weiter  ESC/F4=Zur`Uck  F1=Hilfe  F3=Beenden',
+   ' INVIO=Continua  ESC/F4=Indietro  F1=Guida  F3=Esci',
+   ' INTRO=Continuar  ESC/F4=Atr`4s  F1=Ayuda  F3=Salir');
   mKeyEnter:Raw:=Pick(
    ' ENTREE=Continuer  F3=Quitter',
    ' ENTER=Continue  F3=Exit',
@@ -282,35 +283,35 @@ Begin
    ' INVIO=Indietro',
    ' INTRO=Volver');
   mKeyRetry:Raw:=Pick(
-   ' ENTREE=R`eessayer  ECHAP=Annuler',
-   ' ENTER=Retry  ESC=Cancel',
-   ' EINGABE=Wiederholen  ESC=Abbrechen',
-   ' INVIO=Riprova  ESC=Annulla',
-   ' INTRO=Reintentar  ESC=Cancelar');
+   ' ENTREE=R`eessayer  ECHAP/F4=Annuler',
+   ' ENTER=Retry  ESC/F4=Cancel',
+   ' EINGABE=Wiederholen  ESC/F4=Abbrechen',
+   ' INVIO=Riprova  ESC/F4=Annulla',
+   ' INTRO=Reintentar  ESC/F4=Cancelar');
   mKeySkip:Raw:=Pick(
-   ' ENTREE=R`eessayer  F2=Ignorer  ECHAP=Annuler',
-   ' ENTER=Retry  F2=Ignore  ESC=Cancel',
-   ' EINGABE=Wiederholen  F2=Ignorieren  ESC=Abbrechen',
-   ' INVIO=Riprova  F2=Ignora  ESC=Annulla',
-   ' INTRO=Reintentar  F2=Ignorar  ESC=Cancelar');
+   ' ENTREE=R`eessayer  F2=Ignorer  ECHAP/F4=Annuler',
+   ' ENTER=Retry  F2=Ignore  ESC/F4=Cancel',
+   ' EINGABE=Wiederholen  F2=Ignorieren  ESC/F4=Abbrechen',
+   ' INVIO=Riprova  F2=Ignora  ESC/F4=Annulla',
+   ' INTRO=Reintentar  F2=Ignorar  ESC/F4=Cancelar');
   mKeyCheck:Raw:=Pick(
-   ' ESPACE=Cocher  ENTREE=Continuer  ECHAP=Retour  F3=Quitter',
-   ' SPACE=Toggle  ENTER=Continue  ESC=Back  F3=Exit',
-   ' LEER=Wahl  EINGABE=Weiter  ESC=Zur`Uck  F3=Beenden',
-   ' SPAZIO=Scegli  INVIO=Continua  ESC=Indietro  F3=Esci',
-   ' ESPACIO=Marcar  INTRO=Continuar  ESC=Atr`4s  F3=Salir');
+   ' ESPACE=Cocher  ENTREE=Continuer  ECHAP/F4=Retour  F3=Quitter',
+   ' SPACE=Toggle  ENTER=Continue  ESC/F4=Back  F3=Exit',
+   ' LEER=Wahl  EINGABE=Weiter  ESC/F4=Zur`Uck  F3=Beenden',
+   ' SPAZIO=Scegli  INVIO=Continua  ESC/F4=Indietro  F3=Esci',
+   ' ESPACIO=Marcar  INTRO=Continuar  ESC/F4=Atr`4s  F3=Salir');
   mKeyInstall:Raw:=Pick(
-   ' ENTREE=Installer  ECHAP=Retour  F3=Quitter',
-   ' ENTER=Install  ESC=Back  F3=Exit',
-   ' EINGABE=Installieren  ESC=Zur`Uck  F3=Beenden',
-   ' INVIO=Installa  ESC=Indietro  F3=Esci',
-   ' INTRO=Instalar  ESC=Atr`4s  F3=Salir');
+   ' ENTREE=Installer  ECHAP/F4=Retour  F3=Quitter',
+   ' ENTER=Install  ESC/F4=Back  F3=Exit',
+   ' EINGABE=Installieren  ESC/F4=Zur`Uck  F3=Beenden',
+   ' INVIO=Installa  ESC/F4=Indietro  F3=Esci',
+   ' INTRO=Instalar  ESC/F4=Atr`4s  F3=Salir');
   mKeyDone:Raw:=Pick(
-   ' ENTREE=Red`emarrer  ECHAP=Shell',
-   ' ENTER=Restart  ESC=Shell',
-   ' EINGABE=Neustart  ESC=Shell',
-   ' INVIO=Riavvia  ESC=Shell',
-   ' INTRO=Reiniciar  ESC=Shell');
+   ' ENTREE=Red`emarrer  ECHAP/F4=Shell',
+   ' ENTER=Restart  ESC/F4=Shell',
+   ' EINGABE=Neustart  ESC/F4=Shell',
+   ' INVIO=Riavvia  ESC/F4=Shell',
+   ' INTRO=Reiniciar  ESC/F4=Shell');
   mExitT:Raw:=Pick(
    ' Installation inachev`ee ',
    ' Setup is not complete ',
@@ -465,24 +466,24 @@ Begin
    'Cette installation partitionne le disque dur (MBR et table '+
    'de partitions), le formate en FAT12 ou FAT16, puis copie '+
    'les composants choisis depuis les disquettes (ou le CD). '+
-   'Fl`eches : choisir ; ENTREE : valider ; ECHAP : retour.',
+   'Fl`eches : choisir ; ENTREE : valider ; ECHAP/F4 : retour.',
    'Setup partitions the hard disk (MBR and partition table), '+
    'formats it as FAT12 or FAT16, then copies the chosen '+
    'components from the disks (or the CD). Arrows: select; '+
-   'ENTER: accept; ESC: back.',
+   'ENTER: accept; ESC/F4: back.',
    'Das Setup partitioniert die Festplatte (MBR, '+
    'Partitionstabelle), formatiert sie mit FAT12 oder FAT16 und '+
    'kopiert die gew`Ahlten Komponenten von den Disketten (oder '+
-   'der CD). Pfeile: w`Ahlen; EINGABE: best`Atigen; ESC: '+
+   'der CD). Pfeile: w`Ahlen; EINGABE: best`Atigen; ESC/F4: '+
    'zur`Uck.',
    'L''installazione partiziona il disco fisso (MBR e tabella '+
    'delle partizioni), lo formatta in FAT12 o FAT16 e copia i '+
    'componenti scelti dai dischi (o dal CD). Frecce: scegli; '+
-   'INVIO: conferma; ESC: indietro.',
+   'INVIO: conferma; ESC/F4: indietro.',
    'La instalaci`2n particiona el disco duro (MBR y tabla de '+
    'particiones), lo formatea en FAT12 o FAT16 y copia los '+
    'componentes elegidos desde los discos (o el CD). Flechas: '+
-   'elegir; INTRO: aceptar; ESC: volver.');
+   'elegir; INTRO: aceptar; ESC/F4: volver.');
   mHelp2:Raw:=Pick(
    'Disque : si la partition existante est valide, vous pouvez '+
    'conserver vos donn`ees ; sinon toutes les partitions sont '+
@@ -946,15 +947,15 @@ Begin
    'LINUX-0 est`4 instalado en el disco duro.');
   mDone2:Raw:=Pick(
    'Retirez la disquette du lecteur A: puis appuyez sur ENTREE '+
-   'pour red`emarrer, ou sur ECHAP pour revenir au shell.',
+   'pour red`emarrer, ou sur ECHAP/F4 pour revenir au shell.',
    'Remove the disk from drive A:, then press ENTER to restart, '+
-   'or ESC to return to the shell.',
+   'or ESC/F4 to return to the shell.',
    'Entfernen Sie die Diskette aus Laufwerk A: und dr`Ucken Sie '+
    'EINGABE zum Neustart oder ESC f`Ur die Shell.',
    'Rimuovi il disco dal drive A: e premi INVIO per riavviare, '+
-   'o ESC per tornare alla shell.',
+   'o ESC/F4 per tornare alla shell.',
    'Retire el disco de la unidad A: y pulse INTRO para '+
-   'reiniciar o ESC para volver al shell.');
+   'reiniciar o ESC/F4 para volver al shell.');
   mSkipped:Raw:=Pick(
    '%1 fichier(s) non copi`e(s).',
    '%1 file(s) not copied.',
@@ -1148,6 +1149,8 @@ End;
 
 { Touche normalisee : code ASCII seul pour une touche normale, AX complet
   (AL=0) pour une touche etendue : F1 = $3B00, fleche haut = $4800... }
+{ F4 equivaut a ECHAP : l'onglet emulateur de DEVENV consomme ECHAP pour
+  fermer l'emulation, il n'arrive jamais jusqu'au programme }
 Function GetKey:Word;
 Var
  R:Registers;
@@ -1156,6 +1159,7 @@ Begin
  Intr($16,R);
  If(R.AL<>0)and((R.AL<>$E0)or(R.AH=0))Then GetKey:=R.AL
  Else GetKey:=Word(R.AH)shl 8;
+ If GetKey=kF4 Then GetKey:=kEsc;
 End;
 
 Procedure InitVideo;
@@ -2982,7 +2986,7 @@ End;
 
 Procedure CopyFiles;
 Var
- I,J:Integer;
+ I,J,D,MaxD:Integer;
  C:Word;
 Begin
  TotalBytes:=0;
@@ -3008,11 +3012,18 @@ Begin
   If C=$FFFF Then Fatal(mErrFull);
   DirCl[I]:=C;
  End;
+ { disquette par disquette : avec un seul lecteur, chaque disquette n'est
+   demandee qu'une fois (les fichiers du disque 1 d'abord, deja dans A:) }
+ MaxD:=1;
  For I:=1 to EntryCount do
-  If Chosen(I,InstMask)and(Not Gen(I))and(Entries[I].Comp<8)Then Begin
-   Poll;
-   CopyOne(I);
-  End;
+  If Entries[I].Disk>MaxD Then MaxD:=Entries[I].Disk;
+ For D:=1 to MaxD do
+  For I:=1 to EntryCount do
+   If(Entries[I].Disk=D)and Chosen(I,InstMask)and(Not Gen(I))and
+     (Entries[I].Comp<8)Then Begin
+    Poll;
+    CopyOne(I);
+   End;
  CurFile:='';
  DoneBytes:=TotalBytes;
  DrawGauge;
