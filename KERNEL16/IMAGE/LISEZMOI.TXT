@@ -2,7 +2,8 @@ LINUX-0 KERNEL16 - images disque
 =================================
 
 LINUX144A.IMG  Disquette 1,44 Mo amorcable : noyau (IO.SYS), shell et
-               commandes de base (\BIN), \ETC\PROFILE, CONFIG.SYS.
+               commandes de base (\BIN), \ETC\PROFILE,
+               \ETC\SYSCTL.D\CUSTOM.CFG (configuration du noyau).
 LINUX144B.IMG  Disquette 1,44 Mo : suite des commandes (B:\BIN).
 LINUX.ISO      CD-ROM amorcable (El Torito, emulation de disquette A) avec
                tous les fichiers. Lecture seule : pas de tuyaux dans le shell.
@@ -14,9 +15,9 @@ Demarrage sous QEMU :
 Disque dur (non fourni, 32 Mo) : HD=32 ../BUILD.SH images
   puis qemu-system-i386 -hda LINUXHD.IMG
 
-Langue : ajouter dans CONFIG.SYS une ligne SET LANGUAGE=EN (anglais), GR
-(allemand), SP (espagnol) ou IT (italien) ; francais par defaut. Dans le shell :
-export LANGUAGE=EN
+Langue : ajouter dans \ETC\SYSCTL.D\CUSTOM.CFG la ligne
+  env.LANGUAGE = EN   (anglais ; GR allemand, SP espagnol, IT italien)
+Francais par defaut. Dans le shell : export LANGUAGE=EN
 
 Reconstruire : ../BUILD.SH (Linux) ou ..\MAKEIMG.BAT (DOS/Windows).
 Verifier une image : LSIMG LINUX144A.IMG /C

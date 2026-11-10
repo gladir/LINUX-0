@@ -9,7 +9,7 @@
 ; Lignes vides et lignes commencant par ; ou # ignorees.
 
 ; Dossier du systeme : IO.SYS (le noyau, 1er fichier, contigu), MSDOS.SYS
-; (2e entree de la racine), CONFIG.SYS... copies a la racine de la
+; (2e entree de la racine), ETC\... copies a la racine de la
 ; premiere disquette.
 SYSTEM ..\SYSTEM
 

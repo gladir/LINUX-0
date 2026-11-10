@@ -6,9 +6,12 @@
     MSDOS-0 : il charge et execute des fichiers .EXE/.COM, gere les
     disques FAT12 et FAT16 par l'interface INT 21h et lance l'interpreteur
     de commandes \BIN\SH.EXE (style Linux). Les chemins acceptent '/'
-    comme separateur. CONFIG.SYS accepte les lignes SET (ex. SET LANGUAGE=EN).
+    comme separateur. La configuration est lue dans
+    \ETC\SYSCTL.D\CUSTOM.CFG (lignes 'cle = valeur', style sysctl) :
+    fs.files, kernel.buffers, kernel.lastdrive, kernel.shell, kernel.device,
+    kernel.install et env.NOM = valeur (ex. env.LANGUAGE = EN).
     Langues : francais (defaut), EN anglais, GR allemand, SP espagnol, IT
-    italien (variable LANGUAGE du CONFIG.SYS).
+    italien (env.LANGUAGE de custom.cfg).
 
   Directives de compilation pour compatibilite processeur :
   - CPU86  : Cible 8088/8086 (pas de PUSH immediate)
@@ -1193,11 +1196,11 @@ Begin
  { Initialiser le gestionnaire de memoire }
  InitializeMemoryManager;
 
- { CONFIG.SYS, phase 0 : lecture du fichier et lignes SET (LANGUAGE...) }
+ { custom.cfg, phase 0 : lecture du fichier et lignes env. (LANGUAGE...) }
  InitConfig(0);
  { Message de demarrage dans la langue choisie }
  KBanner;
- { CONFIG.SYS, phase 1 : FILES, BUFFERS, LASTDRIVE, SHELL, DEVICE, INSTALL }
+ { custom.cfg, phase 1 : files, buffers, lastdrive, shell, device, install }
  InitConfig(1);
  { Charger et executer l'interpreteur de commandes (\BIN\SH.EXE) }
  { L'interpreteur est relance s'il se termine (exit) ; absent, le noyau
@@ -10464,11 +10467,11 @@ Begin
      Else KText:='INSTALL: programme introuvable';
     End;
   Else Case L Of
-     1:KText:='Bad command in CONFIG.SYS';
-     2:KText:='Falscher Befehl in CONFIG.SYS';
-     3:KText:='Comando incorrecto en CONFIG.SYS';
-     4:KText:='Comando errato in CONFIG.SYS';
-     Else KText:='Commande incorrecte dans CONFIG.SYS';
+     1:KText:='Bad command in custom.cfg';
+     2:KText:='Falscher Befehl in custom.cfg';
+     3:KText:='Comando incorrecto en custom.cfg';
+     4:KText:='Comando errato in custom.cfg';
+     Else KText:='Commande incorrecte dans custom.cfg';
     End;
  End;
 End;
@@ -10576,16 +10579,48 @@ End;
   ses deux premieres lettres }
 Procedure CfgLine(S,E:Word);
 Var
- CfS,V,P,A,I,N,Sig: Word;
+ CfS,V,P,A,I,N,Sig,K,T,D: Word;
+ IsEnv: Boolean;
 Begin
  CfS:=CfgSegGet;
  Mem[CfS:E]:=32;
  While (S<E) And (Mem[CfS:S]<=32) Do Inc(S);
  If S>=E Then Exit;
- Sig:=(Mem[CfS:S] And $DF)*256+(Mem[CfS:S+1] And $DF);
+ { commentaires : # ou ; }
+ If (Mem[CfS:S]=35) Or (Mem[CfS:S]=59) Then Exit;
+ { cle de style sysctl ("fs.files", "kernel.shell", "env.NOM") : le dernier
+   segment de la cle (apres le dernier point) designe la commande }
+ K:=S;
+ T:=S;
+ While (K<E) And (Mem[CfS:K]>32) And (Mem[CfS:K]<>61) Do Begin
+  If Mem[CfS:K]=46 Then T:=K+1;
+  Inc(K);
+ End;
+ IsEnv:=(K-S>4) And ((Mem[CfS:S] And $DF)=69) And
+   ((Mem[CfS:S+1] And $DF)=78) And ((Mem[CfS:S+2] And $DF)=86) And
+   (Mem[CfS:S+3]=46);
+ Sig:=(Mem[CfS:T] And $DF)*256+(Mem[CfS:T+1] And $DF);
+ If IsEnv Then Sig:=$5345;
  { phase 0 : seulement les lignes SET ; phase 1 : toutes les autres }
  If (Mem[CfS:7]=0) And (Sig<>$5345) Then Exit;
  If (Mem[CfS:7]<>0) And (Sig=$5345) Then Exit;
+ If IsEnv Then Begin
+  { env.NOM = valeur : mis sous la forme NOM=valeur a partir de S+4 }
+  V:=K;
+  While (V<E) And ((Mem[CfS:V]<=32) Or (Mem[CfS:V]=61)) Do Inc(V);
+  P:=E;
+  While (P>V) And (Mem[CfS:P-1]<=32) Do Dec(P);
+  D:=K;
+  Mem[CfS:D]:=61;
+  Inc(D);
+  While V<P Do Begin
+   Mem[CfS:D]:=Mem[CfS:V];
+   Inc(D);
+   Inc(V);
+  End;
+  CfgSet(S+4,D);
+  Exit;
+ End;
  V:=S;
  While (Mem[CfS:V]>32) And (Mem[CfS:V]<>61) Do Inc(V);
  While (V<E) And ((Mem[CfS:V]<=32) Or (Mem[CfS:V]=61)) Do Inc(V);
@@ -10634,7 +10669,7 @@ Procedure InitConfig(Phase:Byte);
 Var
  CfS,H,Got,I,S: Word;
  Ch: Byte;
- Nm: String[13];
+ Nm: String[30];
 Begin
  If Phase=0 Then Begin
   CfS:=DOS48h_AllocateMemory(190);
@@ -10648,11 +10683,17 @@ Begin
    MOV AX,CfS
    MOV WORD PTR [Data + FxBase + 126],AX
   END;
-  { \CONFIG.SYS }
-  Nm:='\CONFIG.SYS';
-  For I:=1 To 11 Do Mem[CfS:299+I]:=Ord(Nm[I]);
+  { \ETC\SYSCTL.D\CUSTOM.CFG, a defaut \CONFIG.SYS (ancienne syntaxe) }
+  Nm:='\ETC\SYSCTL.D\CUSTOM.CFG';
+  For I:=1 To Length(Nm) Do Mem[CfS:299+I]:=Ord(Nm[I]);
   Got:=0;
   H:=DOS3Dh_OpenFile(Ptr(CfS,300),0);
+  If H=$FFFF Then Begin
+   For I:=300 To 399 Do Mem[CfS:I]:=0;
+   Nm:='\CONFIG.SYS';
+   For I:=1 To Length(Nm) Do Mem[CfS:299+I]:=Ord(Nm[I]);
+   H:=DOS3Dh_OpenFile(Ptr(CfS,300),0);
+  End;
   If H<>$FFFF Then Begin
    DOS3Fh_ReadFile(H,Ptr(CfS,640),2040,Got);
    DOS3Eh_CloseFile(H);

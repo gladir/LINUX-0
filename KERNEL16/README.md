@@ -17,7 +17,7 @@ Le noyau 32 bits (KERNEL32) viendra plus tard.
 | `KERNEL16.PAS` | L'unité du noyau (un seul fichier, aucune autre unité) |
 | `MAKER.PAS` | Extrait le code du noyau et écrit `IO.SYS` (programme DOS) |
 | `SH.PAS` | Interpréteur de commandes style Linux, devient `\BIN\SH.EXE` |
-| `SYSTEM\` | Fichiers de la racine : `IO.SYS`, `MSDOS.SYS`, `CONFIG.SYS`, `BIN\SH.EXE` |
+| `SYSTEM\` | Fichiers de la racine : `IO.SYS`, `MSDOS.SYS`, `BIN\SH.EXE`, `ETC\SYSCTL.D\CUSTOM.CFG` (configuration du noyau) |
 | `TOOLS\` | Outils de fabrication des disques : `MAKEDISK.PAS`, `LSIMG.PAS`, `IMAGE.INF`, `ETC\PROFILE` |
 | `IMAGE\` | Images prêtes à démarrer (voir `IMAGE\LISEZMOI.TXT`) |
 | `TESTS\` | `TKENV.PAS` : programme de test du noyau (environnement, chemins `/`) |
@@ -56,12 +56,26 @@ produit au choix un disque dur (`/HD:Mo`, FAT16 avec MBR) et un CD-ROM
 ## Différences avec le noyau de MSDOS-0
 
 - Nom et messages : `Demarrage de LINUX-0 KERNEL16...`, shell `\BIN\SH.EXE`
-  (puis `\SH.EXE`, `\COMMAND.COM`), ou `SHELL=` de `CONFIG.SYS`.
-- **Langues** : français par défaut ; `SET LANGUAGE=EN` (anglais), `GR`
-  (allemand), `SP` (espagnol) ou `IT` (italien) dans `CONFIG.SYS` change les
+  (puis `\SH.EXE`, `\COMMAND.COM`), ou `kernel.shell` de `custom.cfg`.
+- **Configuration de style Linux** : le noyau lit `/etc/sysctl.d/custom.cfg`
+  (`\ETC\SYSCTL.D\CUSTOM.CFG`), au lieu de `CONFIG.SYS`. Une ligne par
+  réglage, `clé = valeur`, `#` ou `;` pour un commentaire :
+
+  | Clé | Effet |
+  |---|---|
+  | `fs.files` | nombre de fichiers ouverts (8 à 20) |
+  | `kernel.buffers` | nombre de tampons |
+  | `kernel.lastdrive` | dernière lettre de lecteur (A à F) |
+  | `kernel.shell` | interpréteur de commandes (chemin et arguments) |
+  | `kernel.device` | pilote de périphérique à charger (`DEVLOAD.EXE`) |
+  | `kernel.install` | programme résident à lancer |
+  | `env.NOM` | variable d'environnement du premier programme |
+
+  À défaut, `\CONFIG.SYS` (ancienne syntaxe `FILES=`, `SHELL=`, `SET NOM=valeur`)
+  est lu.
+- **Langues** : français par défaut ; `env.LANGUAGE = EN` (anglais), `GR`
+  (allemand), `SP` (espagnol) ou `IT` (italien) dans `custom.cfg` change les
   messages du noyau ; le shell et les outils lisent la même variable.
-- **`CONFIG.SYS`** accepte les lignes `SET NOM=valeur`, copiées dans
-  l'environnement du premier programme.
 - **Chemins Linux** : `/` est converti en `\` pour toutes les fonctions INT 21h
   qui reçoivent un nom de fichier. La fonction 37h (caractère d'option) renvoie
   `-`.

@@ -16,7 +16,7 @@ Program MAKEDISK;
   autres fichiers sont toujours alloues en premier et de facon contigue.
 
   Entrees :
-    SYSTEM  dossier du systeme (IO.SYS, MSDOS.SYS, CONFIG.SYS...), copie a la
+    SYSTEM  dossier du systeme (IO.SYS, MSDOS.SYS, ETC\...), copie a la
             racine et toujours place sur la premiere disquette ;
     CMDS    dossier des commandes (*.EXE...), copiees dans \BIN ;
     ADD     fichiers, masques ou dossiers additionnels (src=destination) ;
@@ -154,11 +154,11 @@ Const
    ' /INF:file       Manifesto: righe "PAROLA valore" (vedi IMAGE.INF).'
   ),
   (
-   ' /SYSTEM:dossier IO.SYS, MSDOS.SYS, CONFIG.SYS... a la racine (SYSTEM).',
-   ' /SYSTEM:dir     IO.SYS, MSDOS.SYS, CONFIG.SYS... at the root (SYSTEM).',
-   ' /SYSTEM:ordner  IO.SYS, MSDOS.SYS, CONFIG.SYS... im Stamm (SYSTEM).',
-   ' /SYSTEM:dir     IO.SYS, MSDOS.SYS, CONFIG.SYS... en la raiz (SYSTEM).',
-   ' /SYSTEM:dir     IO.SYS, MSDOS.SYS, CONFIG.SYS... nella radice (SYSTEM).'
+   ' /SYSTEM:dossier IO.SYS, MSDOS.SYS, ETC\... a la racine (SYSTEM).',
+   ' /SYSTEM:dir     IO.SYS, MSDOS.SYS, ETC\... at the root (SYSTEM).',
+   ' /SYSTEM:ordner  IO.SYS, MSDOS.SYS, ETC\... im Stamm (SYSTEM).',
+   ' /SYSTEM:dir     IO.SYS, MSDOS.SYS, ETC\... en la raiz (SYSTEM).',
+   ' /SYSTEM:dir     IO.SYS, MSDOS.SYS, ETC\... nella radice (SYSTEM).'
   ),
   (
    ' /CMDS:dossier   Commandes copiees dans \BIN (defaut BIN16).',
