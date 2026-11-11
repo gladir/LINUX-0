@@ -9,15 +9,25 @@ Program MAKE;
 
 {$X+}
 {$R-}
+{$IFDEF LPC}
+{$M 24000,73728,73728}
+{$ELSE}
 {$M 60000,0,200000}
+{$ENDIF}
 
 Uses DOS;
 
 Const
+ {$IFDEF LPC}
+ MaxVars=200;
+ MaxRules=150;
+ MaxBuilt=150;
+{$ELSE}
  MaxVars=500;
  MaxRules=300;
- MaxCmds=2000;
  MaxBuilt=300;
+{$ENDIF}
+ MaxCmds=2000;
  MaxPhony=120;
  MaxSuffix=30;
  MaxIf=24;

@@ -8,11 +8,16 @@
 Program JOIN;
 
 {$X+}
+{$IFDEF LPC}{$M 8192,40960,40960}{$ENDIF}
 
 Uses DOS;
 
 Const
+{$IFDEF LPC}
+ MaxG=60;
+{$ELSE}
  MaxG=200;
+{$ENDIF}
  MaxO=40;
 
 Type

@@ -34,7 +34,7 @@ Program Shell;
 
 {$I-}
 
-{$M 8192,0,0}
+{$M 16384,0,0}
 
 Const
  MAXTOK=48;

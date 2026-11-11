@@ -141,6 +141,8 @@ Type
   ChildTicks: Longint; { temps processeur des fils attendus (times) }
   ArgPtr: Longint;     { argc/argv/envp sur la pile (exec) }
   Borrowed: Boolean;   { vfork : la memoire est celle du pere }
+  InExec: Boolean;     { fils de vfork qui charge son image (exec) : la
+                         memoire du pere peut alors aller sur le disque }
   Swapped: Boolean;    { image dans la zone de va-et-vient (Where = 0) }
   SwapBlk: Longint;    { premier secteur de l'image dans cette zone }
   SysCtx: Array[0..31] Of Byte;  { contexte de l'appel systeme en cours }
@@ -1601,7 +1603,7 @@ Begin
  Locked:=False;
  For I:=1 To NPROC-1 Do
   If (I<>Q) And (Procs[I].Stat<>PFREE) And Procs[I].Borrowed And
-    (Procs[I].Home=Procs[Q].Home) Then Locked:=True;
+    Not Procs[I].InExec And (Procs[I].Home=Procs[Q].Home) Then Locked:=True;
 End;
 
 Function SwapImage(P: Integer; Sg: Word): Boolean;
@@ -3639,7 +3641,7 @@ Begin
  K:=Procs[C].KStack;
  Procs[C]:=Procs[Cur];
  With Procs[C] Do Begin
-  KStack:=K; Borrowed:=True;
+  KStack:=K; Borrowed:=True; InExec:=False;
   Inc(NextPid); If NextPid>30000 Then NextPid:=2;
   While FindPid(NextPid)>=0 Do Inc(NextPid);
   Pid:=NextPid; PPid:=Procs[Cur].Pid;
@@ -3702,7 +3704,7 @@ Begin
  End;
 End;
 
-Function DoExec(Path: TPath): Integer;
+Function DoExecMain(Path: TPath): Integer;
 { Charge un executable COFF (format natif de LINUX-0, produit par LPC /X) ou
   MZ (programmes DOS), puis prepare la pile (argc, argv, envp comme UNIX),
   le prefixe compatible DOS, l'environnement et la trame initiale du
@@ -3735,14 +3737,14 @@ Begin
  End;
  EnvStart:=I;
  E:=Namei(Path,Vn);
- If E<>0 Then Begin DoExec:=E; Exit End;
- If VNodes[Vn].Typ<>VREG Then Begin VPut(Vn); DoExec:=EACCES; Exit End;
+ If E<>0 Then Begin DoExecMain:=E; Exit End;
+ If VNodes[Vn].Typ<>VREG Then Begin VPut(Vn); DoExecMain:=EACCES; Exit End;
  E:=VAccess(Vn,1);
- If E<>0 Then Begin VPut(Vn); DoExec:=E; Exit End;
+ If E<>0 Then Begin VPut(Vn); DoExecMain:=E; Exit End;
  FMode:=VNodes[Vn].Mode; FUid:=VNodes[Vn].Uid; FGid:=VNodes[Vn].Gid;
  FillChar(H,SizeOf(H),0);
  If VRead(Vn,0,Seg(H),Ofs(H),32)<20 Then Begin
-  VPut(Vn); DoExec:=ENOEXEC; Exit;
+  VPut(Vn); DoExecMain:=ENOEXEC; Exit;
  End;
  Coff:=H[0]=COFFMAGIC;
  HeapMin:=DEFHEAP;
@@ -3751,12 +3753,12 @@ Begin
     a.out : entry a l'octet 20+16 }
   NSec:=H[1];
   If (H[9] And COFF_F_EXEC=0) Or (NSec<1) Or (NSec>MAXCOFFSEC) Or (H[8]<28) Then
-  Begin VPut(Vn); DoExec:=ENOEXEC; Exit End;
+  Begin VPut(Vn); DoExecMain:=ENOEXEC; Exit End;
   If VRead(Vn,20+H[8],Seg(CoffSh),Ofs(CoffSh),NSec*40)<>NSec*40 Then Begin
-   VPut(Vn); DoExec:=ENOEXEC; Exit;
+   VPut(Vn); DoExecMain:=ENOEXEC; Exit;
   End;
   If VRead(Vn,20+16,Seg(J),Ofs(J),4)<>4 Then Begin
-   VPut(Vn); DoExec:=ENOEXEC; Exit;
+   VPut(Vn); DoExecMain:=ENOEXEC; Exit;
   End;
   CsRel:=Word(J Shr 4); IpV:=Word(J And 15);
   Ext:=0; SsRel:=$FFFF; SpV:=0; HeapMin:=-1;
@@ -3771,17 +3773,17 @@ Begin
    { .heap de taille nulle : programme sans tas }
   End;
   If (SsRel=$FFFF) Or (Ext>$9FFF0) Then Begin
-   VPut(Vn); DoExec:=ENOEXEC; Exit;
+   VPut(Vn); DoExecMain:=ENOEXEC; Exit;
   End;
   If HeapMin=-1 Then HeapMin:=DEFHEAP;
   LoadParas:=(Ext+15) Div 16; MinA:=0; HdrParas:=0; ImgBytes:=0;
  End Else Begin
-  If H[0]<>$5A4D Then Begin VPut(Vn); DoExec:=ENOEXEC; Exit End;
+  If H[0]<>$5A4D Then Begin VPut(Vn); DoExecMain:=ENOEXEC; Exit End;
   If H[1]=0 Then ImgBytes:=Longint(H[2])*512
   Else ImgBytes:=Longint(H[2]-1)*512+H[1];
   HdrParas:=H[4];
   ImgBytes:=ImgBytes-HdrParas*16;
-  If ImgBytes<=0 Then Begin VPut(Vn); DoExec:=ENOEXEC; Exit End;
+  If ImgBytes<=0 Then Begin VPut(Vn); DoExecMain:=ENOEXEC; Exit End;
   LoadParas:=(ImgBytes+15) Div 16;
   MinA:=H[5]; MaxA:=H[6];
   CsRel:=H[11]; IpV:=H[10]; SsRel:=H[7]; SpV:=H[8];
@@ -3790,14 +3792,14 @@ Begin
    qu'il reste au moins la moitie de la pile au programme }
  Top:=SpV; If Top=0 Then Top:=$10000;
  UArea:=((KArgLen+1) And $FFFE)+Longint(KArgc+KEnvc+2)*4+2;
- If UArea+24>Top Div 2 Then Begin VPut(Vn); DoExec:=E2BIG; Exit End;
+ If UArea+24>Top Div 2 Then Begin VPut(Vn); DoExecMain:=E2BIG; Exit End;
  { environnement (programmes DOS) : env, nom du programme, argc et argv }
  EnvParas:=(Longint(KArgLen)+Length(Path)+64) Div 16+1;
  { tas : le runtime de Linux Pascal reserve ses blocs par la libc (service
    48h), dans la zone qui suit l'image et sa pile (maxalloc = minalloc) }
  Extra:=HeapMin;   { .heap du COFF, sinon DEFHEAP }
  Total:=EnvParas+16+LoadParas+MinA+Extra;
- If Total>$A000 Then Begin VPut(Vn); DoExec:=ENOMEM; Exit End;
+ If Total>$A000 Then Begin VPut(Vn); DoExecMain:=ENOMEM; Exit End;
  { comme UNIX V7, l'ancienne image est liberee avant le chargement de la
    nouvelle (les arguments sont deja dans KArgs, les en-tetes verifies) :
    la nouvelle image prend la place la plus basse possible, ce qui limite
@@ -3813,7 +3815,7 @@ Begin
    va-et-vient }
  If (Mem_=0) And Reclaim(Total,-1) Then Mem_:=CoreAlloc(Total);
  If Mem_=0 Then Begin
-  VPut(Vn); If Lost Then DoExit(SIGKILL); DoExec:=ENOMEM; Exit;
+  VPut(Vn); If Lost Then DoExit(SIGKILL); DoExecMain:=ENOMEM; Exit;
  End;
  ParaZero(Mem_,EnvParas+16);
  EnvS:=Mem_; PSP_:=Mem_+EnvParas; Load:=PSP_+16;
@@ -3830,7 +3832,7 @@ Begin
      If VRead(Vn,Off,Sg,O,Chunk)<>Chunk Then Begin
       VPut(Vn); CoreFree(Mem_,Total);
       If Lost Then DoExit(SIGKILL);
-      DoExec:=EIO; Exit;
+      DoExecMain:=EIO; Exit;
      End;
      Inc(Off,Chunk); Dec(Rem,Chunk); Inc(Sg,Chunk Div 16);
     End;
@@ -3840,13 +3842,13 @@ Begin
     If VRead(Vn,CoffL(I*40+24)+J*10,Seg(RE),Ofs(RE),10)<>10 Then Begin
      VPut(Vn); CoreFree(Mem_,Total);
      If Lost Then DoExit(SIGKILL);
-     DoExec:=ENOEXEC; Exit;
+     DoExecMain:=ENOEXEC; Exit;
     End;
     Off:=Longint(RE[1]) Shl 16+RE[0];
     If (RE[4]<>R_SEG12) Or (Off+2>Longint(LoadParas)*16) Then Begin
      VPut(Vn); CoreFree(Mem_,Total);
      If Lost Then DoExit(SIGKILL);
-     DoExec:=ENOEXEC; Exit;
+     DoExecMain:=ENOEXEC; Exit;
     End;
     Sg:=Load+Word(Off Shr 4); O:=Word(Off And 15);
     MemW[Sg:O]:=MemW[Sg:O]+Load;
@@ -3859,7 +3861,7 @@ Begin
    If VRead(Vn,Off,Sg,0,Chunk)<>Chunk Then Begin
     VPut(Vn); CoreFree(Mem_,Total);
     If Lost Then DoExit(SIGKILL);
-    DoExec:=EIO; Exit;
+    DoExecMain:=EIO; Exit;
    End;
    Inc(Off,Chunk); Dec(Rem,Chunk); Inc(Sg,Chunk Div 16);
   End;
@@ -3867,7 +3869,7 @@ Begin
    If VRead(Vn,H[12]+Longint(I)*4,Seg(R),Ofs(R),4)<>4 Then Begin
     VPut(Vn); CoreFree(Mem_,Total);
     If Lost Then DoExit(SIGKILL);
-    DoExec:=ENOEXEC; Exit;
+    DoExecMain:=ENOEXEC; Exit;
    End;
    MemW[Load+R[1]:R[0]]:=MemW[Load+R[1]:R[0]]+Load;
   End;
@@ -3956,7 +3958,27 @@ Begin
  MemW[SS_:SP_+22]:=$0202;         { FLAGS (IF) }
  CurUSS:=SS_; CurUSP:=SP_;
  Procs[Cur].USS:=SS_; Procs[Cur].USP:=SP_;
- DoExec:=0;
+ DoExecMain:=0;
+End;
+
+Function DoExec(Path: TPath): Integer;
+{ exec. Pendant le chargement, le fils d'un vfork n'utilise plus la memoire
+  de son pere : celui-ci peut etre ecrit dans la zone de va-et-vient pour
+  faire de la place. Si l'exec echoue, le fils revient dans la memoire du
+  pere, qui est alors remise a son adresse. }
+Var E,O: Integer;
+Begin
+ With Procs[Cur] Do If Borrowed Then InExec:=True;
+ E:=DoExecMain(Path);
+ If (Procs[Cur].Stat<>PFREE) And Procs[Cur].Borrowed Then Begin
+  Procs[Cur].InExec:=False;
+  If E<>0 Then
+   For O:=1 To NPROC-1 Do
+    If (O<>Cur) And (Procs[O].Stat<>PFREE) And (Procs[O].Size<>0) And
+      Not Procs[O].Borrowed And (Procs[O].Home=Procs[Cur].Home) Then
+     If Not MakeResident(O) Then DoExit(SIGKILL);
+ End;
+ DoExec:=E;
 End;
 
 Procedure DoExit(Status: Word);

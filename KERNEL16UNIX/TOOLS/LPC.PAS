@@ -39,7 +39,8 @@
      indique (hexadecimal, defaut 1000 = adresse physique 10000h). Le point
      d'entree est l'octet 0 de l'image; le chargeur doit fournir SS:SP.
 
-   - /X : cible LINUX-0. Le programme est lie a l'unite integree UNIX
+   - /X : cible KERNEL16UNIX (LINUX-0). Le programme est lie a l'unite
+     integree UNIX
      (appels systeme INT 80h du noyau LINUX-0 : fork, execve, waitpid, read,
      write, open, close, ...). La bibliotheque d'execution n'appelle plus
      MS-DOS : les services DOS utilises par le runtime et par les unites DOS
@@ -1387,7 +1388,7 @@ const UnixSource: array[1..1898] of string[255] = (
  '{ @author: Sylvain Maltais (support@gladir.com)',
  '  @created: 2026',
  '  @website(https://www.gladir.com/linux-0)',
- '  @abstract(Target: Linux Pascal (LPC /X))',
+ '  @abstract(Target: KERNEL16UNIX (LPC /X))',
  '  @description: Unite UNIX de Linux Pascal : interface des appels systeme du',
  '   noyau LINUX-0 (INT 80h) et bibliotheque "libc" de la cible LINUX-0.',
  '',
@@ -1472,7 +1473,7 @@ const UnixSource: array[1..1898] of string[255] = (
  ' S_IFIFO=$1000; S_ISUID=$800; S_ISGID=$400; S_ISVTX=$200;',
  ' S_IREAD=$100; S_IWRITE=$80; S_IEXEC=$40;',
  ' { types de systemes de fichiers pour mount }',
- ' FS_AUTO=0; FS_FAT=1; FS_UFS=2;',
+ ' FS_AUTO=0; FS_UFS=2;',
  ' { codes d''erreur (errno, UNIX V7; au-dela, valeurs de 4.4BSD) }',
  ' EPERM=1; ENOENT=2; ESRCH=3; EINTR=4; EIO=5; ENXIO=6; E2BIG=7; ENOEXEC=8;',
  ' EBADF=9; ECHILD=10; EAGAIN=11; ENOMEM=12; EACCES=13; EFAULT=14;',
@@ -1534,7 +1535,7 @@ const UnixSource: array[1..1898] of string[255] = (
  '  SwapIns: Word;      { images relues }',
  ' End;',
  ' TMountInfo=Record',
- '  FsType: Byte;       { 1=FAT12, 2=FAT16, 3=UFS, 4=dev }',
+ '  FsType: Byte;       { 1=UFS, 2=dev }',
  '  Drive: Byte;',
  '  ReadOnly: Byte;',
  '  Pad: Byte;',
@@ -3303,7 +3304,7 @@ const UnixSource: array[1..1898] of string[255] = (
  ' DoSys;',
  'End.');
 { --- fin UnixSource --- }
-const DosSource: array[1..506] of string[255] = (
+const DosSource: array[1..510] of string[255] = (
  'Unit Dos;',
  '{ Unite DOS de Turbo Pascal 7.0 : interruptions, date/heure, fichiers,',
  '  repertoires, environnement et execution de programmes. }',
@@ -3712,7 +3713,11 @@ const DosSource: array[1..506] of string[255] = (
  ' DirEnd:=0; ExtPos:=0;',
  ' For I:=1 To Length(Path) Do',
  '  Case Path[I] Of',
+ '{$IFDEF LINUX0}',
+ '   ''\'',''/'','':'':Begin DirEnd:=I; ExtPos:=0 End;',
+ '{$ELSE}',
  '   ''\'','':'':Begin DirEnd:=I; ExtPos:=0 End;',
+ '{$ENDIF}',
  '   ''.'':ExtPos:=I;',
  '  End;',
  ' Dir:=Copy(Path,1,DirEnd);',
@@ -18627,7 +18632,7 @@ End;
 
 Procedure WriteCoff(Path: TShortString; Size, StoredData, TotalData: Longint;
   StackSeg: Word);
-{ Linux Pascal /X : executable COFF de LINUX-0 (format "common object file" de
+{ LPC /X : executable COFF de KERNEL16UNIX (format "common object file" de
   UNIX System V) au lieu du format MZ de MS-DOS.
     en-tete de fichier (20 octets) : f_magic = 0153h (I286LMAGIC, Intel
       286/8086 modele large), f_nscns, f_timdat, f_symptr, f_nsyms,
@@ -18902,7 +18907,7 @@ Begin
    Name+Ext);
  If Upper(Path)=Upper(SourceName) Then CLIError('Sortie identique au source');
  If UnixTarget And Not KernelOut Then Begin
-  { Linux Pascal /X : executable COFF de LINUX-0 }
+  { LPC /X : executable COFF de KERNEL16UNIX }
   WriteCoff(Path,Size,StoredData,TotalData,StackSeg);
   Dispose(LinkedImage); Exit;
  End;
@@ -19065,8 +19070,8 @@ Procedure Help;Begin
  WriteLn('Options Linux Pascal Compiler:');
  WriteLn('  -K[seg] = Image plate de noyau .SYS chargee au paragraphe seg ' +
    '(hexa, defaut 1000)');
- WriteLn('  -X = Cible LINUX-0 (appels systeme INT 80h, unite UNIX, sans ' +
-   'extension, format COFF)');
+ WriteLn('  -X = Cible KERNEL16UNIX (appels systeme INT 80h, unite UNIX, ' +
+   'sans extension, format COFF)');
 End;
 
 Procedure ProcessArgument(S: TShortString);
@@ -19166,7 +19171,7 @@ Begin
     End;
    End;
    'X':Begin
-    { Linux Pascal : cible LINUX-0 }
+    { Linux Pascal : cible KERNEL16UNIX (LINUX-0) }
     If Arg<>'' Then CLIError('Option /X incorrecte');
     UnixTarget:=True; Define('LINUX0'); Define('KERNEL16UNIX');
     { LINUX-0 : pile par defaut de 8 Ko (memoire de 640 Ko partagee par

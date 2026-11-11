@@ -155,7 +155,9 @@ plus.
   sont à leur tour écrits dans la zone (ou, pour deux images issues du même
   `fork`, simplement échangées en mémoire). L'ordonnanceur ne donne le
   processeur qu'à un processus remis en mémoire ; la mémoire d'un père de
-  `vfork` dont le fils s'exécute n'est jamais écrite, et les piles noyau,
+  `vfork` dont le fils s'exécute n'est écrite que pendant l'`exec` de ce fils
+  (ses arguments sont déjà copiés : si l'`exec` échoue, le père est remis à
+  son adresse avant le retour d'erreur), et les piles noyau,
   qui ne sont pas déplaçables non plus, sont réservées dès l'amorce. `ps`
   montre l'état de chaque image (L en mémoire, W dans la zone) et l'activité
   de la zone.
@@ -227,7 +229,12 @@ noyau charge chaque section à `chargement + s_vaddr`, met à zéro `.bss` et la
 pile, puis applique les relocalisations. `TOOLS/COFFINFO.PAS` affiche et
 vérifie un exécutable COFF. La pile par défaut d'un programme LINUX-0 est de
 8 Ko (`{$M}` peut en demander davantage); sans section `.heap`, le tas
-initial est de 4 Ko et grandit ensuite par `break`.
+initial est de 4 Ko et grandit ensuite par `break`. Comme une image 8086 ne
+se déplace pas, `break` ne réussit que si la mémoire qui suit l'image est
+libre : un programme qui alloue beaucoup demande son tas dès l'`exec` par
+`{$M pile,tasmin,tasmax}` (en général sous `{$IFDEF LPC}`, comme `diff`,
+`join`, `make` et `ldd`), et le noyau écrit alors d'autres processus dans la
+zone de va-et-vient pour trouver la place.
 
 ### Démarrage d'un programme
 

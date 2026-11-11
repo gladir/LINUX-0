@@ -24,7 +24,10 @@ BEGIN
  End
   Else
  Begin
-  For I:=1 to ParamCount do Write(ParamStr(I));
+  For I:=1 to ParamCount do Begin
+   Write(ParamStr(I));
+   If I<ParamCount Then Write(' ');
+  End;
   WriteLn;
  End;
 END.

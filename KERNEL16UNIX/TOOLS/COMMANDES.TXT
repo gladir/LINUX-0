@@ -1,0 +1,222 @@
+COMMANDES DE LINUX-0 SOUS KERNEL16UNIX (compilees par LPC /X)
+==============================================================
+
+Banc d'essai : noyau KERNEL16UNIX amorce sous QEMU (1 Mo, console serie et
+ecran VGA), commandes compilees avec "lpc /X" puis installees dans /bin. Les
+commandes de style DOS (Uses DOS, Crt) ont ete comparees aux executables DOS
+de BIN16 sous DOSBox : memes fichiers d'essai (fins de ligne CR LF cote DOS,
+LF cote LINUX-0).
+
+ETAT : marche    = fonctionne comme sous DOS (ou conformement a l'aide de la
+                   commande) pour les essais faits;
+       reserves  = fonctionne mais avec une limite, expliquee dans REMARQUE;
+       echoue    = ne fonctionne pas, la cause est indiquee.
+ESSAI : l'essai fait; "aide /?" = la commande demarre et affiche son aide
+(le shell developpe /? : l'ecrire '/?').
+
+Resume : 167 marchent, 15 avec reserves, 4 echouent (sur 186 programmes).
+
+Causes frequentes
+-----------------
+ 1. Fins de ligne : plusieurs commandes DOS separent les lignes par CR : sur
+    les fichiers texte LF de LINUX-0 elles ne coupent pas les lignes (tail,
+    tac, fold).
+ 2. Memoire : l'image d'un processus 8086 n'est pas deplacable, l'appel break
+    ne peut donc agrandir le tas que si la memoire qui suit est libre. Les
+    commandes qui allouent beaucoup reservent leur tas des l'exec par une
+    directive {$IFDEF LPC}{$M pile,tasmin,tasmax}{$ENDIF} (diff, join,
+    make, ldd). Pendant exec, le pere d'un vfork (le shell) peut etre
+    ecrit dans la zone de va-et-vient : gpic, groff, lex, myisamchk
+    s'executent donc depuis sh (avec un disque dur; une disquette n'a pas
+    de zone de va-et-vient).
+ 3. Defauts des commandes elles-memes, identiques sous DOS : sort -r -n -u
+    (erreur 002), uniq -c -d (103), paste (202).
+ 4. Programmes DOS : which cherche dans un PATH separe par ";".
+
+COMMANDE    ETAT      ESSAI                                           SOUS DOS          REMARQUE
+----------  --------  ----------------------------------------------  ----------------  --------------------
+a2p         marche    aide /?                                         identique         demarre; aide /? identique a DOS
+ac          marche    ac                                              identique
+access      marche    aide /?                                         identique         demarre; aide /? identique a DOS
+aclocal     marche    aide /?                                         identique         demarre; aide /? identique a DOS
+addftinfo   marche    aide /?, aide                                   absent de BIN16
+addr2line   marche    aide /?, aide                                   absent de BIN16
+afmtodit    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+ansi2knr    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+anytopnm    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+ar          marche    ar t                                            identique
+asciitopgm  marche    aide /?, aide                                   absent de BIN16
+atktopbm    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+awk         marche    awk -f prog fichier                             identique
+banner      marche    banner OK                                       identique
+base64      marche    base64 fichier                                  identique
+basename    marche    aide /?, basename a/b/c.txt                     absent de BIN16
+bash        marche    bash (VGA)                                      identique
+bc          marche    aide /?                                         identique         demarre; aide /? identique a DOS
+bdiff       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+bfs         marche    aide /?                                         identique         demarre; aide /? identique a DOS
+bzip2       marche    bzip2 -c, aller-retour -dc                      identique         adapte (NextIndex Word) ; gzip/bzip2 exigent de la memoire libre
+cal         marche    cal 2 2026                                      identique
+cat         marche    cat, cat -n, 2 fichiers                         identique
+checkeq     marche    aide /?                                         identique         demarre; aide /? identique a DOS
+checknr     marche    aide /?                                         identique         demarre; aide /? identique a DOS
+chmod       reserves  chmod 444/644                                   identique         ls -l montre les attributs DOS : effet des droits non visible
+chsh        marche    aide /?                                         identique         demarre; aide /? identique a DOS
+cksum       marche    cksum                                           identique         octets reels (LF) : differe de DOS (CR LF)
+clear       marche    clear                                           identique
+cmp         marche    cmp (egal, different)                           identique
+column      marche    column fichier                                  identique
+comm        marche    comm f1 f2                                      identique
+compress    marche    compress -c                                     identique
+cp          marche    cp f1 f2                                        identique
+cpp         marche    aide /?                                         identique         demarre; aide /? identique a DOS
+crontab     marche    aide /?                                         identique         demarre; aide /? identique a DOS
+csh         marche    csh (serie)                                     identique
+csplit      marche    csplit fichier 3                                identique
+ctags       echoue    ctags fichier                                   identique         erreur 202 (pile) : tableaux locaux de ProcessPath
+cut         marche    cut f -b 1-3                                    identique
+cvs         marche    aide /?                                         identique         demarre; aide /? identique a DOS
+date        marche    date                                            identique         format Unix
+dc          marche    aide /?                                         identique         demarre; aide /? identique a DOS
+dd          marche    dd if= of=                                      identique
+df          marche    df                                              identique
+diff        marche    diff f1 f2                                      identique         tas de 96 Ko reserve a l exec ({$M} LPC)
+dircmp      marche    aide /?                                         identique         demarre; aide /? identique a DOS
+dircolors   marche    dircolors -b                                    identique
+dirname     marche    dirname                                         identique
+dos2unix    marche    dos2unix                                        identique
+dpost       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+dsplit      marche    aide /?                                         identique         demarre; aide /? identique a DOS
+du          marche    du, du fichier                                  identique
+echo        marche    echo a b c                                      corrige           ECHO.PAS ecrit maintenant un espace entre les arguments
+ed          marche    ed + w + q (clavier)                            identique         essai au clavier : 1d, w, q
+egrep       marche    egrep -c, alternance                            identique         dossiers de patrons/fichiers limites a 16 (adaptation LPC)
+emacs       marche    emacs ^X^S ^X^C (VGA)                           identique
+env         marche    env                                             identique
+eqn         marche    aide /?                                         identique         demarre; aide /? identique a DOS
+etags       marche    etags                                           identique
+expand      marche    expand                                          identique
+expr        marche    expr + / length                                 identique
+factor      marche    factor 360                                      identique
+fallocate   marche    aide /?, aide                                   absent de BIN16
+false       marche    false                                           identique
+fgrep       marche    fgrep -n                                        identique
+fmt         marche    fmt                                             identique
+fold        echoue    fold --width=20 fichier                         identique         boucle sans fin sur fichier LF (option --width)
+format      reserves  aide /?                                         identique         syntaxe %s mal interpretee (idem DOS)
+free        marche    free                                            identique
+fromdos     marche    fromdos                                         identique
+gcal        marche    gcal 2 2026                                     identique
+geqn        marche    aide /?                                         identique         demarre; aide /? identique a DOS
+getent      marche    aide /?                                         identique         demarre; aide /? identique a DOS
+getopt      marche    getopt ab -a x                                  identique
+gettext     marche    gettext                                         identique
+getty       marche    invite login:, /etc/issue (\n \s \r)            -                 programme systeme
+glookbib    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+gperf       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+gpic        marche    aide /?                                         -                 le pere (sh) est ecrit dans la zone de va-et-vient pendant exec
+grefer      marche    aide /?                                         identique         demarre; aide /? identique a DOS
+grep        marche    grep root /etc/passwd                           identique         le nom du fichier trouve est precede du repertoire (FSplit)
+grodvi      marche    aide /?                                         identique         demarre; aide /? identique a DOS
+groff       marche    groff -v                                        -                 idem gpic
+groupdel    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+groups      marche    groups                                          identique
+gsoelim     marche    aide /?                                         identique         demarre; aide /? identique a DOS
+gunzip      marche    gunzip -c                                       identique
+gzexe       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+gzip        marche    gzip -c                                         identique
+h2ph        marche    aide /?                                         identique         demarre; aide /? identique a DOS
+halt        marche    halt (arret de QEMU)                            -                 arrete la machine
+hd          marche    hd                                              identique         octets reels (LF) : differe de DOS (CR LF)
+head        marche    head --lines, -n                                identique
+hexdump     marche    hexdump                                         identique         octets reels (LF) : differe de DOS (CR LF)
+htdigest    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+htpasswd    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+iconv       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+id          marche    id, id -u, id -un, id -g                        identique
+ifconfig    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+init        marche    demarrage, /etc/ttys, LANGUAGE de /etc/profile  -                 programme systeme (COFF)
+ispell      marche    aide /?                                         identique         demarre; aide /? identique a DOS
+join        marche    join f1 f1                                      identique         MaxG=60 sous LPC, tas de 40 Ko reserve
+ksh         marche    ksh (VGA)                                       identique
+lastlog     marche    lastlog                                         identique         Comp remplace par 8 octets; il faut /var/log/lastlog
+ldd         marche    ldd /bin/ls                                     -                 tables reduites sous LPC (60 bibliotheques)
+less        reserves  aide /?                                         identique         sans sortie en mode non interactif (idem DOS)
+lex         marche    aide /?                                         -                 idem gpic
+lispmtopgm  marche    aide /?, aide                                   absent de BIN16
+lkbib       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+login       marche    mot de passe, refus, motd, 5 langues            -                 programme systeme
+logname     marche    logname                                         identique
+look        marche    look be fichier                                 identique
+lp          marche    aide /?                                         identique         demarre; aide /? identique a DOS
+ls          marche    ls, ls -a, ls -l                                identique
+macptopbm   marche    aide /?, aide                                   absent de BIN16
+make        reserves  make -f fichier                                 -                 tables reduites sous LPC; les recettes sont lancees par le programme DOS COMMAND, absent : erreur 127
+md5sum      marche    md5sum                                          identique         octets reels (LF) : differe de DOS (CR LF)
+merge       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+mkdirhier   marche    aide /?, mkdirhier x/y                          absent de BIN16
+mkmanifest  marche    aide /?, aide                                   absent de BIN16
+mktemp      marche    mktemp                                          identique
+more        reserves  aide /?                                         identique         sans sortie en mode non interactif (idem DOS)
+mtest       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+mtvtoppm    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+mv          reserves  mv f1 f2                                        identique         deplace seulement vers un repertoire existant (comme sous DOS)
+myisamchk   marche    aide /?                                         -                 idem gpic
+nano        marche    nano + ^O + ^X (VGA)                            identique
+neqn        marche    aide /?                                         identique         demarre; aide /? identique a DOS
+nl          marche    nl                                              identique
+nroff       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+od          marche    od, od -c, od -x                                identique         octets reels (LF) : differe de DOS (CR LF)
+passwd      marche    changement de mot de passe, 5 langues           -                 programme systeme (set-uid)
+paste       echoue    paste f1 f2                                     identique         erreur 202 : tableaux locaux de 100 fichiers (idem DOS)
+pcat        marche    aide /?                                         identique         demarre; aide /? identique a DOS
+perl        reserves  perl -v, aide /?                                idem              demarre; sans sortie avec /? (idem DOS)
+pico        marche    pico + ^O + ^X (VGA)                            identique
+pr          marche    pr                                              identique
+printf      reserves  printf "%s-%d" ...                              identique         syntaxe %s %d mal interpretee (idem DOS)
+pwd         marche    pwd                                             identique
+python      marche    aide /?                                         identique         demarre; aide /? identique a DOS
+readelf     marche    aide /?, aide                                   absent de BIN16
+reboot      marche    reboot (redemarrage)                            -                 redemarre la machine
+red         marche    red + w + q (clavier)                           identique
+ref         marche    aide /?                                         identique         demarre; aide /? identique a DOS
+repeat      marche    aide /?                                         identique         demarre; aide /? identique a DOS
+replace     marche    aide /?                                         identique         demarre; aide /? identique a DOS
+rev         marche    rev                                             identique
+rm          marche    rm, rm -r, rm -f                                identique
+rmdir       marche    rmdir                                           identique
+s2p         marche    aide /?                                         identique         demarre; aide /? identique a DOS
+sdiff       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+sed         marche    sed -e s/a/A/g, -e 2d                           identique
+seq         marche    seq 3, seq 2 5                                  identique
+sh          marche    shdos (VGA)                                     identique
+sh (SHELL)  marche    variables, tubes, redirections, echo interne    -                 programme systeme; pas de if/for/$(...)
+sleep       marche    aide /?                                         identique         demarre; aide /? identique a DOS
+sort        reserves  sort fichier                                    idem              sort fichier seul; -r -n -u : erreur 002 (idem DOS)
+split       marche    split 2 fichier p_                              identique
+stat        marche    stat                                            identique
+strings_    marche    strings_                                        identique
+sum         marche    sum                                             identique         octets reels (LF) : differe de DOS (CR LF)
+tac         reserves  tac fichier                                     identique         idem tail : une seule ligne sur les fichiers LF
+tail        reserves  tail f --lines 2                                identique         lignes separees par CR : sans fin de ligne sur les fichiers LF
+tee         marche    tee                                             identique
+todos       marche    todos                                           identique
+touch       marche    touch                                           identique
+tr          marche    tr abc ABC                                      identique
+tree        reserves  tree                                            identique         affichage DOS (C:\...)
+true        marche    true                                            identique
+umask       marche    umask                                           erreur de masque  affiche 022 (le shell a aussi un umask interne)
+uname       marche    uname, uname -a                                 -                 LINUX-0 linux0 KERNEL16UNIX 0.1 i8086 (SysUname)
+unexpand    marche    unexpand                                        identique
+uniq        reserves  uniq -c                                         identique         uniq fichier seul; -c -d : erreur 103 (idem DOS)
+unlink      marche    unlink                                          identique
+useradd     marche    aide /?                                         identique         demarre; aide /? identique a DOS
+userdel     marche    aide /?                                         identique         demarre; aide /? identique a DOS
+uudecode    marche    aide /?                                         identique         demarre; aide /? identique a DOS
+uuencode    marche    uuencode                                        identique
+vi          marche    vi i texte :wq (VGA)                            identique
+wc          marche    wc -l -w -c                                     identique
+which       reserves  which sh                                        identique         cherche dans PATH separe par ";" : ne trouve rien avec ":"
+yes         marche    aide /?                                         identique         demarre; aide /? identique a DOS
+zcat        marche    zcat                                            identique
+zforce      marche    aide /?                                         identique         demarre; aide /? identique a DOS

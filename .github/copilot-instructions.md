@@ -9,7 +9,7 @@ LINUX-0 est une collection de clones de commandes Linux écrites en Pascal (Turb
 - **Répertoire racine** : Implémentations individuelles des commandes (`CAT.PAS`, `AWK.PAS`, `SED.PAS`, etc.)
 - **Répertoire `LIB/`** : Unités utilitaires partagées (`STDIO.PAS`, `STDLIB.PAS`, `MATH.PAS`, etc.)
 - **`BIN16/` & `WIN32/`** : Exécutables compilés pour différentes plateformes
-- **`KERNEL<arch/bits><personnalité>/`** : un dossier autonome par noyau (ex. `KERNEL16DOS/` : PC 16 bits, API DOS, FAT12/16 ; futurs `KERNEL16UNIX`, `KERNEL32`, `KERNELARM64`...). Chaque dossier contient ses sources, `SYSTEM`, `TOOLS`, `IMAGE`, `TESTS`, ses scripts de construction et son `README.md` ; aucun code n'est partagé entre noyaux. Les commandes restent à la racine, par format d'exécutable (`BIN16`, `WIN32`, puis `BIN32`...). Les noms de fichiers source et d'unités restent compatibles 8.3 (ex. `K16DOS.PAS`). Voir le `README.md` racine, section « Noyaux ».
+- **`KERNEL<arch/bits><personnalité>/`** : un dossier autonome par noyau (ex. `KERNEL16DOS/` : PC 16 bits, API DOS, FAT12/16 ; `KERNEL16UNIX/` : PC 16 bits, appels UNIX V7, UFS1, exécutables COFF ; futurs `KERNEL32`, `KERNELARM64`...). Chaque dossier contient ses sources, `SYSTEM`, `TOOLS`, `IMAGE`, `TESTS`, ses scripts de construction et son `README.md` ; aucun code n'est partagé entre noyaux. Les commandes restent à la racine, par format d'exécutable (`BIN16`, `WIN32`, puis `BIN32`...). Les noms de fichiers source et d'unités restent compatibles 8.3 (ex. `K16DOS.PAS`). Voir le `README.md` racine, section « Noyaux ».
 
 ### Modèle de structure de code
 Chaque commande suit ce modèle cohérent :

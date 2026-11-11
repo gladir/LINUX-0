@@ -9,10 +9,42 @@ Program UNAME;
 {$IFDEF WINDOWS}
 Uses SysUtils;
 {$ENDIF}
+{$IFDEF LPC}
+Uses Unix;
+{$ENDIF}
 
 Var
  I:Integer;
 
+{$IFDEF LPC}
+Function OSVersion:String;
+Var
+ U:TUtsName;
+Begin
+ OSVersion:='LINUX-0';
+ If SysUname(U)=0 Then OSVersion:=U.SysName;
+End;
+
+Procedure ShowUname(Opt:String);
+Var
+ U:TUtsName;
+Begin
+ If SysUname(U)<>0 Then Begin
+  WriteLn('uname : appel systeme impossible');
+  Exit;
+ End;
+ If(Opt='-s')or(Opt='--kernel-name')Then Write(U.SysName,' ') Else
+ If(Opt='-n')or(Opt='--nodename')Then Write(U.NodeName,' ') Else
+ If(Opt='-r')or(Opt='--kernel-release')Then Write(U.Release,' ') Else
+ If(Opt='-v')or(Opt='--kernel-version')Then Write(U.Version,' ') Else
+ If(Opt='-m')or(Opt='--machine')Then Write(U.Machine,' ') Else
+ If(Opt='-a')or(Opt='--all')Then
+  Write(U.SysName,' ',U.NodeName,' ',U.Release,' ',U.Version,' ',
+        U.Machine,' ');
+End;
+{$ENDIF}
+
+{$IFNDEF LPC}
 Function OSVersion:String;Begin
  OSVersion:='MS-DOS';
   {$IFDEF LCLcarbon}
@@ -69,6 +101,7 @@ Function OSVersion:String;Begin
   {$ENDIF}
  {$ENDIF}
 End;
+{$ENDIF}
 
 BEGIN
  If(ParamStr(1)='/?')or(ParamStr(1)='--help')or(ParamStr(1)='-h')or
@@ -79,6 +112,14 @@ BEGIN
   WriteLn('Syntaxe : UNAME [-h]');
   WriteLn;
   WriteLn(' -h        Affiche l''aide de cette commande');
+  {$IFDEF LPC}
+  WriteLn(' -a        Affiche toutes les informations du noyau');
+  WriteLn(' -s        Affiche le nom du noyau (LINUX-0)');
+  WriteLn(' -n        Affiche le nom de la machine');
+  WriteLn(' -r        Affiche la version du noyau (KERNEL16UNIX)');
+  WriteLn(' -v        Affiche la version');
+  WriteLn(' -m        Affiche l''architecture de la machine');
+  {$ENDIF}
   WriteLn(' -o        Affiche le systäme d''exploitation');
   WriteLn(' -p        Affiche le microprocesseur');
   WriteLn(' --version Affiche la version de la commande');
@@ -99,10 +140,19 @@ BEGIN
     Write(OSVersion,' ');
    End
     Else
-   If ParamStr(I)='--version'Then Write('Corail Version 1.0 ');
+   If ParamStr(I)='--version'Then Write('Corail Version 1.0 ')
+  {$IFDEF LPC}
+    Else ShowUname(ParamStr(I))
+  {$ENDIF}
+   ;
   End;
   WriteLn;
  End
   Else
- WriteLn('Corail');
+ {$IFDEF LPC}
+ WriteLn(OSVersion)
+ {$ELSE}
+ WriteLn('Corail')
+ {$ENDIF}
+ ;
 END.

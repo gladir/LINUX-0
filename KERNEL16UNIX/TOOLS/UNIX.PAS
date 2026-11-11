@@ -1,7 +1,7 @@
 { @author: Sylvain Maltais (support@gladir.com)
   @created: 2026
   @website(https://www.gladir.com/linux-0)
-  @abstract(Target: Linux Pascal (LPC /X))
+  @abstract(Target: KERNEL16UNIX (LPC /X))
   @description: Unite UNIX de Linux Pascal : interface des appels systeme du
    noyau LINUX-0 (INT 80h) et bibliotheque "libc" de la cible LINUX-0.
 
@@ -86,7 +86,7 @@ Const
  S_IFIFO=$1000; S_ISUID=$800; S_ISGID=$400; S_ISVTX=$200;
  S_IREAD=$100; S_IWRITE=$80; S_IEXEC=$40;
  { types de systemes de fichiers pour mount }
- FS_AUTO=0; FS_FAT=1; FS_UFS=2;
+ FS_AUTO=0; FS_UFS=2;
  { codes d'erreur (errno, UNIX V7; au-dela, valeurs de 4.4BSD) }
  EPERM=1; ENOENT=2; ESRCH=3; EINTR=4; EIO=5; ENXIO=6; E2BIG=7; ENOEXEC=8;
  EBADF=9; ECHILD=10; EAGAIN=11; ENOMEM=12; EACCES=13; EFAULT=14;
@@ -148,7 +148,7 @@ Type
   SwapIns: Word;      { images relues }
  End;
  TMountInfo=Record
-  FsType: Byte;       { 1=FAT12, 2=FAT16, 3=UFS, 4=dev }
+  FsType: Byte;       { 1=UFS, 2=dev }
   Drive: Byte;
   ReadOnly: Byte;
   Pad: Byte;

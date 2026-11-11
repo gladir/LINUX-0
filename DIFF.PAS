@@ -6,6 +6,8 @@
 
 Program DIFF;
 
+{$IFDEF LPC}{$M 8192,98304,98304}{$ENDIF}
+
 Uses DOS;
 
 Const
