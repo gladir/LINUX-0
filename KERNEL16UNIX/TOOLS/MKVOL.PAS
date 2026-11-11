@@ -8,20 +8,26 @@
   (l'archive est ecrite directement a partir du secteur 0), et commence par
   le fichier VOLUME ("LINUX-0 numero total"). Les repertoires sont dans le
   premier volume de donnees; un fichier n'est jamais coupe entre deux
-  volumes. Modes, proprietaires et dates sont ceux de l'arborescence
-  (l'installateur /bin/install les applique).
+  volumes. L'installateur /bin/install applique modes, proprietaires et
+  dates.
+
+  Les modes, proprietaires et dates ne sont pas lus dans le systeme de
+  fichiers hote (le projet n'autorise que les unites DOS et CRT) mais dans
+  un fichier liste, une ligne par fichier ou repertoire :
+     type mode_octal uid gid date chemin
+  (type d ou f, date en secondes depuis 1970, eventuellement fractionnaire),
+  ce que produit BUILD.SH avec
+     find . -mindepth 1 -printf '%y %m %U %G %T@ %P\n' | sort -k6
 
   Syntaxe :
-   MKVOL arbre prefixe premier_numero
+   MKVOL arbre liste prefixe premier_numero
      -> prefixeN.TAR (volumes, pour le CD-ROM) et prefixeN.IMG (images de
         disquette de 1 474 560 octets), N = premier_numero, ...
 }
 
 Program MKVOL;
 
-{$MODE OBJFPC}{$H+}
-
-Uses BaseUnix;
+{$MODE OBJFPC}{$H+}{$I-}
 
 Const
  FLOPPY = 1474560;
@@ -29,19 +35,20 @@ Const
  CAP = FLOPPY - 4 * 512;
 
 Type
- TStrList = Array of String;
  TEntry = Record
   Dir: Boolean;
   Name: String;               { chemin relatif a l'arbre }
+  Mode, Uid, Gid: Longint;
+  MTime: Int64;
   Size: Int64;                { place dans l'archive : en-tete + donnees }
   Vol: Integer;
  End;
 
 Var
- Tree, Prefix: String;
+ Tree, Prefix, ListName: String;
  First, Code, NVol, K, V: Integer;
- Dirs, Files: TStrList;
  Entries: Array of TEntry;
+ NDirs: Integer;
  Used: Int64;
  Buf: Array of Byte;
  BufLen: Longint;
@@ -57,48 +64,73 @@ Begin
  Halt(1);
 End;
 
-Procedure Push(Var A: TStrList; S: String);
+{ --- liste des fichiers ---------------------------------------------------- }
+
+Function Field(Var L: String): String;
+{ premier mot de L (separe par des espaces), retire de L }
+Var P: Integer;
 Begin
- SetLength(A, Length(A) + 1);
- A[High(A)] := S;
+ While (L <> '') And (L[1] = ' ') Do Delete(L, 1, 1);
+ P := Pos(' ', L);
+ If P = 0 Then P := Length(L) + 1;
+ Result := Copy(L, 1, P - 1);
+ Delete(L, 1, P);
 End;
 
-Procedure SortStrings(Var A: TStrList);
-Var I, J: Integer; T: String;
+Function OctVal(S: String): Longint;
+Var I: Integer;
 Begin
- For I := 1 To High(A) Do Begin
-  T := A[I]; J := I - 1;
-  While (J >= 0) And (A[J] > T) Do Begin A[J + 1] := A[J]; Dec(J) End;
-  A[J + 1] := T;
+ Result := 0;
+ For I := 1 To Length(S) Do
+  If S[I] In ['0'..'7'] Then Result := Result * 8 + Ord(S[I]) - 48
+  Else Fail('mode octal invalide : ' + S);
+End;
+
+Function FileLen(Path: String): Int64;
+Var F: File;
+Begin
+ Assign(F, Path);
+ Reset(F, 1);
+ If IOResult <> 0 Then Fail('fichier illisible : ' + Path);
+ Result := FileSize(F);
+ Close(F);
+End;
+
+Procedure ReadList;
+{ repertoires d'abord (premier volume), puis les fichiers, dans l'ordre de
+  la liste }
+Var T: Text; L, Kind, M, U, G, D: String; E: TEntry; All: Array of TEntry;
+    I, N, Dummy: Integer;
+Begin
+ Assign(T, ListName);
+ Reset(T);
+ If IOResult <> 0 Then Fail('liste illisible : ' + ListName);
+ N := 0;
+ While Not Eof(T) Do Begin
+  ReadLn(T, L);
+  If L = '' Then Continue;
+  Kind := Field(L); M := Field(L); U := Field(L); G := Field(L);
+  D := Field(L);
+  If (Kind <> 'd') And (Kind <> 'f') Then
+   Fail('type ni d ni f (lien ou fichier special ?) : ' + L);
+  If Pos('.', D) > 0 Then D := Copy(D, 1, Pos('.', D) - 1);
+  E.Dir := Kind = 'd'; E.Name := L;
+  E.Mode := OctVal(M);
+  Val(U, E.Uid, Dummy); Val(G, E.Gid, Dummy); Val(D, E.MTime, Dummy);
+  E.Vol := 0;
+  If E.Dir Then E.Size := 512
+  Else E.Size := 512 + ((FileLen(Tree + '/' + L) + 511) Div 512) * 512;
+  SetLength(All, N + 1); All[N] := E; Inc(N);
  End;
-End;
-
-Function Join(Rel, N: String): String;
-Begin
- If Rel = '' Then Join := N Else Join := Rel + '/' + N;
-End;
-
-{ parcours en profondeur, dans l'ordre alphabetique (comme os.walk trie) }
-Procedure Walk(Rel: String);
-Var Dp: PDir; De: PDirent; N: String; St: Stat; Sub, Fl: TStrList; I: Integer;
-Begin
- Dp := fpOpenDir(Tree + '/' + Rel);
- If Dp = Nil Then Fail('repertoire illisible : ' + Tree + '/' + Rel);
- SetLength(Sub, 0); SetLength(Fl, 0);
- Repeat
-  De := fpReadDir(Dp^);
-  If De = Nil Then Break;
-  N := PChar(@De^.d_name[0]);
-  If (N = '.') Or (N = '..') Then Continue;
-  If fpLStat(Tree + '/' + Join(Rel, N), St) <> 0 Then Fail('stat : ' + Join(Rel, N));
-  If fpS_ISDIR(St.st_mode) Then Push(Sub, N) Else Push(Fl, N);
- Until False;
- fpCloseDir(Dp^);
- SortStrings(Sub); SortStrings(Fl);
- For I := 0 To High(Fl) Do Push(Files, Join(Rel, Fl[I]));
- For I := 0 To High(Sub) Do Begin
-  Push(Dirs, Join(Rel, Sub[I]));
-  Walk(Join(Rel, Sub[I]));
+ Close(T);
+ SetLength(Entries, N);
+ NDirs := 0;
+ For I := 0 To N - 1 Do If All[I].Dir Then Begin
+  Entries[NDirs] := All[I]; Inc(NDirs);
+ End;
+ K := NDirs;
+ For I := 0 To N - 1 Do If Not All[I].Dir Then Begin
+  Entries[K] := All[I]; Inc(K);
  End;
 End;
 
@@ -128,7 +160,8 @@ Begin
 End;
 
 { en-tete ustar (POSIX.1-1988), comme le module tarfile de Python }
-Procedure Header(Name: String; Mode, Uid, Gid: Longint; MTime, Size: Int64; Kind: Char);
+Procedure Header(Name: String; Mode, Uid, Gid: Longint; MTime, Size: Int64;
+  Kind: Char);
 Var H: Array[0..511] Of Byte; Sum, I: Longint;
 
  Procedure Put(O: Integer; S: String);
@@ -155,20 +188,20 @@ Begin
  Emit(H, 512);
 End;
 
-Procedure AddFile(Rel: String; Var NFiles: Integer);
-Var St: Stat; F: File; Data: Array of Byte;
+Procedure AddFile(Const E: TEntry; Var NFiles: Integer);
+Var F: File; Data: Array of Byte;
 Begin
- If fpLStat(Tree + '/' + Rel, St) <> 0 Then Fail('stat : ' + Rel);
- If fpS_ISDIR(St.st_mode) Then Begin
-  Header(Rel, St.st_mode And &7777, St.st_uid, St.st_gid, St.st_mtime, 0, '5');
+ If E.Dir Then Begin
+  Header(E.Name, E.Mode, E.Uid, E.Gid, E.MTime, 0, '5');
   Exit;
  End;
- Assign(F, Tree + '/' + Rel);
+ Assign(F, Tree + '/' + E.Name);
  Reset(F, 1);
+ If IOResult <> 0 Then Fail('fichier illisible : ' + E.Name);
  SetLength(Data, FileSize(F));
  If Length(Data) > 0 Then BlockRead(F, Data[0], Length(Data));
  Close(F);
- Header(Rel, St.st_mode And &7777, St.st_uid, St.st_gid, St.st_mtime, Length(Data), '0');
+ Header(E.Name, E.Mode, E.Uid, E.Gid, E.MTime, Length(Data), '0');
  If Length(Data) > 0 Then Emit(Data[0], Length(Data));
  EmitPad;
  Inc(NFiles);
@@ -194,44 +227,34 @@ Begin
  EmitPad;
  NF := 0;
  For I := 0 To High(Entries) Do
-  If Entries[I].Vol = V Then AddFile(Entries[I].Name, NF);
+  If Entries[I].Vol = V Then AddFile(Entries[I], NF);
  FillChar(Z, SizeOf(Z), 0);
  Emit(Z, 1024);
  WriteOut(Prefix + IStr(Num) + '.TAR', BufLen);
  WriteOut(Prefix + IStr(Num) + '.IMG', FLOPPY);
- WriteLn('  volume ', Num, '/', Last, ' : ', NF, ' fichiers, ', BufLen Div 1024, ' Ko');
+ WriteLn('  volume ', Num, '/', Last, ' : ', NF, ' fichiers, ',
+   BufLen Div 1024, ' Ko');
 End;
 
-Var St: Stat;
-
 BEGIN
- If ParamCount <> 3 Then Begin
-  WriteLn('Syntaxe : MKVOL arbre prefixe premier_numero');
+ If ParamCount <> 4 Then Begin
+  WriteLn('Syntaxe : MKVOL arbre liste prefixe premier_numero');
   Halt(2);
  End;
- Tree := ParamStr(1); Prefix := ParamStr(2);
- Val(ParamStr(3), First, Code);
- If Code <> 0 Then Fail('numero invalide : ' + ParamStr(3));
- Walk('');
- { repertoires d'abord (premier volume), puis les fichiers }
- SetLength(Entries, Length(Dirs) + Length(Files));
- For K := 0 To High(Dirs) Do Begin
-  Entries[K].Dir := True; Entries[K].Name := Dirs[K]; Entries[K].Size := 512;
- End;
- For K := 0 To High(Files) Do
-  With Entries[Length(Dirs) + K] Do Begin
-   Dir := False; Name := Files[K];
-   If fpStat(Tree + '/' + Name, St) <> 0 Then Fail('stat : ' + Name);
-   Size := 512 + ((St.st_size + 511) Div 512) * 512;
-  End;
+ Tree := ParamStr(1); ListName := ParamStr(2); Prefix := ParamStr(3);
+ Val(ParamStr(4), First, Code);
+ If Code <> 0 Then Fail('numero invalide : ' + ParamStr(4));
+ ReadList;
  NVol := 1; Used := 0;
  For K := 0 To High(Entries) Do Begin
-  If Entries[K].Size > CAP Then Fail('fichier trop gros pour une disquette : ' + Entries[K].Name);
+  If Entries[K].Size > CAP Then
+   Fail('fichier trop gros pour une disquette : ' + Entries[K].Name);
   If Used + Entries[K].Size > CAP Then Begin Inc(NVol); Used := 0 End;
   Entries[K].Vol := NVol - 1;
   Inc(Used, Entries[K].Size);
  End;
  SetLength(Buf, FLOPPY);
  For V := 0 To NVol - 1 Do MakeVolume(First + V, First + NVol - 1, V);
- WriteLn(NVol, ' volume(s) de donnees : disquettes ', First, ' a ', First + NVol - 1);
+ WriteLn(NVol, ' volume(s) de donnees : disquettes ', First, ' a ',
+   First + NVol - 1);
 END.

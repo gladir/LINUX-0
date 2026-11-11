@@ -3,17 +3,21 @@
 ; @website(https://www.gladir.com/linux-0)
 ; @abstract(Target: NASM, 8086)
 ; @description: Amorce UFS1 de LINUX-0 (comme boot1/boot2 de FreeBSD). Elle
-;   occupe les 16 premiers secteurs (8 Ko) d'une partition UFS1, zone que le
-;   systeme de fichiers reserve a l'amorce (le superbloc est a 8 Ko).
-;   - secteur 0 (charge a 0000:7C00 par le MBR, DL = unite, DS:SI = entree
-;     de la partition) : lit la geometrie du BIOS et charge les secteurs 1
-;     a 15 a 0000:7E00;
+;   occupe les 16 premiers secteurs (8 Ko) d'un systeme UFS1, zone que le
+;   systeme de fichiers reserve a l'amorce (le superbloc est a 8 Ko). Le
+;   systeme UFS1 est soit une partition de disque dur (amorcee par le MBR),
+;   soit toute une disquette (unite 00h, sans MBR, debut au secteur 0).
+;   - secteur 0 (charge a 0000:7C00 par le MBR ou par le BIOS, DL = unite) :
+;     disque dur (DL >= 80h) : DS:SI = entree de la partition, dont le debut
+;     est retenu; disquette (DL < 80h) : pas d'entree de partition, le debut
+;     est 0. Lit la geometrie du BIOS (INT 13h AH=08h) et charge les
+;     secteurs 1 a 15 a 0000:7E00;
 ;   - secteurs 1 a 15 : lisent le superbloc, l'inode 2 (racine), cherchent
 ;     "unix" dans le repertoire racine et chargent ce fichier (blocs directs
 ;     et indirection simple) a 1000:0000, puis lui donnent le controle.
-;   Comme avec le secteur d'amorce FAT, le noyau trouve l'unite d'amorce en
-;   0000:7C24 et le debut de la partition en 0000:7C1C (champ rempli par
-;   l'installateur ou MKIMAGE, sinon pris dans l'entree de la partition).
+;   Le noyau retrouve l'unite d'amorce en 0000:7C24 et le debut du systeme
+;   de fichiers en 0000:7C1C (champ rempli par l'installateur ou MKIMAGE,
+;   sinon pris dans l'entree de la partition; 0 pour une disquette).
 ;   nasm -f bin -o UFSBOOT.BIN UFSBOOT.ASM
 
         bits 16
@@ -30,7 +34,7 @@ SBUF    equ 0EA00h              ; secteur de travail
         nop
         db 'LINUX-0  '
         times 1Ch-($-$$) db 0
-hidden  dd 0                    ; 1Ch debut de la partition (secteurs)
+hidden  dd 0                    ; 1Ch debut du systeme de fichiers (secteurs)
         dd 0
 drive   db 80h                  ; 24h unite BIOS d'amorce
         times 3Eh-($-$$) db 0
@@ -41,8 +45,13 @@ start:  cli
         mov sp,7C00h
         sti
         cld
-        mov ax,[si+8]           ; DS:SI = entree de la partition (MBR)
+        xor ax,ax
+        xor bx,bx
+        cmp dl,80h              ; disquette : pas d'entree de partition
+        jb .fl
+        mov ax,[si+8]           ; disque dur : DS:SI = entree de la partition
         mov bx,[si+10]
+.fl:
         xor cx,cx
         mov ds,cx
         mov es,cx

@@ -2,13 +2,14 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Free Pascal)
-  @description: Linux Pascal (LPC) : compilateur en ligne de commande du
-    projet LINUX-0, derive du clone de Turbo Pascal 7.0 (TPC.PAS du depot
+  @description: LPC (Linux Pascal Compiler) : compilateur en ligne de
+    commande du projet LINUX-0 (cible KERNEL16UNIX : noyau UNIX V7 16 bits et
+    programmes COFF), derive du clone de Turbo Pascal 7.0 (TPC.PAS du depot
     DEV-COOLS).
   @license: MIT
 }
 
-(* Linux Pascal ajoute au compilateur TPC d'origine :
+(* LPC ajoute au compilateur TPC d'origine :
 
    - les segments-unites, pour ecrire un programme (par exemple un noyau)
      dans un seul et unique fichier source tout en conservant le decoupage en
@@ -61,7 +62,7 @@ Program LPC;
   Base sur le clone du compilateur Turbo Pascal 6.0 (TURBOPASCAL6-0/TPC.PAS)
   avec les evolutions propres a la version 7.0 :
    - unites au format TPUQ (signature 'TPUQ', en-tete de 96 octets, taille
-     de la section symboles a l'offset $1E), voir DOC/TPU_FORMAT.txt;
+     de la section symboles a l'offset $1E);
      une unite TPU9 (6.0) ou plus ancienne provoque l'erreur 70;
    - type predefini PChar (^Char) et syntaxe etendue $X+ : constante chaine
      affectable a un PChar, tableau de Char base 0 compatible PChar,
@@ -81,8 +82,7 @@ Program LPC;
      "n lignes, s secondes, c octets de code, d octets de donnees";
    - code de plus de 64 Ko : mode multi-segments active automatiquement
      (routines globales FAR reparties en
-     segments de code, runtime recopie dans chacun ;
-       voir DOC/TPC_OPTIMISATIONS.txt) ;
+     segments de code, runtime recopie dans chacun) ;
    - unites standard CRT, DOS, STRINGS,
      PRINTER et GRAPH integrees (sources Pascal
      embarques, compiles a la demande quand aucune TPU n'est trouvee);
@@ -103,10 +103,7 @@ Program LPC;
      LOW/HIGH, 5Ch*4, TRUE/FALSE), @Result, Var.Word[n], OFFSET d'une
      variable locale, d'une procedure ou d'un Type.Champ, saut vers une
      etiquette Pascal.
-  La conformite a ete verifiee en compilant les 525 sources du projet CORAIL
-  et en comparant les executables a ceux de Borland sous DOSBox, voir
-  DOC/CORAIL_TPC_TESTS.txt et TESTS/CORAIL_TPC/.
-  Contrainte du projet: tout dans TPC.PAS, aucun fichier d'inclusion,
+  Contrainte du projet: tout dans LPC.PAS, aucun fichier d'inclusion,
   aucune unite auxiliaire; Uses DOS uniquement.
   Hote valide: Free Pascal 3.2, mode TP, strings courts uniquement.
   Cible: DOS MZ multi-segments, instructions 8086, CS/DS local et pile separee.
@@ -123,7 +120,7 @@ Program LPC;
   statiques pour procedures.
   /B recompile les sources et produit des fichiers TPU; /M ne recompile que
   les unites dont le source est plus recent que la TPU.
-  Unites de code: conteneur TPUQ marque profil TPC1, ABI locale near,
+  Unites de code: conteneur TPUQ marque profil LPC1, ABI locale near,
   incompatible ABI Borland. TURBO.TPL: index TPUQ concatene, lecture directe
   par tranche, import des constantes et routines Borland.
   La compatibilite avec le linker Borland n'a pas ete validee.
@@ -273,7 +270,7 @@ Type
   { Packed + Word: jamais de pointeurs natifs 32/64 bits dans une TPU. }
  { En-tete TPUQ (Turbo Pascal 7.0): 96 octets ($60). Par rapport a TPU9,
    un mot (Browser, offset $1C) precede EndTrace, qui est donc la taille de
-   la section symboles a l'offset $1E, voir DOC/TPU_FORMAT.txt. }
+   la section symboles a l'offset $1E. }
  TUnitHeader = Packed Record
   Signature: Array[0..3] Of Char;
   Next, Link, Name, Interf, ProcMap, CodeMap, ConstMap, DataMap: Word;
@@ -1386,7 +1383,7 @@ const PrinterSource: array[1..10] of string[255] = (
  ' If IOResult<>0 Then ;',
  'End.');
 { --- debut UnixSource (genere par MKEMBED) --- }
-const UnixSource: array[1..1689] of string[255] = (
+const UnixSource: array[1..1898] of string[255] = (
  '{ @author: Sylvain Maltais (support@gladir.com)',
  '  @created: 2026',
  '  @website(https://www.gladir.com/linux-0)',
@@ -1413,8 +1410,8 @@ const UnixSource: array[1..1689] of string[255] = (
  '  Couche libc : la bibliotheque d''execution de Turbo Pascal (et les unites',
  '  DOS, CRT, PRINTER) s''adressent aux services de MS-DOS par INT 21h. Sous',
  '  LINUX-0, le vecteur 21h est propre a chaque processus : le noyau y place',
- '  l''adresse de DosEntry, enregistree par l''appel systeme 201 (setdos) lors de',
- '  l''initialisation de cette unite. DosEntry traduit alors, dans le',
+ '  l''adresse de DosEntry, enregistree par l''appel systeme 201 (setdos)',
+ '  lors de l''initialisation de cette unite. DosEntry traduit alors, dans le',
  '  processus lui-meme, chaque service DOS en appels systeme LINUX-0 (open,',
  '  read, write, getdirentries, vfork/exece/wait, ...), comme le ferait une',
  '  libc : le programme n''appelle jamais de service MS-DOS.',
@@ -1510,7 +1507,7 @@ const UnixSource: array[1..1689] of string[255] = (
  '  Pid: Integer;',
  '  PPid: Integer;',
  '  Stat: Byte;     { 1=pret, 2=en attente, 3=zombie }',
- '  Flags: Byte;    { 1 = processus courant, 2 = image dans la zone de va-et-vient }',
+ '  Flags: Byte;    { 1 = processus courant, 2 = image en va-et-vient }',
  '  Paras: Word;    { memoire en paragraphes }',
  '  Ticks: Longint; { temps processeur en tops d''horloge (18,2 par seconde) }',
  '  Name: String[15];',
@@ -1633,6 +1630,9 @@ const UnixSource: array[1..1689] of string[255] = (
  'Function SysProcInfo(Index: Integer; Var P: TProcInfo): Boolean;',
  'Function SysMemInfo(Var M: TMemInfo): Integer;',
  'Function SysMountInfo(Index: Integer; Var M: TMountInfo): Boolean;',
+ 'Function SysGetEnv(Name: String): String;',
+ 'Function SysLangOf(V: String): Integer;',
+ 'Function SysLang: Integer;',
  'Function SysErrorText(E: Integer): String;',
  'Function SigName(Sig: Integer): String;',
  'Function UnixPath(S: String): String;',
@@ -1930,7 +1930,8 @@ const UnixSource: array[1..1689] of string[255] = (
  '  While (I<=Length(Args)) And (Args[I] In ['' '',#9]) Do Inc(I);',
  '  If I>Length(Args) Then Break;',
  '  W:=''''; Quote:=False;',
- '  While (I<=Length(Args)) And (Quote Or Not (Args[I] In ['' '',#9])) Do Begin',
+ '  While (I<=Length(Args)) And (Quote Or Not (Args[I] In ['' '',#9])) Do Beg' +
+  'in',
  '   If Args[I]=''"'' Then Quote:=Not Quote Else W:=W+Args[I];',
  '   Inc(I);',
  '  End;',
@@ -2271,6 +2272,212 @@ const UnixSource: array[1..1689] of string[255] = (
  ' SysMountInfo:=Result16>0;',
  'End;',
  '',
+ '{ --- langue (variable d''environnement LANGUAGE) et messages ---------- }',
+ '',
+ 'Function SysGetEnv(Name: String): String;',
+ '{ valeur de la variable d''environnement Name ('''' si elle n''existe pas) }',
+ 'Var I: Integer; S: String;',
+ 'Begin',
+ ' SysGetEnv:='''';',
+ ' For I:=0 To EnvCount-1 Do Begin',
+ '  S:=EnvStr(I);',
+ '  If Copy(S,1,Length(Name)+1)=Name+''='' Then Begin',
+ '   SysGetEnv:=Copy(S,Length(Name)+2,255); Exit;',
+ '  End;',
+ ' End;',
+ 'End;',
+ '',
+ 'Function SysLangOf(V: String): Integer;',
+ '{ numero de colonne de la langue V (FR 1, EN 2, GR 3, SP 4, IT 5); DE et ES',
+ '  sont admis pour GR et SP; toute autre valeur : le francais }',
+ 'Const Codes=''FRENGRSPITDEES'';',
+ 'Var P: Integer;',
+ 'Begin',
+ ' SysLangOf:=1;',
+ ' If Length(V)<2 Then Exit;',
+ ' V:=UpCase(V[1])+UpCase(V[2]);',
+ ' P:=Pos(V,Codes);',
+ ' If (P=0) Or Not Odd(P) Then Exit;',
+ ' P:=(P+1) Div 2;',
+ ' If P=6 Then P:=3;',
+ ' If P=7 Then P:=4;',
+ ' SysLangOf:=P;',
+ 'End;',
+ '',
+ 'Function SysLang: Integer;',
+ 'Begin',
+ ' SysLang:=SysLangOf(SysGetEnv(''LANGUAGE''));',
+ 'End;',
+ '',
+ '(* Messages en cinq langues (colonnes FR, EN, GR, SP, IT) : seulement pour',
+ '   les programmes qui declarent le symbole LANGERR (DEFINE) avant leur',
+ '   en-tete; les tables occupent environ 5 Ko du segment de donnees. Les',
+ '   autres commandes gardent des messages en francais. *)',
+ '{$IFDEF LANGERR}',
+ 'Function PStr(P: PChar): String;',
+ 'Var S: String;',
+ 'Begin',
+ ' S:='''';',
+ ' While P^<>#0 Do Begin S:=S+P^; Inc(P) End;',
+ ' PStr:=S;',
+ 'End;',
+ '',
+ 'Const',
+ ' { messages des erreurs : colonnes FR, EN, GR (allemand), SP, IT }',
+ ' ErrMsg: Array[1..37,1..5] Of PChar = (',
+ '  (''Operation non permise'',''Operation not permitted'',',
+ '   ''Operation nicht erlaubt'',''Operacion no permitida'',',
+ '   ''Operazione non permessa''),',
+ '  (''Fichier ou repertoire inexistant'',''No such file or directory'',',
+ '   ''Datei oder Verzeichnis nicht gefunden'',',
+ '   ''No existe el archivo o directorio'',''File o directory inesistente''),',
+ '  (''Processus inexistant'',''No such process'',''Prozess nicht gefunden'',',
+ '   ''No existe el proceso'',''Processo inesistente''),',
+ '  (''Appel systeme interrompu'',''Interrupted system call'',',
+ '   ''Systemaufruf unterbrochen'',''Llamada al sistema interrumpida'',',
+ '   ''Chiamata di sistema interrotta''),',
+ '  (''Erreur d''''entree/sortie'',''Input/output error'',''Ein-/Ausgabefehle' +
+  'r'',',
+ '   ''Error de entrada/salida'',''Errore di input/output''),',
+ '  (''Peripherique inexistant'',''No such device or address'',',
+ '   ''Geraet nicht vorhanden'',''No existe el dispositivo'',',
+ '   ''Dispositivo inesistente''),',
+ '  (''Liste d''''arguments trop longue'',''Argument list too long'',',
+ '   ''Argumentliste zu lang'',''Lista de argumentos demasiado larga'',',
+ '   ''Lista di argomenti troppo lunga''),',
+ '  (''Format d''''executable invalide'',''Exec format error'',',
+ '   ''Ungueltiges Programmformat'',''Formato de ejecutable no valido'',',
+ '   ''Formato eseguibile non valido''),',
+ '  (''Descripteur de fichier invalide'',''Bad file descriptor'',',
+ '   ''Ungueltiger Dateideskriptor'',''Descriptor de archivo no valido'',',
+ '   ''Descrittore di file non valido''),',
+ '  (''Aucun processus fils'',''No child processes'',''Keine Kindprozesse'',',
+ '   ''No hay procesos hijos'',''Nessun processo figlio''),',
+ '  (''Ressource temporairement indisponible'',',
+ '   ''Resource temporarily unavailable'',',
+ '   ''Ressource vorlaeufig nicht verfuegbar'',',
+ '   ''Recurso temporalmente no disponible'',',
+ '   ''Risorsa temporaneamente non disponibile''),',
+ '  (''Memoire insuffisante'',''Out of memory'',''Nicht genug Speicher'',',
+ '   ''Memoria insuficiente'',''Memoria insufficiente''),',
+ '  (''Permission refusee'',''Permission denied'',''Zugriff verweigert'',',
+ '   ''Permiso denegado'',''Permesso negato''),',
+ '  (''Adresse invalide'',''Bad address'',''Ungueltige Adresse'',',
+ '   ''Direccion no valida'',''Indirizzo non valido''),',
+ '  (''Peripherique bloc requis'',''Block device required'',',
+ '   ''Blockgeraet erforderlich'',''Se requiere dispositivo de bloques'',',
+ '   ''Richiesto dispositivo a blocchi''),',
+ '  (''Peripherique ou ressource occupe'',''Device or resource busy'',',
+ '   ''Geraet oder Ressource belegt'',''Dispositivo o recurso ocupado'',',
+ '   ''Dispositivo o risorsa occupata''),',
+ '  (''Le fichier existe'',''File exists'',''Datei existiert bereits'',',
+ '   ''El archivo ya existe'',''Il file esiste''),',
+ '  (''Lien entre peripheriques'',''Cross-device link'',',
+ '   ''Link ueber Geraetegrenzen'',''Enlace entre dispositivos'',',
+ '   ''Collegamento tra dispositivi''),',
+ '  (''Peripherique inexistant'',''No such device'',''Geraet nicht vorhanden' +
+  ''',',
+ '   ''No existe el dispositivo'',''Dispositivo inesistente''),',
+ '  (''N''''est pas un repertoire'',''Not a directory'',''Kein Verzeichnis'',',
+ '   ''No es un directorio'',''Non e una directory''),',
+ '  (''Est un repertoire'',''Is a directory'',''Ist ein Verzeichnis'',',
+ '   ''Es un directorio'',''E una directory''),',
+ '  (''Argument invalide'',''Invalid argument'',''Ungueltiges Argument'',',
+ '   ''Argumento no valido'',''Argomento non valido''),',
+ '  (''Table des fichiers pleine'',''File table overflow'',''Dateitabelle vol' +
+  'l'',',
+ '   ''Tabla de archivos llena'',''Tabella dei file piena''),',
+ '  (''Trop de fichiers ouverts'',''Too many open files'',',
+ '   ''Zu viele offene Dateien'',''Demasiados archivos abiertos'',',
+ '   ''Troppi file aperti''),',
+ '  (''N''''est pas un terminal'',''Not a typewriter'',''Kein Terminal'',',
+ '   ''No es un terminal'',''Non e un terminale''),',
+ '  (''Fichier texte occupe'',''Text file busy'',''Programmdatei belegt'',',
+ '   ''Archivo de texto ocupado'',''File di testo occupato''),',
+ '  (''Fichier trop gros'',''File too large'',''Datei zu gross'',',
+ '   ''Archivo demasiado grande'',''File troppo grande''),',
+ '  (''Plus d''''espace sur le peripherique'',''No space left on device'',',
+ '   ''Kein Platz mehr auf dem Geraet'',''No queda espacio en el dispositivo' +
+  ''',',
+ '   ''Spazio esaurito sul dispositivo''),',
+ '  (''Deplacement illegal'',''Illegal seek'',''Ungueltiges Positionieren'',',
+ '   ''Busqueda no valida'',''Posizionamento non valido''),',
+ '  (''Systeme de fichiers en lecture seule'',''Read-only file system'',',
+ '   ''Dateisystem ist schreibgeschuetzt'',',
+ '   ''Sistema de archivos de solo lectura'',''File system in sola lettura''),',
+ '  (''Trop de liens'',''Too many links'',''Zu viele Links'',',
+ '   ''Demasiados enlaces'',''Troppi collegamenti''),',
+ '  (''Tube brise'',''Broken pipe'',''Unterbrochene Pipe'',''Tuberia rota'',',
+ '   ''Pipe interrotta''),',
+ '  (''Argument hors du domaine'',''Argument out of domain'',',
+ '   ''Argument ausserhalb des Bereichs'',''Argumento fuera de dominio'',',
+ '   ''Argomento fuori dominio''),',
+ '  (''Resultat hors limites'',''Result out of range'',',
+ '   ''Ergebnis ausserhalb des Bereichs'',''Resultado fuera de rango'',',
+ '   ''Risultato fuori intervallo''),',
+ '  (''Nom trop long'',''File name too long'',''Dateiname zu lang'',',
+ '   ''Nombre demasiado largo'',''Nome troppo lungo''),',
+ '  (''Repertoire non vide'',''Directory not empty'',''Verzeichnis nicht leer' +
+  ''',',
+ '   ''Directorio no vacio'',''Directory non vuota''),',
+ '  (''Fonction non implementee'',''Function not implemented'',',
+ '   ''Funktion nicht implementiert'',''Funcion no implementada'',',
+ '   ''Funzione non implementata''));',
+ ' { ''Erreur N'' : mot devant le numero d''une erreur inconnue }',
+ ' ErrWord: Array[1..5] Of PChar = (''Erreur '',''Error '',''Fehler '',''Erro' +
+  'r '',',
+ '   ''Errore '');',
+ ' { messages des signaux (sh de V7) : lignes 1 a 15 = signaux 1 a 15 }',
+ ' SigMsg: Array[1..15,1..5] Of PChar = (',
+ '  (''Raccroche'',''Hangup'',''Aufgelegt'',''Colgado'',''Linea caduta''),',
+ '  ('''','''','''','''',''''),',
+ '  (''Abandon'',''Quit'',''Abbruch'',''Salir'',''Uscita''),',
+ '  (''Instruction illegale'',''Illegal instruction'',''Ungueltiger Befehl'',',
+ '   ''Instruccion ilegal'',''Istruzione illegale''),',
+ '  (''Trappe'',''Trace/BPT trap'',''Trace-Falle'',''Trampa de traza'',',
+ '   ''Trap di traccia''),',
+ '  (''IOT'',''IOT trap'',''IOT-Falle'',''Trampa IOT'',''Trap IOT''),',
+ '  (''EMT'',''EMT trap'',''EMT-Falle'',''Trampa EMT'',''Trap EMT''),',
+ '  (''Exception arithmetique'',''Floating exception'',''Arithmetikfehler'',',
+ '   ''Excepcion aritmetica'',''Eccezione aritmetica''),',
+ '  (''Tue'',''Killed'',''Getoetet'',''Terminado a la fuerza'',''Ucciso''),',
+ '  (''Erreur de bus'',''Bus error'',''Busfehler'',''Error de bus'',''Errore ' +
+  'di bus''),',
+ '  (''Erreur de segmentation'',''Segmentation fault'',''Speicherzugriffsfehl' +
+  'er'',',
+ '   ''Fallo de segmentacion'',''Errore di segmentazione''),',
+ '  (''Appel systeme invalide'',''Bad system call'',''Ungueltiger Systemaufru' +
+  'f'',',
+ '   ''Llamada al sistema no valida'',''Chiamata di sistema non valida''),',
+ '  ('''','''','''','''',''''),',
+ '  (''Alarme'',''Alarm clock'',''Alarm'',''Alarma'',''Allarme''),',
+ '  (''Termine'',''Terminated'',''Beendet'',''Terminado'',''Terminato''));',
+ '',
+ 'Function SysErrorText(E: Integer): String;',
+ '{ message de l''erreur E dans la langue de LANGUAGE }',
+ 'Var S: String; R, L: Integer;',
+ 'Begin',
+ ' L:=SysLang;',
+ ' R:=0;',
+ ' If (E>=1) And (E<=34) Then R:=E',
+ ' Else If E=ENAMETOOLONG Then R:=35',
+ ' Else If E=ENOTEMPTY Then R:=36',
+ ' Else If E=ENOSYS Then R:=37;',
+ ' If R>0 Then S:=PStr(ErrMsg[R,L])',
+ ' Else Begin Str(E,S); S:=PStr(ErrWord[L])+S End;',
+ ' SysErrorText:=S;',
+ 'End;',
+ '',
+ 'Function SigName(Sig: Integer): String;',
+ '{ message du signal qui a termine un processus (comme sh de V7) }',
+ 'Var S: String;',
+ 'Begin',
+ ' If (Sig>=1) And (Sig<=15) Then S:=PStr(SigMsg[Sig,SysLang])',
+ ' Else Begin Str(Sig,S); S:=''Signal ''+S End;',
+ ' SigName:=S;',
+ 'End;',
+ '',
+ '{$ELSE}',
  'Function SysErrorText(E: Integer): String;',
  'Var S: String;',
  'Begin',
@@ -2342,6 +2549,8 @@ const UnixSource: array[1..1689] of string[255] = (
  ' SigName:=S;',
  'End;',
  '',
+ '{$ENDIF}',
+ '',
  '{ --- signaux : trampoline ------------------------------------------- }',
  '',
  'Procedure SigDispatch(Sig: Integer; Hd: Pointer); Far;',
@@ -2405,7 +2614,8 @@ const UnixSource: array[1..1689] of string[255] = (
  ' For I:=1 To Length(S) Do If S[I]=''\'' Then S[I]:=''/'';',
  ' U:=S;',
  ' For I:=1 To Length(U) Do U[I]:=UpCase(U[I]);',
- ' If (U=''NUL'') Or (U=''/DEV/NUL'') Or (U=''PRN'') Or (U=''LPT1'') Or (U=''AUX'') Or',
+ ' If (U=''NUL'') Or (U=''/DEV/NUL'') Or (U=''PRN'') Or (U=''LPT1'') Or (U=''' +
+  'AUX'') Or',
  '   (U=''COM1'') Then S:=''/dev/null''',
  ' Else If (U=''CON'') Or (U=''/DEV/CON'') Then S:=''/dev/tty'';',
  ' If S='''' Then S:=''.'';',
@@ -2456,7 +2666,8 @@ const UnixSource: array[1..1689] of string[255] = (
  '   (Copy(U,Length(U)-3,4)=''.COM'')) Then Begin',
  '  U:=Copy(S,1,Length(S)-4);',
  '  If FileExistsU(U) Then Begin ExecPath:=U; Exit End;',
- '  For I:=1 To Length(U) Do U[I]:=Chr(Ord(U[I]) Or (Ord(U[I] In [''A''..''Z''])*32));',
+ '  For I:=1 To Length(U) Do U[I]:=Chr(Ord(U[I]) Or (Ord(U[I] In [''A''..''Z' +
+  '''])*32));',
  '  If FileExistsU(U) Then ExecPath:=U;',
  ' End;',
  'End;',
@@ -2471,7 +2682,8 @@ const UnixSource: array[1..1689] of string[255] = (
  ' Path:=ExecPath(UnixPath(FarString(RDS,RDX)));',
  ' TOfs:=MemW[RES:RBX+2]; TSeg:=MemW[RES:RBX+4];',
  ' L:=Mem[TSeg:TOfs]; Tail:='''';',
- ' For I:=1 To L Do If Mem[TSeg:TOfs+I]<>13 Then Tail:=Tail+Chr(Mem[TSeg:TOfs+I]);',
+ ' For I:=1 To L Do If Mem[TSeg:TOfs+I]<>13 Then Tail:=Tail+Chr(Mem[TSeg:TOfs' +
+  '+I]);',
  ' If Not FileExistsU(Path) Then Begin SetCarry(2); Exit End;',
  ' If Not BuildArgs(Path,Tail) Then Begin SetCarry(10); Exit End;',
  ' OldInt:=SysSignal(SIGINT,SIG_IGN); OldQuit:=SysSignal(SIGQUIT,SIG_IGN);',
@@ -2601,7 +2813,8 @@ const UnixSource: array[1..1689] of string[255] = (
  '  Mem[DtaSeg:DtaOfs+21]:=A;',
  '  T:=DosTime(St.MTime);',
  '  MemW[DtaSeg:DtaOfs+22]:=Word(T); MemW[DtaSeg:DtaOfs+24]:=Word(T Shr 16);',
- '  MemW[DtaSeg:DtaOfs+26]:=Word(St.Size); MemW[DtaSeg:DtaOfs+28]:=Word(St.Size Shr 16);',
+ '  MemW[DtaSeg:DtaOfs+26]:=Word(St.Size);',
+ '  MemW[DtaSeg:DtaOfs+28]:=Word(St.Size Shr 16);',
  '  If Length(Name)>12 Then Name[0]:=#12;',
  '  For I:=1 To Length(Name) Do Mem[DtaSeg:DtaOfs+29+I]:=Ord(Name[I]);',
  '  Mem[DtaSeg:DtaOfs+30+Length(Name)]:=0;',
@@ -2617,7 +2830,8 @@ const UnixSource: array[1..1689] of string[255] = (
  ' I:=Length(S);',
  ' While (I>0) And (S[I]<>''/'') Do Dec(I);',
  ' If I=0 Then Begin D:=''''; P:=S End',
- ' Else Begin D:=Copy(S,1,I); P:=Copy(S,I+1,255); If D<>''/'' Then Dec(D[0]) End;',
+ ' Else Begin D:=Copy(S,1,I); P:=Copy(S,I+1,255); If D<>''/'' Then Dec(D[0]) ' +
+  'End;',
  ' If P='''' Then P:=''*'';',
  ' { sans joker : recherche d''un nom precis }',
  ' K:=FindNo; FindNo:=(FindNo+1) And 3;',
@@ -2726,7 +2940,8 @@ const UnixSource: array[1..1689] of string[255] = (
  'Var S: Word;',
  'Begin',
  ' S:=RES-1;',
- ' If (HeapFirst=0) Or (S<HeapFirst) Or (S>=HeapTop) Or (MemW[S:3]<>$3055) Then',
+ ' If (HeapFirst=0) Or (S<HeapFirst) Or (S>=HeapTop) Or (MemW[S:3]<>$3055) Th' +
+  'en',
  ' Begin',
  '  SetCarry(9); Exit;',
  ' End;',
@@ -2739,7 +2954,8 @@ const UnixSource: array[1..1689] of string[255] = (
  'Begin',
  ' If RES=PrefixSeg Then Exit; { bloc du programme : accepte sans effet }',
  ' S:=RES-1;',
- ' If (HeapFirst=0) Or (S<HeapFirst) Or (S>=HeapTop) Or (MemW[S:3]<>$3055) Then',
+ ' If (HeapFirst=0) Or (S<HeapFirst) Or (S>=HeapTop) Or (MemW[S:3]<>$3055) Th' +
+  'en',
  ' Begin',
  '  SetCarry(9); Exit;',
  ' End;',
@@ -2747,13 +2963,15 @@ const UnixSource: array[1..1689] of string[255] = (
  ' Sz:=MemW[S:1]; Need:=RBX+1;',
  ' If Need<=Sz Then Begin',
  '  If Sz>Need+1 Then Begin',
- '   Mem[S+Need:0]:=Ord(''Z''); MemW[S+Need:1]:=Sz-Need; MemW[S+Need:3]:=$3055;',
+ '   Mem[S+Need:0]:=Ord(''Z''); MemW[S+Need:1]:=Sz-Need; MemW[S+Need:3]:=$305' +
+  '5;',
  '   MemW[S:1]:=Need; HeapMerge;',
  '  End;',
  '  Exit;',
  ' End;',
  ' N:=S+Sz;',
- ' If (N<HeapTop) And (Mem[N:0]=Ord(''Z'')) And (Sz+MemW[N:1]>=Need) Then Begin',
+ ' If (N<HeapTop) And (Mem[N:0]=Ord(''Z'')) And (Sz+MemW[N:1]>=Need) Then Beg' +
+  'in',
  '  MemW[S:1]:=Sz+MemW[N:1];',
  '  If MemW[S:1]>Need+1 Then Begin',
  '   Mem[S+Need:0]:=Ord(''Z''); MemW[S+Need:1]:=MemW[S:1]-Need;',
@@ -2761,7 +2979,8 @@ const UnixSource: array[1..1689] of string[255] = (
  '  End;',
  '  Exit;',
  ' End;',
- ' RBX:=Sz-1; If N<HeapTop Then If Mem[N:0]=Ord(''Z'') Then Inc(RBX,MemW[N:1]);',
+ ' RBX:=Sz-1; If N<HeapTop Then If Mem[N:0]=Ord(''Z'') Then Inc(RBX,MemW[N:1]' +
+  ');',
  ' SetCarry(8);',
  'End;',
  '',
@@ -2827,7 +3046,9 @@ const UnixSource: array[1..1689] of string[255] = (
  ' For I:=1 To 8 Do',
  '  If SysMountInfo(I,M) Then',
  '   If (M.Dir=''/'') Or (Copy(Cwd,1,Length(M.Dir))=M.Dir) Then',
- '    If Length(M.Dir)>L Then Begin Best:=I; L:=Length(M.Dir); T:=M.Blocks; F:=M.Free End;',
+ '    If Length(M.Dir)>L Then Begin',
+ '     Best:=I; L:=Length(M.Dir); T:=M.Blocks; F:=M.Free;',
+ '    End;',
  ' If Best=0 Then Begin RAX:=$FFFF; Exit End;',
  ' If T>65535 Then Begin T:=65535 End;',
  ' If F>T Then F:=T;',
@@ -2925,7 +3146,11 @@ const UnixSource: array[1..1689] of string[255] = (
  '       End;',
  '  $41: If SysUnlink(UnixPath(FarString(RDS,RDX)))<0 Then Fail;',
  '  $42: Begin',
- '        L:=SysLSeek(RBX,Longint(RCX) Shl 16+RDX,AL);',
+ '        L:=Longint(RCX) Shl 16+RDX;',
+ '        { DOS : un deplacement absolu de 2 Go ou plus (negatif ici) est un',
+ '          deplacement apres la fin du fichier, sans erreur }',
+ '        If (AL=SEEK_SET) And (L<0) Then L:=SysLSeek(RBX,0,SEEK_END)',
+ '        Else L:=SysLSeek(RBX,L,AL);',
  '        If L<0 Then Fail Else Begin RAX:=Word(L); RDX:=Word(L Shr 16) End;',
  '       End;',
  '  $43: Begin',
@@ -2943,7 +3168,8 @@ const UnixSource: array[1..1689] of string[255] = (
  '       End;',
  '  $44: Case AL Of',
  '        0: Begin',
- '            If IsATty(RBX) Then RDX:=$80D3 Else If SysFStat(RBX,St)<0 Then Fail',
+ '            If IsATty(RBX) Then RDX:=$80D3 Else If SysFStat(RBX,St)<0 Then ' +
+  'Fail',
  '            Else RDX:=0;',
  '            RAX:=RDX;',
  '           End;',
@@ -5646,7 +5872,7 @@ Var
  MainSeg, MainOff, CrtHookSeg, SegSavedCount: Word;
  CrtHookSet: Boolean;
  SegCap: Word;
-   { taille maximale visee d'un segment (TPC_SEGSIZE pour les essais) }
+   { taille maximale visee d'un segment (LPC_SEGSIZE pour les essais) }
  SegParas: Array[0..MaxSegs-1] Of Word;
    { paragraphe de chaque segment dans l'image liee }
  MultiCodeBytes: Longint;
@@ -6137,9 +6363,12 @@ Begin
  If (S<>'') Or (A[1]<1024) Or (A[1]>65520) Or
  (A[2]<0) Or (A[2]>655360) Or (A[3]<A[2]) Or (A[3]>655360) Then    Fail(17,
  'Limites $M incorrectes');
- If A[2]<>0 Then Unsupported('$M minheap non nul');
+ { Linux Pascal /X : le tas minimal est reserve par le noyau au chargement
+   (section .heap du COFF); pour les autres cibles il reste nul }
+ If (A[2]<>0) And Not UnixTarget Then Unsupported('$M minheap non nul');
  StackSize:=(A[1]+1) And $FFFE;
- MinHeap:=0; MaxHeap:=(A[3]+15) Div 16;
+ If UnixTarget Then MinHeap:=(A[2]+15) Div 16 Else MinHeap:=0;
+ MaxHeap:=(A[3]+15) Div 16;
 End;
 
 Procedure SaveParser(Var P: PParserState); Forward;
@@ -12870,10 +13099,12 @@ Begin
 End;
 
 Procedure StorePCharConst(A: Word; S: TShortString);
-{ Pointeur statique vers une copie a zero terminal de S (programme seul). }
+{ Pointeur statique vers une copie a zero terminal de S (programme ou unite
+  compilee avec lui, mais pas une unite ecrite dans une TPU). }
 Var Z: Word; K: Integer;
 Begin
- If CurrentUnit<>0 Then Unsupported('constante typee PChar dans une unite');
+ If (CurrentUnit<>0) And UnitOutput Then
+  Unsupported('constante typee PChar dans une unite');
  If DataFixupCount=4096 Then Fail(107,'Trop de constantes PChar');
  Z:=AllocData(Length(S)+1);
  For K:=1 To Length(S) Do Data[Z+K-1]:=Ord(S[K]);
@@ -14380,7 +14611,7 @@ Begin
  End;
  Until S='';
 End;
-{ Profil TPUQ/TPC1: conteneur TPUQ et structures historiques, mais ABI locale
+{ Profil TPUQ/LPC1: conteneur TPUQ et structures historiques, mais ABI locale
   near/CS=DS. Reserved[0..2] = 'TP','C1',1 et Flags=$8000 l'identifient.
   Ces fichiers ne sont PAS annonces compatibles avec le linker Borland.
   Les fixups code $4000 sont relatifs IP, $8000 absolus DS; Map=$FFFF
@@ -15556,11 +15787,11 @@ Begin
  IsLocal:=(H.Flags=$8000) And (H.Reserved[0]=$5054) And (H.Reserved[1]=$3143);
  ProjectForeign:=Not IsLocal;
   If IsLocal And Not (H.Reserved[2] In [1,2,3,4,5,6,7,8]) Then Fail(72,
-    'Version du profil TPC1 inconnue');
+    'Version du profil LPC1 inconnue');
  If IsLocal Then Begin
   W:=0;
   For X:=TPUHeaderSize To Size-1 Do W:=((W Shl 1) Or (W Shr 15))+B^[X];
-  If W<>H.Reserved[4] Then Fail(72,'Integrite de la TPU TPC1 invalide');
+  If W<>H.Reserved[4] Then Fail(72,'Integrite de la TPU LPC1 invalide');
  End;
  If IsLocal And (H.Reserved[2]=8) Then Begin
   If H.OverlayLength<>SoftwareChecksum Then Fail(70,
@@ -15604,7 +15835,7 @@ Begin
   If (H.ConstMap-H.CodeMap<>8) Or (H.DataMap-H.ConstMap<>8) Or
   (H.EndMaps<>H.DataMap) Or (H.DataSize<>0) Or (H.DataFixupSize<>0) Or
   ((H.CodeMap-H.ProcMap) Mod 8<>0) Or (H.CodeMap-H.ProcMap<8) Or
-  (H.CodeFixupSize Mod 8<>0) Then Fail(72,'Cartes du profil TPC1 invalides');
+  (H.CodeFixupSize Mod 8<>0) Then Fail(72,'Cartes du profil LPC1 invalides');
   If (ReadWord(H.CodeMap+2)<>H.CodeSize) Or
   (ReadWord(H.CodeMap+4)<>H.CodeFixupSize) Or
   (ReadWord(H.ConstMap+2)<>H.ConstSize) Then Fail(72,
@@ -18283,11 +18514,11 @@ Begin
   Assign(MapFile,MapPath); {$I-} Rewrite(MapFile); E:=IOResult; {$I+}
   If E<>0 Then Fail(16,'Creation MAP impossible');
   {$I-}
-  WriteLn(MapFile,'TPC local map 7; addresses relative to MZ load segment');
+  WriteLn(MapFile,'LPC local map 7; addresses relative to MZ load segment');
   WriteLn(MapFile,'Start       Length       Name                 Class');
-  WriteLn(MapFile,'0000:0000  ',CodeSize:10,'  TPC_CODE             CODE');
+  WriteLn(MapFile,'0000:0000  ',CodeSize:10,'  LPC_CODE             CODE');
   WriteLn(MapFile,Hex4(Align16(CodeSize) Div 16),':0000  ',DataSize+BssSize:10,
-    '  TPC_DATA             DATA');
+    '  LPC_DATA             DATA');
   If NativeNeeded Then WriteLn(MapFile,Hex4(NativeSegment),':0000  ',
     NativeDataSize:10,'  BORLAND_DATA         DATA');
   For I:=1 To ObjectSegmentCount Do If ObjectSegments[I].Root=I Then
@@ -18295,7 +18526,7 @@ Begin
      Hex4(ObjectSegments[I].Base Mod 16),'  ',ObjectSegments[I].Length:10,'  ',
        ObjectSegments[I].Name,'  ',ObjectSegments[I].ClassName);
   WriteLn(MapFile,Hex4(StackSegment),':0000  ',StackSize:10,
-    '  TPC_STACK            STACK');
+    '  LPC_STACK            STACK');
   If MapMode>=2 Then Begin
    WriteLn(MapFile); WriteLn(MapFile,'Address    Publics');
    For I:=1 To DebugCount Do If DebugEntries[I].Kind In [1,2] Then Begin
@@ -18321,7 +18552,7 @@ Begin
  End;
  If Not DebugInExe Then Exit;
  New(B); P:=0;
- PutString('TPCDBG7'); { huit octets: 7 suivi de TPCDBG7 }
+ PutString('LPCDBG7'); { huit octets: 7 suivi de LPCDBG7 }
  PutWord(7); PutWord(DebugCount); PutWord(Word(ResidentSize));
    PutWord(Word(ResidentSize Shr 16));
  For I:=1 To DebugCount Do With DebugEntries[I] Do Begin
@@ -18407,7 +18638,8 @@ Procedure WriteCoff(Path: TShortString; Size, StoredData, TotalData: Longint;
     sections (40 octets chacune) : une ".text" par segment de code (".text",
       ".text1", ...), ".data" (donnees initialisees), ".bss" (donnees non
       initialisees), ".stack" (pile : SS = chargement + s_vaddr/16, SP =
-      s_size) et ".heap" (tas minimal de la directive $M, facultative). s_vaddr est
+      s_size) et ".heap" (tas minimal de la directive $M, facultative).
+      s_vaddr est
       l'adresse lineaire de la section par rapport au debut de l'image (un
       multiple de 16 : chaque section commence un segment 8086);
     relocalisations (10 octets) : r_vaddr, r_symndx = -1, r_type = R_SEG12
@@ -18741,7 +18973,7 @@ Begin
  WriteLn('Fixups code=',H.CodeFixupSize,' constantes=',H.DataFixupSize);
  If (H.Flags=$8000) And (H.Reserved[0]=$5054) And (H.Reserved[1]=$3143) Then
    WriteLn(
- 'Profil TPC1: ABI locale near/CS=DS, non compatible Borland.')
+ 'Profil LPC1: ABI locale near/CS=DS, non compatible Borland.')
  Else WriteLn('TPUQ Borland: appels far et donnees ordinales; ABI partielle.');
 End;
 
@@ -18759,7 +18991,7 @@ Begin
     H.ConstSize);
   If (H.Flags=$8000) And (H.Reserved[0]=$5054) And (H.Reserved[1]=$3143) Then
     Write(
-  ' profil=TPC1')
+  ' profil=LPC1')
   Else If (H.CodeSize<>0) Or (H.ConstSize<>0) Or (H.DataSize<>0) Then
     Write(
   ' Borland: ABI ordinale/far')
@@ -18768,8 +19000,32 @@ Begin
  End;
 End;
 
+Procedure ScanProgramSymbols;
+{ Linux Pascal /X : une directive DEFINE LANGERR du programme principal
+  (avant son en-tete) est aussi transmise a l'unite UNIX integree, qui
+  compile alors ses messages d'erreur dans les cinq langues (FR, EN, GR,
+  SP, IT). Les symboles d'un fichier ne sont pas vus des unites : sans
+  cela, toutes les commandes porteraient les tables de messages (environ
+  5 Ko du segment de donnees de 64 Ko). }
+Const Key='DEFINE LANGERR';
+Var I: Longint; K: Integer; Ok: Boolean;
+Begin
+ If Not UnixTarget Then Exit;
+ LoadSource;
+ I:=1;
+ While I+Length(Key)+2<=SourceSize Do Begin
+  If (Source[I]='{') And (Source[I+1]='$') Then Begin
+   Ok:=True;
+   For K:=1 To Length(Key) Do
+    If UpCase(Source[I+1+K])<>Key[K] Then Ok:=False;
+   If Ok Then Begin Define('LANGERR'); Exit End;
+  End;
+  Inc(I);
+ End;
+End;
+
 Procedure Banner;Begin
- WriteLn('Linux Pascal  Version 1.0 (LINUX-0)');
+ WriteLn('Linux Pascal Compiler  Version 1.0 (LINUX-0)');
 End;
 
 Procedure Help;Begin
@@ -18806,7 +19062,7 @@ Procedure Help;Begin
  WriteLn('  G- Instructions 80286    Q- Controle debordement');
  WriteLn('Tailles memoire: -$M<pile>,<tasmin>,<tasmax>  (defaut: ' +
    '16384,0,655360)');
- WriteLn('Options Linux Pascal:');
+ WriteLn('Options Linux Pascal Compiler:');
  WriteLn('  -K[seg] = Image plate de noyau .SYS chargee au paragraphe seg ' +
    '(hexa, defaut 1000)');
  WriteLn('  -X = Cible LINUX-0 (appels systeme INT 80h, unite UNIX, sans ' +
@@ -18912,7 +19168,7 @@ Begin
    'X':Begin
     { Linux Pascal : cible LINUX-0 }
     If Arg<>'' Then CLIError('Option /X incorrecte');
-    UnixTarget:=True; Define('LINUX0');
+    UnixTarget:=True; Define('LINUX0'); Define('KERNEL16UNIX');
     { LINUX-0 : pile par defaut de 8 Ko (memoire de 640 Ko partagee par
       tous les processus); la directive M peut en demander davantage }
     DefaultStack:=8192;
@@ -19073,6 +19329,7 @@ BEGIN
    B F G N O P Q R T desactives }
  TokenLine:=1; TokenColumn:=1;
  Define('VER70'); Define('MSDOS'); Define('CPU86');
+ Define('LPC');
  Banner;
  ParseArguments;
  StackSize:=DefaultStack;
@@ -19088,6 +19345,7 @@ BEGIN
  If E='' Then SourceName:=SourceName+'.PAS';
  MainSourceName:=SourceName;
  FindAndReadLibrary;
+ ScanProgramSymbols;
  Move(Defines,InitialDefines,SizeOf(Defines)); InitialDefineCount:=DefineCount;
  InitialOptions:=OptionBits;
  NoLimit:=GetEnv('LPC_NOLIMIT')<>'';
@@ -19107,7 +19365,7 @@ BEGIN
  PassNo:=1;
  { Mode multi-segments : possible seulement pour un programme (pas une unite ni
    un noyau) dont le code deborde.
-   TPC_SEGSIZE=n force le mode (segments d'environ n octets) pour essayer le
+   LPC_SEGSIZE=n force le mode (segments d'environ n octets) pour essayer le
      mecanisme sur de petits programmes. }
  SegCap:=MaxImage-16; SegReserve:=0; MultiSeg:=False; InDeadBody:=False;
    MainSizeEst:=0;
@@ -19151,7 +19409,8 @@ BEGIN
   Move(FrameNext,FramePred,SizeOf(FramePred)); FillChar(FrameNext,
     SizeOf(FrameNext),0); ProcOrd:=0;
   Move(InitialDefines,Defines,SizeOf(Defines)); DefineCount:=InitialDefineCount;
-  OptionBits:=InitialOptions; StackSize:=DefaultStack; MinHeap:=0; MaxHeap:=$FFFF;
+  OptionBits:=InitialOptions; StackSize:=DefaultStack;
+  MinHeap:=0; MaxHeap:=$FFFF;
   TokenLine:=1; TokenColumn:=1; TotalLines:=0; CurProc:=0; EdgeCount:=0;
     TotalEmitted:=0;
   JumpOrd:=0; JumpOverflow:=False; ReportCount:=0; RuntimeDepth:=0;
@@ -19208,7 +19467,8 @@ BEGIN
   FillChar(FramePred,SizeOf(FramePred),0); FillChar(FrameNext,SizeOf(FrameNext),
     0); ProcOrd:=0;
   Move(InitialDefines,Defines,SizeOf(Defines)); DefineCount:=InitialDefineCount;
-  OptionBits:=InitialOptions; StackSize:=DefaultStack; MinHeap:=0; MaxHeap:=$FFFF;
+  OptionBits:=InitialOptions; StackSize:=DefaultStack;
+  MinHeap:=0; MaxHeap:=$FFFF;
   TokenLine:=1; TokenColumn:=1; TotalLines:=0; CurProc:=0; EdgeCount:=0;
     TotalEmitted:=0;
   JumpOrd:=0; JumpOverflow:=False; ReportCount:=0; RuntimeDepth:=0;
@@ -19224,7 +19484,8 @@ BEGIN
      SizeOf(FrameNext),0); ProcOrd:=0;
    Move(InitialDefines,Defines,SizeOf(Defines));
      DefineCount:=InitialDefineCount;
-   OptionBits:=InitialOptions; StackSize:=DefaultStack; MinHeap:=0; MaxHeap:=$FFFF;
+   OptionBits:=InitialOptions; StackSize:=DefaultStack;
+   MinHeap:=0; MaxHeap:=$FFFF;
    TokenLine:=1; TokenColumn:=1; TotalLines:=0; CurProc:=0; EdgeCount:=0;
      TotalEmitted:=0;
    JumpOrd:=0; JumpOverflow:=False; ReportCount:=0; RuntimeDepth:=0;

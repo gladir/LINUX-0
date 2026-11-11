@@ -2,246 +2,215 @@
 # @author: Sylvain Maltais (support@gladir.com)
 # @created: 2026
 # @website(https://www.gladir.com/linux-0)
-# @description: Installation de LINUX-0 dans l'onglet "Emulateur 8086" de
-#   DEVENV (depot DEV-COOLS), pilote comme le ferait un utilisateur :
-#   - l'IDE est lance en plein ecran (-maxscreen) avec un fichier .bat pour
-#     l'Invite de commandes : IMGMOUNT A: LINUX0-INST1.IMG, IMGMOUNT C: disque
-#     vierge, BOOT A: (ou BOOT /CDROM:LINUX0-CD.ISO puis IMGMOUNT D: disque);
-#   - les reponses a l'installateur sont tapees dans l'onglet emulateur;
-#   - a chaque "Inserez la disquette N", la disquette est changee dans
-#     l'Invite de commandes (IMGMOUNT -u A puis IMGMOUNT A: LINUX0-INSTN.IMG);
-#   - le disque installe est ensuite monte sur C: et amorce par BOOT C:.
-#   L'ecran de l'emulateur est lu en reconnaissant les caracteres (police
-#   8x8 de l'emulateur, lignes de 14 points), pour attendre chaque question
-#   de l'installateur; chaque etape est capturee (PNG et texte) dans le
-#   dossier de sortie. Le disque installe est verifie par TOOLS/UFSCHK.PAS.
+# @description: Installation de LINUX-0 dans l'emulateur 8086 de DEVENV (depot
+#   DEV-COOLS) en mode banc d'essai sans interface (/KERNELTEST, /KTBOOTIMG,
+#   /KTHD, /KTSCRIPT : voir DEV-COOLS/DOC/KERNELTEST.txt). Aucune frappe
+#   X11 : le script de DEVENV tape les reponses (type), change les
+#   disquettes (mount A: ...) et capture l'ecran emule (screen).
+#   Deux scenarios, avec une distribution reduite (le systeme de base,
+#   environ 1,3 Mo : une disquette de donnees ou un CD) car le banc d'essai
+#   de DEVENV est limite a 2 147 483 647 instructions au total, ce que
+#   l'installation de la distribution complete (9 disquettes de donnees)
+#   depasserait :
+#   - disquettes : LINUX0-INST1.IMG (amorcable) + une disquette de donnees
+#     (volume tar de la distribution reduite), disque cible vierge (/KTHD),
+#     langue du systeme installe : SP (espagnol);
+#   - CD-ROM : CD reduit (disque emule a une partition UFS1 avec /dist), le
+#     disque cible est monte comme D: (81h) par la commande mount du script;
+#   puis le disque installe est amorce seul (/KTBOOTIMG:disque.img), root se
+#   connecte, /etc/profile est lu; le disque est verifie par TOOLS/UFSCHK.PAS
+#   et par le lecteur UFS1 independant TESTS/UFSCMP.PY.
 #   Usage : DEVENV=/chemin/devenv python3 DEVENV_INSTALL.PY [disquettes|cd]
 #           [dossier_de_sortie]
-#   Sous Linux : Xvfb, xdotool et ImageMagick (import) sont necessaires.
-import os, re, shutil, subprocess, sys, time
+#   Variables : W (repertoire de BUILD.SH), LD_LIBRARY_PATH (bibliotheques de
+#   remplacement des DLL Windows). Xvfb (xvfb-run) est necessaire.
+import os, re, shutil, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..'))
-# verificateur UFS1 (TOOLS/UFSCHK.PAS, compile par BUILD.SH)
-UFSCHK = os.path.join(os.environ.get('W', '/tmp/unix0-build'), 'bin', 'ufschk')
+W = os.environ.get('W', '/tmp/linux0-build')
+UFSCHK = os.path.join(W, 'bin', 'ufschk')
+UFSCMP = os.path.join(HERE, 'UFSCMP.PY')
 DEVENV = os.environ.get('DEVENV') or sys.exit('definir DEVENV (executable de DEVENV)')
 MODE = sys.argv[1] if len(sys.argv) > 1 else 'disquettes'
 OUT = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else 'devenv-install-' + MODE)
-DISPLAY = ':78'
-TEXT_Y, ROWS, COLS = 96, 25, 80  # texte de l'onglet emulateur (plein ecran)
-TERM_XY = (400, 1050)            # Invite de commandes (plein ecran 1920x1200)
-EMU_XY = (300, 300)
-env = dict(os.environ, DISPLAY=DISPLAY)
-shots = 0
-
-# police 8x8 de l'emulateur, caracteres 32 a 126
-FONT = bytes.fromhex(
-    '000000000000000030787878300030006c6c6c00000000006c6cfe6cfe6c6c00307cc078'
-    '0cf8300000c6cc183066c600386c3876dccc76006060c000000000001830606060301800'
-    '603018181830600000663cff3c660000003030fc303000000000000000303060000000fc'
-    '000000000000000000303000060c183060c080007cc6c6c6c6c67c00307030303030fc00'
-    '78cc0c3860ccfc0078cc0c380ccc78001c3c6cccfe0c1e00fcc0f80c0ccc78003860c0f8'
-    'cccc7800fccc0c183030300078cccc78cccc780078cccc7c0c1870000030300000303000'
-    '0030300000303060183060c0603018000000fc0000fc00006030180c1830600078cc0c18'
-    '300030007cc6dededec07800386cc6c6fec6c600fcc6c6fcc6c6fc007cc6c6c0c0c67c00'
-    'f8ccc6c6c6ccf800fec0c0fcc0c0fe00fec0c0fcc0c0c0007cc6c0cec6c67e00c6c6c6fe'
-    'c6c6c60078303030303078001e060606c6c67c00c6ccd8f0d8ccc600c0c0c0c0c0c0fe00'
-    'c6eefed6c6c6c600c6e6f6decec6c6007cc6c6c6c6c67c00fcc6c6fcc0c0c0007cc6c6c6'
-    'c6c67c06fcc6c6fcc6c6c60078cc603018cc7800fc30303030303000c6c6c6c6c6c67c00'
-    'c6c6c6c6c66c3800c6c6c6d6feeec600c6c66c386cc6c600c3c3663c18181800fe0c1830'
-    '60c0fe003c30303030303c00c06030180c0603003c0c0c0c0c0c3c0000386cc600000000'
-    '00000000000000ff303018000000000000007c067ec67e00c0c0fcc6c6e6dc0000007cc6'
-    'c0c07e0006067ec6c6ce760000007cc6fec07e001e307c303030300000007ec6ce76067c'
-    'c0c0fcc6c6c6c6001800381818183c0018003818181818f0c0c0ccd8f0d8cc0038181818'
-    '18183c000000ccfed6c6c6000000fcc6c6c6c60000007cc6c6c67c000000fcc6c6e6dcc0'
-    '00007ec6c6ce760600006e706060600000007cc07c06fc0030307c3030301c000000c6c6'
-    'c6c67e000000c6c6c66c38000000c6c6d6fe6c000000c66c386cc6000000c6c6ce76067c'
-    '0000fc183060fc001c3030e030301c001818180018181800e030301c3030e00076dc0000'
-    '00000000'
-)
-GLYPHS = {}
-for _k in range(95):
-    _g = FONT[_k * 8:_k * 8 + 8]
-    GLYPHS.setdefault(_g, chr(32 + _k))
-    GLYPHS.setdefault(bytes(b | (b >> 1) for b in _g), chr(32 + _k))
-GLYPHS[bytes(8)] = ' '
+LANG = 'SP' if MODE == 'disquettes' else 'EN'
+fails = 0
 
 
-def sh(*cmd):
-    return subprocess.run(cmd, env=env, capture_output=True, text=True).stdout
+def ok(cond, what):
+    global fails
+    print(('ok    ' if cond else 'ECHEC ') + what, flush=True)
+    if not cond:
+        fails += 1
 
 
-def screen():
-    """lignes de texte de l'onglet emulateur ('0' et 'O' se confondent)"""
-    raw = subprocess.run(['import', '-window', 'root', '-crop', '%dx%d+0+%d'
-                          % (COLS * 8, ROWS * 14, TEXT_Y), '-depth', '8', 'rgb:-'],
-                         env=env, capture_output=True).stdout
-    w = COLS * 8
-    if len(raw) < w * ROWS * 14 * 3:
-        return []
-    sample = [raw[i:i + 3] for i in range(0, len(raw), 3 * 97)]
-    bg = max(set(sample), key=sample.count)     # couleur de fond
-    lines = []
-    for r in range(ROWS):
-        s = ''
-        for c in range(COLS):
-            cell = bytearray(8)
-            for y in range(8):
-                o = ((r * 14 + y) * w + c * 8) * 3
-                for x in range(8):
-                    if raw[o + x * 3:o + x * 3 + 3] != bg:
-                        cell[y] |= 128 >> x
-            s += GLYPHS.get(bytes(cell), '?')
-        lines.append(s.rstrip())
-    return lines
+def sh(*cmd, **kw):
+    r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    if r.returncode:
+        sys.exit('echec : %s\n%s%s' % (' '.join(cmd), r.stdout, r.stderr))
+    return r.stdout
 
 
-def last_line(lines):
-    for l in reversed(lines):
-        if l.strip():
-            return l
-    return ''
+def mini_distribution(work):
+    """arbre reduit (systeme de base) et ses volumes tar"""
+    tree = os.path.join(work, 'mini')
+    sh('cp', '-a', os.path.join(W, 'fd144'), tree)
+    lst = sh('bash', '-c', "cd '%s' && find . -mindepth 1 -printf '%%y %%m %%U %%G %%T@ %%P\\n' "
+             "| LC_ALL=C sort -k6" % tree)
+    open(os.path.join(work, 'LISTE'), 'w').write(lst)
+    out = sh(os.path.join(W, 'bin', 'mkvol'), tree, os.path.join(work, 'LISTE'),
+             os.path.join(work, 'INST'), '2')
+    return tree, sorted(f for f in os.listdir(work) if re.match(r'INST\d+\.IMG$', f))
 
 
-def wait_for(pat, limit=1800, anywhere=False):
-    """attend que la derniere ligne (ou l'ecran) corresponde a pat"""
-    end = time.time() + limit
-    lines = []
-    while time.time() < end:
-        lines = screen()
-        text = '\n'.join(lines) if anywhere else last_line(lines)
-        m = re.search(pat, text.replace('O', '0') if '0' in pat else text)
-        if m:
-            print('  vu : ' + last_line(lines))
-            return m
-        time.sleep(3)
-    raise TimeoutError('attendu %r, ecran :\n%s' % (pat, '\n'.join(lines)))
+def run_devenv(work, name, img, hd, script, steps):
+    open(os.path.join(work, name + '.txt'), 'w').write('\n'.join(script) + '\n')
+    cmd = ['xvfb-run', '-a', DEVENV, '/KERNELTEST,' + work, '/KTBOOTIMG:' + img]
+    if hd:
+        cmd.append('/KTHD:' + hd)
+    cmd += ['/KTSCRIPT:' + os.path.join(work, name + '.txt'), '/KTSTEPS:%d' % steps]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=work, timeout=1800)
+    open(os.path.join(OUT, name + '.out'), 'w').write(r.stdout)
+    return r.stdout
 
 
-def shot(name, crop='640x480+0+0'):
-    global shots
-    shots += 1
-    p = os.path.join(OUT, '%02d-%s' % (shots, name))
-    sh('import', '-window', 'root', '-crop', crop, p + '.png')
-    if crop.startswith('640x480'):
-        open(p + '.txt', 'w').write('\n'.join(screen()) + '\n')
+def rechs(disk, out, heads=2, spt=18):
+    """copie du disque installe dont la table des partitions est ecrite pour
+    la geometrie du disque d'amorce de DEVENV : /KTHD (disque cible de
+    l'installation) presente 255 tetes et 63 secteurs par piste, alors que
+    /KTBOOTIMG presente un disque dur de 2 tetes et 18 secteurs (DEVENV.PAS,
+    "disque dur de 1,44 Mo sans table de partitions", applique a toute image
+    dure). Le MBR lit le secteur d'amorce par ses coordonnees CHS, qui
+    doivent suivre la geometrie vue au demarrage; le noyau et UFSBOOT,
+    eux, relisent la geometrie par l'INT 13h."""
+    d = bytearray(open(disk, 'rb').read(1024 * 1024))
+
+    def chs(lba):
+        c, h, s = lba // (heads * spt), (lba // spt) % heads, lba % spt + 1
+        if c > 1023:
+            c, h, s = 1023, heads - 1, spt
+        return bytes([h, s | ((c >> 2) & 0xC0), c & 255])
+    for i in range(4):
+        o = 446 + 16 * i
+        if d[o + 4]:
+            start = int.from_bytes(d[o + 8:o + 12], 'little')
+            size = int.from_bytes(d[o + 12:o + 16], 'little')
+            d[o + 1:o + 4] = chs(start)
+            d[o + 5:o + 8] = chs(start + size - 1)
+    shutil.copy(disk, out)
+    with open(out, 'r+b') as f:
+        f.write(bytes(d[:512]))
+        # DEVENV lit aussi la geometrie dans les champs "secteurs par piste"
+        # (1Ah) et "tetes" (18h) du secteur d'amorce de la partition active,
+        # zone que UFSBOOT laisse a zero (BPB absent) et que DEVENV remplit
+        # a sa guise quand le disque est monte comme D: ou /KTHD : on y met
+        # la geometrie du disque d'amorce
+        for i in range(4):
+            if d[446 + 16 * i] == 0x80:
+                start = int.from_bytes(d[446 + 16 * i + 8:446 + 16 * i + 12], 'little')
+                f.seek(start * 512 + 0x18)
+                f.write(spt.to_bytes(2, 'little') + heads.to_bytes(2, 'little'))
 
 
-def win():
-    return sh('xdotool', 'search', '--onlyvisible', '--name', '.').split()[0]
+def boot_installed(work, disk, extra_profile):
+    boot = os.path.join(work, 'amorce.img')
+    rechs(disk, boot)
+    disk = boot
+    script = ['run 60000000', 'screen', 'type root', 'run 60000000',
+              'type cat /etc/profile', 'run 40000000',
+              'type ls /bin /etc', 'run 80000000', 'screen']
+    out = run_devenv(work, 'demarrage', disk, None, script, 600000000)
+    ok('racine : /dev/hda1 (UFS1)' in out and 'va-et-vient : /dev/hda2' in out,
+       'le disque installe demarre seul sous DEVENV (racine /dev/hda1, va-et-vient /dev/hda2)')
+    ok('LINUX-0 KERNEL16UNIX (linux0)' in out, 'banniere de getty : LINUX-0 KERNEL16UNIX (linux0)')
+    ok(extra_profile in out, 'cat /etc/profile : ' + extra_profile)
+    ok(re.search(r'\|(cat|ls)\s.*\n?', out) is not None and 'passwd' in out and 'getty' in out,
+       'ls /bin /etc : les commandes et fichiers installes sont presents')
 
 
-def click(xy):
-    w = win()
-    sh('xdotool', 'mousemove', '--window', w, str(xy[0]), str(xy[1]))
-    time.sleep(0.3)
-    sh('xdotool', 'mousedown', '--window', w, '1')
-    time.sleep(0.3)
-    sh('xdotool', 'mouseup', '--window', w, '1')
-    time.sleep(1)
+def verify_disk(disk, tree):
+    r = subprocess.run([UFSCHK, '--hd', disk], capture_output=True, text=True)
+    ok(r.returncode == 0, 'disque installe : UFS1, MBR et amorce coherents (%s)'
+       % r.stdout.strip().splitlines()[-1])
+    r = subprocess.run([sys.executable, UFSCMP, disk, tree, '--hd', '--extra', 'etc/profile'],
+                       capture_output=True, text=True)
+    ok(r.returncode == 0, 'disque installe : contenu identique a la distribution reduite (%s)'
+       % r.stdout.strip().splitlines()[-1])
+    if r.returncode:
+        print(r.stdout)
 
 
-def type_line(text):
-    w = win()
-    if text:
-        sh('xdotool', 'type', '--window', w, '--delay', '120', text)
-    sh('xdotool', 'key', '--window', w, 'Return')
+def floppies(work):
+    tree, vols = mini_distribution(work)
+    shutil.copy(os.path.join(ROOT, 'IMAGE', 'LINUX0-INST1.IMG'), os.path.join(work, 'INST1.IMG'))
+    disk = os.path.join(work, 'disque.img')
+    with open(disk, 'wb') as f:
+        f.truncate(64 * 1024 * 1024)
+    script = ['run 40000000', 'screen', 'type install', 'run 40000000', 'screen',
+              'type ' + LANG, 'run 20000000', 'type oui', 'run 300000000', 'screen']
+    for v in vols:
+        script += ['mount A: ' + os.path.join(work, v), 'type', 'run 300000000', 'screen']
+    script += ['screen', 'type non', 'run 40000000', 'screen',
+               'mount A: ' + os.path.join(work, 'INST1.IMG'), 'type', 'run 80000000', 'screen']
+    out = run_devenv(work, 'installation', os.path.join(work, 'INST1.IMG'), disk, script,
+                     2000000000)
+    ok('Source : disquettes d\'installation' in out, 'installateur lance depuis la disquette 1')
+    ok('Idioma del sistema instalado' in out or 'Langue du systeme installe' in out,
+       'question sur la langue du systeme installe')
+    ok('Inserez la disquette 2' in out, 'disquette 2 demandee')
+    ok('Volume 2/%d' % (1 + len(vols)) in out and 'termine' in out, 'volumes de donnees lus')
+    ok('Installation terminee' in out, 'Installation terminee')
+    ok('Remettez la disquette 1' in out and out.rstrip().count('login:') >= 1,
+       'retour a la disquette 1 : invite de connexion')
+    verify_disk(disk, tree)
+    boot_installed(work, disk, 'LANGUAGE=%s; export LANGUAGE' % LANG)
 
 
-def emulator(text):
-    click(EMU_XY)
-    type_line(text)
-
-
-def terminal(*cmds):
-    click(TERM_XY)
-    for c in cmds:
-        type_line(c)
-        time.sleep(3)
+def cd(work):
+    tree, vols = mini_distribution(work)
+    inst = os.path.join(work, 'cd')
+    sh('cp', '-a', os.path.join(W, 'inst'), inst)
+    os.makedirs(os.path.join(inst, 'dist'))
+    for v in vols:
+        n = re.search(r'\d+', v).group()
+        shutil.copy(os.path.join(work, 'INST%s.TAR' % n), os.path.join(inst, 'dist', 'vol%s.tar' % n))
+    sh('chmod', '755', os.path.join(inst, 'dist'))
+    ufs = os.path.join(work, 'cd.ufs')
+    sh('makefs', '-t', 'ffs', '-o', 'version=1,minfree=0,density=16384', '-s', '8m', ufs, inst)
+    hd = os.path.join(work, 'cdhd.img')
+    sh(os.path.join(W, 'bin', 'mkimage'), 'HD', hd, os.path.join(ROOT, 'MBR.BIN'),
+       os.path.join(ROOT, 'UFSBOOT.BIN'), ufs, '0')
+    iso = os.path.join(work, 'cd.iso')
+    sh(os.path.join(W, 'bin', 'mkiso'), iso, hd)
+    disk = os.path.join(work, 'disque.img')
+    with open(disk, 'wb') as f:
+        f.truncate(64 * 1024 * 1024)
+    # /KTHD n'est pas monte quand l'image d'amorce est un disque dur (ou un
+    # CD en emulation de disque dur) : le disque cible est monte comme D:
+    # (81h) par la commande mount, avant la premiere instruction
+    script = ['mount D: ' + disk, 'run 60000000', 'screen', 'type install',
+              'run 60000000', 'screen', 'type ' + LANG, 'run 20000000', 'type oui',
+              'run 900000000', 'screen', 'type non', 'run 80000000', 'screen']
+    out = run_devenv(work, 'installation', iso, None, script, 2000000000)
+    ok('Source : CD-ROM (/dist)' in out, 'installateur lance depuis le CD-ROM (/dist)')
+    ok('Installation terminee' in out, 'Installation terminee')
+    verify_disk(disk, tree)
+    boot_installed(work, disk, 'LANGUAGE=%s; export LANGUAGE' % LANG)
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
     work = os.path.join(OUT, 'images')
-    os.makedirs(work, exist_ok=True)
-    for f in os.listdir(os.path.join(ROOT, 'IMAGE')):
-        if f.startswith('LINUX0-INST') or f == 'LINUX0-CD.ISO':
-            shutil.copy(os.path.join(ROOT, 'IMAGE', f), work)
-    disk = os.path.join(work, 'disque.img')
-    with open(disk, 'wb') as f:
-        f.truncate(64 * 1024 * 1024)
-    bat = os.path.join(work, 'inst.bat')
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
     if MODE == 'cd':
-        lines = ['BOOT /CDROM:%s/LINUX0-CD.ISO' % work, 'IMGMOUNT D: %s' % disk]
+        cd(work)
     else:
-        lines = ['IMGMOUNT A: %s/LINUX0-INST1.IMG' % work, 'IMGMOUNT C: %s' % disk, 'BOOT A:']
-    open(bat, 'w').write('\r\n'.join(lines) + '\r\n')
-    xvfb = subprocess.Popen(['Xvfb', DISPLAY, '-screen', '0', '1920x1200x24'],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(2)
-    ide = subprocess.Popen([DEVENV, '-maxscreen', '/TERMINALDOS:' + bat], cwd=work, env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    ok = False
-    try:
-        wait_for(r'^login:$', 600)
-        shot('amorce')
-        emulator('install')                     # connexion "install"
-        wait_for(r'^Choix \[1\] :')
-        shot('type-installation')
-        emulator('' if MODE != 'cd' else '2')   # UFS seul / FAT16 + UFS
-        wait_for(r'Continuer \? \(oui/non\)')
-        emulator('oui')
-        n = 2
-        last = len([x for x in os.listdir(work) if x.startswith('LINUX0-INST')])
-        while MODE != 'cd' and n <= last:
-            wait_for(r'Inserez la disquette %d ' % n, 3600)
-            shot('disquette-%d' % n)
-            # changement de disquette par l'Invite de commandes
-            terminal('IMGMOUNT -u A', 'IMGMOUNT A: %s/LINUX0-INST%d.IMG' % (work, n))
-            shot('invite-de-commandes', '1360x200+0+880')
-            emulator('')
-            n += 1
-        wait_for(r'Redemarrer maintenant \? \(oui/non\)', 3600)
-        shot('installation-terminee')
-        print('  ' + [l for l in screen() if 'Installation terminee' in l][-1].strip())
-        emulator('non')                         # pas de redemarrage
-        if MODE == 'cd':
-            wait_for(r'^login:$', 120)
-            terminal('IMGMOUNT -u C', 'IMGMOUNT -u D', 'IMGMOUNT C: %s' % disk, 'BOOT C:')
-        else:
-            wait_for(r'Remettez la disquette 1', 120)
-            terminal('IMGMOUNT -u A', 'IMGMOUNT A: %s/LINUX0-INST1.IMG' % work)
-            emulator('')
-            wait_for(r'^login:$', 120)
-            terminal('IMGMOUNT -u A', 'BOOT C:')
-        # amorce UFS (disquettes : UFS seul) ou FAT16 (CD-ROM : FAT16 + UFS)
-        wait_for(r'Chargement de /unix' if MODE != 'cd' else r'/boot : /dev/hda1', 300, anywhere=True)
-        wait_for(r'^login:$', 600)
-        shot('amorce-disque-installe')
-        boot = '\n'.join(screen())
-        emulator('invite')
-        wait_for(r'Mot de passe', 120)
-        emulator('invite')
-        wait_for(r'^\$$', 300)
-        emulator('id; ls /; ls /bin | wc -l')
-        time.sleep(5)
-        wait_for(r'^\$$', 300)
-        shot('session-invite')
-        r = subprocess.run([UFSCHK, '--hd', disk],
-                           capture_output=True, text=True)
-        print('UFS1 du disque installe : ' + r.stdout.strip().splitlines()[-1])
-        want = 'racine : /dev/hda1 (UFS' if MODE != 'cd' else 'racine : /dev/hda2 (UFS'
-        print('amorce du disque installe : ' + ('ok' if want in boot else 'ECHEC (' + want + ')'))
-        ok = r.returncode == 0 and want in boot
-    except TimeoutError as e:
-        print(e)
-        shot('erreur')
-    finally:
-        ide.kill()
-        xvfb.kill()
+        floppies(work)
     print('captures : ' + OUT)
-    print('OK DEVENV (%s)' % MODE if ok else 'ECHEC DEVENV (%s)' % MODE)
-    sys.exit(0 if ok else 1)
+    print(('OK DEVENV (%s)' if not fails else 'ECHEC DEVENV (%s)') % MODE)
+    sys.exit(1 if fails else 0)
 
 
 if __name__ == '__main__':

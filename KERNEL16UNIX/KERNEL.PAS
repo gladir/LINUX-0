@@ -5,7 +5,7 @@
   @description: Noyau LINUX-0 16 bits (IBM PC, 8086/8088, mode reel).
 
   Compilation (un seul fichier, une seule image) :
-    LPC /K KERNEL.PAS      -> KERNEL.SYS, copie sous le nom UNIX a la racine
+    LPC /K KERNEL.PAS      -> KERNEL.SYS, copie sous le nom unix a la racine
                               du disque d'amorce (voir KERNEL16UNIX/BUILD.SH).
 
   Le noyau est monolithique et ecrit dans un seul fichier source, decoupe en
@@ -30,16 +30,17 @@
      COFF (ou MZ) avec argc/argv/envp sur la pile; break agrandit l'image;
      va-et-vient (KSwap) : images ecrites dans une partition de type 82h
      quand la memoire manque, et ramenees a leur adresse d'execution;
-   - systemes de fichiers : UFS1 (FreeBSD, racine du disque dur), FAT12 et
-     FAT16 (disquettes, partition d'amorce), /dev, tubes; montage par chemin,
-     cache de secteurs a ecriture differee (sync, toutes les 30 secondes);
+   - systeme de fichiers : UFS1 seul (FreeBSD; racine d'une partition de
+     disque dur ou d'une disquette entiere), /dev, tubes; montage par
+     chemin, cache de secteurs a ecriture differee (sync, toutes les 30
+     secondes); ce noyau n'a volontairement aucun support de FAT;
    - console : ecran et clavier du BIOS, recopie sur COM1, discipline de
      ligne de V7 (RAW, CBREAK, ECHO, CRMOD; ^C = SIGINT, ^\ = SIGQUIT,
      ^D = fin de fichier).
 
   Carte memoire :
    00000-003FF vecteurs d'interruption  00400-004FF donnees du BIOS
-   00500-07BFF pile du processus 0 (amorce)   07C00 secteur d'amorce
+   00500-07BFF pile du processus 0 (amorce)   07C00 secteur 0 de l'amorce
    08000-0FFFF cache disque (64 tampons de 512 octets)
    10000-...   noyau (code, puis donnees DS de 64 Ko)
    ...-A0000   memoire des processus et piles noyau (coremap)
@@ -69,7 +70,7 @@ Const
  KSTKPARAS=256;     { pile noyau : 4 Ko par processus }
  KSTKTOP=KSTKPARAS*16;
  QUANTUM=3;         { tops d'horloge par tranche de temps }
- DEFHEAP=256;       { tas initial par defaut (paragraphes, 4 Ko; break ensuite) }
+ DEFHEAP=256;       { tas initial par defaut (paragraphes, 4 Ko; puis break) }
 
  { etats des processus }
  PFREE=0; PRUN=1; PSLEEP=2; PZOMB=3;
@@ -78,7 +79,7 @@ Const
  VNON=0; VREG=1; VDIR=2; VCHR=3; VFIFO=4;
 
  { systemes de fichiers }
- FSNONE=0; FSFAT12=1; FSFAT16=2; FSUFS=3; FSDEV=4;
+ FSNONE=0; FSUFS=1; FSDEV=2;
 
  { peripheriques de /dev (Minor) }
  DEVTTY=1; DEVNULL=2; DEVZERO=3; DEVDISK=16;   { DEVDISK+n = Disks[n] }
@@ -111,7 +112,6 @@ Const
 Type
  TPath=String[127];
  TName=String[63];
- T83=String[11];    { nom FAT 8.3 sur 11 caracteres }
 
  TProc=Record
   Stat: Byte;          { PFREE, PRUN, PSLEEP, PZOMB }
@@ -137,7 +137,7 @@ Type
   DosProg: Boolean;    { executable MZ (programme DOS) }
   Umask: Word;
   Nice: Integer;
-  CpuRecent: Word;     { temps processeur recent (tops, divise par 2 par seconde) }
+  CpuRecent: Word;     { temps processeur recent (tops, /2 par seconde) }
   ChildTicks: Longint; { temps processeur des fils attendus (times) }
   ArgPtr: Longint;     { argc/argv/envp sur la pile (exec) }
   Borrowed: Boolean;   { vfork : la memoire est celle du pere }
@@ -155,17 +155,13 @@ Type
   Typ: Byte;           { VREG, VDIR, VCHR, VFIFO }
   Mnt: Byte;           { index du montage }
   Dirty: Boolean;
-  Ino: Longint;        { UFS : inode; FAT : DirLBA*16+entree (racine 0) }
+  Ino: Longint;        { UFS : numero d'inode }
   Size: Longint;
   Mode: Word;
   NLink: Word;
   MTime: Longint;
-  First: Longint;      { FAT : premier cluster }
-  DirLBA: Longint;     { FAT : secteur de l'entree de repertoire }
-  DirIdx: Word;        { FAT : entree dans le secteur }
   Minor: Word;         { peripherique ou numero de tube }
-  CIdx, CClus: Longint;{ FAT : dernier cluster parcouru (index, numero) }
-  Uid, Gid: Word;      { proprietaire (UFS; 0 sur FAT et /dev) }
+  Uid, Gid: Word;      { proprietaire (UFS; root pour /dev) }
  End;
 
  TFile=Record
@@ -185,13 +181,6 @@ Type
   Dir: String[31];
   Special: String[15];
   RootVn: Byte;
-  { FAT }
-  SecPerClus: Word;
-  NFats: Word;
-  RootEnt: Word;
-  SecPerFat: Longint;
-  FatLBA, RootLBA, DataLBA, Clusters, FreeHint: Longint;
-  FreeClus: Longint;   { grappes libres (-1 = pas encore compte) }
   { UFS1 }
   FSize, BSize, Frag, Ipg, Fpg, Ncg, Iblkno, Cblkno, Dblkno: Longint;
   Inopb, Nindir, CsAddr, CgSize: Longint;
@@ -676,7 +665,8 @@ Begin
  CoreAllocAt:=False;
  If Paras=0 Then Begin CoreAllocAt:=True; Exit End;
  For I:=1 To MapCount Do
-  If (MapAddr[I]<=Sg) And (Longint(Sg)+Paras<=Longint(MapAddr[I])+MapSize[I]) Then Begin
+  If (MapAddr[I]<=Sg) And
+    (Longint(Sg)+Paras<=Longint(MapAddr[I])+MapSize[I]) Then Begin
    A:=MapAddr[I]; E:=MapAddr[I]+MapSize[I];
    If (A<Sg) And (Sg+Paras<E) Then Begin
     { coupe en deux : une entree de plus }
@@ -1564,7 +1554,9 @@ Begin
  If (I<=SMapCount) And (A+N=SMapAddr[I]) Then Begin
   SMapAddr[I]:=A; Inc(SMapSize[I],N); Exit;
  End;
- If SMapCount=NSWAPMAP Then Begin KPrintLn('carte du va-et-vient pleine'); Exit End;
+ If SMapCount=NSWAPMAP Then Begin
+  KPrintLn('carte du va-et-vient pleine'); Exit;
+ End;
  For J:=SMapCount DownTo I Do Begin
   SMapAddr[J+1]:=SMapAddr[J]; SMapSize[J+1]:=SMapSize[J];
  End;
@@ -1739,7 +1731,7 @@ Const
 Var
  TtyFlags: Word;                   { sg_flags }
  TtyErase, TtyKill: Char;          { sg_erase, sg_kill }
- TChars: Array[0..5] Of Char;      { tchars : intr, quit, start, stop, eof, brk }
+ TChars: Array[0..5] Of Char;      { tchars : intr, quit, start, stop... }
  TtyWaiting: Integer;
 
 Procedure TtyInit;
@@ -1956,616 +1948,6 @@ Begin
   ConPutC(C);
  End;
  TtyWrite:=N;
-End;
-
-SegmentEnd;
-
-{ ====================================================================== }
-SegmentUnit KFat;
-{ Systemes de fichiers FAT12 et FAT16 (noms 8.3, presentes en minuscules). }
-Uses KTypes,KLib,KDisk;
-SegmentInterface
-
-Const FATEOC=$FFFF;
-
-Function FatMount(M: Integer): Integer;
-Procedure FatRoot(M: Integer; Var V: TVNode);
-Function FatGet(M: Integer; C: Longint): Longint;
-Function FatLookup(Var Dir: TVNode; Name: TName; Var V: TVNode): Integer;
-Function FatRead(Var V: TVNode; Off: Longint; Sg, Os, N: Word): Integer;
-Function FatWrite(Var V: TVNode; Off: Longint; Sg, Os, N: Word): Integer;
-Function FatTrunc(Var V: TVNode): Integer;
-Function FatReadDir(Var V: TVNode; Var Pos: Longint; Var Name: TName;
-  Var Ino: Longint; Var Typ: Byte): Boolean;
-Function FatCreate(Var Dir: TVNode; Name: TName; IsDir: Boolean;
-  Var V: TVNode): Integer;
-Function FatRemove(Var Dir: TVNode; Name: TName; IsDir: Boolean): Integer;
-Function FatRename(Var D1: TVNode; N1: TName; Var D2: TVNode;
-  N2: TName): Integer;
-Procedure FatUpdate(Var V: TVNode);
-Function FatFreeKB(M: Integer): Longint;
-Function DosStamp(T: Longint): Longint;
-Function UnixStamp(D, T: Word): Longint;
-
-SegmentImplementation
-
-Var
-
-
-Function DosStamp(T: Longint): Longint;
-{ secondes depuis 1970 -> date (mot haut) et heure (mot bas) DOS }
-Var Days,Secs: Longint; Y,M,D,DM: Word;
-Begin
- If T<315532800 Then T:=315532800;
- Days:=T Div 86400; Secs:=T Mod 86400;
- Y:=1970;
- While True Do Begin
-  If Y Mod 4=0 Then DM:=366 Else DM:=365;
-  If Days<DM Then Break;
-  Dec(Days,DM); Inc(Y);
- End;
- M:=1;
- While True Do Begin
-  Case M Of
-   1,3,5,7,8,10,12: DM:=31;
-   4,6,9,11: DM:=30;
-   Else If Y Mod 4=0 Then DM:=29 Else DM:=28;
-  End;
-  If Days<DM Then Break;
-  Dec(Days,DM); Inc(M);
- End;
- D:=Days+1;
- DosStamp:=(Longint((Y-1980) Shl 9 Or (M Shl 5) Or D) Shl 16) Or
-   ((Secs Div 3600) Shl 11) Or (((Secs Mod 3600) Div 60) Shl 5) Or
-   ((Secs Mod 60) Div 2);
-End;
-
-Function UnixStamp(D, T: Word): Longint;
-Var Y,M,I: Word; Days: Longint;
-Const MD: Array[1..12] Of Word=(31,28,31,30,31,30,31,31,30,31,30,31);
-Begin
- Y:=(D Shr 9)+1980; M:=(D Shr 5) And 15;
- If (M<1) Or (M>12) Then Begin UnixStamp:=315532800; Exit End;
- Days:=0;
- For I:=1970 To Y-1 Do If I Mod 4=0 Then Inc(Days,366) Else Inc(Days,365);
- For I:=1 To M-1 Do Begin
-  Inc(Days,MD[I]); If (I=2) And (Y Mod 4=0) Then Inc(Days);
- End;
- Inc(Days,(D And 31)-1);
- UnixStamp:=Days*86400+Longint(T Shr 11)*3600+((T Shr 5) And 63)*60+
-   (T And 31)*2;
-End;
-
-Function Fat16(M: Integer): Boolean;
-Begin
- Fat16:=Mounts[M].Typ=FSFAT16;
-End;
-
-Function FatMount(M: Integer): Integer;
-Var B: Integer; S: Word; Tot: Longint;
-Begin
- FatMount:=EIO;
- With Mounts[M] Do Begin
-  B:=BRead(Drive,0);
-  If B=0 Then Exit;
-  S:=BufSeg(B);
-  FatMount:=EINVAL;
-  If (MemW[S:11]<>512) Or (Mem[S:13]=0) Or (Mem[S:16]=0) Then Exit;
-  SecPerClus:=Mem[S:13];
-  NFats:=Mem[S:16];
-  RootEnt:=MemW[S:17];
-  Tot:=MemW[S:19]; If Tot=0 Then Tot:=MemL[S:32];
-  SecPerFat:=MemW[S:22];
-  If SecPerFat=0 Then Exit; { FAT32 non gere }
-  FatLBA:=MemW[S:14];
-  RootLBA:=FatLBA+NFats*SecPerFat;
-  DataLBA:=RootLBA+(Longint(RootEnt)*32+511) Div 512;
-  Clusters:=(Tot-DataLBA) Div SecPerClus;
-  Sectors:=Tot;
-  If Clusters<4085 Then Typ:=FSFAT12 Else Typ:=FSFAT16;
-  FreeHint:=2; FreeClus:=-1;
- End;
- FatMount:=0;
-End;
-
-Procedure FatRoot(M: Integer; Var V: TVNode);
-Begin
- FillChar(V,SizeOf(V),0);
- V.Typ:=VDIR; V.Mnt:=M; V.Ino:=0; V.First:=0; V.Mode:=S_IFDIR Or $1FF;
- V.NLink:=2; V.MTime:=BootTime;
-End;
-
-Function ClusLBA(M: Integer; C: Longint): Longint;
-Begin
- ClusLBA:=Mounts[M].DataLBA+(C-2)*Mounts[M].SecPerClus;
-End;
-
-Function FatGet(M: Integer; C: Longint): Longint;
-Var Off,Sec: Longint; B: Integer; O,V: Word; Lo_,Hi_: Byte;
-Begin
- FatGet:=FATEOC;
- With Mounts[M] Do Begin
-  If (C<2) Or (C>Clusters+1) Then Exit;
-  If Typ=FSFAT16 Then Begin
-   Off:=C*2; B:=BRead(Drive,FatLBA+Off Div 512);
-   If B=0 Then Exit;
-   V:=MemW[BufSeg(B):Off Mod 512];
-   If V>=$FFF8 Then FatGet:=FATEOC Else FatGet:=V;
-  End Else Begin
-   Off:=C+C Div 2; Sec:=FatLBA+Off Div 512; O:=Off Mod 512;
-   B:=BRead(Drive,Sec); If B=0 Then Exit;
-   Lo_:=Mem[BufSeg(B):O];
-   If O=511 Then Begin
-    B:=BRead(Drive,Sec+1); If B=0 Then Exit;
-    Hi_:=Mem[BufSeg(B):0];
-   End Else Hi_:=Mem[BufSeg(B):O+1];
-   V:=Lo_+Word(Hi_) Shl 8;
-   If Odd(C) Then V:=V Shr 4 Else V:=V And $FFF;
-   If V>=$FF8 Then FatGet:=FATEOC Else FatGet:=V;
-  End;
- End;
-End;
-
-Procedure FatSet(M: Integer; C, Val: Longint);
-Var Off,Sec: Longint; B,K: Integer; O,V: Word; S: Word;
-Begin
- With Mounts[M] Do Begin
-  If (C<2) Or (C>Clusters+1) Then Exit;
-  For K:=0 To NFats-1 Do Begin
-   If Typ=FSFAT16 Then Begin
-    Off:=C*2; B:=BRead(Drive,FatLBA+K*SecPerFat+Off Div 512);
-    If B=0 Then Exit;
-    MemW[BufSeg(B):Off Mod 512]:=Word(Val); BWrite(B);
-   End Else Begin
-    V:=Word(Val) And $FFF;
-    Off:=C+C Div 2; Sec:=FatLBA+K*SecPerFat+Off Div 512; O:=Off Mod 512;
-    B:=BRead(Drive,Sec); If B=0 Then Exit;
-    S:=BufSeg(B);
-    If Odd(C) Then Mem[S:O]:=(Mem[S:O] And $0F) Or Lo(V Shl 4)
-    Else Mem[S:O]:=Lo(V);
-    If O=511 Then Begin
-     BWrite(B);
-     B:=BRead(Drive,Sec+1); If B=0 Then Exit;
-     S:=BufSeg(B); O:=0;
-    End Else Inc(O);
-    If Odd(C) Then Mem[S:O]:=Hi(V Shl 4)
-    Else Mem[S:O]:=(Mem[S:O] And $F0) Or Hi(V);
-    BWrite(B);
-   End;
-  End;
- End;
-End;
-
-Function FatAlloc(M: Integer): Longint;
-{ cluster libre marque fin de chaine, 0 si le disque est plein }
-Var C,N: Longint;
-Begin
- FatAlloc:=0;
- With Mounts[M] Do Begin
-  C:=FreeHint; If (C<2) Or (C>Clusters+1) Then C:=2;
-  For N:=1 To Clusters Do Begin
-   If FatGet(M,C)=0 Then Begin
-    FatSet(M,C,FATEOC); FreeHint:=C+1; FatAlloc:=C;
-    If FreeClus>0 Then Dec(FreeClus);
-    Exit;
-   End;
-   Inc(C); If C>Clusters+1 Then C:=2;
-  End;
- End;
-End;
-
-Procedure FreeChain(M: Integer; C: Longint);
-Var N: Longint; K: Longint;
-Begin
- K:=0;
- While (C>=2) And (C<>FATEOC) And (K<=Mounts[M].Clusters) Do Begin
-  N:=FatGet(M,C); FatSet(M,C,0);
-  If C<Mounts[M].FreeHint Then Mounts[M].FreeHint:=C;
-  If Mounts[M].FreeClus>=0 Then Inc(Mounts[M].FreeClus);
-  C:=N; Inc(K);
- End;
-End;
-
-Function FatFreeKB(M: Integer): Longint;
-{ espace libre : le compte des grappes libres est fait une seule fois, puis
-  tenu a jour par FatAlloc et FreeChain }
-Var C,N: Longint;
-Begin
- If Mounts[M].FreeClus<0 Then Begin
-  N:=0;
-  For C:=2 To Mounts[M].Clusters+1 Do If FatGet(M,C)=0 Then Inc(N);
-  Mounts[M].FreeClus:=N;
- End;
- FatFreeKB:=Mounts[M].FreeClus*Mounts[M].SecPerClus Div 2;
-End;
-
-Procedure ZeroCluster(M: Integer; C: Longint);
-Var I: Integer; B: Integer;
-Begin
- For I:=0 To Mounts[M].SecPerClus-1 Do Begin
-  B:=BGet(Mounts[M].Drive,ClusLBA(M,C)+I);
-  FarFill(BufSeg(B),0,512,0); BWrite(B);
- End;
-End;
-
-Function DirSector(Var D: TVNode; Index: Longint; Grow: Boolean;
-  Var LBA: Longint; Var Idx: Word): Boolean;
-{ secteur et position de l'entree Index du repertoire D }
-Var Sec,CI,K,C,N: Longint; M: Integer;
-Begin
- DirSector:=False; M:=D.Mnt;
- Idx:=Index Mod 16; Sec:=Index Div 16;
- With Mounts[M] Do
- If D.First=0 Then Begin
-  If Index>=RootEnt Then Exit;
-  LBA:=RootLBA+Sec;
- End Else Begin
-  CI:=Sec Div SecPerClus; C:=D.First; K:=0;
-  While K<CI Do Begin
-   N:=FatGet(M,C);
-   If (N<2) Or (N=FATEOC) Then Begin
-    If Not Grow Then Exit;
-    N:=FatAlloc(M); If N=0 Then Exit;
-    ZeroCluster(M,N); FatSet(M,C,N);
-   End;
-   C:=N; Inc(K);
-  End;
-  LBA:=ClusLBA(M,C)+Sec Mod SecPerClus;
- End;
- DirSector:=True;
-End;
-
-Function To83(Name: TName; Var R: T83): Boolean;
-Var I,P: Integer; B,E: TName;
-Begin
- To83:=False;
- If (Name='') Or (Name='.') Or (Name='..') Then Begin
-  If Name='.' Then R:='.          ' Else If Name='..' Then R:='..         '
-  Else Exit;
-  To83:=True; Exit;
- End;
- Name:=UpStr(Name);
- P:=0; For I:=Length(Name) DownTo 2 Do If Name[I]='.' Then Begin P:=I; Break End;
- If P>0 Then Begin B:=Copy(Name,1,P-1); E:=Copy(Name,P+1,255) End
- Else Begin B:=Name; E:='' End;
- If (Length(B)>8) Or (Length(E)>3) Or (B='') Then Exit;
- For I:=1 To Length(B) Do If B[I] In ['.',' ','"','*','+',',','/',':',';',
-   '<','=','>','?','[','\',']','|'] Then Exit;
- For I:=1 To Length(E) Do If E[I] In ['.',' ','"','*','+',',','/',':',';',
-   '<','=','>','?','[','\',']','|'] Then Exit;
- While Length(B)<8 Do B:=B+' ';
- While Length(E)<3 Do E:=E+' ';
- R:=B+E; To83:=True;
-End;
-
-Function From83(Sg, Os: Word): TName;
-Var B,E: TName; I: Integer;
-Begin
- B:=''; E:='';
- For I:=0 To 7 Do B:=B+Chr(Mem[Sg:Os+I]);
- For I:=8 To 10 Do E:=E+Chr(Mem[Sg:Os+I]);
- While (B<>'') And (B[Length(B)]=' ') Do Dec(B[0]);
- While (E<>'') And (E[Length(E)]=' ') Do Dec(E[0]);
- If B[1]=#5 Then B[1]:=#$E5;
- If E<>'' Then B:=B+'.'+E;
- From83:=LowStr(B);
-End;
-
-Procedure FillVn(M: Integer; Sg, Os: Word; LBA: Longint; Idx: Word;
-  Var V: TVNode);
-Var A: Byte;
-Begin
- FillChar(V,SizeOf(V),0);
- A:=Mem[Sg:Os+11];
- V.Mnt:=M; V.First:=MemW[Sg:Os+26]; V.Size:=MemL[Sg:Os+28];
- V.DirLBA:=LBA; V.DirIdx:=Idx; V.Ino:=LBA*16+Idx;
- V.MTime:=UnixStamp(MemW[Sg:Os+24],MemW[Sg:Os+22]);
- If A And $10<>0 Then Begin
-  V.Typ:=VDIR; V.Mode:=S_IFDIR Or $1FF; V.NLink:=2; V.Size:=0;
- End Else Begin
-  V.Typ:=VREG; V.Mode:=S_IFREG Or $1FF; V.NLink:=1;
- End;
- If A And 1<>0 Then V.Mode:=V.Mode And Not $92;
-End;
-
-Function Search(Var Dir: TVNode; Var N83: T83; Var LBA: Longint;
-  Var Idx: Word): Boolean;
-Var I: Longint; B: Integer; S,O: Word; K: Integer; Ok: Boolean; A: Byte;
-Begin
- Search:=False; I:=0;
- While DirSector(Dir,I,False,LBA,Idx) Do Begin
-  B:=BRead(Mounts[Dir.Mnt].Drive,LBA);
-  If B=0 Then Exit;
-  S:=BufSeg(B); O:=Idx*32;
-  If Mem[S:O]=0 Then Exit;
-  A:=Mem[S:O+11];
-  If (Mem[S:O]<>$E5) And (A<>$0F) And (A And 8=0) Then Begin
-   Ok:=True;
-   For K:=0 To 10 Do If Mem[S:O+K]<>Ord(N83[K+1]) Then Begin
-    Ok:=False; Break;
-   End;
-   If Ok Then Begin Search:=True; Exit End;
-  End;
-  Inc(I);
- End;
-End;
-
-Function FatLookup(Var Dir: TVNode; Name: TName; Var V: TVNode): Integer;
-Var N83: T83; LBA,C: Longint; Idx: Word; B: Integer;
-Begin
- If Not To83(Name,N83) Then Begin FatLookup:=ENOENT; Exit End;
- If Not Search(Dir,N83,LBA,Idx) Then Begin FatLookup:=ENOENT; Exit End;
- B:=BRead(Mounts[Dir.Mnt].Drive,LBA);
- If B=0 Then Begin FatLookup:=EIO; Exit End;
- FillVn(Dir.Mnt,BufSeg(B),Idx*32,LBA,Idx,V);
- { ".." vers la racine (cluster 0) }
- If (V.Typ=VDIR) And (V.First=0) Then FatRoot(Dir.Mnt,V);
- FatLookup:=0;
-End;
-
-Function ClusterAt(Var V: TVNode; Idx: Longint): Longint;
-Var C,I: Longint;
-Begin
- If (V.CClus>=2) And (Idx>=V.CIdx) Then Begin C:=V.CClus; I:=V.CIdx End
- Else Begin C:=V.First; I:=0 End;
- While (I<Idx) And (C>=2) And (C<>FATEOC) Do Begin
-  C:=FatGet(V.Mnt,C); Inc(I);
- End;
- If (C<2) Or (C=FATEOC) Then Begin ClusterAt:=0; Exit End;
- V.CIdx:=Idx; V.CClus:=C;
- ClusterAt:=C;
-End;
-
-Function FatRead(Var V: TVNode; Off: Longint; Sg, Os, N: Word): Integer;
-Var Done,Chunk,O: Word; CB: Longint; C: Longint; B: Integer; M: Integer;
-Begin
- FatRead:=0;
- If Off>=V.Size Then Exit;
- If Off+N>V.Size Then N:=V.Size-Off;
- M:=V.Mnt; CB:=Longint(Mounts[M].SecPerClus)*512; Done:=0;
- While Done<N Do Begin
-  C:=ClusterAt(V,Off Div CB);
-  If C=0 Then Break;
-  O:=Off Mod 512; Chunk:=512-O; If Chunk>N-Done Then Chunk:=N-Done;
-  B:=BRead(Mounts[M].Drive,ClusLBA(M,C)+(Off Mod CB) Div 512);
-  If B=0 Then Begin FatRead:=-EIO; Exit End;
-  FarMove(BufSeg(B),O,Sg,Os+Done,Chunk);
-  Inc(Done,Chunk); Inc(Off,Chunk);
- End;
- FatRead:=Done;
-End;
-
-Procedure FatUpdate(Var V: TVNode);
-Var B: Integer; S,O: Word; T: Longint;
-Begin
- If (V.Ino=0) Or (V.Typ<>VREG) Then Exit;
- B:=BRead(Mounts[V.Mnt].Drive,V.DirLBA);
- If B=0 Then Exit;
- S:=BufSeg(B); O:=V.DirIdx*32;
- MemW[S:O+26]:=Word(V.First); MemL[S:O+28]:=V.Size;
- T:=DosStamp(V.MTime);
- MemW[S:O+22]:=Word(T); MemW[S:O+24]:=Word(T Shr 16);
- MemW[S:O+18]:=Word(T Shr 16);
- BWrite(B);
- V.Dirty:=False;
-End;
-
-Function Extend(Var V: TVNode; Idx: Longint): Longint;
-{ cluster numero Idx du fichier, alloue si besoin }
-Var C,N,I: Longint;
-Begin
- Extend:=0;
- If V.First<2 Then Begin
-  N:=FatAlloc(V.Mnt); If N=0 Then Exit;
-  V.First:=N; V.CIdx:=0; V.CClus:=N; V.Dirty:=True;
- End;
- C:=ClusterAt(V,Idx);
- If C<>0 Then Begin Extend:=C; Exit End;
- { aller a la fin de la chaine }
- C:=V.First; I:=0;
- While True Do Begin
-  N:=FatGet(V.Mnt,C);
-  If (N<2) Or (N=FATEOC) Then Break;
-  C:=N; Inc(I);
- End;
- While I<Idx Do Begin
-  N:=FatAlloc(V.Mnt); If N=0 Then Exit;
-  FatSet(V.Mnt,C,N); C:=N; Inc(I);
- End;
- V.CIdx:=Idx; V.CClus:=C;
- Extend:=C;
-End;
-
-Function FatWrite(Var V: TVNode; Off: Longint; Sg, Os, N: Word): Integer;
-Var Done,Chunk,O: Word; CB: Longint; C: Longint; B: Integer; M: Integer;
-  Pad: Longint;
-Begin
- M:=V.Mnt; CB:=Longint(Mounts[M].SecPerClus)*512;
- If Mounts[M].RO Then Begin FatWrite:=-EROFS; Exit End;
- { trou : rempli de zeros }
- While V.Size<Off Do Begin
-  Pad:=Off-V.Size; If Pad>512 Then Pad:=512;
-  C:=FatWrite(V,V.Size,Seg(ZeroBuf),Ofs(ZeroBuf),Pad);
-  If C<=0 Then Begin FatWrite:=C; Exit End;
- End;
- Done:=0;
- While Done<N Do Begin
-  C:=Extend(V,Off Div CB);
-  If C=0 Then Begin
-   If Done=0 Then Begin FatWrite:=-ENOSPC; Exit End;
-   Break;
-  End;
-  O:=Off Mod 512; Chunk:=512-O; If Chunk>N-Done Then Chunk:=N-Done;
-  If (O=0) And ((Chunk=512) Or (Off+Chunk>=V.Size)) Then Begin
-   B:=BGet(Mounts[M].Drive,ClusLBA(M,C)+(Off Mod CB) Div 512);
-   If Chunk<512 Then FarFill(BufSeg(B),0,512,0);
-  End Else B:=BRead(Mounts[M].Drive,ClusLBA(M,C)+(Off Mod CB) Div 512);
-  If B=0 Then Begin FatWrite:=-EIO; Exit End;
-  FarMove(Sg,Os+Done,BufSeg(B),O,Chunk);
-  If Not BWrite(B) Then Begin FatWrite:=-EIO; Exit End;
-  Inc(Done,Chunk); Inc(Off,Chunk);
-  If Off>V.Size Then V.Size:=Off;
- End;
- V.MTime:=KTime;
- FatUpdate(V);
- FatWrite:=Done;
-End;
-
-Function FatTrunc(Var V: TVNode): Integer;
-Begin
- FatTrunc:=0;
- If V.Typ<>VREG Then Exit;
- If Mounts[V.Mnt].RO Then Begin FatTrunc:=EROFS; Exit End;
- FreeChain(V.Mnt,V.First);
- V.First:=0; V.Size:=0; V.CIdx:=0; V.CClus:=0; V.MTime:=KTime;
- FatUpdate(V);
-End;
-
-Function FatReadDir(Var V: TVNode; Var Pos: Longint; Var Name: TName;
-  Var Ino: Longint; Var Typ: Byte): Boolean;
-Var LBA: Longint; Idx: Word; B: Integer; S,O: Word; A: Byte;
-Begin
- FatReadDir:=False;
- While DirSector(V,Pos,False,LBA,Idx) Do Begin
-  B:=BRead(Mounts[V.Mnt].Drive,LBA);
-  If B=0 Then Exit;
-  S:=BufSeg(B); O:=Idx*32;
-  If Mem[S:O]=0 Then Exit;
-  Inc(Pos);
-  A:=Mem[S:O+11];
-  If (Mem[S:O]<>$E5) And (A<>$0F) And (A And 8=0) Then Begin
-   Name:=From83(S,O); Ino:=LBA*16+Idx;
-   If A And $10<>0 Then Typ:=VDIR Else Typ:=VREG;
-   FatReadDir:=True; Exit;
-  End;
- End;
-End;
-
-Function FreeSlot(Var Dir: TVNode; Var LBA: Longint; Var Idx: Word): Boolean;
-Var I: Longint; B: Integer; S: Word;
-Begin
- FreeSlot:=False; I:=0;
- While DirSector(Dir,I,Dir.First<>0,LBA,Idx) Do Begin
-  B:=BRead(Mounts[Dir.Mnt].Drive,LBA);
-  If B=0 Then Exit;
-  S:=BufSeg(B);
-  If (Mem[S:Idx*32]=0) Or (Mem[S:Idx*32]=$E5) Then Begin
-   FreeSlot:=True; Exit;
-  End;
-  Inc(I);
-  If I>65535 Then Exit;
- End;
-End;
-
-Procedure PutEntry(S, O: Word; N83: T83; Attr: Byte; First: Longint);
-Var I: Integer; T: Longint;
-Begin
- FarFill(S,O,32,0);
- For I:=0 To 10 Do Mem[S:O+I]:=Ord(N83[I+1]);
- Mem[S:O+11]:=Attr;
- T:=DosStamp(KTime);
- MemW[S:O+14]:=Word(T); MemW[S:O+16]:=Word(T Shr 16);
- MemW[S:O+18]:=Word(T Shr 16);
- MemW[S:O+22]:=Word(T); MemW[S:O+24]:=Word(T Shr 16);
- MemW[S:O+26]:=Word(First);
-End;
-
-Function FatCreate(Var Dir: TVNode; Name: TName; IsDir: Boolean;
-  Var V: TVNode): Integer;
-Var N83: T83; LBA,C: Longint; Idx: Word; B: Integer; S: Word;
-Begin
- If Mounts[Dir.Mnt].RO Then Begin FatCreate:=EROFS; Exit End;
- If Not To83(Name,N83) Or (Name='.') Or (Name='..') Then Begin
-  FatCreate:=ENAMETOOLONG; Exit;
- End;
- If Search(Dir,N83,LBA,Idx) Then Begin FatCreate:=EEXIST; Exit End;
- If Not FreeSlot(Dir,LBA,Idx) Then Begin FatCreate:=ENOSPC; Exit End;
- C:=0;
- If IsDir Then Begin
-  C:=FatAlloc(Dir.Mnt);
-  If C=0 Then Begin FatCreate:=ENOSPC; Exit End;
-  ZeroCluster(Dir.Mnt,C);
-  B:=BRead(Mounts[Dir.Mnt].Drive,ClusLBA(Dir.Mnt,C));
-  If B=0 Then Begin FatCreate:=EIO; Exit End;
-  PutEntry(BufSeg(B),0,'.          ',$10,C);
-  PutEntry(BufSeg(B),32,'..         ',$10,Dir.First);
-  BWrite(B);
- End;
- B:=BRead(Mounts[Dir.Mnt].Drive,LBA);
- If B=0 Then Begin FatCreate:=EIO; Exit End;
- S:=BufSeg(B);
- If IsDir Then PutEntry(S,Idx*32,N83,$10,C) Else PutEntry(S,Idx*32,N83,$20,0);
- If Not BWrite(B) Then Begin FatCreate:=EIO; Exit End;
- FillVn(Dir.Mnt,S,Idx*32,LBA,Idx,V);
- FatCreate:=0;
-End;
-
-Function DirEmpty(Var D: TVNode): Boolean;
-Var Pos,Ino: Longint; Name: TName; Typ: Byte;
-Begin
- DirEmpty:=True; Pos:=0;
- While FatReadDir(D,Pos,Name,Ino,Typ) Do
-  If (Name<>'.') And (Name<>'..') Then Begin DirEmpty:=False; Exit End;
-End;
-
-Function FatRemove(Var Dir: TVNode; Name: TName; IsDir: Boolean): Integer;
-Var N83: T83; LBA: Longint; Idx: Word; B: Integer; V: TVNode;
-Begin
- If Mounts[Dir.Mnt].RO Then Begin FatRemove:=EROFS; Exit End;
- If (Name='.') Or (Name='..') Then Begin FatRemove:=EINVAL; Exit End;
- If Not To83(Name,N83) Then Begin FatRemove:=ENOENT; Exit End;
- If Not Search(Dir,N83,LBA,Idx) Then Begin FatRemove:=ENOENT; Exit End;
- B:=BRead(Mounts[Dir.Mnt].Drive,LBA);
- If B=0 Then Begin FatRemove:=EIO; Exit End;
- FillVn(Dir.Mnt,BufSeg(B),Idx*32,LBA,Idx,V);
- If IsDir And (V.Typ<>VDIR) Then Begin FatRemove:=ENOTDIR; Exit End;
- If Not IsDir And (V.Typ=VDIR) Then Begin FatRemove:=EISDIR; Exit End;
- If IsDir And Not DirEmpty(V) Then Begin FatRemove:=ENOTEMPTY; Exit End;
- FreeChain(Dir.Mnt,V.First);
- B:=BRead(Mounts[Dir.Mnt].Drive,LBA);
- If B=0 Then Begin FatRemove:=EIO; Exit End;
- Mem[BufSeg(B):Idx*32]:=$E5;
- BWrite(B);
- FatRemove:=0;
-End;
-
-Function FatRename(Var D1: TVNode; N1: TName; Var D2: TVNode;
-  N2: TName): Integer;
-Var A,B83: T83; L1,L2: Longint; I1,I2: Word; B,E: Integer;
-  Raw: Array[0..31] Of Byte; V: TVNode;
-Begin
- If Mounts[D1.Mnt].RO Then Begin FatRename:=EROFS; Exit End;
- If Not To83(N1,A) Or Not Search(D1,A,L1,I1) Then Begin
-  FatRename:=ENOENT; Exit;
- End;
- If Not To83(N2,B83) Then Begin FatRename:=ENAMETOOLONG; Exit End;
- If Search(D2,B83,L2,I2) Then Begin
-  E:=FatRemove(D2,N2,False);
-  If E<>0 Then Begin FatRename:=EEXIST; Exit End;
-  If Not Search(D1,A,L1,I1) Then Begin FatRename:=ENOENT; Exit End;
- End;
- B:=BRead(Mounts[D1.Mnt].Drive,L1);
- If B=0 Then Begin FatRename:=EIO; Exit End;
- FarMove(BufSeg(B),I1*32,Seg(Raw),Ofs(Raw),32);
- If Not FreeSlot(D2,L2,I2) Then Begin FatRename:=ENOSPC; Exit End;
- B:=BRead(Mounts[D1.Mnt].Drive,L2);
- If B=0 Then Begin FatRename:=EIO; Exit End;
- FarMove(Seg(Raw),Ofs(Raw),BufSeg(B),I2*32,32);
- For E:=0 To 10 Do Mem[BufSeg(B):I2*32+E]:=Ord(B83[E+1]);
- BWrite(B);
- B:=BRead(Mounts[D1.Mnt].Drive,L1);
- If B=0 Then Begin FatRename:=EIO; Exit End;
- Mem[BufSeg(B):I1*32]:=$E5;
- BWrite(B);
- { repertoire deplace : mise a jour de ".." }
- If (Raw[11] And $10<>0) And (D1.First<>D2.First) Then Begin
-  V.Mnt:=D1.Mnt;
-  B:=BRead(Mounts[D1.Mnt].Drive,ClusLBA(D1.Mnt,Raw[26]+Word(Raw[27]) Shl 8));
-  If B<>0 Then Begin
-   MemW[BufSeg(B):32+26]:=Word(D2.First); BWrite(B);
-  End;
- End;
- FatRename:=0;
 End;
 
 SegmentEnd;
@@ -2840,9 +2222,13 @@ Begin
  If Sz<=0 Then Exit;
  CgSetBit(M,Cg,COff,Blk,Cnt>0);
  Fwd:=0; I:=Blk+1;
- While (I<NBlk) And (Fwd<Sz) And CgBit(M,Cg,COff,I) Do Begin Inc(Fwd); Inc(I) End;
+ While (I<NBlk) And (Fwd<Sz) And CgBit(M,Cg,COff,I) Do Begin
+  Inc(Fwd); Inc(I);
+ End;
  Back:=0; I:=Blk-1;
- While (I>=0) And (Back<Sz) And CgBit(M,Cg,COff,I) Do Begin Inc(Back); Dec(I) End;
+ While (I>=0) And (Back<Sz) And CgBit(M,Cg,COff,I) Do Begin
+  Inc(Back); Dec(I);
+ End;
  I:=Back+Fwd+1; If I>Sz Then I:=Sz;
  CgPutL(M,Cg,SOff+I*4,CgGetL(M,Cg,SOff+I*4)+Cnt);
  If Back>0 Then CgPutL(M,Cg,SOff+Back*4,CgGetL(M,Cg,SOff+Back*4)-Cnt);
@@ -3252,7 +2638,12 @@ End;
 
 Function DType(Typ: Byte): Byte;
 Begin
- Case Typ Of VDIR: DType:=4; VCHR: DType:=2; VFIFO: DType:=1; Else DType:=8; End;
+ Case Typ Of
+  VDIR: DType:=4;
+  VCHR: DType:=2;
+  VFIFO: DType:=1;
+  Else DType:=8;
+ End;
 End;
 
 Function AddEntry(Var Dir: TVNode; Name: TName; Ino: Longint;
@@ -3366,7 +2757,9 @@ Var M: Integer; Ino,X: Longint; E: Integer;
 Begin
  M:=Dir.Mnt;
  If Mounts[M].RO Then Begin UfsCreate:=EROFS; Exit End;
- If (Name='') Or (Name='.') Or (Name='..') Then Begin UfsCreate:=EINVAL; Exit End;
+ If (Name='') Or (Name='.') Or (Name='..') Then Begin
+  UfsCreate:=EINVAL; Exit;
+ End;
  If Length(Name)>63 Then Begin UfsCreate:=ENAMETOOLONG; Exit End;
  If Find(Dir,Name,X) Then Begin UfsCreate:=EEXIST; Exit End;
  Ino:=AllocInode(M,IsDir);
@@ -3487,7 +2880,7 @@ SegmentEnd;
 SegmentUnit KVfs;
 { Systeme de fichiers virtuel : table des vnodes, resolution des chemins
   (namei), table des montages, fichiers ouverts, /dev et tubes. }
-Uses KTypes,KLib,KSched,KDisk,KTty,KFat,KUfs;
+Uses KTypes,KLib,KSched,KDisk,KTty,KUfs;
 SegmentInterface
 
 Var
@@ -3814,7 +3207,6 @@ Var M: Integer;
 Begin
  M:=VNodes[D].Mnt;
  Case Mounts[M].Typ Of
-  FSFAT12,FSFAT16: VLookup:=FatLookup(VNodes[D],Name,T);
   FSUFS: VLookup:=UfsLookup(VNodes[D],Name,T);
   FSDEV: VLookup:=DevLookup(M,Name,T);
   Else VLookup:=ENOENT;
@@ -3877,7 +3269,6 @@ Begin
   VCHR: VRead:=DevRW(VNodes[Vn].Minor,Off,Sg,Os,N,False);
   VDIR: VRead:=-EISDIR;
   Else Case FsType(Vn) Of
-   FSFAT12,FSFAT16: VRead:=FatRead(VNodes[Vn],Off,Sg,Os,N);
    FSUFS: VRead:=UfsRead(VNodes[Vn],Off,Sg,Os,N);
    Else VRead:=-EIO;
   End;
@@ -3891,7 +3282,6 @@ Begin
   VCHR: VWrite:=DevRW(VNodes[Vn].Minor,Off,Sg,Os,N,True);
   VDIR: VWrite:=-EISDIR;
   Else Case FsType(Vn) Of
-   FSFAT12,FSFAT16: VWrite:=FatWrite(VNodes[Vn],Off,Sg,Os,N);
    FSUFS: VWrite:=UfsWrite(VNodes[Vn],Off,Sg,Os,N);
    Else VWrite:=-EIO;
   End;
@@ -3903,7 +3293,6 @@ Begin
  VTrunc:=0;
  If VNodes[Vn].Typ<>VREG Then Exit;
  Case FsType(Vn) Of
-  FSFAT12,FSFAT16: VTrunc:=FatTrunc(VNodes[Vn]);
   FSUFS: VTrunc:=UfsTrunc(VNodes[Vn]);
  End;
 End;
@@ -3912,7 +3301,6 @@ Function VReadDir(Vn: Integer; Var Pos: Longint; Var Name: TName;
   Var Ino: Longint; Var Typ: Byte): Boolean;
 Begin
  Case FsType(Vn) Of
-  FSFAT12,FSFAT16: VReadDir:=FatReadDir(VNodes[Vn],Pos,Name,Ino,Typ);
   FSUFS: VReadDir:=UfsReadDir(VNodes[Vn],Pos,Name,Ino,Typ);
   FSDEV: VReadDir:=DevReadDir(Pos,Name,Ino,Typ);
   Else VReadDir:=False;
@@ -3925,7 +3313,6 @@ Var T: TVNode; E: Integer;
 Begin
  Vn:=0;
  Case FsType(Dir) Of
-  FSFAT12,FSFAT16: E:=FatCreate(VNodes[Dir],Name,IsDir,T);
   FSUFS: E:=UfsCreate(VNodes[Dir],Name,IsDir,Mode And Not Procs[Cur].Umask,T);
   Else E:=EROFS;
  End;
@@ -3939,7 +3326,6 @@ End;
 Function VRemove(Dir: Integer; Name: TName; IsDir: Boolean): Integer;
 Begin
  Case FsType(Dir) Of
-  FSFAT12,FSFAT16: VRemove:=FatRemove(VNodes[Dir],Name,IsDir);
   FSUFS: VRemove:=UfsRemove(VNodes[Dir],Name,IsDir);
   Else VRemove:=EROFS;
  End;
@@ -3949,7 +3335,6 @@ Function VRename(D1: Integer; N1: TName; D2: Integer; N2: TName): Integer;
 Begin
  If VNodes[D1].Mnt<>VNodes[D2].Mnt Then Begin VRename:=EXDEV; Exit End;
  Case FsType(D1) Of
-  FSFAT12,FSFAT16: VRename:=FatRename(VNodes[D1],N1,VNodes[D2],N2);
   FSUFS: VRename:=UfsRename(VNodes[D1],N1,VNodes[D2],N2);
   Else VRename:=EROFS;
  End;
@@ -3966,14 +3351,14 @@ Function VChmod(Vn: Integer; Mode: Word): Integer;
 Begin
  Case FsType(Vn) Of
   FSUFS: VChmod:=UfsChmod(VNodes[Vn],Mode);
-  Else VChmod:=0;   { FAT, /dev : pas de permissions enregistrees }
+  Else VChmod:=0;   { /dev : pas de permissions enregistrees }
  End;
 End;
 
 Function VChown(Vn: Integer; U, G: Word): Integer;
 Begin
  VChown:=0;
- If FsType(Vn)<>FSUFS Then Exit;   { FAT, /dev : proprietaire root }
+ If FsType(Vn)<>FSUFS Then Exit;   { /dev : proprietaire root }
  VNodes[Vn].Uid:=U; VNodes[Vn].Gid:=G;
  VChown:=UfsSetAttr(VNodes[Vn]);
 End;
@@ -3983,10 +3368,6 @@ Begin
  VUtime:=0;
  Case FsType(Vn) Of
   FSUFS: Begin VNodes[Vn].MTime:=T; VUtime:=UfsSetAttr(VNodes[Vn]) End;
-  FSFAT12,FSFAT16: If VNodes[Vn].Typ=VREG Then Begin
-   If Mounts[VNodes[Vn].Mnt].RO Then Begin VUtime:=EROFS; Exit End;
-   VNodes[Vn].MTime:=T; FatUpdate(VNodes[Vn]);
-  End;
  End;
 End;
 
@@ -4014,7 +3395,6 @@ End;
 Function MountFree(M: Integer): Longint;
 Begin
  Case Mounts[M].Typ Of
-  FSFAT12,FSFAT16: MountFree:=FatFreeKB(M);
   FSUFS: MountFree:=UfsFreeKB(M);
   Else MountFree:=0;
  End;
@@ -4048,14 +3428,12 @@ Begin
    Begin DoMount:=EBUSY; Exit End;
   Mounts[M].Drive:=D; Mounts[M].Start:=Disks[D].Start;
   BInval(D);
-  E:=EINVAL;
-  If FsType<>1 Then E:=UfsMount(M);
-  If (E<>0) And (FsType<>2) Then E:=FatMount(M);
+  { seul UFS1 existe : 0 (automatique) ou 2 (UFS) }
+  If (FsType<>0) And (FsType<>2) Then Begin DoMount:=EINVAL; Exit End;
+  E:=UfsMount(M);
   If E<>0 Then Begin DoMount:=E; Exit End;
-  If Mounts[M].Typ=FSUFS Then Begin
-   E:=UfsIGet(M,ROOTINO,T);
-   If E<>0 Then Begin DoMount:=E; Exit End;
-  End Else FatRoot(M,T);
+  E:=UfsIGet(M,ROOTINO,T);
+  If E<>0 Then Begin DoMount:=E; Exit End;
  End;
  Mounts[M].Used:=True;
  V:=VGet(T);
@@ -4211,7 +3589,8 @@ Begin
   Inc(NextPid); If NextPid>30000 Then NextPid:=2;
   While FindPid(NextPid)>=0 Do Inc(NextPid);
   Pid:=NextPid; PPid:=Procs[Cur].Pid;
-  Where:=A; CpuTicks:=0; ChildTicks:=0; CpuRecent:=0; SigPend:=0; Chan:=0; Wake:=0;
+  Where:=A; CpuTicks:=0; ChildTicks:=0; CpuRecent:=0; SigPend:=0;
+  Chan:=0; Wake:=0;
   Intr:=False; Alarm:=0;
   USS:=CurUSS; USP:=CurUSP;
   For I:=0 To NOFILE-1 Do If Fd[I]<>0 Then FRef(Fd[I]);
@@ -4391,12 +3770,15 @@ Begin
      (CoffSh[I*40+2]=Ord('e')) Then HeapMin:=(CoffL(I*40+16)+15) Div 16;
    { .heap de taille nulle : programme sans tas }
   End;
-  If (SsRel=$FFFF) Or (Ext>$9FFF0) Then Begin VPut(Vn); DoExec:=ENOEXEC; Exit End;
+  If (SsRel=$FFFF) Or (Ext>$9FFF0) Then Begin
+   VPut(Vn); DoExec:=ENOEXEC; Exit;
+  End;
   If HeapMin=-1 Then HeapMin:=DEFHEAP;
   LoadParas:=(Ext+15) Div 16; MinA:=0; HdrParas:=0; ImgBytes:=0;
  End Else Begin
   If H[0]<>$5A4D Then Begin VPut(Vn); DoExec:=ENOEXEC; Exit End;
-  If H[1]=0 Then ImgBytes:=Longint(H[2])*512 Else ImgBytes:=Longint(H[2]-1)*512+H[1];
+  If H[1]=0 Then ImgBytes:=Longint(H[2])*512
+  Else ImgBytes:=Longint(H[2]-1)*512+H[1];
   HdrParas:=H[4];
   ImgBytes:=ImgBytes-HdrParas*16;
   If ImgBytes<=0 Then Begin VPut(Vn); DoExec:=ENOEXEC; Exit End;
@@ -4430,7 +3812,9 @@ Begin
  { memoire insuffisante : d'autres processus vont dans la zone de
    va-et-vient }
  If (Mem_=0) And Reclaim(Total,-1) Then Mem_:=CoreAlloc(Total);
- If Mem_=0 Then Begin VPut(Vn); If Lost Then DoExit(SIGKILL); DoExec:=ENOMEM; Exit End;
+ If Mem_=0 Then Begin
+  VPut(Vn); If Lost Then DoExit(SIGKILL); DoExec:=ENOMEM; Exit;
+ End;
  ParaZero(Mem_,EnvParas+16);
  EnvS:=Mem_; PSP_:=Mem_+EnvParas; Load:=PSP_+16;
  If Coff Then Begin
@@ -4444,7 +3828,9 @@ Begin
     While Rem>0 Do Begin
      If Rem>$4000 Then Chunk:=$4000 Else Chunk:=Rem;
      If VRead(Vn,Off,Sg,O,Chunk)<>Chunk Then Begin
-      VPut(Vn); CoreFree(Mem_,Total); If Lost Then DoExit(SIGKILL); DoExec:=EIO; Exit;
+      VPut(Vn); CoreFree(Mem_,Total);
+      If Lost Then DoExit(SIGKILL);
+      DoExec:=EIO; Exit;
      End;
      Inc(Off,Chunk); Dec(Rem,Chunk); Inc(Sg,Chunk Div 16);
     End;
@@ -4452,11 +3838,15 @@ Begin
   For I:=0 To NSec-1 Do
    For J:=0 To Longint(MemW[Seg(CoffSh):Ofs(CoffSh)+I*40+32])-1 Do Begin
     If VRead(Vn,CoffL(I*40+24)+J*10,Seg(RE),Ofs(RE),10)<>10 Then Begin
-     VPut(Vn); CoreFree(Mem_,Total); If Lost Then DoExit(SIGKILL); DoExec:=ENOEXEC; Exit;
+     VPut(Vn); CoreFree(Mem_,Total);
+     If Lost Then DoExit(SIGKILL);
+     DoExec:=ENOEXEC; Exit;
     End;
     Off:=Longint(RE[1]) Shl 16+RE[0];
     If (RE[4]<>R_SEG12) Or (Off+2>Longint(LoadParas)*16) Then Begin
-     VPut(Vn); CoreFree(Mem_,Total); If Lost Then DoExit(SIGKILL); DoExec:=ENOEXEC; Exit;
+     VPut(Vn); CoreFree(Mem_,Total);
+     If Lost Then DoExit(SIGKILL);
+     DoExec:=ENOEXEC; Exit;
     End;
     Sg:=Load+Word(Off Shr 4); O:=Word(Off And 15);
     MemW[Sg:O]:=MemW[Sg:O]+Load;
@@ -4467,13 +3857,17 @@ Begin
   While Rem>0 Do Begin
    If Rem>$4000 Then Chunk:=$4000 Else Chunk:=Rem;
    If VRead(Vn,Off,Sg,0,Chunk)<>Chunk Then Begin
-    VPut(Vn); CoreFree(Mem_,Total); If Lost Then DoExit(SIGKILL); DoExec:=EIO; Exit;
+    VPut(Vn); CoreFree(Mem_,Total);
+    If Lost Then DoExit(SIGKILL);
+    DoExec:=EIO; Exit;
    End;
    Inc(Off,Chunk); Dec(Rem,Chunk); Inc(Sg,Chunk Div 16);
   End;
   For I:=0 To H[3]-1 Do Begin
    If VRead(Vn,H[12]+Longint(I)*4,Seg(R),Ofs(R),4)<>4 Then Begin
-    VPut(Vn); CoreFree(Mem_,Total); If Lost Then DoExit(SIGKILL); DoExec:=ENOEXEC; Exit;
+    VPut(Vn); CoreFree(Mem_,Total);
+    If Lost Then DoExit(SIGKILL);
+    DoExec:=ENOEXEC; Exit;
    End;
    MemW[Load+R[1]:R[0]]:=MemW[Load+R[1]:R[0]]+Load;
   End;
@@ -4938,8 +4332,12 @@ Begin
      137: E:=VRemove(D,Last,True);
      136: Begin E:=VCreate(D,Last,True,C.RCX,Vn); If E=0 Then VPut(Vn) End;
      14: Case C.RCX And S_IFMT Of
-          S_IFDIR: Begin E:=VCreate(D,Last,True,C.RCX,Vn); If E=0 Then VPut(Vn) End;
-          0,S_IFREG: Begin E:=VCreate(D,Last,False,C.RCX,Vn); If E=0 Then VPut(Vn) End;
+          S_IFDIR: Begin
+           E:=VCreate(D,Last,True,C.RCX,Vn); If E=0 Then VPut(Vn);
+          End;
+          0,S_IFREG: Begin
+           E:=VCreate(D,Last,False,C.RCX,Vn); If E=0 Then VPut(Vn);
+          End;
           Else If Suser Then E:=EINVAL Else E:=EPERM;
          End;
     End;
@@ -4958,7 +4356,7 @@ Begin
     15: Begin E:=Owner(Vn); If E=0 Then E:=VChmod(Vn,C.RCX) End;
     16: If Not Suser Then E:=EPERM Else E:=VChown(Vn,C.RBX,C.RCX);
     30: Begin
-         { utime(nom, temps) : temps = (acces, modification), ou 0 = maintenant }
+         { utime(nom, temps) : (acces, modification), ou 0 = maintenant }
          If (C.RES=0) And (C.RDI=0) Then Begin
           T:=KTime; E:=Owner(Vn); If E<>0 Then E:=VAccess(Vn,2);
          End Else Begin T:=MemL[C.RES:C.RDI+4]; E:=Owner(Vn) End;
@@ -5138,8 +4536,8 @@ Begin
  If Not Mounts[M].Used Then Exit;
  FarFill(C.RDS,C.RDX,64,0);
  With Mounts[M] Do Begin
-  Case Typ Of FSFAT12: Mem[C.RDS:C.RDX]:=1; FSFAT16: Mem[C.RDS:C.RDX]:=2;
-   FSUFS: Mem[C.RDS:C.RDX]:=3; Else Mem[C.RDS:C.RDX]:=4; End;
+  { type : 1 = UFS1, 2 = /dev }
+  Mem[C.RDS:C.RDX]:=Typ;
   Mem[C.RDS:C.RDX+1]:=Drive; Mem[C.RDS:C.RDX+2]:=Ord(RO);
   MemL[C.RDS:C.RDX+4]:=Start;
   MemL[C.RDS:C.RDX+8]:=Sectors Div 2;
@@ -5272,7 +4670,10 @@ Begin
        If E=0 Then Begin FillStat(Vn,C.RES,C.RDI); VPut(Vn) End;
       End;
   19: E:=SysLSeek;
-  20: Begin C.Ret:=Procs[Cur].Pid; C.Ret2:=Procs[Cur].PPid; C.SetDX:=True; C.Two:=True End;
+  20: Begin
+   C.Ret:=Procs[Cur].Pid; C.Ret2:=Procs[Cur].PPid;
+   C.SetDX:=True; C.Two:=True;
+  End;
   21: If Not Suser Then E:=EPERM Else Begin
        E:=Namei(UStr(C.RES,C.RDI),Vn);
        If E=0 Then Begin
@@ -5285,7 +4686,10 @@ Begin
   23: With Procs[Cur] Do
        If Suser Or (C.RBX=RUid) Then Begin Uid:=C.RBX; RUid:=C.RBX End
        Else E:=EPERM;
-  24: Begin C.Ret:=Procs[Cur].RUid; C.Ret2:=Procs[Cur].Uid; C.SetDX:=True; C.Two:=True End;
+  24: Begin
+   C.Ret:=Procs[Cur].RUid; C.Ret2:=Procs[Cur].Uid;
+   C.SetDX:=True; C.Two:=True;
+  End;
   25: If Not Suser Then E:=EPERM Else
        BootTime:=(Longint(C.RCX) Shl 16+C.RBX)-(Ticks*10) Div 182;
   27: With Procs[Cur] Do Begin
@@ -5349,7 +4753,10 @@ Begin
   46: With Procs[Cur] Do
        If Suser Or (C.RBX=RGid) Then Begin Gid:=C.RBX; RGid:=C.RBX End
        Else E:=EPERM;
-  47: Begin C.Ret:=Procs[Cur].RGid; C.Ret2:=Procs[Cur].Gid; C.SetDX:=True; C.Two:=True End;
+  47: Begin
+   C.Ret:=Procs[Cur].RGid; C.Ret2:=Procs[Cur].Gid;
+   C.SetDX:=True; C.Two:=True;
+  End;
   48: E:=SysSignal;
   54: E:=SysIoctl;
   55: If Not Suser Then E:=EPERM Else Begin
@@ -5367,9 +4774,9 @@ Begin
   57: Begin
        { uname : 5 champs de 16 octets (chaines Pascal) }
        PutPStr(C.RDS,C.RDX,'LINUX-0',15);
-       PutPStr(C.RDS,C.RDX+16,'unix0',15);
-       PutPStr(C.RDS,C.RDX+32,KVersion,15);
-       PutPStr(C.RDS,C.RDX+48,'2026',15);
+       PutPStr(C.RDS,C.RDX+16,'linux0',15);
+       PutPStr(C.RDS,C.RDX+32,'KERNEL16UNIX',15);
+       PutPStr(C.RDS,C.RDX+48,KVersion,15);
        PutPStr(C.RDS,C.RDX+64,'i8086',15);
       End;
   59: E:=SysExec(True);
@@ -5580,14 +4987,16 @@ BEGIN
  { le processus 0 (amorce) s'execute en mode noyau : l'horloge ne doit
    jamais le preempter, meme apres l'activation de l'ordonnanceur }
  InKernel:=1;
- { le secteur d'amorce (0000:7C00) contient encore le BPB }
+ { le secteur d'amorce (0000:7C00) contient encore l'unite d'amorce (24h)
+   et le debut de la partition (1Ch), remplis par UFSBOOT }
  BootDrive:=Mem[0:$7C24];
  BootStart:=MemL[0:$7C1C];
  KDataSeg:=DSeg;
  ConPage:=Mem[$40:$62];
  SerialInit;
  KPrintLn('');
- KPrintLn('LINUX-0 version '+KVersion+' (noyau 16 bits pour IBM PC 8086)');
+ KPrintLn('LINUX-0 KERNEL16UNIX version '+KVersion+
+   ' (noyau UNIX 16 bits pour IBM PC 8086)');
  BootTime:=ReadRTC;
  MemTop:=MemW[$40:$13]*64;
  { fin des donnees du noyau : les longueurs des donnees stockees et du BSS
@@ -5636,40 +5045,27 @@ BEGIN
  SetVector($21,Seg(NoDosStub),Ofs(NoDosStub));
  SetVector($08,Seg(Int08Stub),Ofs(Int08Stub));
  { systemes de fichiers }
- { racine : comme un UNIX, la partition UFS (FreeBSD, type A5h) du disque
-   d'amorce s'il y en a une. Amorce UFS (UFSBOOT) : c'est la partition
-   d'amorce elle-meme (noyau /unix). Amorce FAT16 : la partition FAT, qui
-   contient le noyau, est montee sur /boot. Sinon (disquettes, disque tout
-   FAT), la racine est l'unite d'amorce FAT et une partition UFS eventuelle
-   est montee sur /usr. }
+ { racine : toujours UFS1 (comme sous UNIX). Disque dur : la partition UFS
+   (type A5h, A6h ou A9h) d'ou l'amorce UFSBOOT a charge /unix, sinon la
+   premiere partition UFS du disque d'amorce. Disquette : l'UFS1 occupe
+   toute la disquette (unite 00h, sans MBR, debut au secteur 0). }
  Boot:=RootDevice;
  If Boot='' Then Panic('unite d''amorce inconnue');
  Root:='';
- For I:=0 To DiskCount-1 Do
-  If (Root='') And (Disks[I].Bios=BootDrive) And (Disks[I].PartType In [$A5,$A6,$A9]) Then
-   Root:=Disks[I].Name;
- { amorce UFS : la partition d'amorce, si elle est de type UFS }
- For I:=0 To DiskCount-1 Do
-  If (Disks[I].Name=Boot) And (Disks[I].PartType In [$A5,$A6,$A9]) Then
-   Root:=Boot;
- E:=1;
- If Root<>'' Then E:=DoMount(Root,'/',2);
- If E<>0 Then Begin Root:=Boot; E:=DoMount(Root,'/',0) End;
- If E<>0 Then Panic('montage de la racine impossible ('+IntStr(E)+')');
- KPrintLn('racine : /dev/'+Root+' ('+
-   Copy('FAT12FAT16UFS  ',(Mounts[1].Typ-1)*5+1,5)+')');
- E:=DoMount('devfs','/dev',0);
- If Root<>Boot Then Begin
-  E:=DoMount(Boot,'/boot',1);
-  If E=0 Then KPrintLn('/boot : /dev/'+Boot+' (noyau)');
- End Else If Mounts[1].Typ<>FSUFS Then
+ If BootDrive<$80 Then Root:=Boot
+ Else Begin
   For I:=0 To DiskCount-1 Do
-   If Disks[I].PartType In [$A5,$A6,$A9] Then
-    If Not IsMountDir('/usr') Then Begin
-     E:=DoMount(Disks[I].Name,'/usr',2);
-     If E=0 Then KPrintLn('/usr : /dev/'+Disks[I].Name+' (UFS)')
-     Else KPrintLn('/dev/'+Disks[I].Name+' : pas de systeme UFS ('+IntStr(E)+')');
-    End;
+   If (Root='') And (Disks[I].Bios=BootDrive) And
+     (Disks[I].PartType In [$A5,$A6,$A9]) Then Root:=Disks[I].Name;
+  For I:=0 To DiskCount-1 Do
+   If (Disks[I].Name=Boot) And (Disks[I].PartType In [$A5,$A6,$A9]) Then
+    Root:=Boot;
+ End;
+ If Root='' Then Panic('pas de partition UFS sur l''unite d''amorce');
+ E:=DoMount(Root,'/',2);
+ If E<>0 Then Panic('montage de la racine UFS1 impossible ('+IntStr(E)+')');
+ KPrintLn('racine : /dev/'+Root+' (UFS1)');
+ E:=DoMount('devfs','/dev',0);
  StartInit;
  SchedOn:=True;
  Swtch;

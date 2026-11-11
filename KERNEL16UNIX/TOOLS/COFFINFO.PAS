@@ -118,8 +118,10 @@ Begin
  If Flags And 2 = 0 Then Err('F_EXEC absent');
  OMagic := W16(20); TSize := L32(24); DSize := L32(28); BSize := L32(32);
  Entry := L32(36); DStart := L32(44);
- WriteLn('  a.out : magic=', Hex(OMagic, 4), 'h tsize=', TSize, ' dsize=', DSize,
-         ' bsize=', BSize, ' entry=', Hex(Entry, 5), 'h data_start=', Hex(DStart, 5), 'h');
+ WriteLn('  a.out : magic=', Hex(OMagic, 4), 'h tsize=', TSize,
+         ' dsize=', DSize,
+         ' bsize=', BSize, ' entry=', Hex(Entry, 5),
+         'h data_start=', Hex(DStart, 5), 'h');
  SetLength(Secs, NScns);
  For K := 0 To NScns - 1 Do Begin
   O := 20 + OptHdr + K * 40;
@@ -131,11 +133,13 @@ Begin
   Secs[K] := S;
   WriteLn('  ', Pad(S.Name, 8, False), ' vaddr=', Hex(S.VAddr, 5), 'h taille=',
           Pad(IStr(S.Size), 6, True), ' fichier=', Pad(IStr(S.ScnPtr), 6, True),
-          ' reloc=', Pad(IStr(S.NRel), 4, True), ' flags=', Hex(S.Flags, 2), 'h');
+          ' reloc=', Pad(IStr(S.NRel), 4, True), ' flags=', Hex(S.Flags, 2),
+          'h');
   { .bss prolonge .data dans DS }
   If (S.VAddr Mod 16 <> 0) And (S.Name <> '.bss') Then
    Err(S.Name + ' : s_vaddr non aligne sur un paragraphe');
-  If (S.Flags And $80 = 0) And (S.Size <> 0) And (Int64(S.ScnPtr) + S.Size > Length(D)) Then
+  If (S.Flags And $80 = 0) And (S.Size <> 0) And
+     (Int64(S.ScnPtr) + S.Size > Length(D)) Then
    Err(S.Name + ' : contenu hors du fichier');
   If (S.NRel > 0) And (Int64(S.RelPtr) + S.NRel * 10 > Length(D)) Then
    Err(S.Name + ' : relocalisations hors du fichier')

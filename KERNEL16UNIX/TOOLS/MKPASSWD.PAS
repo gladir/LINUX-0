@@ -5,8 +5,8 @@
   @description: Calcule, sur la machine hote, le champ mot de passe d'une
   ligne de /etc/passwd de LINUX-0 (13 caracteres : sel de 2 caracteres puis
   11 caracteres de l'alphabet ./0-9A-Za-z), avec le meme hachage que login
-  et passwd (KERNEL16UNIX/USR/CRYPT.INC). Utilise par KERNEL16UNIX/BUILD.SH pour le
-  compte invite.
+  et passwd (KERNEL16UNIX/USR/LOGIN.PAS et PASSWD.PAS). Utilise par
+  KERNEL16UNIX/BUILD.SH pour le compte invite.
 
   Syntaxe :
    MKPASSWD mot_de_passe [sel]      (sel par defaut : "..")
@@ -17,7 +17,8 @@ Program MKPASSWD;
 {$MODE OBJFPC}{$H+}
 
 Const
- CryptChars: String[64] = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+ CryptChars: String[64] =
+  './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
 Function Crypt(Pw, Salt: String): String;
 Var A, B, C, D, X: Word; R, K, Bit, V: Integer; S: String;

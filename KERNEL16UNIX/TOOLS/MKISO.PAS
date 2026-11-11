@@ -9,7 +9,8 @@
   lit donc par l'INT 13h comme un disque ordinaire, sans pilote de CD-ROM.
   Les autres fichiers donnes sont copies a la racine du CD (lisibles par
   n'importe quel systeme). La date est celle de SOURCE_DATE_EPOCH si cette
-  variable est definie (construction reproductible), sinon l'heure courante.
+  variable est definie (construction reproductible), sinon l'heure courante
+  (unite DOS de Free Pascal : le projet n'autorise que DOS et CRT).
 
   Syntaxe :
    MKISO cd.iso disque_amorce.img [fichier...]
@@ -23,7 +24,7 @@ Program MKISO;
 
 {$MODE OBJFPC}{$H+}
 
-Uses BaseUnix;
+Uses Dos;
 
 Const
  SECTOR = 2048;
@@ -104,6 +105,22 @@ End;
 
 { --- dates (temps universel) ------------------------------------------------ }
 
+Function Epoch: Int64;
+{ heure courante (unite DOS) en secondes depuis 1970 }
+Var Y, Mo, D, Dw, H, Mi, S, S100: Word; Yy, Era, Yoe, Doy, Doe, Mp: Int64;
+Begin
+ GetDate(Y, Mo, D, Dw);
+ GetTime(H, Mi, S, S100);
+ Yy := Y;
+ If Mo <= 2 Then Dec(Yy);
+ Era := Yy Div 400;
+ Yoe := Yy - Era * 400;
+ If Mo > 2 Then Mp := Mo - 3 Else Mp := Mo + 9;
+ Doy := (153 * Mp + 2) Div 5 + D - 1;
+ Doe := Yoe * 365 + Yoe Div 4 - Yoe Div 100 + Doy;
+ Epoch := (Era * 146097 + Doe - 719468) * 86400 + H * 3600 + Mi * 60 + S;
+End;
+
 Procedure Civil(T: Int64; Out Y, Mo, D, H, Mi, S: Longint);
 Var Days, Era, Doe, Yoe, Doy, Mp: Int64;
 Begin
@@ -132,14 +149,16 @@ Procedure DTime(Var B: TBuf);        { date d'un enregistrement de repertoire }
 Var Y, Mo, D, H, Mi, S: Longint;
 Begin
  Civil(Now, Y, Mo, D, H, Mi, S);
- AddB(B, Y - 1900); AddB(B, Mo); AddB(B, D); AddB(B, H); AddB(B, Mi); AddB(B, S); AddB(B, 0);
+ AddB(B, Y - 1900); AddB(B, Mo); AddB(B, D); AddB(B, H); AddB(B, Mi);
+ AddB(B, S); AddB(B, 0);
 End;
 
 Function VTime: String;              { date d'un descripteur de volume }
 Var Y, Mo, D, H, Mi, S: Longint;
 Begin
  Civil(Now, Y, Mo, D, H, Mi, S);
- VTime := Dig(Y, 4) + Dig(Mo, 2) + Dig(D, 2) + Dig(H, 2) + Dig(Mi, 2) + Dig(S, 2) + '00' + #0;
+ VTime := Dig(Y, 4) + Dig(Mo, 2) + Dig(D, 2) + Dig(H, 2) + Dig(Mi, 2) +
+          Dig(S, 2) + '00' + #0;
 End;
 
 { --- structures ISO 9660 ---------------------------------------------------- }
@@ -176,7 +195,9 @@ Begin
  While (I > 0) And (Path[I] <> '/') Do Dec(I);
  Base := UpCase(Copy(Path, I + 1, Length(Path)));
  I := Pos('.', Base);
- If I > 0 Then Begin Ext := Copy(Base, I + 1, Length(Base)); Base := Copy(Base, 1, I - 1) End
+ If I > 0 Then Begin
+  Ext := Copy(Base, I + 1, Length(Base)); Base := Copy(Base, 1, I - 1);
+ End
  Else Ext := '';
  IsoName := Keep(Base, 8) + '.' + Keep(Ext, 3) + ';1';
 End;
@@ -186,7 +207,9 @@ Var F: File;
 Begin
  Assign(F, Path);
  {$I-} Reset(F, 1); {$I+}
- If IOResult <> 0 Then Begin WriteLn(StdErr, 'MKISO : ', Path, ' introuvable'); Halt(1) End;
+ If IOResult <> 0 Then Begin
+  WriteLn(StdErr, 'MKISO : ', Path, ' introuvable'); Halt(1);
+ End;
  SetLength(Result, FileSize(F));
  If Length(Result) > 0 Then BlockRead(F, Result[0], Length(Result));
  Close(F);
@@ -262,10 +285,10 @@ BEGIN
   WriteLn('Syntaxe : MKISO cd.iso disque_amorce.img [fichier...]');
   Halt(2);
  End;
- S := fpGetEnv('SOURCE_DATE_EPOCH');
+ S := GetEnv('SOURCE_DATE_EPOCH');
  Code := 1;
  If S <> '' Then Val(S, Now, Code);
- If Code <> 0 Then Now := fpTime;
+ If Code <> 0 Then Now := Epoch;
  SetLength(Files, ParamCount - 1);
  For K := 2 To ParamCount Do Begin
   Files[K - 2].Name := IsoName(ParamStr(K));
@@ -290,7 +313,9 @@ BEGIN
  AddBuf(Root, DirRec(21, SECTOR, #1, 2));
  For K := 0 To High(Order) Do
   With Files[Order[K]] Do AddBuf(Root, DirRec(Lba, Length(Data), Name, 0));
- If Length(Root) > SECTOR Then Begin WriteLn(StdErr, 'MKISO : trop de fichiers'); Halt(1) End;
+ If Length(Root) > SECTOR Then Begin
+  WriteLn(StdErr, 'MKISO : trop de fichiers'); Halt(1);
+ End;
  Fill(Root, SECTOR, 0);
  PrimaryDescriptor;
  Catalog;
@@ -301,7 +326,8 @@ BEGIN
  BlockWrite(F, Pvd[0], SECTOR);
  { volume d'amorce El Torito : catalogue au secteur 22 }
  Sec := Nil;
- AddB(Sec, 0); Add(Sec, 'CD001'); AddB(Sec, 1); Add(Sec, 'EL TORITO SPECIFICATION');
+ AddB(Sec, 0); Add(Sec, 'CD001'); AddB(Sec, 1);
+ Add(Sec, 'EL TORITO SPECIFICATION');
  Fill(Sec, 71, 0); Le32(Sec, 22); Fill(Sec, SECTOR, 0);
  BlockWrite(F, Sec[0], SECTOR);
  Sec := Nil;
@@ -314,9 +340,11 @@ BEGIN
  For K := 0 To High(Files) Do
   With Files[K] Do Begin
    If Length(Data) > 0 Then BlockWrite(F, Data[0], Length(Data));
-   If Length(Data) Mod SECTOR <> 0 Then BlockWrite(F, Zero, SECTOR - Length(Data) Mod SECTOR);
+   If Length(Data) Mod SECTOR <> 0 Then
+    BlockWrite(F, Zero, SECTOR - Length(Data) Mod SECTOR);
   End;
  Close(F);
- WriteLn('CD-ROM ', ParamStr(1), ' : ', Total * 2, ' Ko, amorce El Torito (emulation de disque dur) ',
+ WriteLn('CD-ROM ', ParamStr(1), ' : ', Total * 2, ' Ko, amorce El Torito ',
+         '(emulation de disque dur) ',
          Files[0].Name);
 END.

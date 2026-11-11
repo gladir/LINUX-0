@@ -10,8 +10,13 @@ Uses DOS;
 
 Const
  MaxNodes=512;
+{$IFDEF LPC}
+ MaxPatterns=16;   { Linux Pascal : donnees limitees a un segment de 64 Ko }
+ MaxFiles=16;
+{$ELSE}
  MaxPatterns=64;
  MaxFiles=64;
+{$ENDIF}
  MaxContext=64;
 
 Type
@@ -314,7 +319,11 @@ Begin
  Start:=1;
  For Index:=1 To Length(Value)+1 Do Begin
   If Index<=Length(Value)Then If Value[Index]<>#10 Then Continue;
+{$IFDEF LPC}
+  If PatternCount=MaxPatterns Then UsageError('Maximum 16 expressions');
+{$ELSE}
   If PatternCount=MaxPatterns Then UsageError('Maximum 64 expressions');
+{$ENDIF}
   Inc(PatternCount);Patterns[PatternCount]:=Copy(Value,Start,Index-Start);
   Start:=Index+1;
  End;
@@ -497,7 +506,11 @@ Begin
   End Else If Not ExplicitPatterns Then Begin
    AddPatterns(Argument);ExplicitPatterns:=True;
   End Else Begin
+{$IFDEF LPC}
+   If FileCount=MaxFiles Then UsageError('Maximum 16 fichiers');
+{$ELSE}
    If FileCount=MaxFiles Then UsageError('Maximum 64 fichiers');
+{$ENDIF}
    Inc(FileCount);Files[FileCount]:=Argument;
   End;
   Inc(Index);

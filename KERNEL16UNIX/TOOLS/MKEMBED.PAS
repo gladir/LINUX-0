@@ -28,6 +28,7 @@ Var
  Dir: String;
  Src, Lpc, Res: TLines;
  I, A, B, N: Longint;
+ Tail: String;
 
 Procedure Fail(S: String);
 Begin
@@ -39,6 +40,26 @@ Procedure Push(Var L: TLines; S: String);
 Begin
  SetLength(L, Length(L) + 1);
  L[High(L)] := S;
+End;
+
+Procedure PushString(Var L: TLines; Q, Tail: String);
+{ une ligne de texte embarque (chaine entre apostrophes, deja doublees) :
+  elle est coupee en morceaux concatenes (' +') pour que chaque ligne de
+  LPC.PAS reste de 80 caracteres au plus }
+Var Cut, K, Apos: Longint; Lead: String;
+Begin
+ Lead := ' ''';
+ While Length(Lead) + Length(Q) + 1 + Length(Tail) > 80 Do Begin
+  Cut := 80 - Length(Lead) - 3;       { place pour l'apostrophe et " +" }
+  Apos := 0;                          { ne pas couper une apostrophe doublee }
+  K := Cut;
+  While (K > 0) And (Q[K] = '''') Do Begin Inc(Apos); Dec(K) End;
+  If Odd(Apos) Then Dec(Cut);
+  Push(L, Lead + Copy(Q, 1, Cut) + ''' +');
+  Delete(Q, 1, Cut);
+  Lead := '  ''';
+ End;
+ Push(L, Lead + Q + '''' + Tail);
 End;
 
 Function ReadLines(Path: String): TLines;
@@ -105,10 +126,10 @@ BEGIN
  Str(N, S);
  Push(Res, 'const UnixSource: array[1..' + S + '] of string[255] = (');
  For I := 0 To N - 1 Do Begin
-  If Length(Src[I]) > 250 Then Fail('ligne trop longue dans UNIX.PAS : ' + Src[I]);
-  S := ' ''' + Quote(Src[I]) + '''';
-  If I < N - 1 Then S := S + ',' Else S := S + ');';
-  Push(Res, S);
+  If Length(Src[I]) > 250 Then
+   Fail('ligne trop longue dans UNIX.PAS : ' + Src[I]);
+  If I < N - 1 Then Tail := ',' Else Tail := ');';
+  PushString(Res, Quote(Src[I]), Tail);
  End;
  Push(Res, EndMark);
  For I := B + 1 To High(Lpc) Do Push(Res, Lpc[I]);

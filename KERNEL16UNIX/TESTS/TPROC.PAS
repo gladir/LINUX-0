@@ -42,7 +42,9 @@ Begin
  WriteLn('== fork : copie de la memoire');
  V:=10;
  Pid:=Fork;
- If Pid=0 Then Begin V:=99; WriteLn('fils pid=',GetPid,' ppid=',GetPPid,' V=',V); SysExit(7) End;
+ If Pid=0 Then Begin
+  V:=99; WriteLn('fils pid=',GetPid,' ppid=',GetPPid,' V=',V); SysExit(7);
+ End;
  W:=WaitPid(Pid,St,0); WriteLn('pere V=',V,' fils ',W,' etat ',St);
  Ok(WIfExited(St)And(WExitStatus(St)=7)And(St=$700),'etat de wait = 7*256');
  WriteLn('== ordonnanceur : 3 fils en calcul');
@@ -56,15 +58,20 @@ Begin
    SysExit(I);
   End;
  End;
- For I:=1 To 3 Do Begin W:=WaitPid(-1,St,0); WriteLn('termine ',W,' code ',WExitStatus(St)) End;
+ For I:=1 To 3 Do Begin
+  W:=WaitPid(-1,St,0); WriteLn('termine ',W,' code ',WExitStatus(St));
+ End;
  WriteLn('== tube');
  SysPipe(R,Wf);
  Pid:=Fork;
  If Pid=0 Then Begin
-  SysClose(R); S:='message par le tube'; SysWrite(Wf,S[1],Length(S)); SysClose(Wf); SysExit(0);
+  SysClose(R); S:='message par le tube'; SysWrite(Wf,S[1],Length(S));
+  SysClose(Wf); SysExit(0);
  End;
  SysClose(Wf);
- J:=SysRead(R,Buf,63); Buf[J]:=#0; Write('lu ',J,' : '); For I:=0 To J-1 Do Write(Buf[I]); WriteLn;
+ J:=SysRead(R,Buf,63); Buf[J]:=#0; Write('lu ',J,' : ');
+ For I:=0 To J-1 Do Write(Buf[I]);
+ WriteLn;
  J:=SysRead(R,Buf,63); WriteLn('fin de tube : ',J);
  SysClose(R); WaitPid(Pid,St,0);
  WriteLn('== kill');
@@ -112,19 +119,23 @@ Begin
  Fd:=SysOpen('/etc',O_RDONLY,0); J:=0; S:='';
  While SysRead(Fd,Ent,16)=16 Do Begin
   Inc(J);
-  If (Ent[2]=Ord('i'))And(Ent[3]=Ord('n'))And(Ent[4]=Ord('i'))And(Ent[5]=Ord('t'))And(Ent[6]=0) Then S:='init';
+  If (Ent[2]=Ord('i'))And(Ent[3]=Ord('n'))And(Ent[4]=Ord('i'))And
+    (Ent[5]=Ord('t'))And(Ent[6]=0) Then S:='init';
  End;
  SysClose(Fd);
  Ok((J>=2)And(S='init'),'entrees V7 de 16 octets ('+Chr(48+J Mod 10)+')');
- Ok((SysStat('/etc/init',Stb)=0)And(Stb.Size>1000)And(Stb.Mode And S_IFMT=S_IFREG),'stat V7');
+ Ok((SysStat('/etc/init',Stb)=0)And(Stb.Size>1000)And
+   (Stb.Mode And S_IFMT=S_IFREG),'stat V7');
  Ok((GTty(0,Sg)=0)And(Sg.Flags=ECHO+CRMOD)And(Sg.Erase=#8),'gtty : ECHO|CRMOD');
- Ok(Not IsATty(SysOpen('/etc/init',O_RDONLY,0)),'fichier : pas un terminal (ENOTTY)');
+ Ok(Not IsATty(SysOpen('/etc/init',O_RDONLY,0)),
+   'fichier : pas un terminal (ENOTTY)');
  SysTimes(Tm); Ok(Tm.CUTime>0,'times : temps des fils');
  WriteLn('== utilisateurs et permissions');
  Ok((GetUid=0)And(GetGid=0),'root');
  SysUmask($12);   { 022 en octal }
  Fd:=SysCreat('/usr/tmp/perm',$1B6); SysClose(Fd);
- Ok((SysStat('/usr/tmp/perm',Stb)=0)And(Stb.Mode And $1FF=$1A4),'umask 022 : 0644');
+ Ok((SysStat('/usr/tmp/perm',Stb)=0)And(Stb.Mode And $1FF=$1A4),
+   'umask 022 : 0644');
  Pid:=Fork;
  If Pid=0 Then Begin
   SetGid(100); SetUid(100);
@@ -138,7 +149,8 @@ Begin
   If GetUid=100 Then Inc(W);
   SysExit(W);
  End;
- WaitPid(Pid,St,0); Str(WExitStatus(St),S); Ok(WExitStatus(St)=7,'uid 100 : 7 controles de permissions ('+S+')');
+ WaitPid(Pid,St,0); Str(WExitStatus(St),S);
+ Ok(WExitStatus(St)=7,'uid 100 : 7 controles de permissions ('+S+')');
  SysChown('/usr/tmp/perm',100,100);
  Ok((SysStat('/usr/tmp/perm',Stb)=0)And(Stb.Uid=100),'chown');
  SysUnlink('/usr/tmp/perm');

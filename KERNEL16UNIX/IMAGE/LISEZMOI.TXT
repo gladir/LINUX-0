@@ -1,46 +1,60 @@
 Images de disque amorcables de LINUX-0 (produites par KERNEL16UNIX/BUILD.SH)
 =====================================================================
 
-LINUX0-144.IMG  disquette 1,44 Mo FAT12 : noyau /UNIX, /etc/init, getty,
-               login, /etc/passwd et les commandes essentielles dans /bin
-               (sh, ls, cat, cp, mv, rm, mkdir, grep, ps, kill, passwd, ...).
-LINUX0-288.IMG  disquette 2,88 Mo FAT12 : les commandes du depot LINUX-0
-               (sauf les interpreteurs de style DOS bash, csh et ksh).
+Le noyau KERNEL16UNIX est un noyau UNIX (appels systeme V7, executables COFF)
+dont le seul systeme de fichiers est UFS1 (FreeBSD). Toutes les images
+ci-dessous sont donc en UFS1. Ce noyau n'a volontairement aucun support de
+FAT : les disquettes et disques DOS relevent de KERNEL16DOS.
+
+LINUX0-144.IMG  disquette 1,44 Mo : un UFS1 qui occupe toute la disquette
+               (sans MBR), amorce UFS dans le secteur 0, noyau /unix,
+               /etc/init, getty, login, /etc/passwd et les commandes
+               essentielles dans /bin (sh, ls, cat, cp, mv, rm, mkdir, ps,
+               kill, passwd, ...).
+LINUX0-288.IMG  disquette 2,88 Mo : meme disposition, avec un plus grand
+               nombre de commandes (les plus petites tiennent; toutes les
+               commandes sont sur le disque dur).
 LINUX0-HD.IMG   disque dur de 20 Mo (16 tetes, 63 secteurs par piste) amorce
                directement sur UFS : partition 1 active de type A5h, un
-               systeme de fichiers UFS1 (FreeBSD) avec l'amorce UFS dans
-               ses 8 premiers Ko, le noyau /unix, toutes les commandes et
-               les sources dans /usr/src; partition 2 de type 82h (4 Mo) :
+               systeme de fichiers UFS1 avec l'amorce UFS dans ses 8
+               premiers Ko, le noyau /unix, toutes les commandes et les
+               sources dans /usr/src; partition 2 de type 82h (4 Mo) :
                la zone de va-et-vient (swap) du noyau.
 
 Distribution (installation sur un disque dur, programme /bin/install) :
 
-LINUX0-INST1.IMG  disquette 1,44 Mo FAT12 amorcable : noyau, init, getty,
+LINUX0-INST1.IMG  disquette 1,44 Mo UFS1 amorcable : noyau, init, getty,
                  login, sh, l'installateur et quelques commandes, plus les
-                 secteurs d'amorce du disque dur (/mdec/mbr, /mdec/bootsect).
-LINUX0-INST2.IMG  disquettes de donnees : la racine complete du systeme (64
-a INST4.IMG      commandes, /etc, sources dans /usr/src) en volumes tar
+                 amorces du disque dur (/mdec/mbr, /mdec/ufsboot).
+LINUX0-INST2.IMG  disquettes de donnees : la racine complete du systeme (les
+a INST10.IMG     commandes, /etc, sources dans /usr/src) en volumes tar
                  ecrits directement sur la disquette (sans systeme de
                  fichiers), comme les bandes de distribution de UNIX V7.
-                 Il faut donc 4 disquettes de 1,44 Mo en tout : 1 d'amorce
-                 et 3 de donnees (le nombre est recalcule par BUILD.SH).
+                 Il faut donc 10 disquettes de 1,44 Mo en tout : 1 d'amorce
+                 et 9 de donnees (le nombre est recalcule par BUILD.SH).
 LINUX0-CD.ISO     CD-ROM ISO 9660 amorcable (El Torito, emulation de disque
-                 dur) : la disquette 1 et les volumes dans /dist.
+                 dur) : le disque emule a une seule partition UFS1 (type
+                 A5h, sans va-et-vient) qui contient le noyau, l'installateur
+                 et les volumes dans /dist.
 
 Pour installer : demarrer sur la disquette 1 (ou le CD-ROM), se connecter
-sous le nom "install", choisir le disque et le type d'installation :
-  1) UFS seul (par defaut) : racine UFS1 amorcee directement (noyau /unix)
-  2) FAT16 d'amorce (4 Mo, noyau) + racine UFS1
-  3) FAT16 seul (sans permissions UNIX)
-confirmer, puis inserer les disquettes 2, 3 et 4 a la demande. Une zone
-de va-et-vient de 4 Mo est toujours creee. Le disque doit faire au moins
-16 Mo; seuls les 1024 premiers cylindres du BIOS sont utilises (504 Mo).
-Avec le CD-ROM, le BIOS presente le CD comme premier disque dur (hda) :
-l'installation se fait sur hdb, qui demarrera ensuite comme 80h.
+sous le nom "install", choisir le disque (le seul type d'installation est
+UFS seul : racine UFS1 amorcee directement, noyau /unix, plus une zone de
+va-et-vient de 4 Mo) et la langue du systeme installe (FR, EN, GR, SP, IT),
+confirmer, puis inserer les disquettes 2 a 10 a la demande. Le disque doit
+faire au moins 16 Mo; seuls les 1024 premiers cylindres du BIOS sont utilises
+(504 Mo). Avec le CD-ROM, le BIOS presente le CD comme premier disque dur
+(hda) : l'installation se fait sur hdb, qui demarrera ensuite comme 80h.
+
+L'installateur parle la langue de la variable d'environnement LANGUAGE
+(francais par defaut, EN anglais, GR allemand, SP espagnol, IT italien), par
+exemple, en root : LANGUAGE=SP /bin/install. Si le systeme installe n'est pas
+en francais, /etc/profile recoit "LANGUAGE=XX; export LANGUAGE". Les messages
+du noyau restent en francais (il ne peut pas lire LANGUAGE a l'amorce).
 
   qemu-system-i386 -fda LINUX0-INST1.IMG -hda disque.img -boot a
       (dans le moniteur de QEMU, Ctrl+Alt+2 :
-       change floppy0 LINUX0-INST2.IMG, puis 3 et 4)
+       change floppy0 LINUX0-INST2.IMG raw, puis 3, ... 10)
   qemu-system-i386 -cdrom LINUX0-CD.ISO -hda disque.img -boot d
   qemu-system-i386 -hda disque.img -boot c       (le systeme installe)
 
@@ -53,7 +67,7 @@ Dans DEVENV (devenv -maxscreen), Invite de commandes :
   IMGMOUNT C: disque.img
   BOOT A:
 puis a chaque disquette demandee : IMGMOUNT -u A, IMGMOUNT A: LINUX0-INST2.IMG
-(puis 3, 4), et Entree dans l'onglet emulateur. Depuis le CD-ROM :
+(puis 3, ...), et Entree dans l'onglet emulateur. Depuis le CD-ROM :
 BOOT /CDROM:LINUX0-CD.ISO puis IMGMOUNT D: disque.img.
 
 Demarrage sous QEMU (images toutes faites) :
@@ -61,6 +75,9 @@ Demarrage sous QEMU (images toutes faites) :
   qemu-system-i386 -drive file=LINUX0-144.IMG,format=raw,if=floppy -boot a
   qemu-system-i386 -drive file=LINUX0-288.IMG,format=raw,if=floppy -boot a
   qemu-system-i386 -drive file=LINUX0-HD.IMG,format=raw,if=ide -boot c
+
+Les disquettes n'ont pas de zone de va-et-vient : la memoire (640 Ko) limite
+alors le nombre de processus simultanes.
 
 Option utile : -serial stdio (la console du noyau est recopiee sur COM1, et
 COM1 sert aussi de clavier).

@@ -10,6 +10,16 @@
    UFSCHK image [debut_en_secteurs]
    UFSCHK --hd IMAGE/LINUX0-HD.IMG     (derniere partition de type A5h,
                                        A6h ou A9h de la table)
+   UFSCHK --floppy IMAGE/LINUX0-144.IMG   (UFS1 sans MBR, qui occupe toute
+                                       l'image : disquette, debut = 0)
+   UFSCHK --auto image                 (disquette si le superbloc UFS1 est
+                                       a 8 Ko, sinon disque dur)
+
+  Avec --hd et --floppy, verifie aussi l'amorce : table des partitions du
+  MBR (signature, une seule partition active, partitions dans l'image sans
+  chevauchement) et zone d'amorce UFSBOOT dans les 8 premiers Ko du systeme
+  de fichiers (signature 55AAh, nom LINUX-0, debut de partition en 1Ch :
+  celui de la partition pour un disque dur, 0 pour une disquette).
 
   Verifie : carte des fragments libres de chaque groupe de cylindres
   (fragments references par les inodes, regle de FFS pour le dernier bloc
@@ -139,12 +149,83 @@ End;
 
 { --- chargement ------------------------------------------------------------ }
 
+Var
+ BootKind: Integer;      { 0 : pas de controle, 1 : disque dur, 2 : disquette }
+ PartStart: Int64;
+
+Function HexB(V: Integer): String;
+Const H = '0123456789ABCDEF';
+Begin
+ HexB := H[V Div 16 + 1] + H[V Mod 16 + 1];
+End;
+
+Procedure CheckMbr(Const Mbr: Array Of Byte; FileLen: Int64);
+{ table des partitions du MBR }
+Var K, J, Typ, Active: Integer; S, N: Int64; Ss, Ns: Array[0..3] Of Int64;
+    St: String;
+Begin
+ If (Mbr[510] <> $55) Or (Mbr[511] <> $AA) Then
+  Err('MBR : signature 55AAh absente');
+ Active := 0;
+ For K := 0 To 3 Do Begin
+  Typ := Mbr[446 + 16 * K + 4];
+  S := Longword(Mbr[454 + 16 * K] Or (Mbr[455 + 16 * K] Shl 8) Or
+       (Mbr[456 + 16 * K] Shl 16) Or (Longword(Mbr[457 + 16 * K]) Shl 24));
+  N := Longword(Mbr[458 + 16 * K] Or (Mbr[459 + 16 * K] Shl 8) Or
+       (Mbr[460 + 16 * K] Shl 16) Or (Longword(Mbr[461 + 16 * K]) Shl 24));
+  Ss[K] := S; Ns[K] := N;
+  If Typ = 0 Then Continue;
+  If Mbr[446 + 16 * K] = $80 Then St := ', active' Else St := '';
+  WriteLn('  partition ', K + 1, ' : type ', HexB(Typ), 'h, debut ', S,
+          ', ', N, ' secteurs', St);
+  If Mbr[446 + 16 * K] = $80 Then Inc(Active);
+  If (Mbr[446 + 16 * K] <> 0) And (Mbr[446 + 16 * K] <> $80) Then
+   Err('MBR : partition ' + IStr(K + 1) + ' : indicateur d''activite invalide');
+  If (S + N) * 512 > FileLen Then
+   Err('MBR : partition ' + IStr(K + 1) + ' depasse l''image');
+  For J := 0 To K - 1 Do
+   If (Mbr[446 + 16 * J + 4] <> 0) And (S < Ss[J] + Ns[J]) And
+      (Ss[J] < S + N) Then
+    Err('MBR : partitions ' + IStr(J + 1) + ' et ' + IStr(K + 1) +
+        ' se chevauchent');
+ End;
+ If Active <> 1 Then
+  Err('MBR : ' + IStr(Active) + ' partition(s) active(s), 1 attendue');
+ For K := 0 To 3 Do
+  If Mbr[446 + 16 * K + 4] <> 0 Then
+   If (Mbr[446 + 16 * K + 4] = $A5) And (Mbr[446 + 16 * K] <> $80) Then
+    Err('MBR : la partition UFS n''est pas active');
+End;
+
+Procedure CheckBoot;
+{ zone d'amorce UFSBOOT : 8 premiers Ko du systeme de fichiers }
+Var Hidden: Int64; K: Integer; Nz: Boolean;
+Begin
+ If (B8(510) <> $55) Or (B8(511) <> $AA) Then
+  Err('amorce UFS : signature 55AAh absente du secteur 0');
+ If (B8(3) <> Ord('L')) Or (B8(4) <> Ord('I')) Or (B8(5) <> Ord('N')) Then
+  Err('amorce UFS : nom LINUX-0 absent');
+ Hidden := U32(28);
+ If BootKind = 1 Then Begin
+  If Hidden <> PartStart Then
+   Err('amorce UFS : debut de partition ' + IStr(Hidden) + ', attendu ' +
+       IStr(PartStart));
+  If B8($24) <> $80 Then Err('amorce UFS : unite 80h attendue');
+ End Else If Hidden <> 0 Then
+  Err('amorce UFS : debut ' + IStr(Hidden) + ' dans une disquette, attendu 0');
+ Nz := False;
+ For K := 512 To 8191 Do If B8(K) <> 0 Then Nz := True;
+ If Not Nz Then Err('amorce UFS : secteurs 1 a 15 vides');
+End;
+
 Procedure Load(Path: String; HD: Boolean; Start: Int64);
 Var F: File; Mbr: Array[0..511] Of Byte; K, Typ: Integer; Size: Int64;
 Begin
  Assign(F, Path);
  {$I-} Reset(F, 1); {$I+}
- If IOResult <> 0 Then Begin WriteLn('UFSCHK : ', Path, ' introuvable'); Halt(2) End;
+ If IOResult <> 0 Then Begin
+  WriteLn('UFSCHK : ', Path, ' introuvable'); Halt(2);
+ End;
  If HD Then Begin
   BlockRead(F, Mbr, 512);
   Start := -1;
@@ -152,10 +233,13 @@ Begin
    Typ := Mbr[446 + 16 * K + 4];
    If (Typ = $A5) Or (Typ = $A6) Or (Typ = $A9) Then
     Start := Longword(Mbr[454 + 16 * K] Or (Mbr[455 + 16 * K] Shl 8) Or
-             (Mbr[456 + 16 * K] Shl 16) Or (Longword(Mbr[457 + 16 * K]) Shl 24));
+             (Mbr[456 + 16 * K] Shl 16) Or
+                          (Longword(Mbr[457 + 16 * K]) Shl 24));
   End;
   If Start < 0 Then Begin WriteLn('aucune partition UFS'); Halt(1) End;
+  CheckMbr(Mbr, FileSize(F));
  End;
+ PartStart := Start;
  Base0 := Start * 512;
  Size := FileSize(F) - Base0;
  If Size < SBOFF + 2048 Then Size := SBOFF + 2048;
@@ -174,7 +258,8 @@ Begin
  For K := 0 To Cnt - 1 Do Begin
   F := A + K;
   If (F < 0) Or (F >= Length(Used)) Then Begin
-   Err('fragment ' + IStr(F) + ' (' + What + ' inode ' + IStr(Ino) + ') hors du systeme');
+   Err('fragment ' + IStr(F) + ' (' + What + ' inode ' + IStr(Ino) +
+       ') hors du systeme');
    Continue;
   End;
   If Used[F] <> 0 Then
@@ -255,15 +340,16 @@ Begin
    End;
   End;
   If S32(Di + 104) <> NFr * FSize Div 512 Then
-   Err('inode ' + IStr(N) + ' : di_blocks=' + IStr(S32(Di + 104)) + ', attendu ' +
-       IStr(NFr * FSize Div 512));
+   Err('inode ' + IStr(N) + ' : di_blocks=' + IStr(S32(Di + 104)) +
+       ', attendu ' + IStr(NFr * FSize Div 512));
  End;
 End;
 
 { --- passes 2 et 4 : repertoires et nombres de liens ---------------------- }
 
 Procedure Pass2;
-Var N, Ino, L: Longint; Di, Size, Base, A, Ch, P, Rl, Nl: Int64; Name: String; K: Integer;
+Var N, Ino, L: Longint; Di, Size, Base, A, Ch, P, Rl, Nl: Int64;
+    Name: String; K: Integer;
 Begin
  For N := 0 To High(Alloc) Do Begin
   If Not Alloc[N] Then Continue;
@@ -289,7 +375,8 @@ Begin
      Name := '';
      For K := 0 To Nl - 1 Do Name := Name + Chr(B8(Ch + P + 8 + K));
      If (Ino < 0) Or (Ino > High(Alloc)) Or Not Alloc[Ino] Then
-      Err('repertoire ' + IStr(N) + ' : "' + Name + '" -> inode ' + IStr(Longword(Ino)) + ' libre');
+      Err('repertoire ' + IStr(N) + ' : "' + Name + '" -> inode ' +
+          IStr(Longword(Ino)) + ' libre');
      If (Ino >= 0) And (Ino <= High(Links)) Then Inc(Links[Ino]);
     End;
     Inc(P, Rl);
@@ -299,8 +386,8 @@ Begin
  End;
  For N := 0 To High(Alloc) Do
   If Alloc[N] And (Links[N] <> S16(InoOff(N) + 2)) Then
-   Err('inode ' + IStr(N) + ' : ' + IStr(S16(InoOff(N) + 2)) + ' lien(s) indiques, ' +
-       IStr(Links[N]) + ' trouves');
+   Err('inode ' + IStr(N) + ' : ' + IStr(S16(InoOff(N) + 2)) +
+       ' lien(s) indiques, ' + IStr(Links[N]) + ' trouves');
 End;
 
 { --- passe 5 : cartes et compteurs ---------------------------------------- }
@@ -320,13 +407,15 @@ Var C, B, K, F, NDBlk, FOff, IOff, Cbase, M, Run, L, CsSize: Longint;
  Function IsMeta(F: Longint): Boolean;
  Begin
   IsMeta := (F >= Cbase) And (F < Cbase + DBlkNo);
-  If (C = 0) And (F >= CsAddr) And (F < CsAddr + (CsSize + FSize - 1) Div FSize) Then
+  If (C = 0) And (F >= CsAddr) And
+     (F < CsAddr + (CsSize + FSize - 1) Div FSize) Then
    IsMeta := True;
  End;
 
  Function Owner(F: Longint): String;
  Begin
-  If (F < Length(Used)) And (Used[F] <> 0) Then Owner := 'inode ' + IStr(Used[F])
+  If (F < Length(Used)) And (Used[F] <> 0) Then
+   Owner := 'inode ' + IStr(Used[F])
   Else Owner := 'meta';
  End;
 
@@ -347,12 +436,15 @@ Begin
    M := 0;
    For K := 0 To Frag - 1 Do Begin
     F := Cbase + B * Frag + K;
-    IsFree := B8(G + FOff + (B * Frag + K) Div 8) And (1 Shl ((B * Frag + K) Mod 8)) <> 0;
+    IsFree := B8(G + FOff + (B * Frag + K) Div 8) And
+              (1 Shl ((B * Frag + K) Mod 8)) <> 0;
     InUse := ((F < Length(Used)) And (Used[F] <> 0)) Or IsMeta(F);
     If IsFree And InUse Then
-     Err('groupe ' + IStr(C) + ' : fragment ' + IStr(F) + ' libre mais utilise (' + Owner(F) + ')');
+     Err('groupe ' + IStr(C) + ' : fragment ' + IStr(F) +
+         ' libre mais utilise (' + Owner(F) + ')');
     If Not IsFree And Not InUse Then
-     Err('groupe ' + IStr(C) + ' : fragment ' + IStr(F) + ' perdu (ni libre ni utilise)');
+     Err('groupe ' + IStr(C) + ' : fragment ' + IStr(F) +
+         ' perdu (ni libre ni utilise)');
     If IsFree Then M := M Or (1 Shl K);
    End;
    If M = (1 Shl Frag) - 1 Then Begin
@@ -378,12 +470,16 @@ Begin
   Want := [NDir, NBFree, NIFree, NFFree];
   Hdr := Quad(S32(G + 24), S32(G + 28), S32(G + 32), S32(G + 36));
   If Not QEq(Hdr, Want) Then
-   Err('groupe ' + IStr(C) + ' : compteurs ' + QStr(Hdr) + ', attendu ' + QStr(Want));
-  Hdr := Quad(S32(Cs + C * 16), S32(Cs + C * 16 + 4), S32(Cs + C * 16 + 8), S32(Cs + C * 16 + 12));
+   Err('groupe ' + IStr(C) + ' : compteurs ' + QStr(Hdr) + ', attendu ' +
+       QStr(Want));
+  Hdr := Quad(S32(Cs + C * 16), S32(Cs + C * 16 + 4), S32(Cs + C * 16 + 8),
+              S32(Cs + C * 16 + 12));
   If Not QEq(Hdr, Want) Then
    Err('csum ' + IStr(C) + ' : ' + QStr(Hdr) + ', attendu ' + QStr(Want));
   SetLength(Fs, Frag - 1); SetLength(Got, Frag - 1);
-  For K := 1 To Frag - 1 Do Begin Fs[K - 1] := S32(G + 52 + 4 * K); Got[K - 1] := FrSum[K] End;
+  For K := 1 To Frag - 1 Do Begin
+   Fs[K - 1] := S32(G + 52 + 4 * K); Got[K - 1] := FrSum[K];
+  End;
   If Not QEq(Fs, Got) Then
    Err('groupe ' + IStr(C) + ' : frsum ' + QStr(Fs) + ', attendu ' + QStr(Got));
   If (S32(G + 112) <> 0) And (Contig > 0) Then Begin
@@ -396,8 +492,8 @@ Begin
     If B < Length(ClMap) Then Begin
      Bit := B8(G + COff + B Div 8) And (1 Shl (B Mod 8)) <> 0;
      If Bit <> ClMap[B] Then
-      Err('groupe ' + IStr(C) + ' : grappe ' + IStr(B) + ', carte ' + IStr(Ord(Bit)) +
-          ', attendu ' + IStr(Ord(ClMap[B])));
+      Err('groupe ' + IStr(C) + ' : grappe ' + IStr(B) + ', carte ' +
+          IStr(Ord(Bit)) + ', attendu ' + IStr(Ord(ClMap[B])));
     End;
     If (B < Length(ClMap)) And ClMap[B] Then Inc(Run)
     Else If Run <> 0 Then Begin
@@ -406,16 +502,20 @@ Begin
     End;
    End;
    SetLength(Got, Contig); SetLength(Fs, Contig);
-   For K := 1 To Contig Do Begin Got[K - 1] := S32(G + SOff + 4 * K); Fs[K - 1] := Sums[K] End;
+   For K := 1 To Contig Do Begin
+    Got[K - 1] := S32(G + SOff + 4 * K); Fs[K - 1] := Sums[K];
+   End;
    If Not QEq(Got, Fs) Then
-    Err('groupe ' + IStr(C) + ' : resume des grappes ' + QStr(Got) + ', attendu ' + QStr(Fs));
+    Err('groupe ' + IStr(C) + ' : resume des grappes ' + QStr(Got) +
+        ', attendu ' + QStr(Fs));
   End;
   For K := 0 To 3 Do Tot[K] := Tot[K] + Want[K];
  End;
  Hdr := Quad(SB(192), SB(196), SB(200), SB(204));
  If Not QEq(Hdr, Tot) Then
   Err('superbloc (32 bits) ' + QStr(Hdr) + ', attendu ' + QStr(Tot));
- Hdr := Quad(S64(SBOFF + 1008), S64(SBOFF + 1016), S64(SBOFF + 1024), S64(SBOFF + 1032));
+ Hdr := Quad(S64(SBOFF + 1008), S64(SBOFF + 1016), S64(SBOFF + 1024),
+             S64(SBOFF + 1032));
  If Not QEq(Hdr, Tot) Then
   Err('superbloc (64 bits) ' + QStr(Hdr) + ', attendu ' + QStr(Tot));
 End;
@@ -423,20 +523,40 @@ End;
 Var
  Start: Int64;
  Code: Integer;
+ F0: File;
+ Magic: Longint;
+ Mode: String;
 
 BEGIN
  If ParamCount = 0 Then Begin
   WriteLn('Syntaxe : UFSCHK image [debut_en_secteurs]');
   WriteLn('          UFSCHK --hd disque.img');
+  WriteLn('          UFSCHK --floppy disquette.img');
+  WriteLn('          UFSCHK --auto image');
   Halt(2);
  End;
- If ParamStr(1) = '--hd' Then Load(ParamStr(2), True, 0)
- Else Begin
+ NErr := 0; BootKind := 0;
+ If ParamStr(1) = '--auto' Then Begin
+  { superbloc UFS1 a 8 Ko : disquette; sinon disque dur }
+  Assign(F0, ParamStr(2));
+  {$I-} Reset(F0, 1); {$I+}
+  If IOResult <> 0 Then Begin
+   WriteLn('UFSCHK : ', ParamStr(2), ' introuvable'); Halt(2);
+  End;
+  Seek(F0, SBOFF + 1372);
+  BlockRead(F0, Magic, 4);
+  Close(F0);
+  If Magic = $011954 Then Mode := '--floppy' Else Mode := '--hd';
+ End Else Mode := ParamStr(1);
+ If Mode = '--hd' Then Begin
+  BootKind := 1; Load(ParamStr(ParamCount), True, 0);
+ End Else If Mode = '--floppy' Then Begin
+  BootKind := 2; Load(ParamStr(ParamCount), False, 0);
+ End Else Begin
   Start := 0;
   If ParamCount > 1 Then Val(ParamStr(2), Start, Code);
   Load(ParamStr(1), False, Start);
  End;
- NErr := 0;
  If SB(1372) <> $011954 Then Err('superbloc UFS1 absent')
  Else Begin
   CBlkNo := SB(12); IBlkNo := SB(16); DBlkNo := SB(20);
@@ -444,13 +564,16 @@ BEGIN
   NIndir := SB(116); InoPB := SB(120); CsAddr := SB(152);
   Ipg := SB(184); Fpg := SB(188); FsSize := SB(36); CgSize := SB(160);
   Contig := SB(1316);
-  If (Ncg <= 0) Or (Ipg <= 0) Or (Fpg <= 0) Or (FSize <= 0) Or (Frag <= 0) Or (Frag > 8) Or
+  If (Ncg <= 0) Or (Ipg <= 0) Or (Fpg <= 0) Or (FSize <= 0) Or (Frag <= 0) Or
+     (Frag > 8) Or
      (InoPB <= 0) Then
    Err('superbloc UFS1 incoherent')
   Else Begin
-   If FsSize < Ncg * Fpg Then SetLength(Used, Ncg * Fpg) Else SetLength(Used, FsSize);
+   If FsSize < Ncg * Fpg Then SetLength(Used, Ncg * Fpg)
+    Else SetLength(Used, FsSize);
    SetLength(Alloc, Ncg * Ipg);
    SetLength(Links, Ncg * Ipg);
+   If BootKind <> 0 Then CheckBoot;
    Pass1;
    Pass2;
    Pass5;

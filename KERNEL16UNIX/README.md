@@ -1,29 +1,45 @@
-# KERNEL16UNIX : noyau LINUX-0 16 bits
+# KERNEL16UNIX : noyau LINUX-0 16 bits, personnalité UNIX
 
 Noyau UNIX pour IBM PC (8086/8088, mode réel), écrit en Pascal dans **un seul
 fichier source**, `KERNEL.PAS`, et compilé par **Linux Pascal** (`TOOLS/LPC.PAS`)
-en **une seule image monolithique** de plus de 64 Ko (environ 210 Ko : 184 Ko
-de code répartis en segments, 31 Ko de données). Son interface suit celle de
+en **une seule image monolithique** de plus de 64 Ko (environ 187 Ko : 160 Ko
+de code répartis en segments, 30 Ko de données). Son interface suit celle de
 **UNIX V7** (numéros et sémantique des appels système, signaux, `wait`,
 `stat`, terminal, utilisateurs), complétée par quelques appels de 4.2BSD.
+
+Les noyaux du projet se nomment `KERNEL<architecture et bits><personnalité>` :
+la personnalité **UNIX** est celle de ce noyau : appels système V7 par
+`INT 80h`, exécutables **COFF**, système de fichiers **UFS**. Il n'a
+volontairement aucun support de FAT : les disquettes et disques DOS relèvent
+de `KERNEL16DOS`.
+
+Le noyau se présente comme **LINUX-0** : bannière d'amorce
+(`LINUX-0 KERNEL16UNIX version 0.1`), appel système `uname` (`sysname`
+`LINUX-0`, `nodename` `linux0`, `release` `KERNEL16UNIX`), `/etc/issue` et
+`/etc/motd`. Ses messages (amorce, `panic`) sont en **français** : il ne peut
+pas lire la variable d'environnement `LANGUAGE` à l'amorce (aucun processus
+n'existe encore). Tous les programmes utilisateur (installateur, `login`,
+`passwd`, `sh`…) choisissent leur langue par `LANGUAGE` : français par défaut,
+`EN` anglais, `GR` allemand, `SP` espagnol, `IT` italien.
 
 ## Fichiers
 
 | Fichier | Rôle |
 |---|---|
-| `KERNEL.PAS` | le noyau (segments-unités KTypes, KLib, KMem, KSched, KDisk, KSwap, KTty, KFat, KUfs, KVfs, KProc, KSys et le programme principal) |
+| `KERNEL.PAS` | le noyau (segments-unités KTypes, KLib, KMem, KSched, KDisk, KSwap, KTty, KUfs, KVfs, KProc, KSys et le programme principal) |
 | `INIT.PAS` | processus 1 (`/etc/init`) : lit `/etc/ttys`, lance `getty` sur chaque terminal et le relance, récupère les orphelins |
 | `USR/SHELL.PAS` | `/bin/sh`, l'interpréteur de commandes UNIX |
 | `USR/GETTY.PAS`, `USR/LOGIN.PAS` | `/etc/getty` et `/bin/login` : connexion avec `/etc/passwd` |
-| `USR/PASSWD.PAS`, `USR/CRYPT.INC` | `/bin/passwd` (set-uid root) et le hachage des mots de passe |
+| `USR/PASSWD.PAS` | `/bin/passwd` (set-uid root) |
 | `USR/PS.PAS`, `USR/KILL.PAS`, `USR/ID.PAS` | processus, signaux, identité |
 | `USR/MKDIR.PAS`, `USR/RMDIR.PAS`, `USR/RM.PAS` | répertoires et suppression |
-| `USR/INSTALL.PAS` | `/bin/install`, l'installation sur un disque dur depuis les disquettes ou le CD-ROM |
-| `UFSBOOT.ASM` / `.BIN` | amorce UFS1 (8 Ko, dans la zone d'amorce de la partition UFS) : charge `/unix` à 1000:0000 |
-| `BOOTSECT.ASM` / `.BIN` | secteur d'amorce FAT12/FAT16 : charge le fichier `UNIX` à 1000:0000 |
+| `USR/INSTALL.PAS` | `/bin/install`, l'installation sur un disque dur depuis les disquettes ou le CD-ROM (en cinq langues) |
+| `UFSBOOT.ASM` / `.BIN` | amorce UFS1 (8 Ko, dans la zone d'amorce du système de fichiers : partition de disque dur ou disquette entière) : charge `/unix` à 1000:0000 |
 | `MBR.ASM` / `.BIN` | secteur de partition du disque dur |
 | `BUILD.SH` | construit le compilateur, le noyau, toutes les commandes et les images de `IMAGE/` |
-| `TESTS/` | tests sous QEMU (processus, systèmes de fichiers, session complète) et dans DEVENV |
+| `TOOLS/` | outils de l'hôte (Free Pascal) : `LPC` (compilateur), `MKIMAGE` (images de disque dur et de disquette), `UFSCHK` (vérification UFS1), `MKVOL` (volumes tar), `MKISO` (CD-ROM), `COFFINFO`, `MKPASSWD`, `UNIX.PAS` (unité de la libc) |
+| `TESTS/` | tests sous QEMU et dans DEVENV (voir *Tests*) |
+| `IMAGE/` | images produites par `BUILD.SH` (voir `IMAGE/LISEZMOI.TXT`) |
 
 ## Construction et essai
 
@@ -37,32 +53,53 @@ KERNEL16UNIX/TESTS/RUNTESTS.SH
 
 ```bash
 qemu-system-i386 -drive file=IMAGE/LINUX0-HD.IMG,format=raw,if=ide -boot c
+qemu-system-i386 -drive file=IMAGE/LINUX0-144.IMG,format=raw,if=floppy -boot a
 ```
 
-`RUNTESTS.SH` lance chaque programme de test comme `/etc/init` (TPROC :
-processus, signaux, exec, permissions; TFS : UFS et FAT16, liens, `core`;
-TSWAP : huit processus de 75 Ko qui ne tiennent qu'avec le va-et-vient),
-vérifie les systèmes de fichiers (`TOOLS/UFSCHK.PAS`, `fsck.vfat`), puis
-`SESSION.PY` ouvre une session complète par la console série : getty, login
-(mot de passe), commandes du shell, tubes, arrière-plan, ^C, permissions,
-`passwd`, connexion de root.
-
-Dans l'IDE **DEVENV** (dépôt DEV-COOLS), LINUX-0 s'exécute dans un onglet
-« Émulateur 8086 » : dans l'Invite de commandes de l'IDE, `IMGMOUNT A:
-IMAGE/LINUX0-144.IMG` puis `BOOT A:` (ou `IMGMOUNT C: IMAGE/LINUX0-HD.IMG`
-puis `BOOT C:`). `KERNEL16UNIX/TESTS/DEVENV.SH` refait l'essai automatiquement avec
-le banc d'essai sans interface de DEVENV (`/KERNELTEST`, `/KTBOOTIMG`) : il se
-connecte en root et tape quelques commandes. L'installation s'y fait aussi
-(voir *Installation*).
+`BUILD.SH` demande `makefs` (NetBSD, `-t ffs -o version=1`) et s'exécute en
+root (ou sous `fakeroot`) pour que les fichiers de l'UFS1 appartiennent à
+root ; `W=…` choisit le répertoire de travail (par défaut
+`/tmp/linux0-build`). Une commande du dépôt que LPC ne sait pas compiler
+donne un avertissement et n'entre pas dans les images.
 
 Prérequis sur l'hôte : Free Pascal (`fpc`) pour compiler LPC et les outils
-de `TOOLS` (tous écrits en Pascal : MKIMAGE, COFFINFO, UFSCHK, MKVOL, MKISO,
-MKPASSWD, MKEMBED), `makefs` (racine UFS du disque dur), et facultativement
-`nasm` (secteurs d'amorce, déjà fournis en `.BIN`) et `qemu-system-i386`;
+de `TOOLS` (tous écrits en Pascal), `makefs`, et facultativement `nasm`
+(`MBR.BIN` et `UFSBOOT.BIN` sont déjà fournis) et `qemu-system-i386` ;
 les essais sous QEMU et DEVENV (`TESTS/*.PY`) demandent aussi `python3`.
+Les outils hôtes n'emploient que l'unité DOS de Free Pascal (ou aucune) : les
+modes, propriétaires et dates des fichiers de la distribution passent par une
+liste produite par `find` (voir `TOOLS/MKVOL.PAS`).
 
 Compilation du noyau seul : `LPC /K KERNEL.PAS` produit `KERNEL.SYS`, image
-plate chargée à 1000:0000, copiée sous le nom `UNIX` sur le disque d'amorce.
+plate chargée à 1000:0000, copiée sous le nom `unix` à la racine du système
+de fichiers d'amorce.
+
+## Tests
+
+`TESTS/RUNTESTS.SH` enchaîne, sous QEMU :
+
+* `TPROC`, `TFS`, `TSWAP` lancés comme `/etc/init` d'une copie de la racine du
+  disque dur : processus, signaux, exec, permissions ; UFS1 (création, gros
+  fichier à blocs indirects, liens physiques, casse, `core`) ; huit
+  processus de 65 Ko qui ne tiennent qu'avec le va-et-vient ; le système de
+  fichiers est ensuite vérifié par `TOOLS/UFSCHK.PAS` ;
+* `TFS` sur une disquette UFS1 de 2,88 Mo (racine sur toute la disquette),
+  puis `UFSCHK --floppy` ;
+* `SESSION.PY` : session complète par la console série (getty, login avec
+  mot de passe, shell, tubes, arrière-plan, ^C, permissions, `passwd`,
+  connexion de root) sur le disque dur, puis sur les disquettes de 1,44 Mo
+  et 2,88 Mo (amorce sur UFS1, écritures, `reboot`, vérification de l'UFS1
+  de la disquette) ;
+* `INSTALL.PY` : installation de bout en bout depuis les disquettes (changées
+  par le moniteur de QEMU) puis depuis le CD-ROM sur des disques vierges ;
+  chaque disque installé est vérifié par `UFSCHK` (UFS1, MBR, amorce) et par
+  `UFSCMP.PY`, un lecteur UFS1 indépendant écrit en Python qui compare chaque
+  fichier (contenu, mode, propriétaire) à la racine de `BUILD.SH`, puis il
+  démarre seul ; l'installateur est aussi essayé dans les cinq langues.
+
+`TESTS/DEVENV.SH` amorce chaque image (disquettes, disque dur, CD-ROM) dans
+l'émulateur de DEVENV et `TESTS/DEVENV_INSTALL.PY` y installe le système
+(voir *Installation dans DEVENV*).
 
 ## Segments-unités
 
@@ -70,20 +107,21 @@ Le noyau ne peut pas utiliser d'unités (un seul fichier, une seule image) :
 Linux Pascal ajoute les **segments-unités** :
 
 ```pascal
-SegmentUnit KFat;
-Uses KTypes,KLib,KDisk;        { segments-unites utilises }
+SegmentUnit KDisk;
+Uses KTypes,KLib;              { segments-unites utilises }
 SegmentInterface
- Function FatMount(M: Integer): Integer;
+ Procedure DiskInit;
 SegmentImplementation
- Function FatMount(M: Integer): Integer;
+ Procedure DiskInit;
  Begin ... End;
 SegmentEnd;
 ```
 
 Chaque segment-unité a sa propre portée (des constantes ou variables de même
 nom peuvent exister dans deux segments-unités), est accessible par
-`KFat.FatMount` et reçoit son propre segment de code. Les données restent
-dans un segment DS commun de 64 Ko au plus.
+`KDisk.DiskInit` et reçoit son propre segment de code (32 Ko au plus : voir
+*Limites connues*). Les données restent dans un segment DS commun de 64 Ko au
+plus.
 
 ## Organisation (inspirée de UNIX V6, V7 et de xv6, MIT 6.828)
 
@@ -124,14 +162,15 @@ dans un segment DS commun de 64 Ko au plus.
 * **exec** : chargeur d'exécutables **COFF** (format natif de LINUX-0,
   produit par `LPC /X`) et, pour les programmes DOS, MZ. Comme sous V7,
   l'ancienne image est libérée avant le chargement de la nouvelle.
-* **Systèmes de fichiers** (`KFat`, `KUfs`, `KVfs`) : **UFS1** (FreeBSD :
+* **Système de fichiers** (`KUfs`, `KVfs`) : **UFS1** seul (FreeBSD :
   superbloc, groupes de cylindres, inodes de 128 octets avec propriétaire,
-  groupe et mode, blocs/fragments, indirections simple et double, liens
-  physiques, cartes et résumés tenus à jour), **FAT12** et **FAT16**, `/dev`
-  (tty, console, null, zero, disques et partitions), tubes; montages par
-  chemin; cache de 64 secteurs à **écriture différée** : un secteur modifié
-  est écrit quand son tampon est réutilisé, par `sync`, au démontage, avant
-  `reboot` et toutes les 30 secondes (le rôle de `/etc/update` sous V7).
+  groupe et mode, blocs de 4 Ko au moins et fragments de 512 octets au
+  moins, indirections simple et double, liens physiques, cartes et résumés
+  tenus à jour), `/dev` (tty, console, null, zero, disques et partitions),
+  tubes ; montages par chemin ; cache de 64 secteurs à **écriture
+  différée** : un secteur modifié est écrit quand son tampon est réutilisé,
+  par `sync`, au démontage, avant `reboot` et toutes les 30 secondes (le
+  rôle de `/etc/update` sous V7).
 * **Console** (`KTty`) : écran BIOS, clavier BIOS et COM1, discipline de
   ligne de V7 (voir *Terminal*). Le tampon clavier du BIOS (15 touches) est
   vidé dans la file du terminal à chaque commutation et à chaque fin de
@@ -141,24 +180,35 @@ dans un segment DS commun de 64 Ko au plus.
 * **Disques** (`KDisk`) : BIOS INT 13h, disquettes et disques durs,
   partitions du MBR.
 
-À l'amorce, la première partition de type 82h devient la zone de
-va-et-vient. La **racine** est, comme sous UNIX, la partition UFS (type A5h,
-A6h ou A9h) du disque d'amorce :
+### Racine, amorce et disquettes
 
-* **amorce UFS** (disposition par défaut, `LINUX0-HD.IMG`) : le MBR charge
-  l'amorce `UFSBOOT` placée dans les 8 premiers Ko de la partition UFS
-  (zone que le système de fichiers réserve à l'amorce, le superbloc étant
-  à 8 Ko), comme `boot1`/`boot2` de FreeBSD : elle lit la géométrie du
-  BIOS, le superbloc et l'inode 2, cherche `unix` dans la racine et charge
-  ce fichier (blocs directs et indirection simple) à 1000:0000. Le noyau
-  est donc `/unix`, comme sous UNIX V7 ;
-* **amorce FAT16 + racine UFS** : le secteur d'amorce FAT charge `UNIX` de
-  la partition FAT16, montée ensuite sur `/boot` ;
-* sur une **disquette** (ou un disque tout FAT16), la racine est le système
-  FAT de l'unité d'amorce (et une partition UFS éventuelle est montée sur
-  `/usr`).
+La **racine** est toujours un UFS1. À l'amorce, la première partition de type
+82h devient la zone de va-et-vient (elle peut se trouver sur un autre disque
+que la racine, par exemple un disque dur pour une racine sur disquette). Puis :
 
-`/dev` est toujours monté.
+* **disque dur** : la racine est la partition UFS (type A5h, A6h ou A9h) du
+  disque d'amorce, celle que le MBR a lancée. Le MBR charge l'amorce
+  `UFSBOOT` placée dans les 8 premiers Ko de la partition UFS (zone que le
+  système de fichiers réserve à l'amorce, le superbloc étant à 8 Ko), comme
+  `boot1`/`boot2` de FreeBSD : elle lit la géométrie du BIOS, le superbloc et
+  l'inode 2, cherche `unix` dans la racine et charge ce fichier (blocs
+  directs et indirection simple) à 1000:0000. Le noyau est donc `/unix`,
+  comme sous UNIX V7 ;
+* **disquette** : l'UFS1 occupe **toute la disquette** (unité 00h, sans MBR,
+  début au secteur 0 ; makefs avec des blocs de 4 Ko et des fragments de
+  512 octets) et le même `UFSBOOT` est son secteur d'amorce. Le BIOS charge le
+  secteur 0 ; comme une disquette n'a pas d'entrée de partition, `UFSBOOT`
+  n'utilise pas `DS:SI` (que le MBR renseigne pour un disque dur), prend 0
+  pour le début du système de fichiers et lit la géométrie de la disquette
+  par `INT 13h AH=08h`. Le secteur 0 charge les secteurs 1 à 15 puis cherche
+  `unix` à la racine ;
+* le noyau retrouve l'unité d'amorce en `0000:7C24` et le début du système
+  de fichiers en `0000:7C1C` (champs de `UFSBOOT`), et monte la racine :
+  `racine : /dev/hda1 (UFS1)` ou `racine : /dev/fd0 (UFS1)`.
+
+`/dev` est toujours monté. Le disque dur d'amorce n'est pas nécessairement
+`hda` (le CD-ROM en émulation de disque dur est `hda`, l'installation se fait
+sur `hdb`).
 
 ## Format des exécutables : COFF
 
@@ -248,6 +298,11 @@ Détails conformes à V7 :
 * **`signal`** : BX = signal, DX:CX = action (0 = SIG_DFL, 1 = SIG_IGN,
   sinon adresse FAR du gestionnaire) ; DX:AX = action précédente.
 * **`getuid`/`getgid`** : réel dans AX, effectif dans DX.
+* **`uname`** : cinq champs de 16 octets (chaînes Pascal) : `LINUX-0`,
+  `linux0`, `KERNEL16UNIX`, la version du noyau, `i8086`.
+* **`mount`** : `mount(special, répertoire, type)` ; seul UFS1 existe (type 0
+  ou 2), tout autre type donne EINVAL. **`mountinfo`** (203) rend 1 pour un
+  UFS1 et 2 pour `/dev`.
 
 ## Signaux
 
@@ -276,28 +331,30 @@ arrive sous la forme 0 puis le code de balayage.
 
 ## Utilisateurs et permissions
 
-Chaque processus a un utilisateur et un groupe réels et effectifs. Sur UFS,
-les fichiers ont un propriétaire, un groupe et un mode : le noyau vérifie
+Chaque processus a un utilisateur et un groupe réels et effectifs. Les
+fichiers UFS ont un propriétaire, un groupe et un mode : le noyau vérifie
 lecture, écriture, exécution et recherche (propriétaire, groupe, autres) ;
 le super-utilisateur (uid 0) passe outre, sauf pour exécuter un fichier sans
 aucun bit x. `chmod` est réservé au propriétaire, `chown` et `mount` au
-super-utilisateur ; `access` utilise l'utilisateur réel. FAT n'a pas de
-permissions : ses fichiers appartiennent à root, mode 0777.
+super-utilisateur ; `access` utilise l'utilisateur réel. Les fichiers de
+`/dev` appartiennent à root.
 
 `/etc/passwd` a le format de V7 (`nom:mot de passe:uid:gid:commentaire:
 répertoire:interpréteur`). Les mots de passe ont 13 caractères (2 de sel,
-11 de résultat, alphabet `./0-9A-Za-z`) ; le hachage, décrit dans
-`USR/CRYPT.INC`, n'est pas le DES de `crypt(3)`. Les images contiennent
-`root` (sans mot de passe) et `invite` (mot de passe `invite`, uid 100,
-répertoire `/home/invite`).
+11 de résultat, alphabet `./0-9A-Za-z`) ; le hachage, commun à `login`,
+`passwd` et `TOOLS/MKPASSWD.PAS`, n'est pas le DES de `crypt(3)`. Les images
+contiennent `root` (sans mot de passe) et `invite` (mot de passe `invite`,
+uid 100, répertoire `/home/invite`).
 
 ## Session et shell
 
 `init` lit `/etc/ttys` (format de V7 : `10console`) et lance `/etc/getty` sur
-chaque terminal actif ; `getty` remet le terminal dans son état normal et lit
-le nom, `login` vérifie le mot de passe, change de répertoire, d'utilisateur
-et de groupe, affiche `/etc/motd` et lance l'interpréteur de connexion
-(`-sh`), qui lit `/etc/profile` et `$HOME/.profile`.
+chaque terminal actif ; `getty` remet le terminal dans son état normal,
+affiche `LINUX-0 KERNEL16UNIX (linux0)` (le résultat de `uname`) puis
+`/etc/issue` et lit le nom, `login` vérifie le mot de passe, change de
+répertoire, d'utilisateur et de groupe, affiche `/etc/motd` et lance
+l'interpréteur de connexion (`-sh`), qui lit `/etc/profile` et
+`$HOME/.profile`.
 
 `/bin/sh` (`USR/SHELL.PAS`) suit le Bourne shell de V7 : recherche dans
 `PATH`, guillemets `'…'` et `"…"`, `\`, variables (`$NOM`, `$?`, `$$`, `$!`,
@@ -312,61 +369,61 @@ L'interpréteur de style DOS du dépôt (SH.PAS) reste disponible sous le nom
 
 ## Installation
 
-`BUILD.SH` produit aussi une distribution, comme les bandes de UNIX V7 :
+`BUILD.SH` produit aussi une distribution, comme les bandes de UNIX V7. Tout
+est en UFS1 :
 
-* `LINUX0-INST1.IMG` : disquette amorçable avec le noyau, `init`, `getty`,
-  `login`, `sh`, l'installateur et quelques commandes, plus `/mdec/mbr`,
-  `/mdec/ufsboot` et `/mdec/bootsect` (amorces du disque dur) ; `/etc/issue` invite à
-  se connecter sous le nom `install`, dont l'interpréteur est
-  `/bin/install` ;
+* `LINUX0-INST1.IMG` : disquette amorçable (UFS1 sur toute la disquette) avec
+  le noyau, `init`, `getty`, `login`, `sh`, l'installateur et quelques
+  commandes, plus `/mdec/mbr` et `/mdec/ufsboot` (amorces du disque dur) ;
+  `/etc/issue` invite à se connecter sous le nom `install`, dont
+  l'interpréteur est `/bin/install` ;
 * `LINUX0-INST2.IMG`, … : la racine complète en **volumes tar** (ustar)
   écrits directement sur la disquette, sans système de fichiers ; chaque
   volume commence par un fichier `VOLUME` (« LINUX-0 numéro total »), aucun
-  fichier n'est coupé entre deux volumes (`TOOLS/MKVOL.PAS`). Il en faut
-  **3**, soit **4 disquettes de 1,44 Mo** en tout ;
+  fichier n'est coupé entre deux volumes (`TOOLS/MKVOL.PAS`). La
+  distribution complète actuelle (186 commandes, sources dans `/usr/src`)
+  demande **9** disquettes de données, soit **10 disquettes de 1,44 Mo** en
+  tout ; `BUILD.SH` recalcule ce nombre ;
 * `LINUX0-CD.ISO` : CD-ROM ISO 9660 amorçable (El Torito, `TOOLS/MKISO.PAS`)
   en **émulation de disque dur** : le BIOS présente l'image du CD comme le
-  disque 80h et le noyau la lit par l'INT 13h, sans pilote de CD-ROM ; elle
-  contient la disquette 1 et les volumes dans `/dist`. Le disque émulé n'a
-  qu'une partition, car les BIOS le dimensionnent d'après la première.
+  disque 80h et le noyau la lit par l'INT 13h, sans pilote de CD-ROM. Le disque
+  émulé n'a qu'**une partition UFS1** (type A5h, sans va-et-vient), car les
+  BIOS le dimensionnent d'après la première partition ; elle contient le
+  noyau `/unix`, l'installateur et les volumes dans `/dist/volN.tar`.
 
-`install` (`USR/INSTALL.PAS`) :
+`install` (`USR/INSTALL.PAS`), qui n'a plus qu'un seul type d'installation,
+**UFS seul** :
 
 1. propose les disques durs, sauf celui d'où le système a démarré (le CD
-   émulé est `hda`, la cible est alors `hdb`), puis le **type
-   d'installation** :
-   1. **UFS seul** (par défaut) : partition UFS1 active, amorcée
-      directement (`/mdec/ufsboot` dans sa zone d'amorce, noyau `/unix`),
-      et va-et-vient ;
-   2. **FAT16 + UFS** : FAT16 d'amorce de 4 Mo (noyau, `/boot`), racine
-      UFS1, va-et-vient ;
-   3. **FAT16 seul** : racine FAT16 (grappes de 512 octets ou plus, sans
-      permissions UNIX), va-et-vient ;
-
-   et demande confirmation ; ce qui serait monté depuis le disque cible
+   émulé est `hda`, la cible est alors `hdb`), puis demande la **langue du
+   système installé** (`FR`, `EN`, `GR`, `SP` ou `IT` ; par défaut celle de
+   l'installateur) et confirme ; ce qui serait monté depuis le disque cible
    est démonté ;
 2. écrit la table des partitions (code de `/mdec/mbr`), alignées sur les
-   cylindres du BIOS, avec un va-et-vient de 4 Mo (type 82h) ; le noyau
-   relit la table (`ioctl DIOCRESCAN`) et crée `/dev/hdX1`, … ;
-3. formate la FAT16 (BPB pour le disque 80h) et crée le système UFS1 comme
-   `newfs` : superbloc et copies, groupes de cylindres de 32 Mo au plus
-   (cartes des inodes, des fragments et des grappes, résumés), tables
-   d'inodes, racine (inode 2), amorce UFS ;
-4. monte la racine sur `/mnt` (et l'amorce FAT16 sur `/mnt/boot`), copie le
-   noyau, puis extrait les volumes : sur `/dev/fd0`, lu brut, en vidant le
-   cache du lecteur à chaque disquette (`ioctl DIOCINVAL`), ou depuis
-   `/dist/volN.tar` ; modes (bit set-uid de `passwd` compris),
-   propriétaires et dates sont appliqués. Une disquette qui n'est pas la
-   bonne est refusée et redemandée ;
-5. démonte, puis propose de redémarrer.
+   cylindres du BIOS : partition 1 UFS1 active (type A5h) et partition 2 de
+   va-et-vient de 4 Mo (type 82h) ; le noyau relit la table (`ioctl
+   DIOCRESCAN`) et crée `/dev/hdX1`, … ;
+3. crée le système UFS1 comme `newfs` : superbloc et copies, groupes de
+   cylindres de 32 Mo au plus (cartes des inodes, des fragments et des
+   grappes, résumés), tables d'inodes, racine (inode 2), amorce UFS
+   (`/mdec/ufsboot` dans les 8 premiers Ko de la partition) ;
+4. monte la racine sur `/mnt`, copie le noyau (`/unix`), puis extrait les
+   volumes : sur `/dev/fd0`, lu brut, en vidant le cache du lecteur à chaque
+   disquette (`ioctl DIOCINVAL`), ou depuis `/dist/volN.tar` ; modes (bit
+   set-uid de `passwd` compris), propriétaires et dates sont appliqués. Une
+   disquette qui n'est pas la bonne est refusée et redemandée ;
+5. si la langue choisie n'est pas le français, écrit
+   `LANGUAGE=XX; export LANGUAGE` dans `/etc/profile` du disque installé ;
+6. démonte, puis propose de redémarrer.
+
+L'installateur parle la langue de la variable d'environnement `LANGUAGE`
+(français par défaut, `EN`, `GR`, `SP`, `IT`) : par exemple, en root,
+`LANGUAGE=SP /bin/install`. Le noyau, lui, garde ses messages en français.
 
 `ioctl` des disques (LINUX-0) : `DIOCGINFO` (taille, géométrie du BIOS,
 début, type de partition), `DIOCRESCAN` (relecture du MBR, aucune
 partition du disque ne doit être montée), `DIOCINVAL` (tampons écrits puis
-oubliés : changement de disquette). `TESTS/INSTALL.PY` installe le système
-sous QEMU sur des disques vierges : UFS seul depuis les disquettes (changées
-par le moniteur de QEMU), FAT16 + UFS puis FAT16 seul depuis le CD-ROM ; il
-vérifie UFS1 et FAT16 et démarre chaque disque installé.
+oubliés : changement de disquette).
 
 ### Installation dans DEVENV
 
@@ -392,16 +449,22 @@ avant d'appuyer sur Entrée dans l'émulateur. À la fin : `IMGMOUNT -u A`,
 puis `BOOT C:` démarre le disque installé. Depuis le CD-ROM :
 `BOOT /CDROM:LINUX0-CD.ISO` puis aussitôt `IMGMOUNT D: disque.img` (DEVENV
 n'amorce un CD que si aucun disque n'est monté ; le disque cible doit être
-monté avant que le noyau ne recense les disques), et pour démarrer le
-disque installé : `IMGMOUNT -u C`, `IMGMOUNT -u D`, `IMGMOUNT C:
-disque.img`, `BOOT C:`. Sous Linux, DEVENV veut des chemins absolus dans
-`IMGMOUNT`. `TESTS/DEVENV_INSTALL.PY` refait cette installation en pilotant
-l'interface de DEVENV (Xvfb, xdotool) : il lit l'écran de l'émulateur en
-reconnaissant les caractères de sa police 8×8 pour attendre chaque question
-de l'installateur, change les disquettes dans l'Invite de commandes, démarre
-le disque installé, s'y connecte et garde une capture (PNG et texte) de
-chaque étape (`DEVENV=…/devenv python3 TESTS/DEVENV_INSTALL.PY disquettes`
-ou `cd`).
+monté avant que le noyau ne recense les disques). Sous Linux, DEVENV veut des
+chemins absolus dans `IMGMOUNT`.
+
+Le banc d'essai sans interface de DEVENV (`/KERNELTEST`, `/KTBOOTIMG`,
+`/KTHD`, `/KTSCRIPT`, voir `DEV-COOLS/DOC/KERNELTEST.txt`) sert aux essais
+automatiques : `TESTS/DEVENV.SH` amorce les disquettes de 1,44 Mo et 2,88 Mo,
+la disquette d'installation, le disque dur et le CD-ROM, se connecte en root
+et tape quelques commandes ; `TESTS/DEVENV_INSTALL.PY` installe le système
+(`DEVENV=…/DEVENV python3 TESTS/DEVENV_INSTALL.PY disquettes` ou `cd`),
+en espagnol depuis les disquettes et en anglais depuis le CD, puis amorce le
+disque installé. Ce banc d'essai est limité à 2 147 483 647 instructions : le
+script n'installe donc que le système de base (une disquette de données), pas
+les 9 disquettes complètes (installées sous QEMU). Deux particularités de
+DEVENV : le disque `/KTHD` a une géométrie de 255 têtes et 63 secteurs, mais un
+disque dur donné à `/KTBOOTIMG` en a 2 et 18, si bien que le script réécrit les
+coordonnées CHS du MBR du disque installé avant de l'amorcer.
 
 ## Carte mémoire
 
@@ -410,10 +473,13 @@ ou `cd`).
 | 00000-003FF | vecteurs d'interruption |
 | 00400-004FF | données du BIOS |
 | 00500-07BFF | pile du processus 0 (amorce) |
-| 07C00-07DFF | secteur d'amorce (BPB relu par le noyau) |
+| 07C00-07DFF | secteur 0 de l'amorce UFS (unité d'amorce en 7C24, début du système de fichiers en 7C1C, relus par le noyau) |
 | 08000-0FFFF | cache disque (64 tampons de 512 octets) |
 | 10000-...   | noyau : code (segments), puis données |
 | ...-9FFFF   | images des processus (en bas) et piles noyau (en haut), gérées par la coremap ; les images en trop sont dans la zone de va-et-vient |
+
+Le noyau occupe environ 187 Ko (160 Ko de code, 30 Ko de données) : il reste
+environ 388 Ko de mémoire libre pour les processus sur un PC de 640 Ko.
 
 ## Programmes LINUX-0
 
@@ -434,11 +500,15 @@ offre aussi l'interface UNIX directe : `SysOpen`, `SysRead`, `Fork`,
 * L'installation n'utilise que les 1024 premiers cylindres du BIOS (adressage
   CHS de l'INT 13h, 504 Mo au plus) ; le disque doit faire au moins 16 Mo.
 * Le va-et-vient demande une partition de type 82h : les disquettes n'en
-  ont pas, et le nombre de processus simultanés y est limité par les
-  640 Ko (environ 380 Ko pour les processus ; une commande pèse de 45 à
-  100 Ko, dont au moins 35 pour le runtime et la libc). Les processus qui
-  se partagent la même adresse d'exécution (plusieurs `fork` du même
-  programme) font des allers-retours sur le disque à chaque commutation.
+  ont pas (une racine sur disquette peut utiliser celle d'un disque dur), et
+  le nombre de processus simultanés y est limité par les 640 Ko (environ
+  390 Ko pour les processus ; une commande pèse de 42 à 100 Ko, dont au moins
+  35 pour le runtime et la libc). Les processus qui se partagent la même
+  adresse d'exécution (plusieurs `fork` du même programme) font des
+  allers-retours sur le disque à chaque commutation.
+* Les disquettes de 1,44 Mo et de 2,88 Mo ne reçoivent que les commandes
+  essentielles et les plus petites (une commande pèse plus de 42 Ko) ; toutes
+  les commandes sont sur le disque dur et le CD-ROM.
 * Les commandes du dépôt restent des programmes de style DOS sous le capot
   (options `/?`, jokers `*.*`, chemins `C:\` acceptés, NUL/CON/PRN) ; `ls`
   ne prend qu'un argument, `wc` exige une option, `grep` affiche le nom du
@@ -446,13 +516,12 @@ offre aussi l'interface UNIX directe : `SysOpen`, `SysRead`, `Fork`,
 * Les relocalisations de segments des exécutables sont inhérentes au code
   segmenté du 8086 (absentes des binaires PDP-11 de V7).
 * Une recherche de nom sur UFS ne se fait sans tenir compte de la casse que
-  pour un programme DOS (exécutable MZ) ; FAT, lui, ignore toujours la casse
-  (noms 8.3 présentés en minuscules, numéros d'inode non stables, pas de
-  liens physiques).
+  pour un programme DOS (exécutable MZ).
 * Pas de liens symboliques (absents de V7), pas de fichiers spéciaux créés
   par `mknod` (`/dev` est fourni par le noyau), date d'accès non tenue à
   jour, pas de fuseau horaire (l'horloge du PC est en UTC).
-* Fichiers de 16 Mo au plus sur UFS (indirection double).
+* Fichiers de 16 Mo au plus sur UFS (indirection double) ; l'amorce UFS
+  charge un noyau de 12 blocs directs et d'un bloc d'indirection simple.
 * QEMU 8.2 exécute mal un saut proche 16 bits qui fait le tour des 64 Ko
   d'un segment non aligné sur 4 Ko ; pour les cibles LINUX-0, LPC limite donc
   les segments de code à 32 Ko (aucun saut ne fait le tour du segment).

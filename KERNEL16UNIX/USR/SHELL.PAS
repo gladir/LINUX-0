@@ -1,26 +1,34 @@
 { @author: Sylvain Maltais (support@gladir.com)
   @created: 2026
   @website(https://www.gladir.com/linux-0)
-  @abstract(Target: Linux Pascal (LPC /X))
+  @abstract(Target: KERNEL16UNIX (LPC /X))
   @description: Interpreteur de commandes UNIX de LINUX-0 (/bin/sh), dans
    l'esprit du Bourne shell de UNIX V7 (sous-ensemble) :
    - commandes simples cherchees dans PATH, fichiers de commandes (un
      executable qui n'est ni COFF ni MZ est lu par sh);
-   - guillemets '...', "...", \c; variables $NOM (ou entre accolades), $?, $$, $!, $#,
+   - guillemets '...', "...", \c; variables $NOM (ou entre accolades), $?,
+     $$, $!, $#,
      $0..$9, $*; NOM=valeur (avant une commande : pour elle seule);
    - motifs * ? [a-z] [!...] dans le dernier element d'un chemin;
    - redirections < > >> 2> 2>> 2>&1, tubes |, sequences ; et fin de ligne,
      arriere-plan &, conditions && et ||, commentaires #;
    - commandes internes : cd, exit, export, unset, set, wait, exec, umask,
-     read, shift, . (lecture d'un fichier), : (ne fait rien).
+     read, shift, echo, . (lecture d'un fichier), : (ne fait rien);
+     echo est interne (avec -n), comme dans les interpreteurs actuels.
    Signaux comme sh de V7 : l'interpreteur interactif intercepte SIGINT (la
    ligne en cours est abandonnee) et ignore SIGQUIT et SIGTERM; une commande
    au premier plan recoit SIGINT et SIGQUIT, une commande en arriere-plan les
    ignore. $? vaut le code de sortie, ou 128 + numero du signal.
+   L'invite est "# " pour root et "$ " pour les autres (variable PS1 si elle
+   existe). Messages en francais, ou selon la variable LANGUAGE : EN
+   anglais, GR allemand, SP espagnol, IT italien (lue dans les variables de
+   l'interpreteur : /etc/profile peut donc la fixer).
    Usage : sh [-c commande | fichier [arguments]]; un shell de connexion
    (argv[0] commencant par "-") lit /etc/profile et $HOME/.profile.
    Compilation : LPC /X SHELL.PAS  -> /bin/sh
 }
+
+{$DEFINE LANGERR}   { messages d'erreur du systeme en 5 langues }
 
 Program Shell;
 
@@ -30,7 +38,7 @@ Program Shell;
 
 Const
  MAXTOK=48;
- MAXW=64;
+ MAXW=160;
  MAXVAR=64;
  MAXJOB=16;
  { genres de jetons }
@@ -38,6 +46,55 @@ Const
  tDGreat=8; tErr=9; tDErr=10; tErrOut=11;
  SEP=#1;    { separation des champs d'une variable developpee }
  GLOBC=#2;  { joker hors guillemets (marque pour les motifs) }
+
+Const
+ mTooManyVars=1; mLineLong=2; mMissing=3; mTooManyArgs=4; mSyntax=5;
+ mNotFound=6; mCantOpen=7; mOctal=8; mNeedFile=9; mPipeFail=10;
+ mForkFail=11; mHelp1=12; mHelp2=13; mHelp3=14;
+ { messages : colonnes FR, EN, GR (allemand), SP, IT }
+ Tab:Array[1..14,1..5] Of PChar=(
+  ('sh: trop de variables','sh: too many variables','sh: zu viele Variablen',
+   'sh: demasiadas variables','sh: troppe variabili'),
+  ('sh: ligne trop longue','sh: line too long','sh: Zeile zu lang',
+   'sh: linea demasiado larga','sh: riga troppo lunga'),
+  (' manquant',' missing',' fehlt',' falta',' mancante'),
+  ('sh: trop d''arguments','sh: too many arguments',
+   'sh: zu viele Argumente','sh: demasiados argumentos',
+   'sh: troppi argomenti'),
+  ('sh: erreur de syntaxe pres de ','sh: syntax error near ',
+   'sh: Syntaxfehler bei ','sh: error de sintaxis cerca de ',
+   'sh: errore di sintassi vicino a '),
+  (': introuvable',': not found',': nicht gefunden',': no encontrado',
+   ': non trovato'),
+  (': impossible d''ouvrir',': cannot open',': kann nicht geoeffnet werden',
+   ': no se puede abrir',': impossibile aprire'),
+  (' : valeur octale attendue',' : octal value expected',
+   ' : Oktalwert erwartet',' : se esperaba un valor octal',
+   ' : valore ottale atteso'),
+  ('.: nom de fichier attendu','.: file name expected',
+   '.: Dateiname erwartet','.: se esperaba un nombre de archivo',
+   '.: nome di file atteso'),
+  ('sh: tube impossible : ','sh: cannot create pipe: ',
+   'sh: Pipe kann nicht angelegt werden: ','sh: no se puede crear la tuberia: ',
+   'sh: impossibile creare la pipe: '),
+  ('sh: fork impossible : ','sh: cannot fork: ',
+   'sh: fork nicht moeglich: ','sh: no se puede hacer fork: ',
+   'sh: impossibile fare fork: '),
+  ('Usage : sh [-c commande | fichier [arguments]]',
+   'Usage: sh [-c command | file [arguments]]',
+   'Aufruf: sh [-c Befehl | Datei [Argumente]]',
+   'Uso: sh [-c orden | archivo [argumentos]]',
+   'Uso: sh [-c comando | file [argomenti]]'),
+  ('Interpreteur de commandes (style Bourne shell de UNIX V7).',
+   'Command interpreter (Bourne shell of UNIX V7 style).',
+   'Befehlsinterpreter (im Stil der Bourne-Shell von UNIX V7).',
+   'Interprete de ordenes (estilo del Bourne shell de UNIX V7).',
+   'Interprete di comandi (stile Bourne shell di UNIX V7).'),
+  ('Un shell de connexion lit /etc/profile et $HOME/.profile.',
+   'A login shell reads /etc/profile and $HOME/.profile.',
+   'Eine Login-Shell liest /etc/profile und $HOME/.profile.',
+   'Un shell de acceso lee /etc/profile y $HOME/.profile.',
+   'Una shell di login legge /etc/profile e $HOME/.profile.'));
 
 Type
  TStr=String[79];
@@ -58,6 +115,7 @@ Var
  LastStatus,LastBg,I:Integer;
  Interactive,Intr,Done,LexErr:Boolean;
  InFd:Integer;
+ ArgFail:Boolean;     { argv ou environnement trop gros pour exec }
  InBuf:Array[0..511]Of Char;
  InPos,InLen:Integer;
  Line:String;
@@ -78,6 +136,17 @@ End;
 Procedure Err(S:String);
 Begin
  Put(2,S+#10);
+End;
+
+Function GetVar(N:String):String;Forward;
+
+Function Msg(Id:Integer):String;
+{ message Id dans la langue de la variable LANGUAGE }
+Var P:PChar; X:String;
+Begin
+ P:=Tab[Id,SysLangOf(GetVar('LANGUAGE'))]; X:='';
+ While P^<>#0 Do Begin X:=X+P^; Inc(P) End;
+ Msg:=X;
 End;
 
 Function Octal(N:Word):String;
@@ -116,7 +185,7 @@ Var K:Integer;
 Begin
  K:=FindVar(N);
  If K=0 Then Begin
-  If NVar=MAXVAR Then Begin Err('sh: trop de variables'); Exit End;
+  If NVar=MAXVAR Then Begin Err(Msg(mTooManyVars)); Exit End;
   Inc(NVar); K:=NVar; VarName[K]:=N; VarExp[K]:=False;
  End;
  VarVal[K]:=V;
@@ -199,7 +268,7 @@ End;
 Procedure AddTok(K:Byte;S:String);
 Begin
  If NTok=MAXTOK Then Begin
-  If Not LexErr Then Err('sh: ligne trop longue'); LexErr:=True; Exit;
+  If Not LexErr Then Err(Msg(mLineLong)); LexErr:=True; Exit;
  End;
  Inc(NTok); TokK[NTok]:=K; TokS[NTok]:=S;
 End;
@@ -248,7 +317,7 @@ Begin
      If (C='"')And(L[P]='\') Then Inc(P);
      Inc(P);
     End;
-    If P>Length(L) Then Begin Err('sh: '+C+' manquant'); LexErr:=True End;
+    If P>Length(L) Then Begin Err('sh: '+C+Msg(mMissing)); LexErr:=True End;
     Inc(P);
    End Else Inc(P);
   End;
@@ -273,7 +342,8 @@ Var P,K:Integer; W,N,V:String; C:Char;
    N:=''; Inc(P);
    While (P<=Length(L))And(L[P]<>'}') Do Begin N:=N+L[P]; Inc(P) End;
    Inc(P);
-   If (Length(N)=1)And(N[1]In['?','$','!','#','*','@','0'..'9']) Then V:=Special(N[1])
+   If (Length(N)=1)And(N[1]In['?','$','!','#','*','@','0'..'9']) Then
+    V:=Special(N[1])
    Else V:=GetVar(N);
   End Else If L[P]In['?','$','!','#','*','@','0'..'9'] Then Begin
    V:=Special(L[P]); Inc(P);
@@ -370,7 +440,7 @@ End;
 
 Procedure AddWord(S:String);
 Begin
- If NWords=MAXW Then Begin Err('sh: trop d''arguments'); Exit End;
+ If NWords=MAXW Then Begin Err(Msg(mTooManyArgs)); Exit End;
  Inc(NWords); Words[NWords]:=S;
 End;
 
@@ -409,7 +479,9 @@ Begin
  { tri par ordre alphabetique }
  For A:=First To NWords-1 Do
   For B:=A+1 To NWords Do
-   If Words[B]<Words[A] Then Begin T:=Words[A]; Words[A]:=Words[B]; Words[B]:=T End;
+   If Words[B]<Words[A] Then Begin
+    T:=Words[A]; Words[A]:=Words[B]; Words[B]:=T;
+   End;
 End;
 
 Procedure Fields(Raw:String);
@@ -472,11 +544,13 @@ Begin
    tErrOut: C.ErrOut:=True;
    tLess,tGreat,tDGreat,tErr,tDErr: Begin
      If (K=B)Or(TokK[K+1]<>tWord) Then Begin
-      Err('sh: erreur de syntaxe pres de '+TokS[K]); Exit;
+      Err(Msg(mSyntax)+TokS[K]); Exit;
      End;
      Case TokK[K] Of
       tLess: C.InF:=Plain(TokS[K+1]);
-      tGreat,tDGreat: Begin C.OutF:=Plain(TokS[K+1]); C.OutApp:=TokK[K]=tDGreat End;
+      tGreat,tDGreat: Begin
+       C.OutF:=Plain(TokS[K+1]); C.OutApp:=TokK[K]=tDGreat;
+      End;
       tErr,tDErr: Begin C.ErrF:=Plain(TokS[K+1]); C.ErrApp:=TokK[K]=tDErr End;
      End;
      Inc(K);
@@ -484,7 +558,8 @@ Begin
   End;
   Inc(K);
  End;
- If InCmd Then C.WCount:=NWords-C.WFirst+1 Else Begin C.WFirst:=NWords+1; C.WCount:=0 End;
+ If InCmd Then C.WCount:=NWords-C.WFirst+1
+ Else Begin C.WFirst:=NWords+1; C.WCount:=0 End;
  Prepare:=True;
 End;
 
@@ -528,20 +603,25 @@ Procedure BuildArgv(Var C:TCmd;Script:String);
   variables exportees, puis affectations de la commande }
 Var K:Integer;
 Begin
- ArgReset;
+ ArgReset; ArgFail:=False;
  If Script<>'' Then Begin ArgAdd('sh'); ArgAdd(Script) End
  Else ArgAdd(Words[C.WFirst]);
- For K:=1 To C.WCount-1 Do ArgAdd(Words[C.WFirst+K]);
+ For K:=1 To C.WCount-1 Do
+  If Not ArgAdd(Words[C.WFirst+K]) Then ArgFail:=True;
  For K:=1 To NVar Do
-  If VarExp[K] And(FindAssign(VarName[K],C)=0) Then EnvAdd(VarName[K]+'='+VarVal[K]);
- For K:=0 To C.ACount-1 Do EnvAdd(Words[C.AFirst+K]);
+  If VarExp[K] And(FindAssign(VarName[K],C)=0) Then
+   If Not EnvAdd(VarName[K]+'='+VarVal[K]) Then ArgFail:=True;
+ For K:=0 To C.ACount-1 Do
+  If Not EnvAdd(Words[C.AFirst+K]) Then ArgFail:=True;
 End;
 
 Procedure TryExec(Var C:TCmd;Path:String);
 { exece; un fichier executable qui n'est pas un programme est un fichier
   de commandes, lu par /bin/sh (comme sous UNIX V7) }
 Begin
- BuildArgv(C,''); ArgExec(Path);
+ BuildArgv(C,'');
+ If ArgFail Then Begin Errno:=E2BIG; Exit End;
+ ArgExec(Path);
  If Errno=ENOEXEC Then Begin
   BuildArgv(C,Path); ArgExec('/bin/sh'); Errno:=ENOEXEC;
  End;
@@ -582,7 +662,7 @@ Begin
    If Errno<>ENOENT Then E:=Errno;
   Until K=0;
  End;
- If E=ENOENT Then Begin Err(Name+': introuvable'); SysExit(127) End;
+ If E=ENOENT Then Begin Err(Name+Msg(mNotFound)); SysExit(127) End;
  Err(Name+': '+SysErrorText(E));
  SysExit(126);
 End;
@@ -655,7 +735,7 @@ Var F:Text; S:String;
 Begin
  Assign(F,Path); Reset(F);
  If IOResult<>0 Then Begin
-  If Not Quiet Then Begin Err(Path+': impossible d''ouvrir'); LastStatus:=2 End;
+  If Not Quiet Then Begin Err(Path+Msg(mCantOpen)); LastStatus:=2 End;
   Exit;
  End;
  While Not EOF(F) And Not Done Do Begin
@@ -686,7 +766,7 @@ Begin
  N:=Words[C.WFirst];
  IsBuiltin:=(N='cd')Or(N='exit')Or(N='export')Or(N='unset')Or(N='set')Or
    (N='wait')Or(N='exec')Or(N='umask')Or(N='read')Or(N='shift')Or
-   (N='.')Or(N=':');
+   (N='echo')Or(N='.')Or(N=':');
 End;
 
 Function ReadVars(Var C:TCmd):Integer;
@@ -713,7 +793,7 @@ Begin
 End;
 
 Function Builtin(Var C:TCmd):Integer;
-Var N,A,D:String; K,E,P:Integer; M:Word;
+Var N,A,D:String; K,E,P:Integer; Mask:Word; NoNl,Esc:Boolean;
 Begin
  Builtin:=0;
  N:=Words[C.WFirst];
@@ -730,7 +810,8 @@ Begin
   Builtin:=LastStatus;
  End Else If N='export' Then Begin
   If C.WCount=1 Then Begin
-   For K:=1 To NVar Do If VarExp[K] Then WriteLn('export ',VarName[K],'=',VarVal[K]);
+   For K:=1 To NVar Do
+    If VarExp[K] Then Put(1,'export '+VarName[K]+'='+VarVal[K]+#10);
   End Else
    For K:=1 To C.WCount-1 Do Begin
     D:=Words[C.WFirst+K]; P:=Pos('=',D);
@@ -740,7 +821,7 @@ Begin
  End Else If N='unset' Then Begin
   For K:=1 To C.WCount-1 Do UnsetVar(Words[C.WFirst+K]);
  End Else If N='set' Then Begin
-  For K:=1 To NVar Do WriteLn(VarName[K],'=',VarVal[K]);
+  For K:=1 To NVar Do Put(1,VarName[K]+'='+VarVal[K]+#10);
  End Else If N='wait' Then Begin
   If A<>'' Then Begin Val(A,K,E); Builtin:=WaitJobs(K) End
   Else Builtin:=WaitJobs(0);
@@ -753,9 +834,9 @@ Begin
   End;
  End Else If N='umask' Then Begin
   If A='' Then Begin
-   M:=SysUmask(0); SysUmask(M); WriteLn(Octal(M));
-  End Else If ParseOct(A,M) Then SysUmask(M)
-  Else Begin Err('umask: '+A+' : valeur octale attendue'); Builtin:=1 End;
+   Mask:=SysUmask(0); SysUmask(Mask); Put(1,Octal(Mask)+#10);
+  End Else If ParseOct(A,Mask) Then SysUmask(Mask)
+  Else Begin Err('umask: '+A+Msg(mOctal)); Builtin:=1 End;
  End Else If N='read' Then Builtin:=ReadVars(C)
  Else If N='shift' Then Begin
   If NPos>0 Then Begin
@@ -763,10 +844,51 @@ Begin
    Pos0[9]:='';
    Dec(NPos);
   End;
+ End Else If N='echo' Then Begin
+  { echo [-n] [-e] mots : -n sans fin de ligne, -e interprete \n \t \\ }
+  K:=1; NoNl:=False; Esc:=False;
+  While (K<C.WCount)And((Words[C.WFirst+K]='-n')Or(Words[C.WFirst+K]='-e')Or
+    (Words[C.WFirst+K]='-ne')Or(Words[C.WFirst+K]='-en')) Do Begin
+   If Pos('n',Words[C.WFirst+K])>0 Then NoNl:=True;
+   If Pos('e',Words[C.WFirst+K])>0 Then Esc:=True;
+   Inc(K);
+  End;
+  While K<C.WCount Do Begin
+   D:=Words[C.WFirst+K];
+   If Esc Then Begin
+    E:=1;
+    While E<=Length(D) Do Begin
+     If (D[E]='\')And(E<Length(D)) Then Begin
+      Inc(E);
+      Case D[E] Of 'n':Put(1,#10); 't':Put(1,#9); 'c':NoNl:=True;
+       Else Put(1,D[E]) End;
+     End Else Put(1,D[E]);
+     Inc(E);
+    End;
+   End Else Put(1,D);
+   Inc(K);
+   If K<C.WCount Then Put(1,' ');
+  End;
+  If Not NoNl Then Put(1,#10);
  End Else If N='.' Then Begin
-  If A='' Then Begin Err('.: nom de fichier attendu'); Builtin:=2 End
+  If A='' Then Begin Err(Msg(mNeedFile)); Builtin:=2 End
   Else Begin RunFile(A,False); Builtin:=LastStatus End;
  End;
+End;
+
+Function RunBuiltin(Var C:TCmd):Integer;
+{ commande interne; ses redirections sont appliquees au processus puis
+  retablies (sauf pour exec, qui les conserve) }
+Var S0,S1,S2,R:Integer;
+Begin
+ If ((C.InF<>'')Or(C.OutF<>'')Or(C.ErrF<>'')Or C.ErrOut)And
+   (Words[C.WFirst]<>'exec') Then Begin
+  S0:=SysDup(0); S1:=SysDup(1); S2:=SysDup(2);
+  If Redirect(C) Then R:=Builtin(C) Else R:=1;
+  SysDup2(S0,0); SysDup2(S1,1); SysDup2(S2,2);
+  SysClose(S0); SysClose(S1); SysClose(S2);
+  RunBuiltin:=R;
+ End Else RunBuiltin:=Builtin(C);
 End;
 
 Function RunPipeline(A,B:Integer;Bg:Boolean):Integer;
@@ -779,15 +901,17 @@ Begin
  For K:=A To B+1 Do
   If (K>B)Or(TokK[K]=tPipe) Then Begin
    If (K=S)Or(N=8) Then Begin
-    Err('sh: erreur de syntaxe pres de |'); NWords:=Save; RunPipeline:=2; Exit;
+    Err(Msg(mSyntax)+'|'); NWords:=Save; RunPipeline:=2; Exit;
    End;
    Inc(N);
-   If Not Prepare(S,K-1,Cmds[N]) Then Begin NWords:=Save; RunPipeline:=2; Exit End;
+   If Not Prepare(S,K-1,Cmds[N]) Then Begin
+    NWords:=Save; RunPipeline:=2; Exit;
+   End;
    S:=K+1;
   End;
  If (N=1)And Not Bg Then Begin
   If IsBuiltin(Cmds[1]) Then Begin
-   RunPipeline:=Builtin(Cmds[1]); NWords:=Save; Exit;
+   RunPipeline:=RunBuiltin(Cmds[1]); NWords:=Save; Exit;
   End;
   If (Cmds[1].WCount=0)And(Cmds[1].ACount>0) Then Begin
    { NOM=valeur seul : variable de l'interpreteur }
@@ -803,12 +927,12 @@ Begin
  For K:=1 To N Do Begin
   If K<N Then Begin
    If SysPipe(Fd0,Fd1)<0 Then Begin
-    Err('sh: tube impossible : '+SysErrorText(Errno)); Fd0:=-1; Fd1:=-1;
+    Err(Msg(mPipeFail)+SysErrorText(Errno)); Fd0:=-1; Fd1:=-1;
    End;
   End Else Begin Fd0:=-1; Fd1:=-1 End;
   Pid:=VFork;
   If Pid=0 Then ChildExec(Cmds[K],Bg,PIn,Fd1,Fd0);
-  If Pid<0 Then Err('sh: fork impossible : '+SysErrorText(Errno))
+  If Pid<0 Then Err(Msg(mForkFail)+SysErrorText(Errno))
   Else Inc(Left);
   If PIn>=0 Then SysClose(PIn);
   If Fd1>=0 Then SysClose(Fd1);
@@ -853,7 +977,7 @@ Begin
     If LexGen<>Gen Then Begin Lex(L); Inc(LexGen); Gen:=LexGen End;
    End;
   End Else If (J<=NTok)And((TokK[J]<>tSemi)Or(J<NTok)) Then Begin
-   Err('sh: erreur de syntaxe pres de '+TokS[J]); LastStatus:=2; Exit;
+   Err(Msg(mSyntax)+TokS[J]); LastStatus:=2; Exit;
   End;
   If Done Then Exit;
   Run:=True;
@@ -886,6 +1010,10 @@ BEGIN
  Pos0[0]:=ArgStr(0); NPos:=0;
  Login:=(Pos0[0]<>'')And(Pos0[0][1]='-');
  InFd:=0; InPos:=0; InLen:=0;
+ S:=ArgStr(1);
+ If (S='/?')Or(S='-h')Or(S='--help') Then Begin
+  Put(1,Msg(mHelp1)+#10+Msg(mHelp2)+#10+Msg(mHelp3)+#10); SysExit(0);
+ End;
  If (ArgCount>2)And(ArgStr(1)='-c') Then Begin
   For K:=3 To ArgCount-1 Do If K-3<=9 Then Pos0[K-3]:=ArgStr(K);
   If ArgCount>3 Then NPos:=ArgCount-4;

@@ -7,18 +7,25 @@
 #   l'utilisateur invite (mot de passe), commandes du shell (variables, tubes,
 #   redirections, motifs, arriere-plan, &&, ||, ^C), permissions, ps, kill,
 #   passwd, va-et-vient, puis connexion de root.
-#   Usage : python3 SESSION.PY IMAGE_DISQUE_DUR   (code de sortie 0 si OK)
+#   Avec l'argument "floppy", l'image est une disquette UFS1 (racine sur
+#   toute la disquette, sans MBR, ni va-et-vient) : connexion de root,
+#   quelques commandes, ecriture d'un fichier, reboot (qui vide le cache),
+#   puis verification de l'UFS1 de la disquette par TOOLS/UFSCHK.PAS.
+#   Usage : python3 SESSION.PY IMAGE [floppy]   (code de sortie 0 si OK)
 import socket, subprocess, sys, time, re, os, shutil, tempfile
 
 img = sys.argv[1]
+floppy = len(sys.argv) > 2 and sys.argv[2] == 'floppy'
+UFSCHK = os.path.join(os.environ.get('W', '/tmp/linux0-build'), 'bin', 'ufschk')
 tmp = tempfile.mkdtemp()
 disk = os.path.join(tmp, 'hd.img')
 shutil.copy(img, disk)
 port = 4600 + os.getpid() % 300
+drive = ['-boot', 'a', '-drive', 'file=%s,format=raw,if=floppy' % disk] if floppy \
+    else ['-boot', 'c', '-drive', 'file=%s,format=raw,if=ide' % disk]
 q = subprocess.Popen(['qemu-system-i386', '-m', '1', '-display', 'none',
-                      '-no-reboot', '-boot', 'c',
-                      '-drive', 'file=%s,format=raw,if=ide' % disk,
-                      '-serial', 'tcp:127.0.0.1:%d,server,nowait' % port],
+                      '-no-reboot'] + drive +
+                     ['-serial', 'tcp:127.0.0.1:%d,server,nowait' % port],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 s = None
 for i in range(50):
@@ -82,9 +89,38 @@ def run(cmd, pat, prompt=r'\$ $', t=30):
     return body
 
 
+def session_floppy():
+    global fails
+    boot = expect(r'login: ', 120)
+    ok = 'racine : /dev/fd0 (UFS1)' in boot and 'LINUX-0 KERNEL16UNIX version' in boot
+    print(('ok    ' if ok else 'ECHEC ') + 'amorce de la disquette : racine /dev/fd0 (UFS1)')
+    fails += 0 if ok else 1
+    send('root')
+    expect(r'# $')
+    print('ok    connexion de root (invite #)')
+    run('cat /etc/issue /etc/motd', r'LINUX-0.*\n.*Bienvenue sous LINUX-0', prompt=r'# $')
+    run('ls /; ls /bin', r'unix.*\n.*cat.*sh', prompt=r'# $')
+    run('echo bonjour > /f.txt; echo suite >> /f.txt; cat /f.txt', r'bonjour\nsuite',
+        prompt=r'# $')
+    run('mkdir /d; cp /f.txt /d/g.txt; ls /d; rm /f.txt; ls /', r'g.txt', prompt=r'# $')
+    run('ps', r'sh', prompt=r'# $')
+    # reboot : le cache de secteurs est ecrit sur la disquette
+    send('reboot')
+    try:
+        q.wait(30)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 try:
-    expect(r'login: ', 90)
+    if floppy:
+        session_floppy()
+        raise SystemExit
+    banner = expect(r'login: ', 90)
     print('getty : invite "login:"')
+    ok = 'LINUX-0 KERNEL16UNIX (linux0)' in banner
+    print(('ok    ' if ok else 'ECHEC ') + 'banniere de getty : uname = LINUX-0 KERNEL16UNIX (linux0)')
+    fails += 0 if ok else 1
     send('invite')
     expect(r'Mot de passe : ')
     send('mauvais')
@@ -138,7 +174,7 @@ try:
     expect(r'\(encore\) : ')
     send('secret')
     expect(r'\$ $')
-    run('grep invite /etc/passwd', r'invite:..[./0-9A-Za-z]{11}:100')
+    run('cat /etc/passwd | grep invite', r'invite:..[./0-9A-Za-z]{11}:100')
     send('exit')
     expect(r'login: ', 30)
     print('ok    fin de session : nouveau getty')
@@ -155,11 +191,22 @@ try:
     run('id; echo a b > /etc/essai; cat /etc/essai; rm /etc/essai', r'uid=0\(root\).*a b', prompt=r'# $')
     run('umask; umask 077; umask', r'022\n077', prompt=r'# $')
     run('ls /usr/src | wc -l; echo /usr/src/W*', r'\b\d\d\b\n/usr/src/WC.PAS', prompt=r'# $')
+except SystemExit:
+    pass
 except TimeoutError as e:
     print('ECHEC ' + str(e))
     fails += 1
 finally:
     q.kill()
+    q.wait()
+    if floppy:
+        r = subprocess.run([UFSCHK, '--floppy', disk], capture_output=True, text=True)
+        good = r.returncode == 0
+        print(('ok    ' if good else 'ECHEC ') + 'UFS1 de la disquette coherent apres '
+              'les ecritures (%s)' % r.stdout.strip().splitlines()[-1])
+        if not good:
+            print(r.stdout)
+            fails += 1
     shutil.rmtree(tmp)
 print('Session : %d echec(s)' % fails)
 sys.exit(1 if fails else 0)

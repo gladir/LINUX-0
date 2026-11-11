@@ -23,7 +23,7 @@ Type
  LastLogRecord64=Record
   ll_time:Record Case Byte of
    0:(A,B:LongInt);
-   1:(C:Comp);
+   1:(C:Array[0..7]Of Byte);   { 8 octets (Comp sous DOS) }
   End;
   ll_line:Array[0..UT_LINESIZE-1]of Char;
   ll_host:Array[0..UT_HOSTSIZE-1]of Char;

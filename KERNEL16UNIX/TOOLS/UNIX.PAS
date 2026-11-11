@@ -24,8 +24,8 @@
   Couche libc : la bibliotheque d'execution de Turbo Pascal (et les unites
   DOS, CRT, PRINTER) s'adressent aux services de MS-DOS par INT 21h. Sous
   LINUX-0, le vecteur 21h est propre a chaque processus : le noyau y place
-  l'adresse de DosEntry, enregistree par l'appel systeme 201 (setdos) lors de
-  l'initialisation de cette unite. DosEntry traduit alors, dans le
+  l'adresse de DosEntry, enregistree par l'appel systeme 201 (setdos)
+  lors de l'initialisation de cette unite. DosEntry traduit alors, dans le
   processus lui-meme, chaque service DOS en appels systeme LINUX-0 (open,
   read, write, getdirentries, vfork/exece/wait, ...), comme le ferait une
   libc : le programme n'appelle jamais de service MS-DOS.
@@ -121,7 +121,7 @@ Type
   Pid: Integer;
   PPid: Integer;
   Stat: Byte;     { 1=pret, 2=en attente, 3=zombie }
-  Flags: Byte;    { 1 = processus courant, 2 = image dans la zone de va-et-vient }
+  Flags: Byte;    { 1 = processus courant, 2 = image en va-et-vient }
   Paras: Word;    { memoire en paragraphes }
   Ticks: Longint; { temps processeur en tops d'horloge (18,2 par seconde) }
   Name: String[15];
@@ -244,6 +244,9 @@ Function SysGetCwd: String;
 Function SysProcInfo(Index: Integer; Var P: TProcInfo): Boolean;
 Function SysMemInfo(Var M: TMemInfo): Integer;
 Function SysMountInfo(Index: Integer; Var M: TMountInfo): Boolean;
+Function SysGetEnv(Name: String): String;
+Function SysLangOf(V: String): Integer;
+Function SysLang: Integer;
 Function SysErrorText(E: Integer): String;
 Function SigName(Sig: Integer): String;
 Function UnixPath(S: String): String;
@@ -882,6 +885,203 @@ Begin
  SysMountInfo:=Result16>0;
 End;
 
+{ --- langue (variable d'environnement LANGUAGE) et messages ---------- }
+
+Function SysGetEnv(Name: String): String;
+{ valeur de la variable d'environnement Name ('' si elle n'existe pas) }
+Var I: Integer; S: String;
+Begin
+ SysGetEnv:='';
+ For I:=0 To EnvCount-1 Do Begin
+  S:=EnvStr(I);
+  If Copy(S,1,Length(Name)+1)=Name+'=' Then Begin
+   SysGetEnv:=Copy(S,Length(Name)+2,255); Exit;
+  End;
+ End;
+End;
+
+Function SysLangOf(V: String): Integer;
+{ numero de colonne de la langue V (FR 1, EN 2, GR 3, SP 4, IT 5); DE et ES
+  sont admis pour GR et SP; toute autre valeur : le francais }
+Const Codes='FRENGRSPITDEES';
+Var P: Integer;
+Begin
+ SysLangOf:=1;
+ If Length(V)<2 Then Exit;
+ V:=UpCase(V[1])+UpCase(V[2]);
+ P:=Pos(V,Codes);
+ If (P=0) Or Not Odd(P) Then Exit;
+ P:=(P+1) Div 2;
+ If P=6 Then P:=3;
+ If P=7 Then P:=4;
+ SysLangOf:=P;
+End;
+
+Function SysLang: Integer;
+Begin
+ SysLang:=SysLangOf(SysGetEnv('LANGUAGE'));
+End;
+
+(* Messages en cinq langues (colonnes FR, EN, GR, SP, IT) : seulement pour
+   les programmes qui declarent le symbole LANGERR (DEFINE) avant leur
+   en-tete; les tables occupent environ 5 Ko du segment de donnees. Les
+   autres commandes gardent des messages en francais. *)
+{$IFDEF LANGERR}
+Function PStr(P: PChar): String;
+Var S: String;
+Begin
+ S:='';
+ While P^<>#0 Do Begin S:=S+P^; Inc(P) End;
+ PStr:=S;
+End;
+
+Const
+ { messages des erreurs : colonnes FR, EN, GR (allemand), SP, IT }
+ ErrMsg: Array[1..37,1..5] Of PChar = (
+  ('Operation non permise','Operation not permitted',
+   'Operation nicht erlaubt','Operacion no permitida',
+   'Operazione non permessa'),
+  ('Fichier ou repertoire inexistant','No such file or directory',
+   'Datei oder Verzeichnis nicht gefunden',
+   'No existe el archivo o directorio','File o directory inesistente'),
+  ('Processus inexistant','No such process','Prozess nicht gefunden',
+   'No existe el proceso','Processo inesistente'),
+  ('Appel systeme interrompu','Interrupted system call',
+   'Systemaufruf unterbrochen','Llamada al sistema interrumpida',
+   'Chiamata di sistema interrotta'),
+  ('Erreur d''entree/sortie','Input/output error','Ein-/Ausgabefehler',
+   'Error de entrada/salida','Errore di input/output'),
+  ('Peripherique inexistant','No such device or address',
+   'Geraet nicht vorhanden','No existe el dispositivo',
+   'Dispositivo inesistente'),
+  ('Liste d''arguments trop longue','Argument list too long',
+   'Argumentliste zu lang','Lista de argumentos demasiado larga',
+   'Lista di argomenti troppo lunga'),
+  ('Format d''executable invalide','Exec format error',
+   'Ungueltiges Programmformat','Formato de ejecutable no valido',
+   'Formato eseguibile non valido'),
+  ('Descripteur de fichier invalide','Bad file descriptor',
+   'Ungueltiger Dateideskriptor','Descriptor de archivo no valido',
+   'Descrittore di file non valido'),
+  ('Aucun processus fils','No child processes','Keine Kindprozesse',
+   'No hay procesos hijos','Nessun processo figlio'),
+  ('Ressource temporairement indisponible',
+   'Resource temporarily unavailable',
+   'Ressource vorlaeufig nicht verfuegbar',
+   'Recurso temporalmente no disponible',
+   'Risorsa temporaneamente non disponibile'),
+  ('Memoire insuffisante','Out of memory','Nicht genug Speicher',
+   'Memoria insuficiente','Memoria insufficiente'),
+  ('Permission refusee','Permission denied','Zugriff verweigert',
+   'Permiso denegado','Permesso negato'),
+  ('Adresse invalide','Bad address','Ungueltige Adresse',
+   'Direccion no valida','Indirizzo non valido'),
+  ('Peripherique bloc requis','Block device required',
+   'Blockgeraet erforderlich','Se requiere dispositivo de bloques',
+   'Richiesto dispositivo a blocchi'),
+  ('Peripherique ou ressource occupe','Device or resource busy',
+   'Geraet oder Ressource belegt','Dispositivo o recurso ocupado',
+   'Dispositivo o risorsa occupata'),
+  ('Le fichier existe','File exists','Datei existiert bereits',
+   'El archivo ya existe','Il file esiste'),
+  ('Lien entre peripheriques','Cross-device link',
+   'Link ueber Geraetegrenzen','Enlace entre dispositivos',
+   'Collegamento tra dispositivi'),
+  ('Peripherique inexistant','No such device','Geraet nicht vorhanden',
+   'No existe el dispositivo','Dispositivo inesistente'),
+  ('N''est pas un repertoire','Not a directory','Kein Verzeichnis',
+   'No es un directorio','Non e una directory'),
+  ('Est un repertoire','Is a directory','Ist ein Verzeichnis',
+   'Es un directorio','E una directory'),
+  ('Argument invalide','Invalid argument','Ungueltiges Argument',
+   'Argumento no valido','Argomento non valido'),
+  ('Table des fichiers pleine','File table overflow','Dateitabelle voll',
+   'Tabla de archivos llena','Tabella dei file piena'),
+  ('Trop de fichiers ouverts','Too many open files',
+   'Zu viele offene Dateien','Demasiados archivos abiertos',
+   'Troppi file aperti'),
+  ('N''est pas un terminal','Not a typewriter','Kein Terminal',
+   'No es un terminal','Non e un terminale'),
+  ('Fichier texte occupe','Text file busy','Programmdatei belegt',
+   'Archivo de texto ocupado','File di testo occupato'),
+  ('Fichier trop gros','File too large','Datei zu gross',
+   'Archivo demasiado grande','File troppo grande'),
+  ('Plus d''espace sur le peripherique','No space left on device',
+   'Kein Platz mehr auf dem Geraet','No queda espacio en el dispositivo',
+   'Spazio esaurito sul dispositivo'),
+  ('Deplacement illegal','Illegal seek','Ungueltiges Positionieren',
+   'Busqueda no valida','Posizionamento non valido'),
+  ('Systeme de fichiers en lecture seule','Read-only file system',
+   'Dateisystem ist schreibgeschuetzt',
+   'Sistema de archivos de solo lectura','File system in sola lettura'),
+  ('Trop de liens','Too many links','Zu viele Links',
+   'Demasiados enlaces','Troppi collegamenti'),
+  ('Tube brise','Broken pipe','Unterbrochene Pipe','Tuberia rota',
+   'Pipe interrotta'),
+  ('Argument hors du domaine','Argument out of domain',
+   'Argument ausserhalb des Bereichs','Argumento fuera de dominio',
+   'Argomento fuori dominio'),
+  ('Resultat hors limites','Result out of range',
+   'Ergebnis ausserhalb des Bereichs','Resultado fuera de rango',
+   'Risultato fuori intervallo'),
+  ('Nom trop long','File name too long','Dateiname zu lang',
+   'Nombre demasiado largo','Nome troppo lungo'),
+  ('Repertoire non vide','Directory not empty','Verzeichnis nicht leer',
+   'Directorio no vacio','Directory non vuota'),
+  ('Fonction non implementee','Function not implemented',
+   'Funktion nicht implementiert','Funcion no implementada',
+   'Funzione non implementata'));
+ { 'Erreur N' : mot devant le numero d'une erreur inconnue }
+ ErrWord: Array[1..5] Of PChar = ('Erreur ','Error ','Fehler ','Error ',
+   'Errore ');
+ { messages des signaux (sh de V7) : lignes 1 a 15 = signaux 1 a 15 }
+ SigMsg: Array[1..15,1..5] Of PChar = (
+  ('Raccroche','Hangup','Aufgelegt','Colgado','Linea caduta'),
+  ('','','','',''),
+  ('Abandon','Quit','Abbruch','Salir','Uscita'),
+  ('Instruction illegale','Illegal instruction','Ungueltiger Befehl',
+   'Instruccion ilegal','Istruzione illegale'),
+  ('Trappe','Trace/BPT trap','Trace-Falle','Trampa de traza',
+   'Trap di traccia'),
+  ('IOT','IOT trap','IOT-Falle','Trampa IOT','Trap IOT'),
+  ('EMT','EMT trap','EMT-Falle','Trampa EMT','Trap EMT'),
+  ('Exception arithmetique','Floating exception','Arithmetikfehler',
+   'Excepcion aritmetica','Eccezione aritmetica'),
+  ('Tue','Killed','Getoetet','Terminado a la fuerza','Ucciso'),
+  ('Erreur de bus','Bus error','Busfehler','Error de bus','Errore di bus'),
+  ('Erreur de segmentation','Segmentation fault','Speicherzugriffsfehler',
+   'Fallo de segmentacion','Errore di segmentazione'),
+  ('Appel systeme invalide','Bad system call','Ungueltiger Systemaufruf',
+   'Llamada al sistema no valida','Chiamata di sistema non valida'),
+  ('','','','',''),
+  ('Alarme','Alarm clock','Alarm','Alarma','Allarme'),
+  ('Termine','Terminated','Beendet','Terminado','Terminato'));
+
+Function SysErrorText(E: Integer): String;
+{ message de l'erreur E dans la langue de LANGUAGE }
+Var S: String; R, L: Integer;
+Begin
+ L:=SysLang;
+ R:=0;
+ If (E>=1) And (E<=34) Then R:=E
+ Else If E=ENAMETOOLONG Then R:=35
+ Else If E=ENOTEMPTY Then R:=36
+ Else If E=ENOSYS Then R:=37;
+ If R>0 Then S:=PStr(ErrMsg[R,L])
+ Else Begin Str(E,S); S:=PStr(ErrWord[L])+S End;
+ SysErrorText:=S;
+End;
+
+Function SigName(Sig: Integer): String;
+{ message du signal qui a termine un processus (comme sh de V7) }
+Var S: String;
+Begin
+ If (Sig>=1) And (Sig<=15) Then S:=PStr(SigMsg[Sig,SysLang])
+ Else Begin Str(Sig,S); S:='Signal '+S End;
+ SigName:=S;
+End;
+
+{$ELSE}
 Function SysErrorText(E: Integer): String;
 Var S: String;
 Begin
@@ -952,6 +1152,8 @@ Begin
  End;
  SigName:=S;
 End;
+
+{$ENDIF}
 
 { --- signaux : trampoline ------------------------------------------- }
 
@@ -1212,7 +1414,8 @@ Begin
   Mem[DtaSeg:DtaOfs+21]:=A;
   T:=DosTime(St.MTime);
   MemW[DtaSeg:DtaOfs+22]:=Word(T); MemW[DtaSeg:DtaOfs+24]:=Word(T Shr 16);
-  MemW[DtaSeg:DtaOfs+26]:=Word(St.Size); MemW[DtaSeg:DtaOfs+28]:=Word(St.Size Shr 16);
+  MemW[DtaSeg:DtaOfs+26]:=Word(St.Size);
+  MemW[DtaSeg:DtaOfs+28]:=Word(St.Size Shr 16);
   If Length(Name)>12 Then Name[0]:=#12;
   For I:=1 To Length(Name) Do Mem[DtaSeg:DtaOfs+29+I]:=Ord(Name[I]);
   Mem[DtaSeg:DtaOfs+30+Length(Name)]:=0;
@@ -1438,7 +1641,9 @@ Begin
  For I:=1 To 8 Do
   If SysMountInfo(I,M) Then
    If (M.Dir='/') Or (Copy(Cwd,1,Length(M.Dir))=M.Dir) Then
-    If Length(M.Dir)>L Then Begin Best:=I; L:=Length(M.Dir); T:=M.Blocks; F:=M.Free End;
+    If Length(M.Dir)>L Then Begin
+     Best:=I; L:=Length(M.Dir); T:=M.Blocks; F:=M.Free;
+    End;
  If Best=0 Then Begin RAX:=$FFFF; Exit End;
  If T>65535 Then Begin T:=65535 End;
  If F>T Then F:=T;
@@ -1536,7 +1741,11 @@ Begin
        End;
   $41: If SysUnlink(UnixPath(FarString(RDS,RDX)))<0 Then Fail;
   $42: Begin
-        L:=SysLSeek(RBX,Longint(RCX) Shl 16+RDX,AL);
+        L:=Longint(RCX) Shl 16+RDX;
+        { DOS : un deplacement absolu de 2 Go ou plus (negatif ici) est un
+          deplacement apres la fin du fichier, sans erreur }
+        If (AL=SEEK_SET) And (L<0) Then L:=SysLSeek(RBX,0,SEEK_END)
+        Else L:=SysLSeek(RBX,L,AL);
         If L<0 Then Fail Else Begin RAX:=Word(L); RDX:=Word(L Shr 16) End;
        End;
   $43: Begin
