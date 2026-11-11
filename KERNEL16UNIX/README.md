@@ -2,7 +2,7 @@
 
 Noyau UNIX pour IBM PC (8086/8088, mode réel), écrit en Pascal dans **un seul
 fichier source**, `KERNEL.PAS`, et compilé par **Linux Pascal** (`TOOLS/LPC.PAS`)
-en **une seule image monolithique** de plus de 64 Ko (environ 187 Ko : 160 Ko
+en **une seule image monolithique** de plus de 64 Ko (environ 134 Ko : 107 Ko
 de code répartis en segments, 30 Ko de données). Son interface suit celle de
 **UNIX V7** (numéros et sémantique des appels système, signaux, `wait`,
 `stat`, terminal, utilisateurs), complétée par quelques appels de 4.2BSD.
@@ -485,8 +485,21 @@ coordonnées CHS du MBR du disque installé avant de l'amorcer.
 | 10000-...   | noyau : code (segments), puis données |
 | ...-9FFFF   | images des processus (en bas) et piles noyau (en haut), gérées par la coremap ; les images en trop sont dans la zone de va-et-vient |
 
-Le noyau occupe environ 187 Ko (160 Ko de code, 30 Ko de données) : il reste
-environ 388 Ko de mémoire libre pour les processus sur un PC de 640 Ko.
+Le noyau occupe environ 134 Ko (107 Ko de code, 30 Ko de données) : il reste
+environ 440 Ko de mémoire libre pour les processus sur un PC de 640 Ko.
+
+**Segments de code légers** : quand le code dépasse un segment, `LPC` le répartit
+en plusieurs segments de code (un par segment-unité, plus les coupures de
+taille). Seul le segment 0 contient le runtime de Pascal (environ 5,7 Ko :
+démarrage, chaînes, entrées/sorties, tas...). Chacun des autres commence par
+un petit en-tête, puis par la copie des seules routines de runtime qu'il
+appelle (recopiées avec leurs références de données et leurs appels internes),
+au lieu d'une copie complète du runtime comme avant : le noyau passe de 187 Ko
+à 134 Ko, et les commandes de plus de 32 Ko perdent de 3 à 20 Ko chacune
+(374 Ko de moins pour l'ensemble des commandes). Un segment qui appelle une
+routine non recopiable redevient complet. `LPC_NOLIGHT=1` rétablit l'ancien
+comportement (comparaison, diagnostic) et `LPC_LIGHTDBG=1` liste les
+routines recopiées.
 
 ## Programmes LINUX-0
 

@@ -5919,8 +5919,26 @@ Var
    SPend, SDbg, SLab, SDataFix, SRing, SRingPos: Word;
  ChunkLo, ChunkHi, ChunkAt: Array[1..1024] Of Word;
  ChunkCount: Word;
- CloneSrc, CloneDst: Array[1..128] Of Word;
+ CloneSrc, CloneDst: Array[1..256] Of Word;
  CloneCount: Word;
+ { Segments legers (mode multi-segments) : seul le segment 0 recoit le runtime
+   complet. Les autres commencent par l'en-tete (HdrEnd octets : demarrage et
+   mot du segment de donnees) et recopient, une fois par segment et au
+   moment de leur premier appel, les seules routines de runtime appelees.
+   Un segment qui appelle une routine non recopiable (donnees, relocalisation)
+   devient complet a la passe suivante (SegFull). LPC_NOLIGHT=1 desactive. }
+ SegOpt, LightOK, FullChanged: Boolean;
+ SegFull: Array[0..MaxSegs-1] Of Boolean;
+ WantN: Array[0..MaxSegs-1] Of Word;
+ WantT: Array[0..MaxSegs-1] Of Array[1..128] Of Word;
+ SegBase, HdrEnd, HdrFix, HdrReloc, RtlFixN, RtlRelN, RtlRelocN: Word;
+ RtlImg: Array[0..8191] Of Byte;
+ RtlFixSave: Array[1..2048] Of TAddressFixup;
+ RtlRel: Array[1..2048] Of TRelativeFixup;
+ RtlRelocSave: Array[1..1024] Of TMZRelocation;
+ RtlShortPos, RtlShortTgt: Array[1..4096] Of Word;
+ RtlShortN: Word;
+ RtlKindSave: Array[1..1024] Of Byte;
  CurProc: Word;
  EdgeFrom, EdgeTo: Array[1..32768] Of Word;
  EdgeCount: Word;
@@ -6898,6 +6916,11 @@ Begin
    JumpOverflow:=True; If O<>0 Then ForceLong[O]:=True; D:=0;
   End Else If O<>0 Then ShortNext[O]:=True;
   Image[P]:=Byte(D);
+  { runtime : saut court memorise (une routine recopiee ne peut pas en
+    contenir qui sorte d'elle-meme) }
+  If (RuntimeDepth>0) And (RtlShortN<4096) Then Begin
+   Inc(RtlShortN); RtlShortPos[RtlShortN]:=P; RtlShortTgt[RtlShortN]:=Target;
+  End;
   Exit;
  End;
  If (O<>0) And (O<=32000) Then Begin
@@ -7066,6 +7089,7 @@ Begin
 End;
 
 Function RtlTarget(T: Word): Word; Forward;
+Procedure AddSegmentRelocation(P: Word; Kind: Byte); Forward;
 
 Procedure CallTo(Target: Word);
 Var
@@ -7086,6 +7110,124 @@ Function NumText(W: Word): String;
 Var S: String;
 Begin Str(W,S); NumText:=S End;
 
+Function RtlExtent(T: Word; Var EndAddr: Word): Boolean;
+{ Etendue [T,EndAddr) de la routine de runtime T dans l'image du runtime;
+  faux si elle n'est pas recopiable : adresse qui n'est pas un point d'entree,
+  relocalisation de segment, ou saut court qui sort de la routine. }
+Var
+ Entries: Array[1..110] Of Word; N,K,J,Last: Word; Bad,Done: Boolean;
+Begin
+ N:=0;
+ For K:=1 To 96 Do If RuntimeStandard[K]<>0 Then Begin Inc(N);
+   Entries[N]:=RuntimeStandard[K] End;
+ Inc(N); Entries[N]:=RuntimeString; Inc(N); Entries[N]:=RuntimeInteger;
+ Inc(N); Entries[N]:=RuntimeChar;
+ Inc(N); Entries[N]:=RuntimeRawChar; Inc(N); Entries[N]:=RuntimeBoolean;
+ Inc(N); Entries[N]:=RuntimeUnsigned;
+ Inc(N); Entries[N]:=RuntimeCopy; Inc(N); Entries[N]:=RuntimeError;
+ Inc(N); Entries[N]:=RuntimeHalt;
+ Inc(N); Entries[N]:=RuntimeBodyEnd;
+ EndAddr:=RuntimeBodyEnd; J:=0;
+ For K:=1 To N Do If Entries[K]=T Then J:=1;
+ For K:=1 To N Do If (Entries[K]>T) And (Entries[K]<EndAddr) Then
+   EndAddr:=Entries[K];
+ Bad:=(J=0);
+ If GetEnv('LPC_NOCLONE')<>'' Then
+  If Pos(','+NumText(StdIndex(T))+',',','+GetEnv('LPC_NOCLONE')+',')>0 Then
+   Bad:=True;
+ { une routine qui ne se termine pas par RET ou JMP continue dans la
+   suivante (ex. ReadLnEnd puis ReadEnd) : recopier aussi celle-ci; le
+   remplissage par NOP de fin de routine n'est pas recopie }
+ While Not Bad Do Begin
+  Last:=EndAddr;
+  While (Last>T+1) And (RtlImg[Last-1]=$90) Do Dec(Last);
+  Done:=(RtlImg[Last-1]=$C3) Or (RtlImg[Last-1]=$CB);
+  If (Last>=T+3) And (RtlImg[Last-3]=$E9) Then
+   For K:=1 To RtlRelN Do If RtlRel[K].Position=Last-2 Then Done:=True;
+  If Done Or (EndAddr>=RuntimeBodyEnd) Then Begin
+   If Done Then EndAddr:=Last;
+   Break;
+  End;
+  J:=RuntimeBodyEnd;
+  For K:=1 To N Do If (Entries[K]>EndAddr) And (Entries[K]<J) Then
+    J:=Entries[K];
+  EndAddr:=J;
+ End;
+ For K:=1 To RtlRelocN Do
+  If (RtlRelocSave[K].Offs>=T) And (RtlRelocSave[K].Offs<EndAddr) Then
+   Bad:=True;
+ For K:=1 To RtlShortN Do
+  If (RtlShortPos[K]>=T) And (RtlShortPos[K]<EndAddr) And
+     ((RtlShortTgt[K]<T) Or (RtlShortTgt[K]>=EndAddr)) Then Bad:=True;
+ RtlExtent:=Not Bad;
+End;
+
+Function CloneAddr(T: Word): Word;
+Var K: Word;
+Begin
+ CloneAddr:=T;
+ For K:=1 To CloneCount Do If CloneSrc[K]=T Then CloneAddr:=CloneDst[K];
+End;
+
+Procedure EmitClone(T: Word);
+{ Emet, au debut d'un segment leger, la copie de la routine de runtime T et
+  (recursivement) des routines qu'elle appelle, avec leurs references de
+  donnees. }
+Var
+ EndAddr,Start,K,RelCount: Word; Rel: Array[1..64] Of Word;
+Begin
+ For K:=1 To CloneCount Do If CloneSrc[K]=T Then Exit;
+ If CloneCount=256 Then Begin
+  SegFull[CurSeg]:=True; FullChanged:=True; Exit End;
+ Start:=CodeSize;
+ Inc(CloneCount); CloneSrc[CloneCount]:=T; CloneDst[CloneCount]:=Start;
+ { erreur d'execution et arret : le programme se termine, un saut FAR vers
+   la copie du segment 0 suffit (la pile garde l'adresse de l'appelant) }
+ If (T=RuntimeError) Or (T=RuntimeHalt) Then Begin
+  Emit($EA); EmitWord(T); AddSegmentRelocation(CodeSize,8); EmitWord(0);
+  Exit;
+ End;
+ If Not RtlExtent(T,EndAddr) Then Begin
+  SegFull[CurSeg]:=True; FullChanged:=True; Exit End;
+ For K:=T To EndAddr-1 Do Emit(RtlImg[K]);
+ { references de donnees de la routine : memes decalages dans la copie }
+ For K:=1 To RtlFixN Do
+  If (RtlFixSave[K].Position>=T) And (RtlFixSave[K].Position<EndAddr) Then Begin
+   If FixupCount=MaxFixups Then Unsupported('trop de references de donnees');
+   Inc(FixupCount);
+   Fixups[FixupCount].Position:=Start+RtlFixSave[K].Position-T;
+   Fixups[FixupCount].DataOffset:=RtlFixSave[K].DataOffset;
+  End;
+ RelCount:=0;
+ For K:=1 To RtlRelN Do
+  If (RtlRel[K].Position>=T) And (RtlRel[K].Position<EndAddr) And
+     ((RtlRel[K].Target<T) Or (RtlRel[K].Target>=EndAddr)) Then Begin
+   If RelCount=64 Then Begin
+    SegFull[CurSeg]:=True; FullChanged:=True; Exit End;
+   Inc(RelCount); Rel[RelCount]:=K;
+  End;
+ For K:=1 To RelCount Do EmitClone(RtlRel[Rel[K]].Target);
+ For K:=1 To RelCount Do
+  PatchJump(Start+RtlRel[Rel[K]].Position-T,CloneAddr(RtlRel[Rel[K]].Target));
+End;
+
+Function RtlClone(T: Word): Word;
+{ Segment leger : adresse locale de la copie de la routine de runtime T. Les
+  copies sont emises au debut du segment (SegNext) pour les routines
+  demandees par les passes precedentes; une routine nouvelle est ajoutee a la
+  liste et une passe de plus est faite. }
+Var K,E: Word;
+Begin
+ RtlClone:=CloneAddr(T);
+ For K:=1 To CloneCount Do If CloneSrc[K]=T Then Exit;
+ For K:=1 To WantN[CurSeg] Do If WantT[CurSeg][K]=T Then Exit;
+ FullChanged:=True;
+ If (T<>RuntimeError) And (T<>RuntimeHalt) And Not RtlExtent(T,E) Then Begin
+  SegFull[CurSeg]:=True; Exit End;
+ If WantN[CurSeg]=128 Then Begin SegFull[CurSeg]:=True; Exit End;
+ Inc(WantN[CurSeg]); WantT[CurSeg][WantN[CurSeg]]:=T;
+End;
+
 Function RtlTarget(T: Word): Word;
 { Hors noyau : T. Dans le noyau : copie (une fois) de la routine de runtime T
   dans le segment du noyau et rend son adresse locale. Le code du runtime
@@ -7095,6 +7237,10 @@ Var
  Rel: Array[1..64] Of Word; RelCount: Word;
 Begin
  RtlTarget:=T;
+ If MultiSeg And SegOpt And LightOK And (CurSeg>0) And Not SegFull[CurSeg]
+   And Not KernelMode Then Begin
+  RtlTarget:=RtlClone(T); Exit;
+ End;
  If Not KernelMode Then Exit;
  For K:=1 To CloneCount Do If CloneSrc[K]=T Then Begin RtlTarget:=CloneDst[K];
    Exit End;
@@ -13370,24 +13516,45 @@ End;
 Procedure SegNext;
 { Ferme le segment de code courant et en ouvre un nouveau qui commence par une
   copie du runtime
-  (octets 0..RuntimeEnd-1 de l'image, avec leurs fixups et relocalisations). }
+  (octets 0..RuntimeEnd-1 de l'image, avec leurs fixups et relocalisations),
+  ou, pour un segment leger, par le seul en-tete (voir RtlClone). }
+Var K: Word;
 Begin
  If CurSeg+1>=MaxSegs Then Fail(48,
    'Trop de segments de code (maximum '+NumText(MaxSegs)+')');
  If PendCount<>0 Then
    Unsupported('reference en avant non resolue a la frontiere de segment');
  SegSave;
- Inc(CurSeg); SegCount:=CurSeg+1;
- { le debut de l'image (runtime) est intact : seul le reste est a reprendre }
- CodeSize:=RuntimeEnd; FixupCount:=RtlFix; RelocationCount:=RtlReloc;
-   RelativeCount:=0; CodeRefCount:=0;
+ Inc(CurSeg); SegCount:=CurSeg+1; CloneCount:=0;
+ If SegOpt And LightOK And Not SegFull[CurSeg] Then Begin
+  { segment leger : l'en-tete (debut de l'image) est intact }
+  CodeSize:=HdrEnd; FixupCount:=HdrFix; RelocationCount:=HdrReloc;
+  SegBase:=HdrEnd;
+ End Else Begin
+  { segment complet : le runtime est remis tel qu'il a ete emis (un segment
+    leger a pu en ecraser une partie) }
+  If SegOpt And LightOK Then Begin
+   Move(RtlImg,Image,RuntimeEnd);
+   For K:=1 To RtlFixN Do Fixups[K]:=RtlFixSave[K];
+   For K:=1 To RtlRelocN Do Begin
+    Relocations[K]:=RtlRelocSave[K]; RelocationKinds[K]:=RtlKindSave[K] End;
+   For K:=HdrEnd To RuntimeEnd-1 Do Begin OrdAt[K]:=0; CodeOwners[K]:=0 End;
+  End;
+  CodeSize:=RuntimeEnd; FixupCount:=RtlFix; RelocationCount:=RtlReloc;
+  SegBase:=RuntimeEnd;
+ End;
+ RelativeCount:=0; CodeRefCount:=0;
+ If SegOpt And LightOK And Not SegFull[CurSeg] Then Begin
+  For K:=1 To WantN[CurSeg] Do EmitClone(WantT[CurSeg][K]);
+  SegBase:=CodeSize;
+ End;
  LastJumpTarget:=CodeSize; CondTail:=0;
 End;
 
 Procedure SegRoom(Need: Word);
 { Segment suivant si Need octets ne tiennent plus dans le segment courant. }
 Begin
- If (CodeSize>RuntimeEnd) And
+ If (CodeSize>SegBase) And
    (Longint(CodeSize)+Need>Longint(SegCap)-SegReserve) Then SegNext;
 End;
 
@@ -14032,7 +14199,7 @@ Begin
  CurrentUnit:=U; Imports:=[]; ImportCount:=0; CurrentScope:=0;
  InInterface:=False; InProcedure:=False;
  { un segment de code par segment-unite }
- If MultiSeg And (SegDepth=0) And (CodeSize>RuntimeEnd) Then SegNext;
+ If MultiSeg And (SegDepth=0) And (CodeSize>SegBase) Then SegNext;
  ImportLibrarySystem;
  { partie privee facultative avant SegmentInterface }
  UsesClause; DeclarationPart;
@@ -14069,7 +14236,7 @@ Begin
  InProcedure:=SavedInProcedure;
  AddImport(U);
  { la suite du programme ne partage pas le segment du segment-unite }
- If MultiSeg And (SegDepth=0) And (CodeSize>RuntimeEnd) Then SegNext;
+ If MultiSeg And (SegDepth=0) And (CodeSize>SegBase) Then SegNext;
 End;
 
 Procedure OpenBinaryRead(Var F: File; Var E: Integer);
@@ -18076,8 +18243,22 @@ Begin
      complete a l'edition de liens }
  Else EntryFixup:=Jump;
  DataSegVar:=CodeSize; AddSegmentRelocation(CodeSize,3); EmitWord(0);
+ HdrEnd:=CodeSize; HdrFix:=FixupCount; HdrReloc:=RelocationCount;
+ RtlShortN:=0;
  Inc(RuntimeDepth); EmitRuntime; Dec(RuntimeDepth); RuntimeEnd:=CodeSize;
  RtlFix:=FixupCount; RtlReloc:=RelocationCount;
+ { instantane du runtime pour les segments legers }
+ LightOK:=(RuntimeEnd<=8192) And (RtlFix<=2048) And (RelativeCount<=2048) And
+   (RtlReloc<=1024);
+ If LightOK Then Begin
+  Move(Image,RtlImg,RuntimeEnd);
+  RtlFixN:=RtlFix; RtlRelN:=RelativeCount; RtlRelocN:=RtlReloc;
+  For I:=1 To RtlFix Do RtlFixSave[I]:=Fixups[I];
+  For I:=1 To RelativeCount Do RtlRel[I]:=RelativeFixups[I];
+  For I:=1 To RtlReloc Do Begin
+   RtlRelocSave[I]:=Relocations[I]; RtlKindSave[I]:=RelocationKinds[I] End;
+ End;
+ SegBase:=RuntimeEnd; FullChanged:=False;
  { InOutRes partage l'emplacement de l'erreur d'E/S du runtime. }
  For I:=1 To SymbolCount Do If (Symbols[I].Owner=255) And
    (Symbols[I].Name='INOUTRES') Then Symbols[I].Addr:=InputError;
@@ -19374,6 +19555,8 @@ BEGIN
      mecanisme sur de petits programmes. }
  SegCap:=MaxImage-16; SegReserve:=0; MultiSeg:=False; InDeadBody:=False;
    MainSizeEst:=0;
+ SegOpt:=GetEnv('LPC_NOLIGHT')=''; LightOK:=False; FullChanged:=False;
+ FillChar(SegFull,SizeOf(SegFull),0); FillChar(WantN,SizeOf(WantN),0);
  If CodeLimit<MaxImage-1 Then SegCap:=CodeLimit-16;
  FillChar(RoutSize,SizeOf(RoutSize),0);
  AllowMulti:=Overflowed And Not UnitOutput And Not HaveKernel And Not NoLimit
@@ -19432,6 +19615,7 @@ BEGIN
      multi-segments, les passes
      reprennent a zero (les mesures de la passe tronquee ne sont pas fiables) }
    MultiSeg:=True; PassNo:=1; Overflowed:=False;
+   FillChar(SegFull,SizeOf(SegFull),0); FillChar(WantN,SizeOf(WantN),0);
    FillChar(ShortNext,SizeOf(ShortNext),0); FillChar(FrameNext,
      SizeOf(FrameNext),0);
    FillChar(ForceLong,SizeOf(ForceLong),0); FillChar(FrameForce,
@@ -19444,6 +19628,7 @@ BEGIN
    For PassI:=1 To 8000 Do If FrameNext[PassI]<>FramePred[PassI] Then
      Stable:=False;
    If JumpOverflow Then Stable:=False;
+   If FullChanged Then Stable:=False;
    If GetEnv('LPC_PASSES')<>'' Then Begin
     Write(StdErr,'  passe ',PassNo,' segments=',SegCount,' stable=',Stable,
       ' jmpovf=',JumpOverflow,' tropgrand=',SegTooBig,' tailles:');
@@ -19465,6 +19650,22 @@ BEGIN
   End;
  Until (Stable And Not JumpOverflow And Not SegTooBig) Or
    (PassNo>=10+4*Ord(MultiSeg));
+ If MultiSeg And SegOpt And FullChanged Then Begin
+  { les segments legers n'ont pas converge : retour aux segments complets }
+  SegOpt:=False; FullChanged:=False;
+  FillChar(ShortPred,SizeOf(ShortPred),0); FillChar(ShortNext,SizeOf(ShortNext),
+    0);
+  FillChar(FramePred,SizeOf(FramePred),0); FillChar(FrameNext,SizeOf(FrameNext),
+    0); ProcOrd:=0;
+  Move(InitialDefines,Defines,SizeOf(Defines)); DefineCount:=InitialDefineCount;
+  OptionBits:=InitialOptions; StackSize:=DefaultStack;
+  MinHeap:=0; MaxHeap:=$FFFF;
+  TokenLine:=1; TokenColumn:=1; TotalLines:=0; CurProc:=0; EdgeCount:=0;
+    TotalEmitted:=0;
+  JumpOrd:=0; JumpOverflow:=False; ReportCount:=0; RuntimeDepth:=0;
+  Overflowed:=False; SegTooBig:=False;
+  LoadSource; CompileProgram;
+ End;
  If JumpOverflow Then Begin
   { filet de securite : derniere passe sans saut court }
   FillChar(ShortPred,SizeOf(ShortPred),0); FillChar(ShortNext,SizeOf(ShortNext),
