@@ -1,7 +1,7 @@
 @ECHO OFF
-REM MAKEIMG.BAT - Construit KERNEL16 et ses images sous DOS ou Windows.
+REM MAKEIMG.BAT - Construit KERNEL16DOS et ses images sous DOS ou Windows.
 REM Necessite TPC (compilateur Turbo Pascal 7) dans le PATH.
-REM Depuis le dossier KERNEL16 : MAKEIMG
+REM Depuis le dossier KERNEL16DOS : MAKEIMG
 REM Option : MAKEIMG /HD pour produire aussi un disque dur de 32 Mo.
 REM (Sous DOS les noms sont limites a 8 caracteres : LINU144A.IMG.)
 IF "%1"=="/HD" SET HDOPT=/HD:32

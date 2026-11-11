@@ -2,7 +2,7 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7)
-  @description: Test du noyau KERNEL16 : fixe la date (INT 21h AH=2Bh) puis
+  @description: Test du noyau KERNEL16DOS : fixe la date (INT 21h AH=2Bh) puis
     la relit (AH=2Ah). Le noyau doit convertir l'annee en BCD pour le BIOS.
 }
 

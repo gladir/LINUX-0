@@ -2,7 +2,7 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7)
-  @description: Test du noyau KERNEL16 : affiche l'environnement recu,
+  @description: Test du noyau KERNEL16DOS : affiche l'environnement recu,
     la liste de la racine par un chemin '/' et lit un fichier par '/'.
     Copier sous le nom \BIN\SH.EXE d'une image pour l'essayer.
 }

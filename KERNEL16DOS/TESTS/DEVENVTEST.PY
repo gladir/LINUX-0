@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DEVENVTEST.PY - Teste une image de KERNEL16 dans l'emulateur DOS de DEVENV
+# DEVENVTEST.PY - Teste une image de KERNEL16DOS dans l'emulateur DOS de DEVENV
 # (DEV-COOLS\DEVENV.PAS), sans interface graphique : amorcage reel de l'image
 # (/KERNELTEST /KTBOOTIMG), frappes au clavier, capture de l'ecran emule.
 #
@@ -16,7 +16,7 @@
 # Variables d'environnement :
 #   DEVENV   executable DEVENV compile pour Linux (obligatoire)
 #   LD_LIBRARY_PATH est transmis tel quel (bibliotheques de remplacement des
-#   DLL Windows, voir KERNEL16/README.md).
+#   DLL Windows, voir KERNEL16DOS/README.md).
 # L'image est copiee : DEVENV ecrit dans l'image montee.
 import sys, os, re, shutil, subprocess, tempfile
 
@@ -31,7 +31,7 @@ TESTS = [
  ('ls /', 'BIN', '', 0, 0),
  ('ls /etc/sysctl.d', 'CUSTOM.CFG', '', 0, 0),
  ('echo $PATH $HOME $USER $HOSTNAME', r'\\BIN;B:\\BIN \\ root linux0', '', 0, 0),
- ('uname -a', 'LINUX-0 KERNEL16', '', 0, 0),
+ ('uname -a', 'LINUX-0 KERNEL16DOS', '', 0, 0),
  ('cat /etc/profile', 'export PATH', '', 0, 0),
  ('cat /etc/sysctl.d/custom.cfg', 'fs.files', '', 0, 0),
  ('head -n 2 /etc/profile', 'Les commandes', '', 0, 0),

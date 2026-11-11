@@ -2,7 +2,7 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7)
-  @description: KERNEL16, noyau 16 bits de LINUX-0. Derive du noyau de
+  @description: KERNEL16DOS, noyau 16 bits de LINUX-0. Derive du noyau de
     MSDOS-0 : il charge et execute des fichiers .EXE/.COM, gere les
     disques FAT12 et FAT16 par l'interface INT 21h et lance l'interpreteur
     de commandes \BIN\SH.EXE (style Linux). Les chemins acceptent '/'
@@ -106,7 +106,7 @@
   @target: Turbo Pascal 7 (syntaxe assembleur Intel)
 }
 
-Unit KERNEL16;
+Unit K16DOS;
 
 INTERFACE
 
@@ -1212,7 +1212,7 @@ Begin
   CLI
   HLT
   JMP @Halt
-  DB 'DEBUT DU NOYAU LINUX-0 KERNEL16'
+  DB 'DEBUT DU NOYAU LINUX-0 KERNEL16DOS'
  END;
 End;
 
@@ -10488,11 +10488,11 @@ Begin
  KText:='';
  Case Id Of
   0:Case L Of
-     1:KText:='Starting LINUX-0 KERNEL16...';
-     2:KText:='LINUX-0 KERNEL16 wird gestartet...';
-     3:KText:='Iniciando LINUX-0 KERNEL16...';
-     4:KText:='Avvio di LINUX-0 KERNEL16...';
-     Else KText:='Demarrage de LINUX-0 KERNEL16...';
+     1:KText:='Starting LINUX-0 KERNEL16DOS...';
+     2:KText:='LINUX-0 KERNEL16DOS wird gestartet...';
+     3:KText:='Iniciando LINUX-0 KERNEL16DOS...';
+     4:KText:='Avvio di LINUX-0 KERNEL16DOS...';
+     Else KText:='Demarrage de LINUX-0 KERNEL16DOS...';
     End;
   1:Case L Of
      1:KText:='Command interpreter not found (\BIN\SH.EXE)';
@@ -12915,7 +12915,7 @@ END;
 
 Procedure END_KERNEL;Begin
  ASM
-  DB 'FIN DU NOYAU LINUX-0 KERNEL16';
+  DB 'FIN DU NOYAU LINUX-0 KERNEL16DOS';
  END;
 End;
 

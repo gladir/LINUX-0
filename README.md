@@ -1,9 +1,28 @@
 # LINUX-0
 Clone des commandes Linux écrit en Pascal (Turbo Pascal ou Free Pascal)
 
-<h2>KERNEL16</h2>
+<h2>Noyaux</h2>
 
-Le dossier [KERNEL16](KERNEL16/README.md) contient un noyau bootable 16 bits écrit en Turbo Pascal 7 (dérivé du noyau de MSDOS-0) qui exécute les commandes de ce projet (fichiers `.EXE` du dossier `BIN16`) sur FAT12 ou FAT16, avec un interpréteur de commandes de style Linux (`SH.PAS`). Il comprend les outils de fabrication des disques (`KERNEL16/TOOLS`) et les images disquettes et CD-ROM prêtes à démarrer (`KERNEL16/IMAGE`).
+LINUX-0 propose (ou proposera) plusieurs noyaux indépendants, selon la machine et le besoin. Chaque noyau a son propre dossier, nommé selon la règle :
+
+**`KERNEL<arch/bits><personnalité>`**
+
+- **arch/bits** : l'architecture du processeur. Un nombre seul désigne le PC x86 (`16`, `32`, `64`) ; les autres architectures sont nommées (`ARM32`, `ARM64`...), car les bits seuls seraient ambigus.
+- **personnalité** : ce que le noyau offre aux programmes (interface système, format des exécutables, système de fichiers). Elle est toujours indiquée pour un noyau 16 bits (`DOS`, `UNIX`...) ; pour les autres, elle n'est ajoutée que lorsqu'il faut distinguer deux noyaux de même architecture.
+
+| Dossier | Noyau | État |
+|---|---|---|
+| [KERNEL16DOS](KERNEL16DOS/README.md) | PC 16 bits, interface DOS (`INT 21h`), exécutables `.EXE`, disques FAT12/FAT16 | disponible |
+| `KERNEL16UNIX` | PC 16 bits, appels de type Unix, système de fichiers UFS, sans FAT | envisagé |
+| `KERNEL32` | PC 32 bits | envisagé |
+| `KERNELARM32`, `KERNELARM64` | ARM | envisagé |
+
+Règles communes :
+
+- **un dossier par noyau, autonome** : sources du noyau, `SYSTEM`, `TOOLS` (outils de fabrication des disques et installeur), `IMAGE`, `TESTS`, scripts de construction et `README.md`. Aucun code n'est partagé entre deux noyaux ;
+- **les commandes restent à la racine**, rangées par format d'exécutable et non par noyau (`BIN16`, `WIN32`, puis `BIN32`, `BINARM`...) : deux noyaux qui exécutent le même format utilisent les mêmes commandes ;
+- le nom affiché par un noyau (bannière, `uname`) est `LINUX-0 <NOM DU DOSSIER>` ;
+- les noms de fichiers source et d'unités restent compatibles 8.3 (TP7 sous DOS) : le noyau de `KERNEL16DOS` est l'unité `K16DOS.PAS`.
 
 <h2>Liste des fichiers de commande</h2>
 

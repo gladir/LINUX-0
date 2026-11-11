@@ -1,4 +1,4 @@
-LINUX-0 KERNEL16 - images disque
+LINUX-0 KERNEL16DOS - images disque
 =================================
 
 LINUX144A.IMG  Disquette 1,44 Mo amorcable : noyau (IO.SYS), shell et

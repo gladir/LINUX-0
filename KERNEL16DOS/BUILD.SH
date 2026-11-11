@@ -1,5 +1,5 @@
 #!/bin/bash
-# BUILD.SH - Construit KERNEL16 (noyau 16 bits LINUX-0) et ses images disque.
+# BUILD.SH - Construit KERNEL16DOS (noyau 16 bits LINUX-0) et ses images disque.
 #
 # Utilisation : ./BUILD.SH [etape ...]      etapes : tpc kernel shell tools
 #                                                    images  (defaut : toutes)
@@ -34,11 +34,11 @@ if has tpc && [ ! -x "$TPC" ]; then
  ( cd "$W/tpcsrc" && fpc -O2 -Mtp TPC.PAS >/dev/null && cp TPC "$TPC" )
 fi
 
-# --- 2. noyau : KERNEL16.PAS + MAKER.PAS -> SYSTEM/IO.SYS ---------------------
+# --- 2. noyau : K16DOS.PAS + MAKER.PAS -> SYSTEM/IO.SYS ---------------------
 if has kernel; then
  echo "== Noyau (IO.SYS)"
  rm -rf "$W/kernel"; mkdir -p "$W/kernel"
- cp "$HERE/KERNEL16.PAS" "$HERE/MAKER.PAS" "$W/kernel/"
+ cp "$HERE/K16DOS.PAS" "$HERE/MAKER.PAS" "$W/kernel/"
  ( cd "$W/kernel" && "$TPC" -M -Q MAKER.PAS )
  printf '[sdl]\nfullscreen=false\n[autoexec]\nmount c %s\nc:\nMAKER.EXE\nexit\n' \
    "$W/kernel" > "$W/kernel/dosbox.conf"
@@ -75,7 +75,7 @@ fi
 
 # --- 5. images : disquettes, disque dur facultatif, CD-ROM --------------------
 if has images; then
- echo "== Images (KERNEL16/IMAGE)"
+ echo "== Images (KERNEL16DOS/IMAGE)"
  OPT=""
  [ -n "$HD" ] && OPT="$OPT /HD:$HD"
  [ -n "$FLOPPY" ] && OPT="$OPT /FLOPPY:$FLOPPY"

@@ -2,7 +2,7 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7)
-  @description: SH - interpreteur de commandes (shell) du noyau KERNEL16
+  @description: SH - interpreteur de commandes (shell) du noyau KERNEL16DOS
                 de LINUX-0, dans le style de sh sous Linux. Invite PS1,
                 commandes internes (cd, echo, export, test, ...), variables,
                 redirections > >> < 2>, tuyaux |, && || ;, if/for/while,
@@ -364,9 +364,11 @@ End;
   --------------------------------------------------------------------- }
 Function MsgRaw(Id:Byte):String;Begin
  Case Id of
-  mBanner:MsgRaw:='LINUX-0 KERNEL16 - tapez help|LINUX-0 KERNEL16 - type '+
-   'help|LINUX-0 KERNEL16 - help eingeben|LINUX-0 KERNEL16 - escriba help|'+
-   'LINUX-0 KERNEL16 - digitare help';
+  mBanner:MsgRaw:='LINUX-0 KERNEL16DOS - tapez help|'+
+   'LINUX-0 KERNEL16DOS - type help|'+
+   'LINUX-0 KERNEL16DOS - help eingeben|'+
+   'LINUX-0 KERNEL16DOS - escriba help|'+
+   'LINUX-0 KERNEL16DOS - digitare help';
   mNotFound:MsgRaw:='commande introuvable|command not found|Befehl nicht '+
    'gefunden|orden no encontrada|comando non trovato';
   mNoFile:MsgRaw:='Fichier introuvable|No such file|Datei nicht gefunden|'+
@@ -2085,7 +2087,7 @@ Begin
 End;
 
 Function VerString:String;Begin
- VerString:='LINUX-0 KERNEL16 version DOS '+IntStr(Lo(DosVersion))+'.'+
+ VerString:='LINUX-0 KERNEL16DOS version '+IntStr(Lo(DosVersion))+'.'+
             IntStr(Hi(DosVersion));
 End;
 

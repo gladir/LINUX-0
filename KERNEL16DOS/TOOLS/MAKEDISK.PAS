@@ -2,7 +2,7 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7, Free Pascal)
-  @description: Cree les images disque amorcables de LINUX-0 (KERNEL16) :
+  @description: Cree les images disque amorcables de LINUX-0 (KERNEL16DOS) :
                 disquettes FAT12 (LINUX144A.IMG, LINUX144B.IMG...), disque
                 dur FAT16 avec MBR et CD-ROM ISO 9660 amorcable (El Torito).
 }
@@ -121,11 +121,11 @@ Const
 Const
  MsgTab:Array[0..MsgCount-1,0..4]of String[74]=(
   (
-   'MAKEDISK : cree les images disque amorcables de LINUX-0 (KERNEL16).',
-   'MAKEDISK: builds the bootable disk images of LINUX-0 (KERNEL16).',
-   'MAKEDISK: erzeugt die bootfaehigen Disk-Images von LINUX-0 (KERNEL16).',
-   'MAKEDISK: crea las imagenes de disco arrancables de LINUX-0 (KERNEL16).',
-   'MAKEDISK: crea le immagini disco avviabili di LINUX-0 (KERNEL16).'
+   'MAKEDISK : cree les images disque amorcables de LINUX-0 (KERNEL16DOS).',
+   'MAKEDISK: builds the bootable disk images of LINUX-0 (KERNEL16DOS).',
+   'MAKEDISK: erzeugt die bootfaehigen Disk-Images von LINUX-0 (KERNEL16DOS).',
+   'MAKEDISK: crea las imagenes de disco arrancables de LINUX-0 (KERNEL16DOS).',
+   'MAKEDISK: crea le immagini disco avviabili di LINUX-0 (KERNEL16DOS).'
   ),
   (
    '',
@@ -2484,7 +2484,7 @@ Begin
  Assign(F,Path);
  Rewrite(F);
  If IOResult<>0 Then Die(3,M_eCreate,Path);
- WriteLn(F,'; INSTALL.INF - LINUX-0 KERNEL16 (genere par MAKEDISK)');
+ WriteLn(F,'; INSTALL.INF - LINUX-0 KERNEL16DOS (genere par MAKEDISK)');
  WriteLn(F,'; nn,dossier,nom,taille,composant');
  WriteLn(F,'DISKS,',Pad(DiskCnt,2));
  For X:=1 to DirCnt-1 do WriteLn(F,'DIR,',Dirs[X].Path);

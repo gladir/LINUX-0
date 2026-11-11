@@ -1,4 +1,4 @@
-# KERNEL16
+# KERNEL16DOS
 
 Noyau bootable 16 bits de **LINUX-0**, écrit en Turbo Pascal 7. Il reprend le
 noyau de [MSDOS-0](https://github.com/gladir/MSDOS-0) (INT 21h, FAT12 et FAT16,
@@ -8,13 +8,17 @@ interpréteur de commandes `sh`, chemins avec `/`, variables d'environnement
 
 Les 177 commandes de [`../BIN16`](../BIN16) sont copiées sur les images et
 s'exécutent telles quelles sur ce noyau (`ls`, `cat`, `cp`, `grep`, `awk`...).
-Le noyau 32 bits (KERNEL32) viendra plus tard.
+Les autres noyaux (`KERNEL32`, `KERNELARM64`...) auront chacun leur propre
+dossier indépendant : voir la règle de nommage `KERNEL<arch/bits><personnalité>`
+dans la section « Noyaux » du [README racine](../README.md). Ici la
+personnalité est `DOS` (interface `INT 21h`, `.EXE`, FAT) ; l'unité du noyau
+s'appelle `K16DOS` pour rester compatible 8.3 avec TP7 sous DOS.
 
 ## Contenu du dossier
 
 | Élément | Rôle |
 |---|---|
-| `KERNEL16.PAS` | L'unité du noyau (un seul fichier, aucune autre unité) |
+| `K16DOS.PAS` | L'unité du noyau (un seul fichier, aucune autre unité) |
 | `MAKER.PAS` | Extrait le code du noyau et écrit `IO.SYS` (programme DOS) |
 | `SH.PAS` | Interpréteur de commandes style Linux, devient `\BIN\SH.EXE` |
 | `SYSTEM\` | Fichiers de la racine : `IO.SYS`, `MSDOS.SYS`, `BIN\SH.EXE`, `ETC\SYSCTL.D\CUSTOM.CFG` (configuration du noyau) |
@@ -98,7 +102,7 @@ produit au choix un disque dur (`/HD:Mo`, FAT16 avec MBR) et un CD-ROM
 
 ## Différences avec le noyau de MSDOS-0
 
-- Nom et messages : `Demarrage de LINUX-0 KERNEL16...`, shell `\BIN\SH.EXE`
+- Nom et messages : `Demarrage de LINUX-0 KERNEL16DOS...`, shell `\BIN\SH.EXE`
   (puis `\SH.EXE`, `\COMMAND.COM`), ou `kernel.shell` de `custom.cfg`.
 - **Configuration de style Linux** : le noyau lit `/etc/sysctl.d/custom.cfg`
   (`\ETC\SYSCTL.D\CUSTOM.CFG`), au lieu de `CONFIG.SYS`. Une ligne par

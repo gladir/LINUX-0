@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7)
-  @description: Programme d'installation de LINUX-0 (KERNEL16) sur disque dur.
+  @description: Programme d'installation de LINUX-0 (KERNEL16DOS) sur
+    disque dur.
 }
 
 Program INSTALL;
@@ -411,11 +412,11 @@ Begin
    'IO.SYS no est`4 al inicio del volumen: el disco no '+
    'arrancar`4.');
   mWel1:Raw:=Pick(
-   'Bienvenue dans l''installation de LINUX-0 (KERNEL16).',
-   'Welcome to the LINUX-0 (KERNEL16) setup.',
-   'Willkommen beim Setup von LINUX-0 (KERNEL16).',
-   'Benvenuti nell''installazione di LINUX-0 (KERNEL16).',
-   'Bienvenido a la instalaci`2n de LINUX-0 (KERNEL16).');
+   'Bienvenue dans l''installation de LINUX-0 (KERNEL16DOS).',
+   'Welcome to the LINUX-0 (KERNEL16DOS) setup.',
+   'Willkommen beim Setup von LINUX-0 (KERNEL16DOS).',
+   'Benvenuti nell''installazione di LINUX-0 (KERNEL16DOS).',
+   'Bienvenido a la instalaci`2n de LINUX-0 (KERNEL16DOS).');
   mWel2:Raw:=Pick(
    'Ce programme partitionne le disque dur, le formate (FAT12 '+
    'ou FAT16) et installe le syst`eme.',
@@ -3073,7 +3074,7 @@ Begin
  TL('PATH=\BIN');
  TL('export PATH');
  PutText('\ETC','PROFILE','PROFILE.OLD');
- TL('# /etc/sysctl.d/custom.cfg - configuration du noyau KERNEL16 '+
+ TL('# /etc/sysctl.d/custom.cfg - configuration du noyau KERNEL16DOS '+
     '(genere par INSTALL)');
  TL('fs.files = '+NumStr(FilesN));
  TL('kernel.buffers = '+NumStr(BufN));

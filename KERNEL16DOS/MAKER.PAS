@@ -2,14 +2,14 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7)
-  @description: Fabrique le fichier IO.SYS (noyau KERNEL16) a partir de
-    l'unite KERNEL16 : ecrit dans le repertoire courant le code compris
+  @description: Fabrique le fichier IO.SYS (noyau KERNEL16DOS) a partir de
+    l'unite K16DOS : ecrit dans le repertoire courant le code compris
     entre BEGIN_KERNEL et END_KERNEL. Doit etre execute sous DOS.
 }
 
 Program MAKER;
 
-Uses KERNEL16;
+Uses K16DOS;
 
 Var
  SourceKernel:Pointer;
