@@ -1,5 +1,5 @@
 #!/bin/bash
-# BUILD.SH - Construit KERNEL16 (noyau 16 bits LINUX-0) et ses images disque.
+# BUILD.SH - Construit KERNEL16DOS (noyau 16 bits LINUX-0) et ses images disque.
 #
 # Utilisation : ./BUILD.SH [etape ...]      etapes : tpc kernel shell tools
 #                                                    images  (defaut : toutes)
@@ -34,11 +34,11 @@ if has tpc && [ ! -x "$TPC" ]; then
  ( cd "$W/tpcsrc" && fpc -O2 -Mtp TPC.PAS >/dev/null && cp TPC "$TPC" )
 fi
 
-# --- 2. noyau : KERNEL16.PAS + MAKER.PAS -> SYSTEM/IO.SYS ---------------------
+# --- 2. noyau : K16DOS.PAS + MAKER.PAS -> SYSTEM/IO.SYS ---------------------
 if has kernel; then
  echo "== Noyau (IO.SYS)"
  rm -rf "$W/kernel"; mkdir -p "$W/kernel"
- cp "$HERE/KERNEL16.PAS" "$HERE/MAKER.PAS" "$W/kernel/"
+ cp "$HERE/K16DOS.PAS" "$HERE/MAKER.PAS" "$W/kernel/"
  ( cd "$W/kernel" && "$TPC" -M -Q MAKER.PAS )
  printf '[sdl]\nfullscreen=false\n[autoexec]\nmount c %s\nc:\nMAKER.EXE\nexit\n' \
    "$W/kernel" > "$W/kernel/dosbox.conf"
@@ -49,7 +49,7 @@ if has kernel; then
  ls -l "$HERE/SYSTEM/IO.SYS"
 fi
 
-# --- 3. shell : SH.PAS -> SYSTEM/BIN/SH.EXE -----------------------------------
+# --- 3. shell et installeur : SH.PAS, TOOLS/INSTALL.PAS -> SYSTEM/BIN -----------------------------------
 if has shell; then
  echo "== Shell (SH.EXE)"
  rm -rf "$W/shell"; mkdir -p "$W/shell"
@@ -58,6 +58,11 @@ if has shell; then
  mkdir -p "$HERE/SYSTEM/BIN"
  cp "$W/shell/SH.EXE" "$HERE/SYSTEM/BIN/SH.EXE"
  ls -l "$HERE/SYSTEM/BIN/SH.EXE"
+ echo "== Programme d'installation (INSTALL.EXE)"
+ cp "$HERE/TOOLS/INSTALL.PAS" "$W/shell/"
+ ( cd "$W/shell" && "$TPC" -Q INSTALL.PAS )
+ cp "$W/shell/INSTALL.EXE" "$HERE/SYSTEM/BIN/INSTALL.EXE"
+ ls -l "$HERE/SYSTEM/BIN/INSTALL.EXE"
 fi
 
 # --- 4. outils : MAKEDISK et LSIMG (natifs) -----------------------------------
@@ -70,7 +75,7 @@ fi
 
 # --- 5. images : disquettes, disque dur facultatif, CD-ROM --------------------
 if has images; then
- echo "== Images (KERNEL16/IMAGE)"
+ echo "== Images (KERNEL16DOS/IMAGE)"
  OPT=""
  [ -n "$HD" ] && OPT="$OPT /HD:$HD"
  [ -n "$FLOPPY" ] && OPT="$OPT /FLOPPY:$FLOPPY"

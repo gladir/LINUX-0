@@ -2,7 +2,7 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7, Free Pascal)
-  @description: Cree les images disque amorcables de LINUX-0 (KERNEL16) :
+  @description: Cree les images disque amorcables de LINUX-0 (KERNEL16DOS) :
                 disquettes FAT12 (LINUX144A.IMG, LINUX144B.IMG...), disque
                 dur FAT16 avec MBR et CD-ROM ISO 9660 amorcable (El Torito).
 }
@@ -113,17 +113,19 @@ Const
  M_iIso=52;
  M_iTotal=53;
  M_iCopy=54;
- MsgCount=55;
+ M_h25=55;
+ M_h26=56;
+ MsgCount=57;
 
 { Table des messages : FR, EN, GR, SP, IT }
 Const
  MsgTab:Array[0..MsgCount-1,0..4]of String[74]=(
   (
-   'MAKEDISK : cree les images disque amorcables de LINUX-0 (KERNEL16).',
-   'MAKEDISK: builds the bootable disk images of LINUX-0 (KERNEL16).',
-   'MAKEDISK: erzeugt die bootfaehigen Disk-Images von LINUX-0 (KERNEL16).',
-   'MAKEDISK: crea las imagenes de disco arrancables de LINUX-0 (KERNEL16).',
-   'MAKEDISK: crea le immagini disco avviabili di LINUX-0 (KERNEL16).'
+   'MAKEDISK : cree les images disque amorcables de LINUX-0 (KERNEL16DOS).',
+   'MAKEDISK: builds the bootable disk images of LINUX-0 (KERNEL16DOS).',
+   'MAKEDISK: erzeugt die bootfaehigen Disk-Images von LINUX-0 (KERNEL16DOS).',
+   'MAKEDISK: crea las imagenes de disco arrancables de LINUX-0 (KERNEL16DOS).',
+   'MAKEDISK: crea le immagini disco avviabili di LINUX-0 (KERNEL16DOS).'
   ),
   (
    '',
@@ -502,6 +504,20 @@ Const
    '  %1 -> %2',
    '  %1 -> %2',
    '  %1 -> %2'
+  )  ,
+  (
+   ' /COMP n liste  Composant n de l''installeur (manifeste).',
+   ' /COMP n list   Installer component n (manifest).',
+   ' /COMP n Liste  Installer-Komponente n (Manifest).',
+   ' /COMP n lista  Componente n del instalador (manifiesto).',
+   ' /COMP n elenco Componente n dell''installatore (manifesto).'
+  ),
+  (
+   ' /INSTALL        Ecrit INSTALL.INF sur la disquette A.',
+   ' /INSTALL        Writes INSTALL.INF on floppy A.',
+   ' /INSTALL        Schreibt INSTALL.INF auf Diskette A.',
+   ' /INSTALL        Escribe INSTALL.INF en el disquete A.',
+   ' /INSTALL        Scrive INSTALL.INF nel dischetto A.'
   )
  );
 
@@ -516,6 +532,7 @@ Type
   Attr:Byte;
   Sys:Byte;              { 1 = IO.SYS, 2 = MSDOS.SYS }
   Boot:Boolean;          { obligatoirement sur la premiere disquette }
+  Comp:Byte;             { composant de l'installeur (255 = non liste) }
   Size:LongInt;
   Disk:Integer;          { -1 a placer, -2 trop gros, 0.. disquette }
   Clu:Word;              { premier cluster pendant la construction }
@@ -583,6 +600,9 @@ Var
  ZBuf,CBuf:PBytes;
  Sec:Array[0..IsoSec-1]of Byte;
  InfDepth:Integer;
+ CompPat:Array[1..7]of String[250];
+ DoInst:Boolean;
+ InfTmp:String;
 
 { ---- Messages ---- }
 
@@ -661,6 +681,8 @@ Var
  I:Integer;
 Begin
  For I:=M_H00 to M_H00+25-1 do WriteLn(Msg(I));
+ WriteLn(Msg(M_h25));
+ WriteLn(Msg(M_h26));
 End;
 
 { ---- Chemins et noms ---- }
@@ -2279,6 +2301,14 @@ Begin
   If Not ParseDate(V)Then Die(1,M_eDate,V);
  End
  Else If K='V' Then Verbose:=True
+ Else If K='INSTALL' Then DoInst:=True
+ Else If K='COMP' Then Begin
+  P:=Pos(' ',V);
+  If(P<2)or(V[1]<'1')or(V[1]>'7')Then Bad(V);
+  I:=Ord(V[1])-48;
+  CompPat[I]:=CompPat[I]+','+UpStr(Copy(V,P+1,255));
+  While Pos(' ',CompPat[I])>0 do Delete(CompPat[I],Pos(' ',CompPat[I]),1);
+ End
  Else Option:=False;
 End;
 
@@ -2407,6 +2437,76 @@ Begin
  ImageName:=OutDir+FitName(BaseName,C+Chr(65+K))+'.IMG';
 End;
 
+{ ---- INSTALL.INF (pour TOOLS\INSTALL.PAS) ----
+  Lignes : DISKS,nn / DIR,chemin / nn,dossier,nom,taille(9),composant
+  Composants : 0 systeme, 1..7 selon /COMP, 7 par defaut. Les lignes ont une
+  largeur fixe : le fichier a la meme taille avant et apres le placement. }
+
+Function Pad(N:LongInt;W:Integer):String;
+Var
+ S:String;
+Begin
+ S:=NumStr(N);
+ While Length(S)<W do S:='0'+S;
+ Pad:=S;
+End;
+
+Function CompOf(E:Integer):Integer;
+Var
+ N:String;
+ C,P:Integer;
+Begin
+ N:=DispName(Ents[E]^.N11);
+ If(N='INSTALL.EXE')or(N='INSTALL.INF')Then Begin
+  CompOf:=255;
+  Exit;
+ End;
+ If(Dirs[Ents[E]^.DIdx].Path<>'\'+BinDir)or(N='SH.EXE')Then Begin
+  CompOf:=0;
+  Exit;
+ End;
+ P:=Pos('.',N);
+ If P>0 Then N:=Copy(N,1,P-1);
+ CompOf:=7;
+ For C:=1 to 6 do
+  If Pos(','+N+',',CompPat[C]+',')>0 Then Begin
+   CompOf:=C;
+   Exit;
+  End;
+End;
+
+Procedure WriteInf(Const Path:String);
+Var
+ F:Text;
+ I,X:Integer;
+ D:String;
+Begin
+ Assign(F,Path);
+ Rewrite(F);
+ If IOResult<>0 Then Die(3,M_eCreate,Path);
+ WriteLn(F,'; INSTALL.INF - LINUX-0 KERNEL16DOS (genere par MAKEDISK)');
+ WriteLn(F,'; nn,dossier,nom,taille,composant');
+ WriteLn(F,'DISKS,',Pad(DiskCnt,2));
+ For X:=1 to DirCnt-1 do WriteLn(F,'DIR,',Dirs[X].Path);
+ For I:=1 to EntCnt do
+  If(Ents[I]^.Comp<>255)and(Ents[I]^.Disk>=-1)Then Begin
+   D:=Dirs[Ents[I]^.DIdx].Path;
+   If D='' Then D:='\';
+   WriteLn(F,Pad(Ents[I]^.Disk+1,2),',',D,',',DispName(Ents[I]^.N11),',',
+     Pad(Ents[I]^.Size,9),',',Ents[I]^.Comp);
+  End;
+ Close(F);
+ If IOResult<>0 Then Die(3,M_eWrite,Path);
+End;
+
+Function SizeOfFile(Const Path:String):LongInt;
+Var
+ S:SearchRec;
+Begin
+ FindFirst(Path,AnyFile,S);
+ If DosError=0 Then SizeOfFile:=S.Size Else SizeOfFile:=0;
+End;
+
 Procedure MarkBoot;
 Var
  I,J:Integer;
@@ -2490,10 +2590,25 @@ Begin
   K:=DirFromPath(MkList[I]);
   If K>0 Then Dirs[K].Keep:=True;
  End;
+ If DoInst Then Begin
+  For I:=1 to EntCnt do Ents[I]^.Comp:=CompOf(I);
+  InfTmp:=OutDir+'INSTALL.TMP';
+  DiskCnt:=1;
+  WriteInf(InfTmp);
+  E:=AddFile(InfTmp,'INSTALL.INF',0,SizeOfFile(InfTmp));
+  Ents[E]^.Boot:=True;
+  Ents[E]^.Comp:=255;
+ End;
  SortEnts;
  MarkBoot;
  { disquettes }
  Pack;
+ If DoInst Then Begin
+  { fichier de meme largeur : on connait maintenant les disquettes }
+  WriteInf(InfTmp);
+  E:=FindEnt(0,'INSTALL INF');
+  Ents[E]^.Size:=SizeOfFile(InfTmp);
+ End;
  Kb:=0;
  For I:=1 to EntCnt do Kb:=Kb+SizeKB(Ents[I]^.Size);
  Say(M_iTotal,NumStr(EntCnt),NumStr(Kb),NumStr(DirCnt-1),'');
@@ -2521,6 +2636,12 @@ Begin
   If Not BuildIso(IsoName,ImageName(0),FloppyKB,Nf,Kb)Then Halt(3);
   Say(M_iIso,IsoName,NumStr(Nf),NumStr(Kb),'');
  End;
+ { fichier temporaire de INSTALL.INF : efface en dernier (l'ISO le relit) }
+ If DoInst Then Begin
+  Assign(Img,InfTmp);
+  Erase(Img);
+  If IOResult<>0 Then;
+ End;
 End;
 
 BEGIN
@@ -2539,6 +2660,8 @@ BEGIN
  HardMB:=32;
  DoHard:=False;
  DoIso:=False;
+ DoInst:=False;
+ FillChar(CompPat,SizeOf(CompPat),0);
  Verbose:=False;
  ForceBits:=0;
  AddCnt:=0;

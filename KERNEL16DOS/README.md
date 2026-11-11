@@ -1,4 +1,4 @@
-# KERNEL16
+# KERNEL16DOS
 
 Noyau bootable 16 bits de **LINUX-0**, écrit en Turbo Pascal 7. Il reprend le
 noyau de [MSDOS-0](https://github.com/gladir/MSDOS-0) (INT 21h, FAT12 et FAT16,
@@ -8,19 +8,23 @@ interpréteur de commandes `sh`, chemins avec `/`, variables d'environnement
 
 Les 177 commandes de [`../BIN16`](../BIN16) sont copiées sur les images et
 s'exécutent telles quelles sur ce noyau (`ls`, `cat`, `cp`, `grep`, `awk`...).
-Le noyau 32 bits (KERNEL32) viendra plus tard.
+Les autres noyaux (`KERNEL32`, `KERNELARM64`...) auront chacun leur propre
+dossier indépendant : voir la règle de nommage `KERNEL<arch/bits><personnalité>`
+dans la section « Noyaux » du [README racine](../README.md). Ici la
+personnalité est `DOS` (interface `INT 21h`, `.EXE`, FAT) ; l'unité du noyau
+s'appelle `K16DOS` pour rester compatible 8.3 avec TP7 sous DOS.
 
 ## Contenu du dossier
 
 | Élément | Rôle |
 |---|---|
-| `KERNEL16.PAS` | L'unité du noyau (un seul fichier, aucune autre unité) |
+| `K16DOS.PAS` | L'unité du noyau (un seul fichier, aucune autre unité) |
 | `MAKER.PAS` | Extrait le code du noyau et écrit `IO.SYS` (programme DOS) |
 | `SH.PAS` | Interpréteur de commandes style Linux, devient `\BIN\SH.EXE` |
 | `SYSTEM\` | Fichiers de la racine : `IO.SYS`, `MSDOS.SYS`, `BIN\SH.EXE`, `ETC\SYSCTL.D\CUSTOM.CFG` (configuration du noyau) |
-| `TOOLS\` | Outils de fabrication des disques : `MAKEDISK.PAS`, `LSIMG.PAS`, `IMAGE.INF`, `ETC\PROFILE` |
+| `TOOLS\` | Outils : `MAKEDISK.PAS` (images), `LSIMG.PAS` (contrôle d'images), **`INSTALL.PAS`** (installation sur disque dur), `IMAGE.INF`, `ETC\PROFILE` |
 | `IMAGE\` | Images prêtes à démarrer (voir `IMAGE\LISEZMOI.TXT`) |
-| `TESTS\` | `TKENV.PAS` : programme de test du noyau (environnement, chemins `/`) ; `DEVENVTEST.PY` : banc d'essai des images dans l'émulateur de `DEVENV` |
+| `TESTS\` | `TKENV.PAS` et `TKDATE.PAS` : programmes de test du noyau (environnement, chemins `/`, date) ; `DEVENVTEST.PY` : banc d'essai des images dans l'émulateur de `DEVENV` |
 | `BUILD.SH`, `MAKEIMG.BAT` | Construction complète sous Linux ou sous DOS/Windows |
 
 ## Essayer
@@ -36,6 +40,47 @@ Les tuyaux `|` créent des fichiers temporaires dans `\TMP` : il faut donc un
 support en écriture (disquette ou disque dur, pas un vrai CD-ROM gravé).
 L'ISO démarre en émulation de disquette 2,88 Mo qui contient les 181 fichiers :
 le noyau n'a pas de pilote CD-ROM, cette disquette est donc le lecteur `A:`.
+
+## Installer sur un disque dur
+
+Démarrer sur `LINUX144A.IMG` (ou sur le CD-ROM) avec un disque dur, puis taper
+`install`. `TOOLS/INSTALL.PAS` (`\BIN\INSTALL.EXE`) fonctionne comme l'installeur
+de MSDOS-0 : écrans bleus plein texte, **partitionne** le disque (MBR et
+partition active, de 4 à 1000 Mo), le **formate** (FAT12 ou FAT16) et **installe**
+le système selon la configuration choisie :
+
+1. bienvenue ; 2. date, heure, pays et langue (`env.LANGUAGE`) ;
+3. nom de machine, utilisateur et `HOME` ;
+4. disque (80h ou 81h), taille de la partition, formatage, avec avertissement et
+   confirmation ; si la partition est déjà une FAT valide, les données peuvent
+   être conservées (IO.SYS est replacé en tête du volume) ;
+5. type d'installation : *Minimale*, *Standard*, *Complète* ou *Personnalisée*
+   (cases à cocher avec la taille de chaque composant) ;
+6. réglages du noyau (`fs.files`, `kernel.buffers`, `kernel.lastdrive`) ;
+7. copie des fichiers (disquette 2 demandée au besoin, en A: ou en B:), puis
+   écriture de `\ETC\SYSCTL.D\CUSTOM.CFG` et `\ETC\PROFILE`, secteur de boot et
+   MBR, redémarrage.
+
+| Composant | Contenu |
+|---|---|
+| 0 Système | `IO.SYS`, `MSDOS.SYS`, `\BIN\SH.EXE`, `\ETC` (toujours installé) |
+| 1 Commandes de base | `cat`, `cp`, `mv`, `rm`, `ls`, `echo`, `date`, `df`... |
+| 2 Traitement de texte | `grep`, `sed`, `awk`, `sort`, `diff`, `cut`... |
+| 3 Éditeurs | `vi`, `ed`, `nano`, `pico`, `emacs`, `less` |
+| 4 Archives et compression | `gzip`, `bzip2`, `ar`, `compress`... |
+| 5 Programmation et scripts | `make`, `perl`, `python`, `bash`, `bc`, `lex`... |
+| 6 Système, utilisateurs, réseau | `useradd`, `groups`, `ifconfig`, `crontab`... |
+| 7 Divers | le reste de `\BIN` (groff, outils netpbm...) |
+
+La liste des fichiers par disquette et par composant est `\INSTALL.INF`, écrit par
+`MAKEDISK` (lignes `INSTALL` et `COMP n liste` d'`IMAGE.INF`). Les textes de
+l'installeur existent en français, anglais, allemand, espagnol et italien
+(`LANGUAGE`, ou choix à l'écran 2). Testé sous QEMU et sous DEVENV : installation
+complète, minimale et personnalisée, partition de 4 Mo (FAT12), de 20 Mo sur
+64 Mo, disque 81h, réinstallation par-dessus un disque installé, et démarrage du
+disque installé. Limites : CHS classique (1024 premiers cylindres, partition
+d'au plus 1000 Mo) ; « conserver » n'accepte que la première partition ;
+`kernel.country` est écrit mais ignoré par le noyau.
 
 ## Construire
 
@@ -57,7 +102,7 @@ produit au choix un disque dur (`/HD:Mo`, FAT16 avec MBR) et un CD-ROM
 
 ## Différences avec le noyau de MSDOS-0
 
-- Nom et messages : `Demarrage de LINUX-0 KERNEL16...`, shell `\BIN\SH.EXE`
+- Nom et messages : `Demarrage de LINUX-0 KERNEL16DOS...`, shell `\BIN\SH.EXE`
   (puis `\SH.EXE`, `\COMMAND.COM`), ou `kernel.shell` de `custom.cfg`.
 - **Configuration de style Linux** : le noyau lit `/etc/sysctl.d/custom.cfg`
   (`\ETC\SYSCTL.D\CUSTOM.CFG`), au lieu de `CONFIG.SYS`. Une ligne par
@@ -101,6 +146,8 @@ aucun fichier d'inclusion ; lignes de 80 caractères au plus ; sources en ASCII.
 - `SH.PAS` ne gère pas `$(...)`, `case`, les fonctions, les documents ici (`<<`),
   ni la complétion par Tab ; 16 arguments et 126 caractères par commande externe.
 - Sur un CD-ROM gravé, `\TMP` est en lecture seule : pas de tuyaux.
+- **Correctifs** : `INT 21h AH=2Bh` (fixer la date) convertit l'année en BCD pour le
+  BIOS ; sans `kernel.shell`, le shell n'est plus lancé avec un argument parasite.
 - Les noms 8.3 de `BIN16` plus longs sont tronqués sur l'image
   (`ADDFTINFO` devient `ADDFTINF`).
 - Testé sous QEMU (disquettes, disque dur, CD-ROM) et DOSBox, pas sur matériel réel.
@@ -122,6 +169,31 @@ Résultat : disquettes 1,44 Mo A+B, ISO et disque dur de 32 Mo, 36 vérification
 sur 36 ; disquettes de 720 Ko, 1,2 Mo et 2,88 Mo, 9 sur 9. Pour compiler
 `DEVENV.PAS` sous Linux, voir `DEV-COOLS/DOC/KERNELTEST.txt` (unité `cthreads`,
 `fp-units-gfx`, bibliothèques X11 et remplacement des DLL Windows).
+### Dans l'onglet émulateur de l'IDE
+
+Avec l'interface graphique (sous Linux : `xvfb-run`, `xdotool` pour les frappes,
+`import` pour les captures), l'onglet « Émulateur 8086 » démarre les images ainsi :
+
+```bash
+DEVENV /DISK0:LINUX144A.IMG /DISK1:LINUX144B.IMG /DISK80:hd.img /TERMINALDOS:boot.bat   # boot.bat : BOOT A:
+DEVENV /CDROM:LINUX.ISO /TERMINALDOS:cd.bat   # cd.bat : BOOT puis IMGMOUNT C: hd.img -t hdd
+DEVENV /DISK80:hd.img /TERMINALDOS:bootc.bat  # bootc.bat : BOOT C: (disque installé)
+```
+
+Scénarios vérifiés de bout en bout avec `install` : disquettes A: + B: puis
+démarrage du disque installé (onglet « C: »), CD-ROM, installation *minimale*
+en anglais avec un nom de machine personnalisé, et changement de disquette avec
+un seul lecteur (`mount A:` du banc `/KERNELTEST`). Remarques :
+
+- l'onglet **consomme la touche Échap** pour arrêter l'émulation (« [Esc] Fermer ») ;
+  les flèches et F1 à F12 sont transmises. L'installeur accepte donc **F4 comme
+  équivalent d'Échap** (« ECHAP/F4=Retour ») ;
+- la copie se fait désormais disquette par disquette : avec un seul lecteur,
+  chaque disquette n'est réclamée qu'une fois (avant, l'ordre alphabétique des
+  fichiers réclamait les disquettes 1 et 2 en alternance) ;
+- `BOOT` d'un CD-ROM n'est possible que si aucun disque n'est déjà monté : on
+  monte le disque dur cible ensuite avec `IMGMOUNT C: hd.img -t hdd`.
+
 Ces tests ont révélé un bogue de l'émulateur (caractère perdu à l'écran,
 `INT 10h AH=02` ne mettait pas à jour `BdaCurX/Y`), corrigé dans la branche
 `fix/devenv-int10-curseur-bda` de DEV-COOLS.

@@ -2,7 +2,7 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: Turbo Pascal 7)
-  @description: KERNEL16, noyau 16 bits de LINUX-0. Derive du noyau de
+  @description: KERNEL16DOS, noyau 16 bits de LINUX-0. Derive du noyau de
     MSDOS-0 : il charge et execute des fichiers .EXE/.COM, gere les
     disques FAT12 et FAT16 par l'interface INT 21h et lance l'interpreteur
     de commandes \BIN\SH.EXE (style Linux). Les chemins acceptent '/'
@@ -106,7 +106,7 @@
   @target: Turbo Pascal 7 (syntaxe assembleur Intel)
 }
 
-Unit KERNEL16;
+Unit K16DOS;
 
 INTERFACE
 
@@ -1212,7 +1212,7 @@ Begin
   CLI
   HLT
   JMP @Halt
-  DB 'DEBUT DU NOYAU LINUX-0 KERNEL16'
+  DB 'DEBUT DU NOYAU LINUX-0 KERNEL16DOS'
  END;
 End;
 
@@ -2330,8 +2330,57 @@ Procedure Intr21hCore;Assembler;ASM
  { Interruption 21h - Fonction 2Bh: Fixe la date   }
  {- - - - - - - - - - - - - - - - - - - - - - - - -}
 @2Bh:
+ { Fixer la date : CX = annee (1980-2099), DH = mois, DL = jour. Le BIOS
+   (INT 1Ah AH=05h) attend du BCD : CH = siecle, CL = annee, DH, DL. }
+ CMP CX,1980
+ JB @2BError
+ CMP CX,2099
+ JA @2BError
+ CMP DH,1
+ JB @2BError
+ CMP DH,12
+ JA @2BError
+ CMP DL,1
+ JB @2BError
+ CMP DL,31
+ JA @2BError
+ PUSH BX
+ PUSH CX
+ PUSH DX
+ MOV AX,CX
+ MOV BL,100
+ DIV BL
+ MOV BH,AH
+ AAM
+ MOV CL,4
+ SHL AH,CL
+ OR AL,AH
+ MOV CH,AL
+ MOV AL,BH
+ AAM
+ SHL AH,CL
+ OR AL,AH
+ MOV BL,AL
+ MOV AL,DH
+ AAM
+ SHL AH,CL
+ OR AL,AH
+ MOV DH,AL
+ MOV AL,DL
+ AAM
+ SHL AH,CL
+ OR AL,AH
+ MOV DL,AL
+ MOV CL,BL
  MOV AH,05h
  INT 1Ah
+ POP DX
+ POP CX
+ POP BX
+ MOV AL,0
+ JMP @Xit
+@2BError:
+ MOV AL,0FFh
  JMP @Xit
 
  {- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -10439,11 +10488,11 @@ Begin
  KText:='';
  Case Id Of
   0:Case L Of
-     1:KText:='Starting LINUX-0 KERNEL16...';
-     2:KText:='LINUX-0 KERNEL16 wird gestartet...';
-     3:KText:='Iniciando LINUX-0 KERNEL16...';
-     4:KText:='Avvio di LINUX-0 KERNEL16...';
-     Else KText:='Demarrage de LINUX-0 KERNEL16...';
+     1:KText:='Starting LINUX-0 KERNEL16DOS...';
+     2:KText:='LINUX-0 KERNEL16DOS wird gestartet...';
+     3:KText:='Iniciando LINUX-0 KERNEL16DOS...';
+     4:KText:='Avvio di LINUX-0 KERNEL16DOS...';
+     Else KText:='Demarrage de LINUX-0 KERNEL16DOS...';
     End;
   1:Case L Of
      1:KText:='Command interpreter not found (\BIN\SH.EXE)';
@@ -10756,8 +10805,8 @@ Begin
  { Environnement par defaut (0 = heriter) }
  ParamBlock.Environment:=0;
 
- { Ligne de commande vide }
- CommandLine:=#0;
+ { Ligne de commande vide (longueur 0 : pas d'argument pour le shell) }
+ CommandLine:='';
  ParamBlock.CommandLine:=@CommandLine;
 
  { FCB vides }
@@ -12866,7 +12915,7 @@ END;
 
 Procedure END_KERNEL;Begin
  ASM
-  DB 'FIN DU NOYAU LINUX-0 KERNEL16';
+  DB 'FIN DU NOYAU LINUX-0 KERNEL16DOS';
  END;
 End;
 
