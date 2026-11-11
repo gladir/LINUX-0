@@ -13,14 +13,14 @@ LINUX-0 propose (ou proposera) plusieurs noyaux indépendants, selon la machine 
 | Dossier | Noyau | État |
 |---|---|---|
 | [KERNEL16DOS](KERNEL16DOS/README.md) | PC 16 bits, interface DOS (`INT 21h`), exécutables `.EXE`, disques FAT12/FAT16 | disponible |
-| `KERNEL16UNIX` | PC 16 bits, appels de type Unix, système de fichiers UFS, sans FAT | envisagé |
+| [KERNEL16UNIX](KERNEL16UNIX/README.md) | PC 16 bits, appels système de type UNIX V7 (`INT 80h`), exécutables COFF, système de fichiers UFS1, sans FAT | disponible |
 | `KERNEL32` | PC 32 bits | envisagé |
 | `KERNELARM32`, `KERNELARM64` | ARM | envisagé |
 
 Règles communes :
 
 - **un dossier par noyau, autonome** : sources du noyau, `SYSTEM`, `TOOLS` (outils de fabrication des disques et installeur), `IMAGE`, `TESTS`, scripts de construction et `README.md`. Aucun code n'est partagé entre deux noyaux ;
-- **les commandes restent à la racine**, rangées par format d'exécutable et non par noyau (`BIN16`, `WIN32`, puis `BIN32`, `BINARM`...) : deux noyaux qui exécutent le même format utilisent les mêmes commandes ;
+- **les commandes restent à la racine**, rangées par format d'exécutable et non par noyau (`BIN16`, `WIN32`, puis `BIN32`, `BINARM`...) : deux noyaux qui exécutent le même format utilisent les mêmes commandes. `KERNEL16UNIX` recompile les sources de ces commandes avec son compilateur `LPC` (*Linux Pascal Compiler*, `KERNEL16UNIX/TOOLS/LPC.PAS`, issu de `UPC.PAS` de UNIX-0) pour obtenir des exécutables COFF ;
 - le nom affiché par un noyau (bannière, `uname`) est `LINUX-0 <NOM DU DOSSIER>` ;
 - les noms de fichiers source et d'unités restent compatibles 8.3 (TP7 sous DOS) : le noyau de `KERNEL16DOS` est l'unité `K16DOS.PAS`.
 

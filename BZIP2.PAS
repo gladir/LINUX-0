@@ -22,7 +22,7 @@ Const
 
 Type
   TBlockBytes=Array[0..MaxBlockSize-1]Of Byte;
-  TNextArray=Array[0..MaxBlockSize-1]Of LongInt;
+  TNextArray=Array[0..MaxBlockSize-1]Of Word;   { positions < MaxBlockSize }
   TGroupLengths=Array[0..MaxGroups-1,0..MaxAlphabet-1]Of Byte;
   TSelectorArray=Array[0..MaxSelectors-1]Of Byte;
   TCodeArray=Array[0..MaxCodeLength]Of LongInt;

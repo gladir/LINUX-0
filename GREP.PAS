@@ -32,6 +32,9 @@ Var
  Info:SearchRec;
  FindStr,FindInFile,CurrLine:String;
  InitOk:Boolean;
+ FDir:DirStr;
+ FName:NameStr;
+ FExt:ExtStr;
  PTmp:Array[0..255]of Char;
 
 Function PatLength(hp1:PRegExprEntry):Integer;
@@ -720,7 +723,8 @@ BEGIN
    While DOSError=0 do Begin
     LineNumber:=1;
     WriteLn('-------- ',Info.Name);
-    Assign(FileFind,Info.Name);
+    FSplit(FindInFile,FDir,FName,FExt);
+    Assign(FileFind,FDir+Info.Name);
     Reset(FileFind);
     While Not EOF(FileFind)do Begin
      ReadLn(FileFind,CurrLine);

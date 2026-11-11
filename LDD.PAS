@@ -8,16 +8,25 @@
 Program LDD;
 
 {$X+}
+{$IFDEF LPC}
+{$M 16384,49152,49152}
+{$ELSE}
 {$M 32768,0,655360}
+{$ENDIF}
 
 Uses DOS;
 
 Const
  HexDigits:String[16]='0123456789abcdef';
  MaxNeed=48;
+ {$IFDEF LPC}
+ MaxLibs=60;
+ MaxDirs=32;
+ {$ELSE}
  MaxLibs=120;
- MaxLoad=16;
  MaxDirs=96;
+ {$ENDIF}
+ MaxLoad=16;
  MaxFiles=32;
  DT_PLTRELSZ=2;
  DT_HASH=4;
@@ -28,7 +37,11 @@ Const
  DT_RELSZ=18;
  DT_PLTREL=20;
  DT_JMPREL=23;
+ {$IFDEF LPC}
+ MaxUndef=100;
+ {$ELSE}
  MaxUndef=200;
+ {$ENDIF}
  DT_NULL=0;
  DT_NEEDED=1;
  DT_STRTAB=5;
