@@ -2,18 +2,22 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/mkdir : cree des repertoires (-p : avec les parents, -m mode).
+  @description: /bin/mkdir : cree des repertoires (-p : avec les parents,
+      -m mode).
 }
 
 Program Mkdir;
 
 Const
   M : Array[1..2, 1..5] Of PChar = (
-    ('Usage : mkdir [-p] [-m mode] repertoire...', 'Usage: mkdir [-p] [-m mode] directory...',
-     'Aufruf: mkdir [-p] [-m Modus] Verzeichnis...', 'Uso: mkdir [-p] [-m modo] directorio...',
+    ('Usage : mkdir [-p] [-m mode] repertoire...',
+      'Usage: mkdir [-p] [-m mode] directory...',
+     'Aufruf: mkdir [-p] [-m Modus] Verzeichnis...',
+       'Uso: mkdir [-p] [-m modo] directorio...',
      'Uso: mkdir [-p] [-m modo] directory...'),
     ('mkdir : impossible de creer ', 'mkdir: cannot create directory ',
-     'mkdir: Verzeichnis kann nicht erstellt werden: ', 'mkdir: no se puede crear el directorio ',
+     'mkdir: Verzeichnis kann nicht erstellt werden: ',
+       'mkdir: no se puede crear el directorio ',
      'mkdir: impossibile creare la directory '));
 
 Var I, Mode, Rc, X, Dirs : LongInt; A : String; Parents : Boolean;

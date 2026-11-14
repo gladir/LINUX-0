@@ -1,23 +1,24 @@
 COMMANDES DE LINUX-0 SOUS KERNEL32 (compilees par LPC -3X)
 ==============================================================
 
-Banc d'essai : KERNEL32/TESTS/U/cmdbench.py. Chaque commande de la table
-reçoit un essai fonctionnel (sortie comparee a la commande GNU de l'hote, a un
+Banc d'essai : KERNEL32/TESTS/U/cmdbench.py (hote) et
+USR/ROOTFS/usr/share/bench/run.sh (sous QEMU). Chaque commande de la table
+recoit un essai fonctionnel (sortie comparee a la commande GNU de l'hote, a un
 texte, ou presence d'un texte) sur l'hote (ELF32 statique execute directement)
-puis, avec USR/ROOTFS/usr/share/bench/run.sh, sous le noyau KERNEL32 amorce
-sous QEMU depuis IMAGE/LINUX32-HD.IMG (ext2). Les autres commandes recoivent
-l'essai "aide /?" (demarre, affiche son aide, code de sortie < 128). Les
-commandes sont des programmes de style DOS (Uses Dos, Crt) : leur syntaxe est
-la leur (voir leur aide), pas celle de GNU ; seuls les resultats de meme
-syntaxe sont compares a GNU.
+puis, sous le noyau KERNEL32 amorce sous QEMU depuis IMAGE/LINUX32-HD.IMG
+(ext2). Les autres commandes recoivent l'essai "aide /?" (demarre, affiche son
+aide, code de sortie < 128). Les commandes sont des programmes de style DOS
+(Uses Dos, Crt) : leur syntaxe est la leur (voir leur aide), pas celle de GNU ;
+seuls les resultats de meme syntaxe sont compares a GNU. Fabrique par
+TESTS/U/mkcmdtab.py.
 
 ETAT : marche = fonctionne conformement a son aide pour les essais faits ;
        reserves = fonctionne avec une limite (voir REMARQUE) ;
        echoue = ne fonctionne pas (cause dans REMARQUE).
 QEMU : ok = meme resultat sous KERNEL32 ; KO = difference ; aide = seul l'essai
-       d'aide a ete fait (tous passent : 186 sur 186) ; - = non essaye.
+       d'aide a ete fait ; - = non essaye.
 
-Resume (hote) : 168 marchent, 1 avec reserves, 9 echouent (sur 178 programmes)
+Resume : 176 marchent, 2 avec reserves, 0 echouent (sur 178 programmes)
 
 COMMANDE     ETAT      QEMU  ESSAI                                        REMARQUE
 ----------   --------  ----  ------------------------------------------   --------------------
@@ -33,7 +34,7 @@ anytopnm     marche    aide  aide /?                                      demarr
 ar           marche    aide  aide /?                                      demarre et affiche son aide
 asciitopgm   marche    aide  aide /?                                      demarre et affiche son aide
 atktopbm     marche    aide  aide /?                                      demarre et affiche son aide
-awk          echoue    KO    awk {print $2}; awk {s+=$1} END {print s} nu dialecte reduit : print $N, -f prog ; le shell est restitue en 'apostrophes' (LINUX0) ; resultat dif
+awk          reserves  KO    awk {print $2}; awk {s+=$1} END {print s} nu interprete AWK minimal du depot : la plupart des mots (print $N, if, w
 banner       marche    ok    banner OK                                    
 base64       marche    ok    base64 a.txt                                 
 basename     marche    ok    basename /a/b/c.txt; basename a.txt .txt     
@@ -41,7 +42,7 @@ bash         marche    aide  aide /?                                      demarr
 bc           marche    ok    bc -q                                        
 bdiff        marche    aide  aide /?                                      demarre et affiche son aide
 bfs          marche    aide  aide /?                                      demarre et affiche son aide
-bzip2        echoue    aide  bzip2 -c a.txt                               aller-retour impossible (a revoir)
+bzip2        marche    aide  bzip2 -c a.txt                               
 cal          marche    ok    cal 2 2026                                   
 cat          marche    ok    cat in.txt; cat -n a.txt b.txt               
 checkeq      marche    aide  aide /?                                      demarre et affiche son aide
@@ -53,7 +54,7 @@ clear        marche    ok    clear
 cmp          marche    ok    cmp a.txt a.txt; cmp a.txt b.txt             
 column       marche    ok    column -t j1.txt                             
 comm         marche    ok    comm a.txt b.txt                             
-compress     echoue    aide  compress -c a.txt                            aller-retour impossible (a revoir)
+compress     marche    aide  compress -c a.txt                            
 cp           marche    ok    cp a.txt /tmp/linux0-cmdbench/cp.out         
 cpp          marche    aide  aide /?                                      demarre et affiche son aide
 crontab      marche    aide  aide /?                                      demarre et affiche son aide
@@ -88,7 +89,7 @@ fallocate    marche    aide  aide /?                                      demarr
 false        marche    ok    false                                        
 fgrep        marche    ok    fgrep alpha in.txt                           
 fmt          marche    ok    fmt --width=30 long.txt                      
-fold         echoue    KO    fold --width=20 long.txt                     coupe apres la largeur puis un caractere par ligne (defaut du programme)
+fold         marche    ok    fold --width=20 long.txt                     
 format       marche    aide  aide /?                                      demarre et affiche son aide
 free         marche    aide  aide /?                                      demarre et affiche son aide
 fromdos      marche    aide  aide /?                                      demarre et affiche son aide
@@ -109,7 +110,7 @@ groups       marche    ok    groups
 gsoelim      marche    aide  aide /?                                      demarre et affiche son aide
 gunzip       marche    aide  aide /?                                      demarre et affiche son aide
 gzexe        marche    aide  aide /?                                      demarre et affiche son aide
-gzip         echoue    aide  gzip -c a.txt                                aller-retour -c / -dc impossible (a revoir)
+gzip         marche    aide  gzip -c a.txt                                
 h2ph         marche    aide  aide /?                                      demarre et affiche son aide
 hd           marche    ok    hd a.txt                                     
 head         marche    ok    head -n 3 in.txt                             
@@ -121,7 +122,7 @@ id           marche    ok    id
 ifconfig     marche    aide  aide /?                                      demarre et affiche son aide
 ispell       marche    aide  aide /?                                      demarre et affiche son aide
 join         marche    ok    join j1.txt j2.txt                           
-ksh          reserves  -     aide /?                                      interactif : l'essai d'aide attend l'entree
+ksh          reserves  aide  aide /?                                      shell interactif : l'aide /? attend l'entree
 lastlog      marche    aide  aide /?                                      demarre et affiche son aide
 ldd          marche    aide  aide /?                                      demarre et affiche son aide
 less         marche    aide  aide /?                                      demarre et affiche son aide
@@ -131,7 +132,7 @@ lkbib        marche    aide  aide /?                                      demarr
 logname      marche    aide  aide /?                                      demarre et affiche son aide
 look         marche    ok    look ap a.txt                                
 lp           marche    aide  aide /?                                      demarre et affiche son aide
-ls           marche    ok    ls /tmp/linux0-cmdbench/ls; ls -l /tmp/linux 
+ls           marche    ok    ls /tmp/linux0-cmdbench/ls; ls -l /tmp/linux 0-cm
 macptopbm    marche    aide  aide /?                                      demarre et affiche son aide
 make         marche    aide  aide /?                                      demarre et affiche son aide
 md5sum       marche    ok    md5sum a.txt                                 
@@ -142,7 +143,7 @@ mktemp       marche    ok    mktemp
 more         marche    aide  aide /?                                      demarre et affiche son aide
 mtest        marche    aide  aide /?                                      demarre et affiche son aide
 mtvtoppm     marche    aide  aide /?                                      demarre et affiche son aide
-mv           marche    ok    mv /tmp/linux0-cmdbench/cp.out /tmp/linux0-c 
+mv           marche    ok    mv /tmp/linux0-cmdbench/cp.out /tmp/linux0-c mdbe
 myisamchk    marche    aide  aide /?                                      demarre et affiche son aide
 nano         marche    aide  aide /?                                      demarre et affiche son aide
 neqn         marche    aide  aide /?                                      demarre et affiche son aide
@@ -154,8 +155,8 @@ pcat         marche    aide  aide /?                                      demarr
 perl         marche    aide  aide /?                                      demarre et affiche son aide
 pico         marche    aide  aide /?                                      demarre et affiche son aide
 pr           marche    aide  aide /?                                      demarre et affiche son aide
-printf       echoue    KO    printf x %s %d\n abc 5                       ne traite pas %s/%d (programme minimal)
-pwd          marche    KO    pwd                                          
+printf       marche    ok    printf x %s %d\n abc 5                       
+pwd          marche    ok    pwd                                          
 python       marche    aide  aide /?                                      demarre et affiche son aide
 readelf      marche    aide  aide /?                                      demarre et affiche son aide
 red          marche    aide  aide /?                                      demarre et affiche son aide
@@ -163,7 +164,7 @@ ref          marche    aide  aide /?                                      demarr
 repeat       marche    ok    repeat 2 /bin/echo hi                        
 replace      marche    aide  aide /?                                      demarre et affiche son aide
 rev          marche    ok    rev in.txt                                   
-rm           marche    KO    rm /tmp/linux0-cmdbench/mv.out               
+rm           marche    ok    rm /tmp/linux0-cmdbench/mv.out               
 rmdir        marche    ok    rmdir /tmp/linux0-cmdbench/dd/ee             
 s2p          marche    aide  aide /?                                      demarre et affiche son aide
 sdiff        marche    ok    sdiff a.txt b.txt                            
@@ -181,11 +182,11 @@ tail         marche    ok    tail --lines 2 in.txt
 tee          marche    ok    tee /tmp/linux0-cmdbench/tee.out             
 todos        marche    aide  aide /?                                      demarre et affiche son aide
 touch        marche    ok    touch /tmp/linux0-cmdbench/touched           
-tr           echoue    KO    tr l L                                       intervalles a-z non developpes ('tr l L' : defaut du programme)
-tree         echoue    KO    tree /tmp/linux0-cmdbench                    n'affiche que les repertoires (comme sous DOS)
+tr           marche    ok    tr l L                                       
+tree         marche    ok    tree /tmp/linux0-cmdbench                    
 true         marche    ok    true                                         
 umask        marche    aide  aide /?                                      demarre et affiche son aide
-uname        marche    KO    uname -s                                     sysname LINUX-0 (et non Linux) sous KERNEL32
+uname        marche    ok    uname -s                                     
 unexpand     marche    ok    unexpand a.txt                               
 uniq         marche    ok    uniq in.txt                                  
 unlink       marche    ok    unlink /tmp/linux0-cmdbench/touched          
@@ -196,6 +197,6 @@ uuencode     marche    ok    uuencode a.txt /tmp/linux0-cmdbench/uu.out
 vi           marche    aide  aide /?                                      demarre et affiche son aide
 wc           marche    ok    wc a.txt -l                                  
 which        marche    ok    which ls                                     
-yes          echoue    -     yes                                          boucle infinie : essai par tube vers head
+yes          marche    -     yes                                          boucle infinie par nature : essai par tube vers head
 zcat         marche    aide  aide /?                                      demarre et affiche son aide
 zforce       marche    aide  aide /?                                      demarre et affiche son aide

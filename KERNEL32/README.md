@@ -334,11 +334,11 @@ init, getty, login, passwd, installateur...) traduits.
    `LANGUAGE=XX` (langue choisie) ;
 4. le disque installe s'amorce seul (chargeur de B + noyau copie de `/boot`).
 `mkfs.ext2 [-s Mo] peripherique` (meme programme, autre nom) formate sans
-partitionner. Verification : `e2fsck -fn` propre (1 Mo a 300 Mo essayes ;
-fichiers de 40 Mo, 300 entrees de repertoire, liens, tubes). Limites : un
-seul groupe de parametres (blocs de 1 Ko, inodes de 128 octets), disque de
-2 Go au plus, 4000 entrees par repertoire, un seul disque source (`/` en
-cours d'execution ou `-r dossier`). Essai : `TESTS/U/RUNU.SH install`
+partitionner. Verification : `e2fsck -fn` propre (3 Mo a 300 Mo essayes ;
+fichiers de 40 Mo, 300 entrees de repertoire, liens, tubes). Limites : blocs
+de 1 Ko et inodes de 128 octets uniquement, disque de 2 Go au plus, 4000
+entrees par repertoire, une seule source (`/` en cours d'execution ou
+`-r dossier`), ext2 seulement (pas de journal). Essai : `TESTS/U/RUNU.SH install`
 (deux disques sous QEMU : `install -d /dev/hdb`, e2fsck, amorce du disque
 installe, LANGUAGE=IT).
 
@@ -356,9 +356,10 @@ d'`awk`, `mktemp`, `repeat`...) pour rester compatibles avec DOS.
 
 | Fichier | Contenu |
 |---|---|
-| `RUNU.SH [sh\|host\|qemu\|install]` | orchestre tous les essais ci-dessous |
+| `RUNU.SH [sh\|host\|qemu\|power\|install]` | orchestre tous les essais : construit l'image dans `$W` (pas `IMAGE/`), `KSRC=` choisit le noyau |
 | `shtest.sh`, `sh/*.sh` | le shell contre `dash` (5 scripts, sortie identique) |
 | `cmdbench.py` | essai fonctionnel de chaque commande (hote), `--gen DIR` fabrique `run.sh` pour QEMU |
+| `mkcmdtab.py` | fabrique `TOOLS/COMMANDES.TXT` (hote + QEMU) |
 
 ### Regles de l'API Unix de `L32API.PAS` utiles aux programmes
 
@@ -377,5 +378,12 @@ chaines temporaires).
 
 ### Demandes au noyau (agent D)
 
-Voir `/tmp/claude-0/work/k32/BUGS_NOYAU.md` : disque IDE esclave (`index=1`)
-bloque l'amorce avec le noyau du 13:22 (sans effet avec celui du 13:14).
+Details et cas minimaux : `/tmp/claude-0/work/k32/BUGS_NOYAU.md`.
+1. `kill(-1, sig)` fige le systeme (sous Linux : tous les processus sauf init
+   et l'appelant) ; `USR/INIT.PAS` envoie les signaux un par un. Tests faits
+   avec `KERNEL32.PAS` du 14:11 (et `D/backup-9.PAS` du 13:14) ; le noyau de
+   13:58 paniquait au lancement de `/sbin/init` (corrige depuis).
+2. Le second disque IDE (`-drive ...,index=1`, /dev/hdb) fonctionne ; un
+   disque en `index=2` (secondaire maitre, hdc) n'est pas detecte.
+3. `uname -s` renvoie `LINUX-0` (les programmes Linux courants attendent
+   `Linux` : le noyau garde-t-il `uname_release=` seulement pour la release ?).

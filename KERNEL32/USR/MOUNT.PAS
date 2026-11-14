@@ -2,19 +2,23 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/mount : monte un systeme de fichiers (mount [-t type] [-o options] source cible) ; sans argument, affiche /proc/mounts.
+  @description: /sbin/mount : monte un systeme de fichiers (mount [-t type]
+      [-o options] source cible) ; sans argument, affiche /proc/mounts.
 }
 
 Program Mount;
 
 Const
   M : Array[1..2, 1..5] Of PChar = (
-    ('Usage : mount [-t type] [-o options] source cible', 'Usage: mount [-t type] [-o options] source target',
-     'Aufruf: mount [-t Typ] [-o Optionen] Quelle Ziel', 'Uso: mount [-t tipo] [-o opciones] origen destino',
+    ('Usage : mount [-t type] [-o options] source cible',
+      'Usage: mount [-t type] [-o options] source target',
+     'Aufruf: mount [-t Typ] [-o Optionen] Quelle Ziel',
+       'Uso: mount [-t tipo] [-o opciones] origen destino',
      'Uso: mount [-t tipo] [-o opzioni] origine destinazione'),
     ('mount : ', 'mount: ', 'mount: ', 'mount: ', 'mount: '));
 
-Var I, Fl, Cnt, N : LongInt; A, Typ, Opt, Src, Dst : String; B : Array[0..255] Of Char;
+Var I, Fl, Cnt, N : LongInt; A, Typ, Opt, Src,
+  Dst : String; B : Array[0..255] Of Char;
 
 Function Msg(Id : LongInt) : String;
 Var P : PChar; X : String;

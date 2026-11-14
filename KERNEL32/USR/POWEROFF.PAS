@@ -2,14 +2,16 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/poweroff : eteint la machine (signal SIGUSR2 a init, ou directement avec -f).
+  @description: /sbin/poweroff : eteint la machine (signal SIGUSR2 a init,
+      ou directement avec -f).
 }
 
 Program POWEROFF;
 
 Const
   M : Array[1..2, 1..5] Of PChar = (
-    ('Usage : poweroff [-f]', 'Usage: poweroff [-f]', 'Aufruf: poweroff [-f]', 'Uso: poweroff [-f]',
+    ('Usage : poweroff [-f]', 'Usage: poweroff [-f]', 'Aufruf: poweroff [-f]',
+      'Uso: poweroff [-f]',
      'Uso: poweroff [-f]'),
     ('-f : sans prevenir init (synchronise puis agit directement)',
      '-f: do not signal init (sync, then act directly)',
@@ -47,7 +49,8 @@ BEGIN
   If Force Then
   Begin
     SysSync;
-    If SysReboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_POWER_OFF) < 0 Then;
+    If SysReboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+      LINUX_REBOOT_POWER_OFF) < 0 Then;
   End
   Else If SysKill(1, SIGUSR2) < 0 Then
   Begin

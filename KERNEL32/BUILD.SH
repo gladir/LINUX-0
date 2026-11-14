@@ -22,7 +22,7 @@
 #  Usage : KERNEL32/BUILD.SH [boot]       ("boot" : etape 2 seulement)
 #  Variables : W (dossier de travail, defaut /tmp/linux32-build), FPC, NASM,
 #              LPC (compilateur deja construit), TESTKERNEL=1, MB (taille du
-#              disque en Mo, KSRC (source du noyau), defaut 64), BS (blocs ext2, defaut 1024), INODE
+#              disque en Mo, KSRC (source du noyau), IMG (image produite), defaut 64), BS (blocs ext2, defaut 1024), INODE
 #              (taille d'inode, defaut 128), CMDLINE (ligne de commande du
 #              noyau, defaut : root=/dev/hda1 rw console=ttyS0), NOCMDS=1 (sans les 178
 #              commandes du depot : systeme minimal).
@@ -137,8 +137,9 @@ mkdir -p "$W/root/home/linux"; chown 1000:1000 "$W/root/home/linux" 2>/dev/null 
 chmod 1777 "$W/root/tmp" "$W/root/var/tmp"
 
 echo "== Image disque"
-mkdir -p "$HERE/IMAGE"
-"$HERE/TOOLS/MKIMAGE.SH" -o "$HERE/IMAGE/LINUX32-HD.IMG" -k "$KERNEL" \
+IMG=${IMG:-$HERE/IMAGE/LINUX32-HD.IMG}     # image produite
+mkdir -p "$(dirname "$IMG")"
+"$HERE/TOOLS/MKIMAGE.SH" -o "$IMG" -k "$KERNEL" \
   -r "$W/root" -s "$MB" -b "$BS" -i "$INODE" -c "${CMDLINE:-root=/dev/hda1 rw console=ttyS0}"
 echo "Essai : qemu-system-i386 -m 64" \
   "-drive file=IMAGE/LINUX32-HD.IMG,format=raw,if=ide"

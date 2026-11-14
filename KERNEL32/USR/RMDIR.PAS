@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/rmdir : supprime des repertoires vides (-p : avec les parents).
+  @description: /bin/rmdir : supprime des repertoires vides (-p : avec les
+      parents).
 }
 
 Program Rmdir;
@@ -58,7 +59,8 @@ BEGIN
       Begin
         If SysRmdir(A) < 0 Then
         Begin
-          SysPut(2, Msg(2) + #39 + A + #39 + ' : ' + SysErrorText(SysErrno) + #10);
+          SysPut(2, Msg(2) + #39 + A + #39 + ' : ' + SysErrorText(SysErrno) +
+            #10);
           Rc := 1;
           Break;
         End;

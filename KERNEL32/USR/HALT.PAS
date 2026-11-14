@@ -2,14 +2,16 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/halt : arrete le systeme (signal SIGUSR1 a init, ou directement avec -f).
+  @description: /sbin/halt : arrete le systeme (signal SIGUSR1 a init,
+      ou directement avec -f).
 }
 
 Program HALT;
 
 Const
   M : Array[1..2, 1..5] Of PChar = (
-    ('Usage : halt [-f]', 'Usage: halt [-f]', 'Aufruf: halt [-f]', 'Uso: halt [-f]',
+    ('Usage : halt [-f]', 'Usage: halt [-f]', 'Aufruf: halt [-f]',
+      'Uso: halt [-f]',
      'Uso: halt [-f]'),
     ('-f : sans prevenir init (synchronise puis agit directement)',
      '-f: do not signal init (sync, then act directly)',
@@ -47,7 +49,8 @@ BEGIN
   If Force Then
   Begin
     SysSync;
-    If SysReboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_HALT) < 0 Then;
+    If SysReboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+      LINUX_REBOOT_HALT) < 0 Then;
   End
   Else If SysKill(1, SIGUSR1) < 0 Then
   Begin

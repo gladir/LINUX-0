@@ -2,14 +2,16 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/reboot : redemarre le systeme (signal SIGTERM a init, ou directement avec -f).
+  @description: /sbin/reboot : redemarre le systeme (signal SIGTERM a init,
+      ou directement avec -f).
 }
 
 Program REBOOT;
 
 Const
   M : Array[1..2, 1..5] Of PChar = (
-    ('Usage : reboot [-f]', 'Usage: reboot [-f]', 'Aufruf: reboot [-f]', 'Uso: reboot [-f]',
+    ('Usage : reboot [-f]', 'Usage: reboot [-f]', 'Aufruf: reboot [-f]',
+      'Uso: reboot [-f]',
      'Uso: reboot [-f]'),
     ('-f : sans prevenir init (synchronise puis agit directement)',
      '-f: do not signal init (sync, then act directly)',
@@ -47,7 +49,8 @@ BEGIN
   If Force Then
   Begin
     SysSync;
-    If SysReboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_RESTART) < 0 Then;
+    If SysReboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+      LINUX_REBOOT_RESTART) < 0 Then;
   End
   Else If SysKill(1, SIGTERM) < 0 Then
   Begin

@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/mkpasswd : affiche le mot de passe code (13 caracteres) pour /etc/shadow : mkpasswd mot_de_passe [sel].
+  @description: /sbin/mkpasswd : affiche le mot de passe code (13 caracteres)
+      pour /etc/shadow : mkpasswd mot_de_passe [sel].
 }
 
 Program Mkpasswd;

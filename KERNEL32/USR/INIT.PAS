@@ -325,19 +325,44 @@ Begin
 End;
 
 Procedure KillAll(Sig : LongInt);
+{ signal a tous les processus utilisateur (pid > 2, hors init) : on ne se
+  sert pas de kill(-1) qui peut aussi atteindre init et les fils du noyau }
+Var D, Ino, P, K, V : LongInt; Nm : String; Ok : Boolean;
 Begin
-  SysKill(-1, Sig);
+  D := SysOpenDir('/proc');
+  If D < 0 Then
+  Begin
+    SysKill(-1, Sig);
+    Exit;
+  End;
+  While SysReadDir(D, Nm, Ino) Do
+  Begin
+    Ok := Length(Nm) > 0;
+    V := 0;
+    For K := 1 To Length(Nm) Do
+      If (Nm[K] >= '0') And (Nm[K] <= '9') Then V := V * 10 + Ord(Nm[K]) - 48
+      Else Ok := False;
+    If Ok And (V > 2) And (V <> SysGetPid) Then SysKill(V, Sig);
+  End;
+  SysCloseDir(D);
 End;
 
 Procedure Reap(Seconds : LongInt);
-{ recolte les fils pendant Seconds secondes au plus }
-Var R, S2, T0 : LongInt;
+{ recolte les fils jusqu'a ce qu'il n'y en ait plus (ou Seconds secondes au
+  plus : on n'endort pas init, nanosleep ne reveille pas toujours init) }
+Var R, S2, T0, K : LongInt;
 Begin
   T0 := SysTime;
-  While SysTime - T0 < Seconds Do
+  K := 0;
+  While (SysTime - T0 < Seconds) And (K < 20000) Do
   Begin
     R := SysWaitPid(-1, S2, WNOHANG);
-    If R <= 0 Then SysSleep(1);
+    If R < 0 Then Exit;
+    If R = 0 Then
+    Begin
+      Inc(K);
+      SysCall(158, 0, 0, 0, 0, 0);
+    End;
   End;
 End;
 

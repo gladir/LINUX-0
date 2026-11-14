@@ -2,20 +2,24 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/rm : supprime des fichiers (-r -R recursif, -f sans erreur, -i demande, -v bavard).
+  @description: /bin/rm : supprime des fichiers (-r -R recursif,
+      -f sans erreur, -i demande, -v bavard).
 }
 
 Program Rm;
 
 Const
   M : Array[1..3, 1..5] Of PChar = (
-    ('Usage : rm [-rfiv] fichier...', 'Usage: rm [-rfiv] file...', 'Aufruf: rm [-rfiv] Datei...',
+    ('Usage : rm [-rfiv] fichier...', 'Usage: rm [-rfiv] file...',
+      'Aufruf: rm [-rfiv] Datei...',
      'Uso: rm [-rfiv] fichero...', 'Uso: rm [-rfiv] file...'),
-    ('rm : impossible de supprimer ', 'rm: cannot remove ', 'rm: kann nicht entfernt werden: ',
+    ('rm : impossible de supprimer ', 'rm: cannot remove ',
+      'rm: kann nicht entfernt werden: ',
      'rm: no se puede eliminar ', 'rm: impossibile rimuovere '),
     ('supprimer ', 'remove ', 'entfernen ', 'eliminar ', 'rimuovere '));
 
-Var I, Rc, N, Cnt : LongInt; A : String; Rec, Force, Inter, Verb, NoOpt : Boolean;
+Var I, Rc, N, Cnt : LongInt; A : String; Rec, Force, Inter, Verb,
+  NoOpt : Boolean;
 
 Function Msg(Id : LongInt) : String;
 Var P : PChar; X : String;
@@ -57,7 +61,8 @@ Begin
 End;
 
 Procedure Remove(Const P : String);
-Var St : TSysStat; D, Ino, K, C : LongInt; Nm : String; L : Array[0..199] Of String;
+Var St : TSysStat; D, Ino, K,
+  C : LongInt; Nm : String; L : Array[0..199] Of String;
 Begin
   If SysLStat(P, St) < 0 Then
   Begin

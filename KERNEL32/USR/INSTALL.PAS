@@ -21,7 +21,8 @@
      -d  disque cible (defaut : demande ; ex. /dev/hdb)
      -l  langue du systeme installe : FR, EN, GR (allemand), SP, IT
      -s  taille de la partition en Mo (defaut : tout le disque)
-     -r  racine source (defaut /) ; -y  ne rien demander (essais automatiques)  -q  silencieux
+     -r  racine source (defaut /) ; -y  ne rien demander (essais automatiques)
+       -q  silencieux
    Messages en cinq langues (LANGUAGE ou choix au debut).
 }
 
@@ -45,8 +46,10 @@ Const
      'Sprache: 1 Francais, 2 English, 3 Deutsch, 4 Espanol, 5 Italiano [3]: ',
      'Idioma: 1 Francais, 2 English, 3 Deutsch, 4 Espanol, 5 Italiano [4]: ',
      'Lingua: 1 Francais, 2 English, 3 Deutsch, 4 Espanol, 5 Italiano [5]: '),
-    ('Disque cible (par exemple /dev/hdb) : ', 'Target disk (for example /dev/hdb): ',
-     'Zieldatentraeger (zum Beispiel /dev/hdb): ', 'Disco de destino (por ejemplo /dev/hdb): ',
+    ('Disque cible (par exemple /dev/hdb) : ',
+      'Target disk (for example /dev/hdb): ',
+     'Zieldatentraeger (zum Beispiel /dev/hdb): ',
+       'Disco de destino (por ejemplo /dev/hdb): ',
      'Disco di destinazione (per esempio /dev/hdb): '),
     ('TOUT le contenu du disque sera efface. Continuer (oui/non) ? ',
      'ALL data on the disk will be erased. Continue (yes/no)? ',
@@ -56,8 +59,10 @@ Const
     ('Annule.', 'Cancelled.', 'Abgebrochen.', 'Cancelado.', 'Annullato.'),
     ('Partitionnement et amorce...', 'Partitioning...', 'Partitionierung...',
      'Particionando...', 'Partizionamento...'),
-    ('Creation du systeme de fichiers ext2...', 'Creating the ext2 file system...',
-     'Erstelle das ext2-Dateisystem...', 'Creando el sistema de ficheros ext2...',
+    ('Creation du systeme de fichiers ext2...',
+      'Creating the ext2 file system...',
+     'Erstelle das ext2-Dateisystem...',
+       'Creando el sistema de ficheros ext2...',
      'Creazione del file system ext2...'),
     ('Copie du systeme...', 'Copying the system...', 'Kopiere das System...',
      'Copiando el sistema...', 'Copia del sistema...'),
@@ -71,7 +76,8 @@ Const
      'Installazione completata. Rimuovere il supporto e riavviare.'),
     ('Erreur : ', 'Error: ', 'Fehler: ', 'Error: ', 'Errore: '),
     ('disque inaccessible ou trop petit', 'disk not accessible or too small',
-     'Datentraeger nicht zugreifbar oder zu klein', 'disco inaccesible o demasiado pequeno',
+     'Datentraeger nicht zugreifbar oder zu klein',
+       'disco inaccesible o demasiado pequeno',
      'disco inaccessibile o troppo piccolo'),
     ('plus de place sur le disque cible', 'target disk is full',
      'Zieldatentraeger ist voll', 'el disco de destino esta lleno',
@@ -81,10 +87,13 @@ Const
      'Aufruf: install [-d Platte] [-l FR|EN|GR|SP|IT] [-s MB] [-y] [-q]',
      'Uso: install [-d disco] [-l FR|EN|GR|SP|IT] [-s MB] [-y] [-q]',
      'Uso: install [-d disco] [-l FR|EN|GR|SP|IT] [-s MB] [-y] [-q]'),
-    ('Fichiers copies : ', 'Files copied: ', 'Kopierte Dateien: ', 'Ficheros copiados: ',
+    ('Fichiers copies : ', 'Files copied: ', 'Kopierte Dateien: ',
+      'Ficheros copiados: ',
      'File copiati: '),
-    ('MBR.BIN ou STAGE2.BIN introuvable dans /usr/share/boot', 'MBR.BIN or STAGE2.BIN not found in /usr/share/boot',
-     'MBR.BIN oder STAGE2.BIN fehlt in /usr/share/boot', 'No se encuentra MBR.BIN o STAGE2.BIN en /usr/share/boot',
+    ('MBR.BIN ou STAGE2.BIN introuvable dans /usr/share/boot',
+      'MBR.BIN or STAGE2.BIN not found in /usr/share/boot',
+     'MBR.BIN oder STAGE2.BIN fehlt in /usr/share/boot',
+       'No se encuentra MBR.BIN o STAGE2.BIN en /usr/share/boot',
      'MBR.BIN o STAGE2.BIN non trovato in /usr/share/boot'),
     ('Systeme de fichiers ext2 cree.', 'ext2 file system created.',
      'ext2-Dateisystem erstellt.', 'Sistema de ficheros ext2 creado.',
@@ -412,7 +421,8 @@ Begin
   DirBlockCount := Cnt;
 End;
 
-Procedure EmitDirent(Addr, Off, Ino, RecLen, NameLen, Typ : LongInt; Const Name : String);
+Procedure EmitDirent(Addr, Off, Ino, RecLen, NameLen,
+  Typ : LongInt; Const Name : String);
 Var K : LongInt;
 Begin
   PutD(Addr, Off, Ino);
@@ -424,7 +434,8 @@ End;
 
 { ecrit le repertoire Ino (parent Par) avec ses entrees ; rend les blocs }
 Procedure WriteDir(Ino, Par : LongInt; Ents : PDirEnts; N : LongInt;
-    Mode, Uid, Gid, ATime, CTime, MTime, SubDirs : LongInt; MinBlocks : LongInt);
+    Mode, Uid, Gid, ATime, CTime, MTime,
+      SubDirs : LongInt; MinBlocks : LongInt);
 Var K, Off, LastOff, Need, Blk, NB : LongInt;
 Begin
   FileBegin;
@@ -472,7 +483,8 @@ Begin
     FileAddBlock(Blk);
     Inc(NB);
   End;
-  PutInode(Ino, $4000 Or (Mode And $FFF), Uid, Gid, NB * BS, ATime, CTime, MTime,
+  PutInode(Ino, $4000 Or (Mode And $FFF), Uid, Gid, NB * BS, ATime, CTime,
+    MTime,
            2 + SubDirs, FSect, FBlocks);
 End;
 
@@ -499,7 +511,8 @@ Begin
 End;
 
 Procedure CopyFileData(Const Src : String; Var St : TSysStat; Ino : LongInt);
-Var In1, N, Blk, Total : LongInt; Chunk : Array[0..1023] Of Byte; Blocks : TBlk15;
+Var In1, N, Blk,
+  Total : LongInt; Chunk : Array[0..1023] Of Byte; Blocks : TBlk15;
 Begin
   FileBegin;
   In1 := SysOpen(Src, O_RDONLY, 0);
@@ -547,7 +560,8 @@ Begin
     End;
     SysClose(In1);
   End;
-  If Not Have Then Text := 'LANGUAGE=' + NewLang + #10 + 'export LANGUAGE' + #10 + Text;
+  If Not Have Then Text := 'LANGUAGE=' + NewLang + #10 + 'export LANGUAGE' +
+    #10 + Text;
   FileBegin;
   FillChar(Chunk, BS, 0);
   Len := Length(Text);
@@ -584,7 +598,8 @@ Begin
       Begin
         If (Name = '.') Or (Name = '..') Then Continue;
         If Cnt >= MAXDIRENT Then Break;
-        If Src[Length(Src)] = '/' Then Full := Src + Name Else Full := Src + '/' + Name;
+        If Src[Length(Src)] = '/' Then Full := Src + Name Else Full := Src +
+          '/' + Name;
         Child := Full;
         If Rel = '' Then Link := '/' + Name Else Link := Rel + '/' + Name;
         If SysLStat(Full, S2) < 0 Then Continue;
@@ -616,7 +631,8 @@ Begin
                 Begin
                   For K := 1 To Length(Link) Do
                     PutB(LongInt(@Blocks), K - 1, Ord(Link[K]));
-                  PutInode(Ino2, S2.Mode, S2.Uid, S2.Gid, Length(Link), S2.ATime,
+                  PutInode(Ino2, S2.Mode, S2.Uid, S2.Gid, Length(Link),
+                    S2.ATime,
                            S2.MTime, S2.MTime, 1, 0, Blocks);
                 End
                 Else
@@ -627,7 +643,8 @@ Begin
                   WriteBlk(K, LongInt(@Buf));
                   FileAddBlock(K);
                   Blocks := FBlocks;
-                  PutInode(Ino2, S2.Mode, S2.Uid, S2.Gid, Length(Link), S2.ATime,
+                  PutInode(Ino2, S2.Mode, S2.Uid, S2.Gid, Length(Link),
+                    S2.ATime,
                            S2.MTime, S2.MTime, 1, FSect, Blocks);
                 End;
               End;
@@ -726,20 +743,17 @@ Begin
   End;
   For G := 0 To NGroups - 1 Do
   Begin
-    { bitmaps }
-    For K := 0 To BS - 1 Do Bb[K] := BlkBm[((GroupBase(G) Div 8)) + K];
-  End;
-  For G := 0 To NGroups - 1 Do
-  Begin
     { bitmap des blocs : bits du groupe (le debut du groupe est un
       multiple de 8 + 1 : on recopie bit a bit) }
     FillChar(Bb, BS, 0);
     For K := 0 To BPG - 1 Do
-      If GetBlkBit(GroupBase(G) + K) Then Bb[K Shr 3] := Bb[K Shr 3] Or (1 Shl (K And 7));
+      If GetBlkBit(GroupBase(G) + K) Then Bb[K Shr 3] := Bb[K Shr 3] Or (1 Shl
+        (K And 7));
     WriteBlk(GrpBBm[G], LongInt(@Bb));
     FillChar(Bb, BS, 0);
     For K := 0 To IPG - 1 Do
-      If (InoBm[(G * IPG + K) Shr 3] And (1 Shl ((G * IPG + K) And 7))) <> 0 Then
+      If (InoBm[(G * IPG + K) Shr 3] And (1 Shl ((G * IPG + K) And 7))) <> 0
+        Then
         Bb[K Shr 3] := Bb[K Shr 3] Or (1 Shl (K And 7));
     For K := IPG To BPG - 1 Do Bb[K Shr 3] := Bb[K Shr 3] Or (1 Shl (K And 7));
     WriteBlk(GrpIBm[G], LongInt(@Bb));
@@ -769,7 +783,6 @@ Procedure MakeLostFound;
 Var Ents : PDirEnts; Blocks : TBlk15;
 Begin
   GetMem(Ents, SizeOf(TDirEnts));
-  Inc(NextIno, 0);
   { inode 11 reserve pour lost+found : allouer explicitement }
   SetInoBit(10);
   Dec(GrpFreeIno[0]);
@@ -799,7 +812,8 @@ Begin
 End;
 
 Procedure InstallBoot(TotalSectors : LongInt);
-Var Mbr : Array[0..511] Of Byte; F, N, K, Ns2 : LongInt; St2 : Array[0..65535] Of Byte;
+Var Mbr : Array[0..511] Of Byte; F, N, K,
+  Ns2 : LongInt; St2 : Array[0..65535] Of Byte;
     Len : LongInt;
 Begin
   FillChar(Mbr, 512, 0);
@@ -986,7 +1000,6 @@ BEGIN
   If SysStat(SrcRoot + '/', St) < 0 Then Die('stat /');
   Root := 2;
   SetInoBit(1);
-  Dec(GrpFreeIno[0], 0);
   { l'inode 2 (racine) fait partie des 10 reserves ; lost+found = 11 }
   Inc(GrpDirs[0]);
   MakeLostFound;

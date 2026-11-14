@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/hostname : affiche ou change le nom de la machine (sethostname).
+  @description: /bin/hostname : affiche ou change le nom de la machine
+      (sethostname).
 }
 
 Program Hostname;

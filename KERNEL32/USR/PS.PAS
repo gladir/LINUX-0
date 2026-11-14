@@ -2,14 +2,16 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/ps : liste des processus (lit /proc/N/status et /proc/N/cmdline).
+  @description: /bin/ps : liste des processus (lit /proc/N/status et
+      /proc/N/cmdline).
 }
 
 Program Ps;
 
 Const
   M : Array[1..1, 1..5] Of PChar = (
-    ('ps : /proc inaccessible', 'ps: cannot read /proc', 'ps: /proc nicht lesbar',
+    ('ps : /proc inaccessible', 'ps: cannot read /proc',
+      'ps: /proc nicht lesbar',
      'ps: no se puede leer /proc', 'ps: /proc non leggibile'));
   Hdr : Array[1..5] Of PChar = (
     '  PID  PPID UTIL ET TAILLE COMMANDE', '  PID  PPID USER  S   SIZE COMMAND',
@@ -99,7 +101,8 @@ BEGIN
   All := False;
   Uid := SysGetUid;
   If (SysArgCount > 1) And ((SysArgStr(1) = '-e') Or (SysArgStr(1) = '-A') Or
-     (SysArgStr(1) = 'aux') Or (SysArgStr(1) = '-ef') Or (SysArgStr(1) = 'ax')) Then
+     (SysArgStr(1) = 'aux') Or (SysArgStr(1) = '-ef') Or (SysArgStr(1) =
+       'ax')) Then
     All := True;
   D := SysOpenDir('/proc');
   If D < 0 Then

@@ -2,17 +2,21 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/kill : envoie un signal (kill [-s sig | -sig] pid... ; kill -l liste les signaux).
+  @description: /bin/kill : envoie un signal (kill [-s sig | -sig] pid... ;
+      kill -l liste les signaux).
 }
 
 Program Kill;
 
 Const
   M : Array[1..3, 1..5] Of PChar = (
-    ('Usage : kill [-s signal | -signal] pid...', 'Usage: kill [-s signal | -signal] pid...',
-     'Aufruf: kill [-s Signal | -Signal] pid...', 'Uso: kill [-s senal | -senal] pid...',
+    ('Usage : kill [-s signal | -signal] pid...',
+      'Usage: kill [-s signal | -signal] pid...',
+     'Aufruf: kill [-s Signal | -Signal] pid...',
+       'Uso: kill [-s senal | -senal] pid...',
      'Uso: kill [-s segnale | -segnale] pid...'),
-    ('signal inconnu : ', 'unknown signal: ', 'unbekanntes Signal: ', 'senal desconocida: ',
+    ('signal inconnu : ', 'unknown signal: ', 'unbekanntes Signal: ',
+      'senal desconocida: ',
      'segnale sconosciuto: '),
     ('kill : ', 'kill: ', 'kill: ', 'kill: ', 'kill: '));
   Names : Array[1..31] Of String[7] = (

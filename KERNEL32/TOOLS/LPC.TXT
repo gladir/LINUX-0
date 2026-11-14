@@ -165,6 +165,14 @@ passe de 180 Ko a 13 Ko, une commande type fait 20 a 60 Ko (tout le depot :
 donnees (chaine vide...) reserve un mot propre. -nogc desactive l'elimination
 (utile pour localiser un defaut du compilateur).
 
+Autres correctifs du moteur -3X (non-regression : TESTS/C/RUN.SH)
+------------------------------------------------------------------
+FindFirst/FindNext gardent leur poignee dans le SearchRec (recherches
+imbriquees ou recursives : tree), Write(#0) et Write de chaine par la
+longueur (octets nuls : gzip), parametres PChar (Inc(P)), 'x' In ensemble,
+Include/Exclude de caracteres, WriteLn(S = T), ReadLn(A[i]), tas : le bloc
+reserve un octet pour le NUL des chaines.
+
 Pieges du langage connus (Pascal est insensible a la casse)
 -----------------------------------------------------------
 - Un type et une constante qui ne different que par la casse (TWord/tWord)

@@ -5,7 +5,8 @@
   @description: /bin/sh de KERNEL32 : interpreteur de commandes de type
    POSIX en Pascal. Variables, export, $? $$ $! $# $@ $* $0 $1.., guillemets
    ' " \, expansions (*, ?, [..], ~, $(..), `..`, $((..)), formes avec
-   accolades pour les valeurs par defaut, la longueur et les suffixes), redirections (< > >> 2> 2>&1 <<EOF <<-EOF <>),
+   accolades pour les valeurs par defaut, la longueur et les suffixes),
+     redirections (< > >> 2> 2>&1 <<EOF <<-EOF <>),
    tubes, listes ; & && ||, travaux (jobs fg bg, Ctrl-Z), if/elif/else,
    while, until, for, case, fonctions, source, alias, trap, et les commandes
    internes cd pwd echo export unset exit read test [ set shift wait trap
@@ -5912,7 +5913,8 @@ End;
 
 Function ReadLineEd(Const Prompt : String; Var Line : String) : Boolean;
 Var
-  Buf, Saved : String; Cur, Key, K2, K3, HI, I, N, Num : LongInt; Done : Boolean;
+  Buf, Saved : String; Cur, Key, K2, K3, HI, I, N,
+    Num : LongInt; Done : Boolean;
   Twice, Raw : Boolean; C : Char; P2 : String;
 Begin
   ReadLineEd := True;
@@ -6079,7 +6081,8 @@ Begin
               126 :
                 Case Num Of
                   1, 7 : Begin Cur := 0; Redraw(Prompt, Buf, Cur); End;
-                  4, 8 : Begin Cur := Length(Buf); Redraw(Prompt, Buf, Cur); End;
+                  4, 8 : Begin Cur := Length(Buf); Redraw(Prompt, Buf,
+                    Cur); End;
                   3 : If Cur < Length(Buf) Then
                       Begin
                         Delete(Buf, Cur + 1, 1);
@@ -6166,7 +6169,8 @@ End;
 
 Procedure Usage;
 Begin
-  Err(Msg(mHelpUsage) + ': sh [-ceilnsuvx] [-c commande] [fichier [arguments]]');
+  Err(Msg(mHelpUsage) +
+    ': sh [-ceilnsuvx] [-c commande] [fichier [arguments]]');
   SysExit(2);
 End;
 

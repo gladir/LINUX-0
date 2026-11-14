@@ -12,7 +12,8 @@ BEGIN
   For I := 1 To SysArgCount - 1 Do
     If SysUmount(SysArgStr(I)) < 0 Then
     Begin
-      SysPut(2, 'umount: ' + SysArgStr(I) + ': ' + SysErrorText(SysErrno) + #10);
+      SysPut(2, 'umount: ' + SysArgStr(I) + ': ' + SysErrorText(SysErrno) +
+        #10);
       Rc := 1;
     End;
   SysExit(Rc);
