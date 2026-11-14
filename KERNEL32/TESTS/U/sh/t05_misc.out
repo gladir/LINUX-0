@@ -1,0 +1,32 @@
+a.txt b.txt
+a.txt b.txt c.dat
+a.txt b.txt
+c.dat
+*.txt
+*.txt
+nomatch*
+3
+hello
+world
+a b c
+back
+nested quotes
+a b
+[]
+3
+7
+5
+still
+func 3
+x
+y
+z
+[x]
+[y]
+[x y]
+a b
+c
+16 8
+case-ok
+done
+rc=0

@@ -187,7 +187,7 @@ Const
   EISDIR = 21; EINVAL = 22;  ENFILE = 23;  EMFILE = 24;  ENOTTY = 25;
   ETXTBSY = 26; EFBIG = 27;  ENOSPC = 28;  ESPIPE = 29;  EROFS = 30;
   EMLINK = 31; EPIPE = 32;   EDOM = 33;    ERANGE = 34;  EDEADLK = 35;
-  ENAMETOOLONG = 36; ENOLCK = 37; ENOSYS = 38; ENOTEMPTY = 39; ELOOP = 40;
+  ENAMETOOLONG = 36; ENOLCK = 37; ELIBBAD = 80; ENOSYS = 38; ENOTEMPTY = 39; ELOOP = 40;
   ENOTSOCK = 88; EAFNOSUPPORT = 97; ERESTARTSYS = 512;
 
 Type
@@ -1346,6 +1346,7 @@ Var
   KeymapName       : String[8];
   RootDev          : String[63];
   InitPath         : String[63];
+  UnameRel         : String[63];   { release de uname (KERNEL32 par defaut) }
   BootQuiet        : Boolean;
   KDebug           : Boolean;      { debug : journal des fautes et appels }
   ConsoleSerial    : Boolean;      { console=ttyS0 : /dev/console = port serie }
@@ -1479,6 +1480,9 @@ Begin
   If KeymapName = '' Then KeymapName := 'us';
   RootDev := CmdGet('root');
   InitPath := CmdGet('init');
+  UnameRel := CmdGet('uname_release');
+  If UnameRel = '' Then
+    If CmdHas('uname26') Then UnameRel := '2.6.32' Else UnameRel := 'KERNEL32';
   BootQuiet := CmdHas('quiet');
   KDebug := CmdHas('debug');
   ConsoleSerial := Copy(CmdGet('console'), 1, 5) = 'ttyS0';
@@ -2643,7 +2647,7 @@ Type
     SigSender          : Array[0..64] Of LongInt;   { pid de l'emetteur }
     SigStk             : Array[0..2] Of LongInt;    { sigaltstack }
     ReapPending        : LongInt;
-    Fpu                : Array[0..27] Of LongInt;   { etat x87 (FNSAVE) }
+    Fpu                : Array[0..131] Of LongInt;  { FXSAVE (512, aligne 16) ou FNSAVE }
   End;
 
 Var
@@ -2700,16 +2704,60 @@ Begin
   end;
 End;
 
-{ Etat de l'unite flottante : FNSAVE / FRSTOR / FNINIT (octets bruts) }
+{ Etat de l'unite flottante. Avec FXSR (CPUID 1, EDX bit 24 : x87, MMX et
+  SSE) : FXSAVE/FXRSTOR de 512 octets alignes sur 16 (l'adresse donnee est
+  arrondie) ; sinon FNSAVE/FRSTOR de 108 octets. CR4.OSFXSR et OSXMMEXCPT
+  sont mis par FpuDetect (sans cela SSE leve #UD). }
+Var
+  HasFxsr    : Boolean;
+  FxInitBuf  : Array[0..131] Of LongInt;   { etat initial (xmm a zero) }
+  FxTmp      : Array[0..131] Of LongInt;   { tampon de passage }
+
+Function FpuAlign(A : LongInt) : LongInt;
+Begin
+  FpuAlign := (A + 15) And Not 15;
+End;
+
 Procedure SaveFpu(Addr : LongInt);
 Begin
-  asm
-    mov eax,Addr
-    db 221,48
-  end;
+  If HasFxsr Then
+  Begin
+    Addr := FpuAlign(Addr);
+    asm
+      mov eax,Addr
+      db 15,174,0
+    end;
+  End
+  Else
+  Begin
+    asm
+      mov eax,Addr
+      db 221,48
+    end;
+  End;
 End;
 
 Procedure LoadFpu(Addr : LongInt);
+Begin
+  If HasFxsr Then
+  Begin
+    Addr := FpuAlign(Addr);
+    asm
+      mov eax,Addr
+      db 15,174,8
+    end;
+  End
+  Else
+  Begin
+    asm
+      mov eax,Addr
+      db 221,32
+    end;
+  End;
+End;
+
+{ Etat x87 seul au format FNSAVE (108 octets, adresse utilisateur) }
+Procedure FrstorAt(Addr : LongInt);
 Begin
   asm
     mov eax,Addr
@@ -2717,11 +2765,62 @@ Begin
   end;
 End;
 
+{ Etat initial : x87 reinitialise, registres xmm a zero, MXCSR = 1F80h }
 Procedure InitFpu;
 Begin
+  If HasFxsr Then LoadFpu(LongInt(@FxInitBuf[0]))
+  Else
+  Begin
+    asm
+      db 219,227
+    end;
+  End;
+End;
+
+{ Detecter FXSR/SSE, les activer, preparer l'etat initial }
+Procedure FpuDetect;
+Var Feat, A : LongInt;
+Begin
   asm
-    db 219,227
+    push ebx
+    mov eax,1
+    cpuid
+    mov Feat,edx
+    pop ebx
   end;
+  HasFxsr := (Feat And $1000000) <> 0;
+  If HasFxsr Then
+  Begin
+    asm
+      mov eax,cr0
+      and eax,-5
+      or eax,2
+      mov cr0,eax
+      mov eax,cr4
+      or eax,1536
+      mov cr4,eax
+    end;
+    A := FpuAlign(LongInt(@FxInitBuf[0]));
+    MemFill(A, 0, 512);
+    MemW[0:A] := $037F;
+    MemL[0:A + 24] := $1F80;
+  End;
+End;
+
+{ Image FXSAVE (512 octets) vers / depuis une adresse quelconque }
+Procedure FxSaveTo(Dst : LongInt);
+Begin
+  SaveFpu(LongInt(@FxTmp[0]));
+  MemCopy(Dst, FpuAlign(LongInt(@FxTmp[0])), 512);
+End;
+
+Procedure FxLoadFrom(Src : LongInt);
+Var A : LongInt;
+Begin
+  A := FpuAlign(LongInt(@FxTmp[0]));
+  MemCopy(A, Src, 512);
+  MemL[0:A + 24] := MemL[0:A + 24] And $FFBF;
+  LoadFpu(LongInt(@FxTmp[0]));
 End;
 
 Procedure LoadTls(T : PTask);
@@ -3081,6 +3180,7 @@ Begin
   SaveFpu(LongInt(@Cur^.Fpu[0]));
   LoadFpu(LongInt(@Cur^.Fpu[0]));
   MemCopy(LongInt(T), LongInt(Cur), SizeOf(TTask));
+  MemCopy(FpuAlign(LongInt(@T^.Fpu[0])), FpuAlign(LongInt(@Cur^.Fpu[0])), 512);
   T^.State := TsSleepUn;                 { pas encore ordonnable }
   T^.KStack := AllocPages(KStackOrder);
   If T^.KStack = 0 Then
@@ -3565,6 +3665,7 @@ Begin
       <> 0) Then
     Sp := Cur^.SigStk[0] + Cur^.SigStk[2];
   If Rt Then Size := 380 Else Size := 220;
+  If HasFxsr Then Size := Size + 512;
   Fr := ((Sp - Size) And Not 15) - 4;
   If Not EnsureUser(Fr, Sp - Fr, True) Then Exit;
   MemFill(Fr, 0, Sp - Fr);
@@ -3581,6 +3682,7 @@ Begin
     Sc := Fr + 164;
     Fpu := Fr + 260;
     Rest := Fr + 372;
+    If HasFxsr Then Rest := Rest + 512;
     MemL[0:Fr + 252] := Cur^.Blk[0];
     MemL[0:Fr + 256] := Cur^.Blk[1];
   End
@@ -3590,11 +3692,20 @@ Begin
     MemL[0:Fr + 96] := Cur^.Blk[1];            { extramask }
     Fpu := Fr + 100;
     Rest := Fr + 212;
+    If HasFxsr Then Rest := Rest + 512;
   End;
   PutSigContext(Sc, F, Cur^.Blk[0], 0);
   MemL[0:Sc + 76] := Fpu;
-  SaveFpu(Fpu);
-  LoadFpu(Fpu);
+  If HasFxsr Then
+  Begin
+    FxSaveTo(Fpu + 112);
+    MemW[0:Fpu + 110] := 0;                 { magic : etat FXSR present }
+  End
+  Else
+  Begin
+    SaveFpu(Fpu);
+    LoadFpu(Fpu);
+  End;
   InitFpu;
   If (Fl And SA_RESTORER) <> 0 Then MemL[0:Fr] := Sg^.Restorer[Sig]
   Else
@@ -3675,7 +3786,13 @@ Begin
     If H = SIG_DFL Then
     Begin
       Act := DefaultAction(Sig);
-      If Cur^.Pid = 1 Then Continue;
+      If Cur^.Pid = 1 Then
+      Begin
+        If (Sig = SIGSEGV) Or (Sig = SIGILL) Or (Sig = SIGBUS)
+            Or (Sig = SIGFPE) Then
+          KPanic('Attempted to kill init ! (signal ' + IntStr(Sig) + ')');
+        Continue;
+      End;
       Case Act Of
         0, 4 : Continue;
         1 : DieBySignal(Sig, False);
@@ -3755,7 +3872,12 @@ Begin
     Cur^.Blk[1] := MemL[0:Sg + SigCtxSize];
   End;
   Fp := MemL[0:Sg + 76];
-  If (Fp <> 0) And EnsureUser(Fp, 108, False) Then LoadFpu(Fp);
+  If Fp <> 0 Then
+  Begin
+    If HasFxsr And EnsureUser(Fp, 624, False) And (MemW[0:Fp + 110] = 0) Then
+      FxLoadFrom(Fp + 112)
+    Else If EnsureUser(Fp, 108, False) Then FrstorAt(Fp);
+  End;
   DoSigreturn := F^.Eax;
 End;
 
@@ -4151,7 +4273,7 @@ Begin
   End;
   If P = B Then
     If Q = Nil Then BufAll := B^.Next Else Q^.Next := B^.Next;
-  If B^.Size >= 4096 Then FreePages(B^.Data, 0) Else KFree(B^.Data);
+  If B^.Size >= 2048 Then FreePages(B^.Data, 0) Else KFree(B^.Data);
   KFree(LongInt(B));
   Dec(BufCount);
 End;
@@ -4201,7 +4323,7 @@ Begin
   B := Pointer(KMallocZ(SizeOf(TBuf)));
   BGetBlk := Nil;
   If B = Nil Then Exit;
-  If Size >= 4096 Then B^.Data := AllocPages(0) Else B^.Data := KMalloc(Size);
+  If Size >= 2048 Then B^.Data := AllocPages(0) Else B^.Data := KMalloc(Size);
   If B^.Data = 0 Then
   Begin
     KFree(LongInt(B));
@@ -4326,7 +4448,7 @@ Const
   O_APPEND = $400; O_NONBLOCK = $800; O_SYNC = $1000; O_DIRECTORY = $10000;
   O_NOFOLLOW = $20000; O_LARGEFILE = $8000; O_CLOEXEC = $80000;
 
-  MS_RDONLY = 1;
+  MS_RDONLY = 1; MS_REMOUNT = 32; MS_BIND = 4096;
 
   { Operations sur les inodes (indices dans la table d'adresses) }
   IoLookup = 0; IoCreate = 1; IoMkdir = 2; IoMknod = 3; IoUnlink = 4;
@@ -4337,7 +4459,7 @@ Const
   FoOpen = 5; FoRelease = 6; FoLlseek = 7; FoFsync = 8;
   { Operations sur les superblocs }
   SoReadInode = 0; SoPutInode = 1; SoWriteInode = 2; SoStatfs = 3;
-  SoSync = 4; SoUmount = 5;
+  SoSync = 4; SoUmount = 5; SoClearInode = 6; SoRemount = 7;
 
   MaxSupers   = 16;
   MaxFsTypes  = 8;
@@ -4388,6 +4510,8 @@ Type
     NamePtr         : LongInt;
     Count, NChild   : LongInt;
     Mounted         : PSuper;
+    Bind            : PDentry;     { point de montage : racine du bind mount }
+    BindMp          : PDentry;     { racine d'un bind mount : son point de montage }
     Hashed          : LongInt;
     AllNext         : PDentry;
   End;
@@ -4417,6 +4541,7 @@ Var
   RootDentry  : PDentry;
   NextAnonDev : LongInt;
   LinkDepth   : LongInt;
+  BindCount   : LongInt;       { bind mounts crees (alias de dentries) }
   ChrOps      : Array[0..255] Of LongInt;
       { tables FoXxx par majeur }
   TmpIOps, TmpFOps, TmpDirFOps, TmpLnkIOps : Array[0..15] Of LongInt;
@@ -4515,6 +4640,39 @@ Begin
     If Q = Nil Then InodeAll := I^.Next Else Q^.Next := I^.Next;
 End;
 
+{ Liberer un inode du cache (ecrit s'il est modifie, libere ses donnees
+  privees par SoClearInode) }
+Procedure InodeFreeOne(P : PInode);
+Var Fn : LongInt;
+Begin
+  If P^.Dirty <> 0 Then
+  Begin
+    Fn := GetOp(P^.Sb^.SOps, SoWriteInode);
+    If Fn <> 0 Then Call1(Fn, LongInt(P));
+    P^.Dirty := 0;
+  End;
+  Fn := GetOp(P^.Sb^.SOps, SoClearInode);
+  If Fn <> 0 Then Call1(Fn, LongInt(P));
+  InodeUnlinkList(P);
+  Dec(InodeCount);
+  KFree(LongInt(P));
+End;
+
+{ Trop d'inodes en cache : liberer ceux des systemes de fichiers sur disque
+  qui ne sont plus utilises (compteur 0) }
+Procedure InodeShrink;
+Var P, N : PInode;
+Begin
+  P := InodeAll;
+  While (P <> Nil) And (InodeCount > 2000) Do
+  Begin
+    N := P^.Next;
+    If (P^.Count = 0) And (P^.Nlink > 0)
+        And (GetOp(P^.Sb^.SOps, SoClearInode) <> 0) Then InodeFreeOne(P);
+    P := N;
+  End;
+End;
+
 { Inode (Sb, Ino) : en cache, ou lu par SoReadInode (compteur incremente) }
 Function IGet(Sb : PSuper; Ino : LongInt) : PInode;
 Var I : PInode; Fn : LongInt;
@@ -4533,6 +4691,7 @@ Begin
   IGet := Nil;
   Fn := GetOp(Sb^.SOps, SoReadInode);
   If Fn = 0 Then Exit;
+  If InodeCount > 3000 Then InodeShrink;
   I := Pointer(KMallocZ(SizeOf(TInode)));
   If I = Nil Then Exit;
   I^.Sb := Sb; I^.Ino := Ino; I^.Count := 1; I^.Dev := Sb^.Dev;
@@ -4678,7 +4837,7 @@ Begin
   Dec(P^.Count);
   Dec(P^.Sb^.RefTotal);
   If (P^.Count <= 0) And ((P^.Hashed = 0) Or (P^.Inode = Nil)) And (P^.NChild
-      = 0) And (P^.Mounted = Nil) Then
+      = 0) And (P^.Mounted = Nil) And (P^.Bind = Nil) Then
   Begin
     Par := P^.Parent;
     DentryFree(P);
@@ -4752,7 +4911,8 @@ Begin
     While D <> Nil Do
     Begin
       N := D^.AllNext;
-      If (D^.Count = 0) And (D^.NChild = 0) And (D^.Mounted = Nil) And
+      If (D^.Count = 0) And (D^.NChild = 0) And (D^.Mounted = Nil)
+         And (D^.Bind = Nil) And
          (D^.Sb^.Root <> D) Then DentryFree(D);
       D := N;
     End;
@@ -4841,9 +5001,9 @@ End;
 Function CrossMounts(D : PDentry) : PDentry;
 Var N : PDentry;
 Begin
-  While D^.Mounted <> Nil Do
+  While (D^.Mounted <> Nil) Or (D^.Bind <> Nil) Do
   Begin
-    N := D^.Mounted^.Root;
+    If D^.Mounted <> Nil Then N := D^.Mounted^.Root Else N := D^.Bind;
     DentryGet(LongInt(N));
     DentryPut(LongInt(D));
     D := N;
@@ -5321,6 +5481,7 @@ Begin
       I^.Size := 0;
       Call2(Fn, LongInt(I), 0);
       I^.Mtime := NowSec; I^.Ctime := I^.Mtime;
+      IMarkDirty(I);
     End;
   End;
   F := FileNew(D, Flags);
@@ -5449,6 +5610,21 @@ Begin
   VfsCreateNode := R;
 End;
 
+{ Apres une suppression ou un renommage : oublier les dentries qui nomment
+  encore (DirI, Nm) par un autre chemin (bind mounts) }
+Procedure DentryDropAliases(DirI : PInode; Const Nm : String; Keep : PDentry);
+Var D : PDentry;
+Begin
+  D := DentAll;
+  While D <> Nil Do
+  Begin
+    If (D <> Keep) And (D^.Hashed <> 0) And (D^.Parent <> Nil) Then
+      If D^.Parent^.Inode = DirI Then
+        If DName(D) = Nm Then DentryUnhash(D);
+    D := D^.AllNext;
+  End;
+End;
+
 Function StickyDenied(Dir, Victim : PInode) : Boolean;
 Begin
   StickyDenied := False;
@@ -5491,7 +5667,7 @@ Begin
       If Rmdir Then
       Begin
         If Not IsDir(I) Then R := -ENOTDIR
-        Else If D^.Mounted <> Nil Then R := -EBUSY
+        Else If (D^.Mounted <> Nil) Or (D^.Bind <> Nil) Then R := -EBUSY
         Else If D^.NChild > 0 Then
         Begin
           { dentries enfants : decision du systeme de fichiers }
@@ -5515,7 +5691,11 @@ Begin
         End;
       End;
     End;
-    If R = 0 Then DentryUnhash(D);
+    If R = 0 Then
+    Begin
+      DentryUnhash(D);
+      If BindCount > 0 Then DentryDropAliases(Par^.Inode, Nm, D);
+    End;
     DentryPut(LongInt(D));
   End;
   DentryPut(LongInt(Par));
@@ -5585,7 +5765,8 @@ Begin
   If R = 0 Then R := InodePerm(NP^.Inode, MAY_WRITE Or MAY_EXEC);
   If (R = 0) And StickyDenied(OP^.Inode, Src^.Inode) Then R := -EPERM;
   If (R = 0) And IsDir(Src^.Inode) And IsAncestor(Src, NP) Then R := -EINVAL;
-  If (R = 0) And (Src^.Mounted <> Nil) Then R := -EBUSY;
+  If (R = 0) And ((Src^.Mounted <> Nil) Or (Src^.Bind <> Nil)) Then
+    R := -EBUSY;
   Dst := Nil;
   Replace := False;
   If R = 0 Then
@@ -5601,7 +5782,7 @@ Begin
       End;
       If IsDir(Src^.Inode) And Not IsDir(Dst^.Inode) Then R := -ENOTDIR
       Else If (Not IsDir(Src^.Inode)) And IsDir(Dst^.Inode) Then R := -EISDIR
-      Else If Dst^.Mounted <> Nil Then R := -EBUSY
+      Else If (Dst^.Mounted <> Nil) Or (Dst^.Bind <> Nil) Then R := -EBUSY
       Else If StickyDenied(NP^.Inode, Dst^.Inode) Then R := -EPERM;
     End;
   If R = 0 Then
@@ -5625,6 +5806,11 @@ Begin
     Src^.Next := DentTab[NameHash(NP, NN)];
     DentTab[NameHash(NP, NN)] := Src;
     Src^.Hashed := 1;
+    If BindCount > 0 Then
+    Begin
+      DentryDropAliases(OP^.Inode, ON, Nil);
+      DentryDropAliases(NP^.Inode, NN, Src);
+    End;
   End;
   If Dst <> Nil Then DentryPut(LongInt(Dst));
   DentryPut(LongInt(Src));
@@ -5737,6 +5923,7 @@ Begin
   I^.Size := Size;
   VfsTruncateInode := Call2(Fn, LongInt(I), Size);
   I^.Mtime := NowSec; I^.Ctime := I^.Mtime;
+  IMarkDirty(I);
 End;
 
 { Modifier les attributs : mode, proprietaire ; -1 = inchange }
@@ -5787,6 +5974,68 @@ Begin
 End;
 
 { ---- Montages ---- }
+
+{ Liberer tous les dentries inutilises d'un systeme de fichiers (sauf sa
+  racine) : les feuilles d'abord, jusqu'a ce qu'il n'en reste plus }
+Procedure DentryPurgeSb(Sb : PSuper);
+Var D, N : PDentry; Again : Boolean;
+Begin
+  Again := True;
+  While Again Do
+  Begin
+    Again := False;
+    D := DentAll;
+    While D <> Nil Do
+    Begin
+      N := D^.AllNext;
+      If (D^.Sb = Sb) And (D^.Count <= 0) And (D^.NChild = 0)
+          And (D^.Mounted = Nil) And (D^.Bind = Nil) And (D <> Sb^.Root) Then
+      Begin
+        DentryFree(D);
+        Again := True;
+      End;
+      D := N;
+    End;
+  End;
+End;
+
+{ Somme des references d'inodes d'un systeme de fichiers }
+Function InodeRefsOf(Sb : PSuper) : LongInt;
+Var P : PInode; N : LongInt;
+Begin
+  N := 0;
+  P := InodeAll;
+  While P <> Nil Do
+  Begin
+    If P^.Sb = Sb Then N := N + P^.Count;
+    P := P^.Next;
+  End;
+  InodeRefsOf := N;
+End;
+
+{ Liberer tous les inodes d'un systeme de fichiers (apres umount) }
+Procedure InodePurgeSb(Sb : PSuper);
+Var P, N : PInode; Fn : LongInt;
+Begin
+  P := InodeAll;
+  While P <> Nil Do
+  Begin
+    N := P^.Next;
+    If P^.Sb = Sb Then
+    Begin
+      If GetOp(Sb^.SOps, SoClearInode) <> 0 Then InodeFreeOne(P)
+      Else
+      Begin
+        Fn := GetOp(Sb^.SOps, SoPutInode);
+        If Fn <> 0 Then Call1(Fn, LongInt(P));
+        InodeUnlinkList(P);
+        Dec(InodeCount);
+        KFree(LongInt(P));
+      End;
+    End;
+    P := N;
+  End;
+End;
 
 Function FindFsType(Const Nm : String) : LongInt;
 Var I : LongInt;
@@ -5864,41 +6113,122 @@ Begin
   VfsMount := 0;
 End;
 
-Function VfsUmount(Const Path : String) : LongInt;
-Var D : PDentry; R, Fn, Dev : LongInt; Sb : PSuper; Cov : PDentry; I : LongInt;
+{ Un dentry est-il dans le sous-arbre de Root ? }
+Function DentryUnder(D, Root : PDentry) : Boolean;
+Var X : PDentry; N : LongInt;
 Begin
-  R := PathWalk(Path, True, D);
-  If R <> 0 Then
+  DentryUnder := False;
+  X := D;
+  N := 0;
+  While (X <> Nil) And (N < 200) Do
   Begin
-    VfsUmount := R;
+    If X = Root Then
+    Begin
+      DentryUnder := True;
+      Exit;
+    End;
+    X := X^.Parent;
+    Inc(N);
+  End;
+End;
+
+{ Demonter un bind mount dont C est la racine (C porte +1 du chemin) }
+Function VfsUnbind(C : PDentry) : LongInt;
+Var D, N, Y : PDentry; Again : Boolean;
+Begin
+  If C^.Count > 2 Then
+  Begin
+    DentryPut(LongInt(C));
+    VfsUnbind := -EBUSY;
+    Exit;
+  End;
+  Again := True;
+  While Again Do
+  Begin
+    Again := False;
+    D := DentAll;
+    While D <> Nil Do
+    Begin
+      N := D^.AllNext;
+      If (D <> C) And (D^.Count <= 0) And (D^.NChild = 0) And (D^.Mounted = Nil)
+         And (D^.Bind = Nil) And DentryUnder(D, C) Then
+      Begin
+        DentryFree(D);
+        Again := True;
+      End;
+      D := N;
+    End;
+  End;
+  If C^.NChild > 0 Then
+  Begin
+    DentryPut(LongInt(C));
+    VfsUnbind := -EBUSY;
+    Exit;
+  End;
+  Y := C^.BindMp;
+  Y^.Bind := Nil;
+  C^.BindMp := Nil;
+  DentryPut(LongInt(C));
+  DentryPut(LongInt(C));
+  DentryPut(LongInt(Y));
+  VfsUnbind := 0;
+End;
+
+{ umount2 : Flags 1 = MNT_FORCE (ignore), 2 = MNT_DETACH (decroche meme
+  occupe) }
+Function VfsUmountD(D : PDentry; Flags : LongInt) : LongInt;
+Var D2 : PDentry; R, Fn, Dev : LongInt; Sb : PSuper; Cov : PDentry;
+    I : LongInt; Busy : Boolean;
+Begin
+  If D^.BindMp <> Nil Then
+  Begin
+    VfsUmountD := VfsUnbind(D);
     Exit;
   End;
   Sb := D^.Sb;
   If (Sb^.Root <> D) Or (Sb^.Covered = Nil) Then
   Begin
     DentryPut(LongInt(D));
-    VfsUmount := -EINVAL;
+    VfsUmountD := -EINVAL;
     Exit;
   End;
   { occupe : plus de references que celle du chemin et de la racine }
-  If Sb^.RefTotal > 2 Then
-  Begin
-    DentryPut(LongInt(D));
-    VfsUmount := -EBUSY;
-    Exit;
-  End;
+  Busy := Sb^.RefTotal > 2;
   For I := 0 To MaxSupers - 1 Do
     If (Supers[I] <> Nil) And (Supers[I]^.Covered <> Nil)
-        And (Supers[I]^.Covered^.Sb = Sb) Then
-    Begin
-      DentryPut(LongInt(D));
-      VfsUmount := -EBUSY;
-      Exit;
-    End;
+        And (Supers[I]^.Covered^.Sb = Sb) Then Busy := True;
+  D2 := DentAll;
+  While D2 <> Nil Do
+  Begin
+    If (D2^.Sb = Sb) And (D2^.Bind <> Nil) Then Busy := True;
+    D2 := D2^.AllNext;
+  End;
+  If Busy And ((Flags And 2) = 0) Then
+  Begin
+    DentryPut(LongInt(D));
+    VfsUmountD := -EBUSY;
+    Exit;
+  End;
   Dev := Sb^.Dev;
   DentryPut(LongInt(D));
   Fn := GetOp(Sb^.SOps, SoSync);
   If Fn <> 0 Then Call1(Fn, LongInt(Sb));
+  If Busy Then
+  Begin
+    { MNT_DETACH : decrocher seulement ; le systeme reste en vie }
+    Cov := Sb^.Covered;
+    Cov^.Mounted := Nil;
+    Sb^.Covered := Nil;
+    DentryPut(LongInt(Cov));
+    VfsUmountD := 0;
+    Exit;
+  End;
+  DentryPurgeSb(Sb);
+  If (GetOp(Sb^.SOps, SoClearInode) <> 0) And (InodeRefsOf(Sb) > 1) Then
+  Begin
+    VfsUmountD := -EBUSY;
+    Exit;
+  End;
   Cov := Sb^.Covered;
   Cov^.Mounted := Nil;
   Sb^.Covered := Nil;
@@ -5907,11 +6237,197 @@ Begin
   D := Sb^.Root;
   Sb^.Root := Nil;
   DentryPut(LongInt(D));
+  InodePurgeSb(Sb);
   Fn := GetOp(Sb^.SOps, SoUmount);
   If Fn <> 0 Then Call1(Fn, LongInt(Sb));
   If Dev <> 0 Then BInvalidate(Dev);
   SuperRelease(Sb);
-  VfsUmount := 0;
+  VfsUmountD := 0;
+End;
+
+Function VfsUmount(Const Path : String; Flags : LongInt) : LongInt;
+Var D : PDentry; R : LongInt;
+Begin
+  R := PathWalk(Path, (Flags And 8) = 0, D);
+  If R <> 0 Then
+  Begin
+    VfsUmount := R;
+    Exit;
+  End;
+  VfsUmount := VfsUmountD(D, Flags);
+End;
+
+{ mount --bind : le sous-arbre Src apparait aussi en Dst. La racine du bind
+  mount est un dentry "clone" (meme inode, sans entree dans la table de
+  hachage) dont le parent est celui du point de montage, ce qui fait
+  fonctionner ".." et les chemins. Les montages sous Src ne suivent pas
+  (pas de MS_REC). }
+Function VfsBind(Const SrcP, DstP : String) : LongInt;
+Var S, Y, C, Par : PDentry; R : LongInt; Nm : String;
+Begin
+  R := PathWalk(SrcP, True, S);
+  If R <> 0 Then
+  Begin
+    VfsBind := R;
+    Exit;
+  End;
+  R := PathWalk(DstP, True, Y);
+  If R <> 0 Then
+  Begin
+    DentryPut(LongInt(S));
+    VfsBind := R;
+    Exit;
+  End;
+  If IsDir(S^.Inode) <> IsDir(Y^.Inode) Then
+  Begin
+    DentryPut(LongInt(S)); DentryPut(LongInt(Y));
+    If IsDir(S^.Inode) Then VfsBind := -ENOTDIR Else VfsBind := -EISDIR;
+    Exit;
+  End;
+  If (Y^.Mounted <> Nil) Or (Y^.Bind <> Nil) Then
+  Begin
+    { le point est deja un montage : recouvrir le dessus }
+    DentryPut(LongInt(S)); DentryPut(LongInt(Y));
+    VfsBind := -EBUSY;
+    Exit;
+  End;
+  Par := Y^.Parent;
+  Nm := DName(Y);
+  If (Par = Nil) And (Y^.Sb^.Root = Y) And (Y^.Sb^.Covered <> Nil) Then
+  Begin
+    Par := Y^.Sb^.Covered^.Parent;
+    Nm := DName(Y^.Sb^.Covered);
+  End;
+  Inc(S^.Inode^.Count);
+  C := DentryNew(Par, Nm, S^.Inode, S^.Sb);
+  If C = Nil Then
+  Begin
+    InodePut(LongInt(S^.Inode));
+    DentryPut(LongInt(S)); DentryPut(LongInt(Y));
+    VfsBind := -ENOMEM;
+    Exit;
+  End;
+  DentryUnhash(C);
+  Inc(BindCount);
+  C^.BindMp := Y;
+  Y^.Bind := C;
+  DentryPut(LongInt(S));
+  VfsBind := 0;
+End;
+
+{ Deplacer un montage (MS_MOVE) de Src vers Dst }
+Function VfsMoveMount(Const SrcP, DstP : String) : LongInt;
+Var S, Y, Old : PDentry; R : LongInt; Sb : PSuper;
+Begin
+  R := PathWalk(SrcP, True, S);
+  If R <> 0 Then
+  Begin
+    VfsMoveMount := R;
+    Exit;
+  End;
+  R := PathWalk(DstP, True, Y);
+  If R <> 0 Then
+  Begin
+    DentryPut(LongInt(S));
+    VfsMoveMount := R;
+    Exit;
+  End;
+  If (Y^.Mounted <> Nil) Or (Y^.Bind <> Nil) Or (Not IsDir(Y^.Inode)) Then
+  Begin
+    DentryPut(LongInt(S)); DentryPut(LongInt(Y));
+    VfsMoveMount := -EBUSY;
+    Exit;
+  End;
+  If S^.BindMp <> Nil Then
+  Begin
+    Old := S^.BindMp;
+    Old^.Bind := Nil;
+    Y^.Bind := S;
+    S^.BindMp := Y;
+    DentryPut(LongInt(Old));
+    DentryPut(LongInt(S));
+    VfsMoveMount := 0;
+    Exit;
+  End;
+  Sb := S^.Sb;
+  If (Sb^.Root <> S) Or (Sb^.Covered = Nil) Then
+  Begin
+    DentryPut(LongInt(S)); DentryPut(LongInt(Y));
+    VfsMoveMount := -EINVAL;
+    Exit;
+  End;
+  Old := Sb^.Covered;
+  Old^.Mounted := Nil;
+  Y^.Mounted := Sb;
+  Sb^.Covered := Y;
+  DentryPut(LongInt(Old));
+  DentryPut(LongInt(S));
+  VfsMoveMount := 0;
+End;
+
+{ pivot_root(Nouv, Ancien) : Nouv (un point de montage, racine d'un systeme
+  de fichiers) devient la racine ; l'ancienne racine est montee sur Ancien
+  (sous Nouv). Les processus dont la racine ou le repertoire courant etait
+  l'ancienne racine sont deplaces. }
+Function VfsPivotRoot(Const NewP, OldP : String) : LongInt;
+Var N, O, R0, Cov : PDentry; R, I : LongInt; Rs, Ns : PSuper; Fs : PFsStruct;
+Begin
+  R := PathWalk(NewP, True, N);
+  If R <> 0 Then
+  Begin
+    VfsPivotRoot := R;
+    Exit;
+  End;
+  R := PathWalk(OldP, True, O);
+  If R <> 0 Then
+  Begin
+    DentryPut(LongInt(N));
+    VfsPivotRoot := R;
+    Exit;
+  End;
+  R0 := Cur^.Fs^.Root;
+  Ns := N^.Sb;
+  Rs := R0^.Sb;
+  If (Not IsDir(O^.Inode)) Or (Ns^.Root <> N) Or (Ns^.Covered = Nil)
+     Or (Rs^.Covered <> Nil) Or (Rs^.Root <> R0) Or (Ns = Rs)
+     Or (Not DentryUnder(O, N)) Or (O^.Mounted <> Nil) Or (O^.Bind <> Nil) Then
+  Begin
+    DentryPut(LongInt(N)); DentryPut(LongInt(O));
+    If Not IsDir(O^.Inode) Then VfsPivotRoot := -ENOTDIR
+    Else VfsPivotRoot := -EINVAL;
+    Exit;
+  End;
+  { decrocher le nouveau systeme de l'ancien arbre }
+  Cov := Ns^.Covered;
+  Cov^.Mounted := Nil;
+  Ns^.Covered := Nil;
+  DentryPut(LongInt(Cov));
+  { monter l'ancienne racine sur O (la reference de O est reprise) }
+  O^.Mounted := Rs;
+  Rs^.Covered := O;
+  RootDentry := N;
+  For I := 0 To MaxTasks - 1 Do
+    If Tasks[I].State <> TsFree Then
+    Begin
+      Fs := Tasks[I].Fs;
+      If Fs <> Nil Then
+      Begin
+        If Fs^.Root = LongInt(R0) Then
+        Begin
+          DentryGet(LongInt(N));
+          Fs^.Root := LongInt(N);
+          DentryPut(LongInt(R0));
+        End;
+        If Fs^.Pwd = LongInt(R0) Then
+        Begin
+          DentryGet(LongInt(N));
+          Fs^.Pwd := LongInt(N);
+          DentryPut(LongInt(R0));
+        End;
+      End;
+    End;
+  DentryPut(LongInt(N));
+  VfsPivotRoot := 0;
 End;
 
 Procedure VfsSyncAll;
@@ -5923,6 +6439,47 @@ Begin
       Fn := GetOp(Supers[I]^.SOps, SoSync);
       If Fn <> 0 Then Call1(Fn, LongInt(Supers[I]));
     End;
+  BSync(0);
+End;
+
+{ Remontage (MS_REMOUNT) du systeme de fichiers qui contient Dir : change
+  l'option lecture seule (le systeme de fichiers marque propre/sale) }
+Function VfsRemount(Const Dir : String; Flags : LongInt) : LongInt;
+Var D : PDentry; R, Fn : LongInt; Sb : PSuper;
+Begin
+  R := PathWalk(Dir, True, D);
+  If R <> 0 Then
+  Begin
+    VfsRemount := R;
+    Exit;
+  End;
+  Sb := D^.Sb;
+  DentryPut(LongInt(D));
+  Fn := GetOp(Sb^.SOps, SoRemount);
+  If Fn <> 0 Then R := Call2(Fn, LongInt(Sb), Flags)
+  Else
+  Begin
+    Sb^.Flags := (Sb^.Flags And Not MS_RDONLY) Or (Flags And MS_RDONLY);
+    R := 0;
+  End;
+  VfsRemount := R;
+End;
+
+{ Arret du systeme : ecrire tout, puis passer en lecture seule les systemes
+  de fichiers sur disque (ils sont alors marques propres) }
+Procedure VfsShutdown;
+Var I, Fn : LongInt; Sb : PSuper;
+Begin
+  VfsSyncAll;
+  For I := 0 To MaxSupers - 1 Do
+  Begin
+    Sb := Supers[I];
+    If (Sb <> Nil) And ((Sb^.Flags And MS_RDONLY) = 0) Then
+    Begin
+      Fn := GetOp(Sb^.SOps, SoRemount);
+      If Fn <> 0 Then Call2(Fn, LongInt(Sb), Sb^.Flags Or MS_RDONLY);
+    End;
+  End;
   BSync(0);
 End;
 
@@ -7049,24 +7606,27 @@ Begin
 End;
 
 Procedure GenMounts;
-Var I, K : LongInt; Sb : PSuper; Dn, Pth : String;
+Var I, K, Pass : LongInt; Sb : PSuper; Dn, Pth : String;
 Begin
-  For I := 0 To MaxSupers - 1 Do
-  Begin
-    Sb := Supers[I];
-    If (Sb <> Nil) And (Sb^.Root <> Nil) Then
+  For Pass := 0 To 1 Do
+    For I := 0 To MaxSupers - 1 Do
     Begin
-      Dn := '';
-      If Sb^.DevName <> 0 Then
-        For K := 1 To Mem[0:Sb^.DevName] Do
-          Dn := Dn + Chr(Mem[0:Sb^.DevName + K]);
-      If Sb^.Covered <> Nil Then Pth := DentryPath(Sb^.Covered) Else Pth := '/';
-      If (Sb^.Flags And MS_RDONLY) <> 0 Then
-        PAddLn(Dn + ' ' + Pth + ' ' + FsNames[Sb^.FsType] + ' ro 0 0')
-      Else
-        PAddLn(Dn + ' ' + Pth + ' ' + FsNames[Sb^.FsType] + ' rw 0 0');
+      Sb := Supers[I];
+      If (Sb <> Nil) And (Sb^.Root <> Nil)
+          And ((Sb^.Covered = Nil) = (Pass = 0)) Then
+      Begin
+        Dn := '';
+        If Sb^.DevName <> 0 Then
+          For K := 1 To Mem[0:Sb^.DevName] Do
+            Dn := Dn + Chr(Mem[0:Sb^.DevName + K]);
+        If Sb^.Covered <> Nil Then Pth := DentryPath(Sb^.Covered)
+        Else Pth := '/';
+        If (Sb^.Flags And MS_RDONLY) <> 0 Then
+          PAddLn(Dn + ' ' + Pth + ' ' + FsNames[Sb^.FsType] + ' ro 0 0')
+        Else
+          PAddLn(Dn + ' ' + Pth + ' ' + FsNames[Sb^.FsType] + ' rw 0 0');
+      End;
     End;
-  End;
 End;
 
 Procedure GenMaps(T : PTask);
@@ -7108,7 +7668,7 @@ Begin
   If Pid = 0 Then
   Begin
     Case Idx Of
-      2 : PAddLn('Linux version 0.1 (LINUX-0) KERNEL32 #1 i386');
+      2 : PAddLn('Linux version ' + UnameRel + ' (LINUX-0 KERNEL32 ' + KVersion + ') #1 i386');
       3 : Begin
             PAddLn('MemTotal:     ' + IntStr(TotalFreePages * 4) + ' kB');
             PAddLn('MemFree:      ' + IntStr(FreePagesCnt * 4) + ' kB');
@@ -7396,6 +7956,2164 @@ Begin
   ProcFOps[FoRead] := LongInt(@ProcRead);
   MemFill(LongInt(@ProcDirFOps[0]), 0, SizeOf(ProcDirFOps));
   ProcDirFOps[FoReaddir] := LongInt(@ProcReaddir);
+End;
+
+{ ==================================================================== }
+{ Partie 18 - ext2 : systeme de fichiers lecture/ecriture sur disque   }
+{ ==================================================================== }
+{ (placee avant la partie 14 : elle n'utilise que les parties 1 a 13)  }
+
+{ ext2 : superbloc, descripteurs de groupes, bitmaps, inodes de 128 ou
+  256 octets, revisions 0 et 1, blocs de 1, 2 ou 4 Ko, sparse_super,
+  filetype, indirections simple/double/triple, repertoires lineaires,
+  liens durs et symboliques (rapides et lents), fichiers speciaux.
+  Ni extents, ni journal (ext3 propre : monte comme ext2 ; journal a
+  rejouer : lecture seule), ni attributs etendus (le bloc d'EA d'un inode
+  supprime est libere), ni meta_bg, ni 64bit, ni sommes de controle
+  (lecture seule). Fichiers limites a 2 Go.
+  Tous les acces passent par le cache de tampons de la partie 11 ; les
+  tampons du superbloc et des descripteurs de groupes restent epingles
+  (compteur > 0) pendant le montage. Le noyau n'etant jamais interrompu
+  pendant ces fonctions (les lectures disque sont en attente active), il
+  n'y a aucun verrou. Les modifications sont ecrites dans le cache de
+  tampons ; l'ecriture sur disque est differee (bdflush, sync). }
+
+Const
+  ExMagic        = $EF53;
+  ExRootIno      = 2;
+  ExStValid      = 1;
+  ExStError      = 2;
+  ExIncFiletype  = $0002;
+  ExIncRecover   = $0004;
+  ExIncFlexBg    = $0200;
+  ExCompatJournal = $0004;
+  ExRoSparse     = $0001;
+  ExRoLargeFile  = $0002;
+  ExRoBtree      = $0004;
+  ExRoHugeFile   = $0008;
+  ExRoDirNlink   = $0020;
+  ExRoExtraIsize = $0040;
+  ExRoGdtCsum    = $0010;
+  ExIndexFl      = $1000;
+  ExMaxLinks     = 32000;
+  ExMaxFileSize  = $7FFFFFFF;
+
+Type
+  PExSb = ^TExSb;
+  TExSb = Record
+    Dev, Bs, Ppb, FirstData, BlocksCount, InodesCount : LongInt;
+    Bpg, Ipg, Groups, InodeSize, FirstIno, Rev : LongInt;
+    Incompat, RoCompat, Compat : LongInt;
+    GdtBlocks, GdPerBlk, Itb : LongInt;
+    SbBuf         : PBuf;
+    SbOff         : LongInt;
+    GdBufs        : LongInt;        { tableau de PBuf (un par bloc de GDT) }
+    MountState    : LongInt;        { s_state lu au montage }
+    Overhead      : LongInt;        { blocs de metadonnees (statfs) }
+    NoSync        : LongInt;
+  End;
+
+Var
+  ExFileIOps, ExDirIOps, ExLnkIOps, ExSpecIOps : Array[0..15] Of LongInt;
+  ExFileFOps, ExDirFOps, ExSOps                : Array[0..15] Of LongInt;
+
+Function ExOf(Sb : PSuper) : PExSb;
+Begin
+  ExOf := Pointer(Sb^.Priv);
+End;
+
+{ Adresse du superbloc dans son tampon epingle }
+Function ExSbA(E : PExSb) : LongInt;
+Begin
+  ExSbA := E^.SbBuf^.Data + E^.SbOff;
+End;
+
+Procedure ExSbDirty(E : PExSb);
+Begin
+  BDirty(E^.SbBuf);
+End;
+
+Procedure ExAddFreeBlocks(E : PExSb; Delta : LongInt);
+Var A : LongInt;
+Begin
+  A := ExSbA(E);
+  MemL[0:A + 12] := MemL[0:A + 12] + Delta;
+  ExSbDirty(E);
+End;
+
+Procedure ExAddFreeInodes(E : PExSb; Delta : LongInt);
+Var A : LongInt;
+Begin
+  A := ExSbA(E);
+  MemL[0:A + 16] := MemL[0:A + 16] + Delta;
+  ExSbDirty(E);
+End;
+
+{ Descripteur du groupe G (32 octets dans un tampon epingle) }
+Function ExGd(E : PExSb; G : LongInt) : LongInt;
+Var B : PBuf;
+Begin
+  B := Pointer(MemL[0:E^.GdBufs + (G Div E^.GdPerBlk) * 4]);
+  ExGd := B^.Data + (G Mod E^.GdPerBlk) * 32;
+End;
+
+Procedure ExGdDirty(E : PExSb; G : LongInt);
+Var B : PBuf;
+Begin
+  B := Pointer(MemL[0:E^.GdBufs + (G Div E^.GdPerBlk) * 4]);
+  BDirty(B);
+End;
+
+{ Lire le bloc Blk (verifie qu'il est dans le systeme de fichiers) }
+Function ExBRead(E : PExSb; Blk : LongInt) : PBuf;
+Begin
+  If (Blk < E^.FirstData) Or (Blk >= E^.BlocksCount) Then
+  Begin
+    KLog('ext2 : bloc ' + IntStr(Blk) + ' hors limites');
+    ExBRead := Nil;
+  End
+  Else ExBRead := BRead(E^.Dev, Blk, E^.Bs);
+End;
+
+{ ---- Bitmaps ---- }
+
+Function ExBitTest(Base, Bit : LongInt) : Boolean;
+Begin
+  ExBitTest := (Mem[0:Base + (Bit Shr 3)] And (1 Shl (Bit And 7))) <> 0;
+End;
+
+Procedure ExBitSet(Base, Bit : LongInt);
+Begin
+  Mem[0:Base + (Bit Shr 3)] := Mem[0:Base + (Bit Shr 3)]
+      Or (1 Shl (Bit And 7));
+End;
+
+Procedure ExBitClr(Base, Bit : LongInt);
+Begin
+  Mem[0:Base + (Bit Shr 3)] := Mem[0:Base + (Bit Shr 3)]
+      And Not (1 Shl (Bit And 7));
+End;
+
+{ Premier bit a zero dans [Start, Lim) ou -1 }
+Function ExFindZero(Base, Start, Lim : LongInt) : LongInt;
+Var I : LongInt;
+Begin
+  I := Start;
+  While I < Lim Do
+  Begin
+    If ((I And 7) = 0) And (I + 8 <= Lim) And (Mem[0:Base + (I Shr 3)] = $FF)
+        Then I := I + 8
+    Else If (Mem[0:Base + (I Shr 3)] And (1 Shl (I And 7))) = 0 Then
+    Begin
+      ExFindZero := I;
+      Exit;
+    End
+    Else Inc(I);
+  End;
+  ExFindZero := -1;
+End;
+
+{ Nombre de blocs du groupe G }
+Function ExGroupBlocks(E : PExSb; G : LongInt) : LongInt;
+Begin
+  If G = E^.Groups - 1 Then
+    ExGroupBlocks := E^.BlocksCount - E^.FirstData - G * E^.Bpg
+  Else ExGroupBlocks := E^.Bpg;
+End;
+
+{ ---- Allocation de blocs ---- }
+
+{ Allouer un bloc le plus pres possible de Goal ; le contenu n'est pas
+  initialise. 0 ou -errno }
+Function ExAllocBlock(E : PExSb; Goal : LongInt; Var Blk : LongInt) : LongInt;
+Var G, G0, N, Gd, Start, Lim, Bit, Free, Rsv : LongInt; B : PBuf;
+    A : LongInt;
+Begin
+  Blk := 0;
+  A := ExSbA(E);
+  Free := MemL[0:A + 12];
+  Rsv := MemL[0:A + 8];
+  If Free <= 0 Then
+  Begin
+    ExAllocBlock := -ENOSPC;
+    Exit;
+  End;
+  If (Free <= Rsv) And (Cur^.Fsuid <> 0) Then
+  Begin
+    ExAllocBlock := -ENOSPC;
+    Exit;
+  End;
+  If (Goal < E^.FirstData) Or (Goal >= E^.BlocksCount) Then
+    Goal := E^.FirstData;
+  G0 := (Goal - E^.FirstData) Div E^.Bpg;
+  For N := 0 To E^.Groups Do
+  Begin
+    G := (G0 + N) Mod E^.Groups;
+    Gd := ExGd(E, G);
+    If MemW[0:Gd + 12] > 0 Then
+    Begin
+      B := ExBRead(E, MemL[0:Gd]);
+      If B <> Nil Then
+      Begin
+        Lim := ExGroupBlocks(E, G);
+        If N = 0 Then Start := (Goal - E^.FirstData) Mod E^.Bpg
+        Else Start := 0;
+        Bit := ExFindZero(B^.Data, Start, Lim);
+        If (Bit < 0) And (Start > 0) Then Bit := ExFindZero(B^.Data, 0, Lim);
+        If Bit >= 0 Then
+        Begin
+          ExBitSet(B^.Data, Bit);
+          BDirty(B);
+          BRelease(B);
+          MemW[0:Gd + 12] := MemW[0:Gd + 12] - 1;
+          ExGdDirty(E, G);
+          ExAddFreeBlocks(E, -1);
+          Blk := E^.FirstData + G * E^.Bpg + Bit;
+          ExAllocBlock := 0;
+          Exit;
+        End;
+        BRelease(B);
+      End;
+    End;
+  End;
+  ExAllocBlock := -ENOSPC;
+End;
+
+Procedure ExFreeBlock(E : PExSb; Blk : LongInt);
+Var G, Bit, Gd : LongInt; B : PBuf;
+Begin
+  If (Blk < E^.FirstData) Or (Blk >= E^.BlocksCount) Then
+  Begin
+    KLog('ext2 : liberation du bloc ' + IntStr(Blk) + ' hors limites');
+    Exit;
+  End;
+  G := (Blk - E^.FirstData) Div E^.Bpg;
+  Bit := (Blk - E^.FirstData) Mod E^.Bpg;
+  Gd := ExGd(E, G);
+  B := ExBRead(E, MemL[0:Gd]);
+  If B = Nil Then Exit;
+  If Not ExBitTest(B^.Data, Bit) Then
+    KLog('ext2 : double liberation du bloc ' + IntStr(Blk))
+  Else
+  Begin
+    ExBitClr(B^.Data, Bit);
+    BDirty(B);
+    MemW[0:Gd + 12] := MemW[0:Gd + 12] + 1;
+    ExGdDirty(E, G);
+    ExAddFreeBlocks(E, 1);
+  End;
+  BRelease(B);
+End;
+
+{ ---- Allocation d'inodes ---- }
+
+{ Choisir le groupe d'un nouvel inode : un repertoire va dans un groupe
+  peu rempli (celui qui a le plus de blocs libres parmi ceux qui ont plus
+  d'inodes libres que la moyenne), les autres pres de leur repertoire }
+Function ExAllocInode(E : PExSb; ParentIno : LongInt; IsDirNew : Boolean;
+    Var Ino : LongInt) : LongInt;
+Var G, G0, N, Gd, Best, BestFree, Ave, Tot, Bit, Fb : LongInt; B : PBuf;
+Begin
+  Ino := 0;
+  If MemL[0:ExSbA(E) + 16] <= 0 Then
+  Begin
+    ExAllocInode := -ENOSPC;
+    Exit;
+  End;
+  G0 := 0;
+  If ParentIno > 0 Then G0 := (ParentIno - 1) Div E^.Ipg;
+  If IsDirNew Then
+  Begin
+    Tot := MemL[0:ExSbA(E) + 16];
+    Ave := Tot Div E^.Groups;
+    Best := -1; BestFree := -1;
+    For G := 0 To E^.Groups - 1 Do
+    Begin
+      Gd := ExGd(E, G);
+      Fb := MemW[0:Gd + 12];
+      If (MemW[0:Gd + 14] > 0) And (MemW[0:Gd + 14] >= Ave)
+          And (Fb > BestFree) Then
+      Begin
+        Best := G;
+        BestFree := Fb;
+      End;
+    End;
+    If Best >= 0 Then G0 := Best;
+  End;
+  For N := 0 To E^.Groups - 1 Do
+  Begin
+    G := (G0 + N) Mod E^.Groups;
+    Gd := ExGd(E, G);
+    If MemW[0:Gd + 14] > 0 Then
+    Begin
+      B := ExBRead(E, MemL[0:Gd + 4]);
+      If B <> Nil Then
+      Begin
+        Bit := ExFindZero(B^.Data, 0, E^.Ipg);
+        If (G = 0) And (Bit >= 0) And (Bit < E^.FirstIno - 1) Then
+        Begin
+          { inodes reserves : sauter }
+          Bit := ExFindZero(B^.Data, E^.FirstIno - 1, E^.Ipg);
+        End;
+        If Bit >= 0 Then
+        Begin
+          ExBitSet(B^.Data, Bit);
+          BDirty(B);
+          BRelease(B);
+          MemW[0:Gd + 14] := MemW[0:Gd + 14] - 1;
+          If IsDirNew Then MemW[0:Gd + 16] := MemW[0:Gd + 16] + 1;
+          ExGdDirty(E, G);
+          ExAddFreeInodes(E, -1);
+          Ino := G * E^.Ipg + Bit + 1;
+          ExAllocInode := 0;
+          Exit;
+        End;
+        BRelease(B);
+      End;
+    End;
+  End;
+  ExAllocInode := -ENOSPC;
+End;
+
+Procedure ExFreeInode(E : PExSb; Ino : LongInt; WasDir : Boolean);
+Var G, Bit, Gd : LongInt; B : PBuf;
+Begin
+  If (Ino < 1) Or (Ino > E^.InodesCount) Then Exit;
+  G := (Ino - 1) Div E^.Ipg;
+  Bit := (Ino - 1) Mod E^.Ipg;
+  Gd := ExGd(E, G);
+  B := ExBRead(E, MemL[0:Gd + 4]);
+  If B = Nil Then Exit;
+  If Not ExBitTest(B^.Data, Bit) Then
+    KLog('ext2 : double liberation de l''inode ' + IntStr(Ino))
+  Else
+  Begin
+    ExBitClr(B^.Data, Bit);
+    BDirty(B);
+    MemW[0:Gd + 14] := MemW[0:Gd + 14] + 1;
+    If WasDir And (MemW[0:Gd + 16] > 0) Then
+      MemW[0:Gd + 16] := MemW[0:Gd + 16] - 1;
+    ExGdDirty(E, G);
+    ExAddFreeInodes(E, 1);
+  End;
+  BRelease(B);
+End;
+
+{ ---- Inodes sur disque ---- }
+
+{ Tampon contenant l'inode Ino et decalage de l'inode dans ce tampon }
+Function ExInodeBuf(E : PExSb; Ino : LongInt; Var Off : LongInt) : PBuf;
+Var G, Idx, Gd, Blk, Pos : LongInt;
+Begin
+  ExInodeBuf := Nil;
+  If (Ino < 1) Or (Ino > E^.InodesCount) Then Exit;
+  G := (Ino - 1) Div E^.Ipg;
+  Idx := (Ino - 1) Mod E^.Ipg;
+  Gd := ExGd(E, G);
+  Pos := Idx * E^.InodeSize;
+  Blk := MemL[0:Gd + 8] + Pos Div E^.Bs;
+  Off := Pos Mod E^.Bs;
+  ExInodeBuf := ExBRead(E, Blk);
+End;
+
+Procedure ExSetOps(I : PInode);
+Begin
+  I^.FOps := 0;
+  Case I^.Mode And S_IFMT Of
+    S_IFREG :
+      Begin
+        I^.IOps := LongInt(@ExFileIOps[0]);
+        I^.FOps := LongInt(@ExFileFOps[0]);
+      End;
+    S_IFDIR :
+      Begin
+        I^.IOps := LongInt(@ExDirIOps[0]);
+        I^.FOps := LongInt(@ExDirFOps[0]);
+      End;
+    S_IFLNK : I^.IOps := LongInt(@ExLnkIOps[0]);
+  Else
+    I^.IOps := LongInt(@ExSpecIOps[0]);
+  End;
+End;
+
+{ Priv de l'inode = copie des 128 premiers octets de l'inode disque }
+Function ExReadInode(I : PInode) : LongInt;
+Var E : PExSb; B : PBuf; Off, Blob, M : LongInt;
+Begin
+  E := ExOf(I^.Sb);
+  B := ExInodeBuf(E, I^.Ino, Off);
+  If B = Nil Then
+  Begin
+    ExReadInode := -EIO;
+    Exit;
+  End;
+  Blob := KMalloc(128);
+  If Blob = 0 Then
+  Begin
+    BRelease(B);
+    ExReadInode := -ENOMEM;
+    Exit;
+  End;
+  MemCopy(Blob, B^.Data + Off, 128);
+  BRelease(B);
+  M := MemW[0:Blob];
+  If (MemW[0:Blob + 26] = 0) Or (M = 0) Then
+  Begin
+    KFree(Blob);
+    ExReadInode := -EIO;
+    Exit;
+  End;
+  I^.Priv := Blob;
+  I^.Mode := M;
+  I^.Uid := MemW[0:Blob + 2] Or (MemW[0:Blob + 120] Shl 16);
+  I^.Gid := MemW[0:Blob + 24] Or (MemW[0:Blob + 122] Shl 16);
+  I^.Size := MemL[0:Blob + 4];
+  If I^.Size < 0 Then I^.Size := ExMaxFileSize;
+  If ((M And S_IFMT) = S_IFREG) And (MemL[0:Blob + 108] <> 0) Then
+    I^.Size := ExMaxFileSize;
+  I^.Atime := MemL[0:Blob + 8];
+  I^.Ctime := MemL[0:Blob + 12];
+  I^.Mtime := MemL[0:Blob + 16];
+  I^.Nlink := MemW[0:Blob + 26];
+  I^.Blocks := MemL[0:Blob + 28];
+  I^.Rdev := 0;
+  If ((M And S_IFMT) = S_IFCHR) Or ((M And S_IFMT) = S_IFBLK) Then
+  Begin
+    If MemL[0:Blob + 40] <> 0 Then I^.Rdev := MemL[0:Blob + 40] And $FFFF
+    Else
+      I^.Rdev := ((MemL[0:Blob + 44] And $FFF00) Shr 8) Shl 8
+          Or (MemL[0:Blob + 44] And $FF);
+  End;
+  ExSetOps(I);
+  ExReadInode := 0;
+End;
+
+{ Ecrire l'inode (champs generiques + bloc prive) dans le tampon du disque }
+Function ExWriteInode(I : PInode) : LongInt;
+Var E : PExSb; B : PBuf; Off, Blob : LongInt;
+Begin
+  ExWriteInode := 0;
+  Blob := I^.Priv;
+  If Blob = 0 Then Exit;
+  E := ExOf(I^.Sb);
+  MemW[0:Blob] := I^.Mode And $FFFF;
+  MemW[0:Blob + 2] := I^.Uid And $FFFF;
+  MemW[0:Blob + 120] := (I^.Uid Shr 16) And $FFFF;
+  MemW[0:Blob + 24] := I^.Gid And $FFFF;
+  MemW[0:Blob + 122] := (I^.Gid Shr 16) And $FFFF;
+  If Not (((I^.Mode And S_IFMT) = S_IFREG) And (MemL[0:Blob + 108] <> 0)) Then
+    MemL[0:Blob + 4] := I^.Size;
+  MemL[0:Blob + 8] := I^.Atime;
+  MemL[0:Blob + 12] := I^.Ctime;
+  MemL[0:Blob + 16] := I^.Mtime;
+  MemW[0:Blob + 26] := I^.Nlink;
+  MemL[0:Blob + 28] := I^.Blocks;
+  B := ExInodeBuf(E, I^.Ino, Off);
+  If B = Nil Then
+  Begin
+    ExWriteInode := -EIO;
+    Exit;
+  End;
+  MemCopy(B^.Data + Off, Blob, 128);
+  BDirty(B);
+  BRelease(B);
+  I^.Dirty := 0;
+End;
+
+{ ---- Correspondance bloc logique -> bloc disque ---- }
+
+{ Nombre de blocs adressables sous un pointeur de niveau L (1 : simple) }
+Function ExSpan(E : PExSb; L : LongInt) : LongInt;
+Var N, K : LongInt;
+Begin
+  N := 1;
+  For K := 1 To L Do N := N * E^.Ppb;
+  ExSpan := N;
+End;
+
+{ Bloc disque du bloc logique Idx de l'inode I (0 = trou). Create : allouer
+  le bloc et les blocs d'indirection manquants (Goal : bloc voulu, 0 =
+  automatique) ; New devient vrai si le bloc de donnees vient d'etre alloue }
+Function ExBmap(I : PInode; Idx : LongInt; Create : Boolean; Goal : LongInt;
+    Var Phys : LongInt; Var IsNew : Boolean) : LongInt;
+Var E : PExSb; Blob, P, Depth, L, V, NB, SlotA, R, K : LongInt;
+    Off : Array[0..3] Of LongInt;
+    Owner, Nb2 : PBuf;
+Begin
+  E := ExOf(I^.Sb);
+  Blob := I^.Priv;
+  Phys := 0;
+  IsNew := False;
+  ExBmap := 0;
+  If Idx < 0 Then
+  Begin
+    ExBmap := -EFBIG;
+    Exit;
+  End;
+  P := E^.Ppb;
+  If Idx < 12 Then
+  Begin
+    Depth := 1;
+    Off[0] := Idx;
+  End
+  Else
+  Begin
+    Idx := Idx - 12;
+    If Idx < P Then
+    Begin
+      Depth := 2;
+      Off[0] := 12; Off[1] := Idx;
+    End
+    Else
+    Begin
+      Idx := Idx - P;
+      If Idx < P * P Then
+      Begin
+        Depth := 3;
+        Off[0] := 13; Off[1] := Idx Div P; Off[2] := Idx Mod P;
+      End
+      Else
+      Begin
+        Idx := Idx - P * P;
+        If Idx >= P * P * P Then
+        Begin
+          ExBmap := -EFBIG;
+          Exit;
+        End;
+        Depth := 4;
+        Off[0] := 14; Off[1] := Idx Div (P * P);
+        Off[2] := (Idx Div P) Mod P; Off[3] := Idx Mod P;
+      End;
+    End;
+  End;
+  SlotA := Blob + 40 + Off[0] * 4;
+  Owner := Nil;
+  For L := 0 To Depth - 1 Do
+  Begin
+    V := MemL[0:SlotA];
+    If V = 0 Then
+    Begin
+      If Not Create Then
+      Begin
+        If Owner <> Nil Then BRelease(Owner);
+        Exit;
+      End;
+      R := ExAllocBlock(E, Goal, NB);
+      If R <> 0 Then
+      Begin
+        If Owner <> Nil Then BRelease(Owner);
+        ExBmap := R;
+        Exit;
+      End;
+      If L < Depth - 1 Then
+      Begin
+        Nb2 := BGetBlk(E^.Dev, NB, E^.Bs);
+        If Nb2 = Nil Then
+        Begin
+          ExFreeBlock(E, NB);
+          If Owner <> Nil Then BRelease(Owner);
+          ExBmap := -ENOMEM;
+          Exit;
+        End;
+        MemFill(Nb2^.Data, 0, E^.Bs);
+        BDirty(Nb2);
+        BRelease(Nb2);
+      End
+      Else IsNew := True;
+      MemL[0:SlotA] := NB;
+      If Owner <> Nil Then BDirty(Owner) Else I^.Dirty := 1;
+      Inc(I^.Blocks, E^.Bs Div 512);
+      V := NB;
+    End;
+    If L = Depth - 1 Then
+    Begin
+      Phys := V;
+      If Owner <> Nil Then BRelease(Owner);
+      Exit;
+    End;
+    Goal := V + 1;
+    Nb2 := ExBRead(E, V);
+    If Owner <> Nil Then BRelease(Owner);
+    If Nb2 = Nil Then
+    Begin
+      ExBmap := -EIO;
+      Exit;
+    End;
+    Owner := Nb2;
+    SlotA := Owner^.Data + Off[L + 1] * 4;
+  End;
+  K := 0;
+End;
+
+{ Liberer sous le pointeur SlotA (dans l'inode ou dans le tampon Owner) les
+  blocs de donnees d'indice logique >= NewBlocks. Level : 1 = simple.
+  Base : indice logique du premier bloc de donnees couvert }
+Procedure ExTruncInd(I : PInode; SlotA : LongInt; Owner : PBuf; Level,
+    Base, NewBlocks : LongInt);
+Var E : PExSb; V, Span, Sub, K, EBase, Cell, Val : LongInt; B : PBuf;
+Begin
+  E := ExOf(I^.Sb);
+  V := MemL[0:SlotA];
+  If V = 0 Then Exit;
+  Span := ExSpan(E, Level);
+  If Base + Span <= NewBlocks Then Exit;
+  B := ExBRead(E, V);
+  If B = Nil Then Exit;
+  Sub := ExSpan(E, Level - 1);
+  For K := 0 To E^.Ppb - 1 Do
+  Begin
+    EBase := Base + K * Sub;
+    If EBase + Sub > NewBlocks Then
+    Begin
+      Cell := B^.Data + K * 4;
+      Val := MemL[0:Cell];
+      If Val <> 0 Then
+      Begin
+        If Level = 1 Then
+        Begin
+          ExFreeBlock(E, Val);
+          MemL[0:Cell] := 0;
+          Dec(I^.Blocks, E^.Bs Div 512);
+          BDirty(B);
+        End
+        Else
+        Begin
+          ExTruncInd(I, Cell, B, Level - 1, EBase, NewBlocks);
+        End;
+      End;
+    End;
+  End;
+  BRelease(B);
+  If Base >= NewBlocks Then
+  Begin
+    ExFreeBlock(E, V);
+    MemL[0:SlotA] := 0;
+    Dec(I^.Blocks, E^.Bs Div 512);
+    If Owner <> Nil Then BDirty(Owner) Else I^.Dirty := 1;
+  End;
+End;
+
+{ Liberer tous les blocs de donnees (et d'indirection devenus inutiles)
+  d'indice logique >= NewBlocks }
+Procedure ExTruncBlocks(I : PInode; NewBlocks : LongInt);
+Var E : PExSb; Blob, K, P : LongInt;
+Begin
+  E := ExOf(I^.Sb);
+  Blob := I^.Priv;
+  P := E^.Ppb;
+  For K := NewBlocks To 11 Do
+    If (K >= 0) And (MemL[0:Blob + 40 + K * 4] <> 0) Then
+    Begin
+      ExFreeBlock(E, MemL[0:Blob + 40 + K * 4]);
+      MemL[0:Blob + 40 + K * 4] := 0;
+      Dec(I^.Blocks, E^.Bs Div 512);
+      I^.Dirty := 1;
+    End;
+  ExTruncInd(I, Blob + 40 + 12 * 4, Nil, 1, 12, NewBlocks);
+  ExTruncInd(I, Blob + 40 + 13 * 4, Nil, 2, 12 + P, NewBlocks);
+  ExTruncInd(I, Blob + 40 + 14 * 4, Nil, 3, 12 + P + P * P, NewBlocks);
+  If I^.Blocks < 0 Then I^.Blocks := 0;
+End;
+
+{ Troncature : I^.Size contient deja la nouvelle taille (VFS) }
+Function ExTruncate(I : PInode; Size : LongInt) : LongInt;
+Var E : PExSb; Phys, R, Off : LongInt; B : PBuf; IsNew : Boolean;
+Begin
+  E := ExOf(I^.Sb);
+  ExTruncBlocks(I, (Size + E^.Bs - 1) Div E^.Bs);
+  Off := Size Mod E^.Bs;
+  If (Off <> 0) And (Size > 0) Then
+  Begin
+    R := ExBmap(I, Size Div E^.Bs, False, 0, Phys, IsNew);
+    If (R = 0) And (Phys <> 0) Then
+    Begin
+      B := ExBRead(E, Phys);
+      If B <> Nil Then
+      Begin
+        MemFill(B^.Data + Off, 0, E^.Bs - Off);
+        BDirty(B);
+        BRelease(B);
+      End;
+    End;
+  End;
+  I^.Mtime := NowSec; I^.Ctime := I^.Mtime;
+  ExTruncate := ExWriteInode(I);
+End;
+
+{ Supprimer l'inode (nlink = 0, plus aucune reference) : libere les blocs,
+  marque dtime, libere l'inode sur disque }
+Procedure ExDeleteInode(I : PInode);
+Var E : PExSb; Blob, Acl : LongInt; B : PBuf; T : LongInt;
+Begin
+  Blob := I^.Priv;
+  If Blob = 0 Then Exit;
+  E := ExOf(I^.Sb);
+  T := I^.Mode And S_IFMT;
+  If (T = S_IFREG) Or (T = S_IFDIR) Or ((T = S_IFLNK) And (I^.Blocks > 0)) Then
+  Begin
+    I^.Size := 0;
+    ExTruncBlocks(I, 0);
+  End;
+  Acl := MemL[0:Blob + 104];
+  If Acl <> 0 Then
+  Begin
+    B := ExBRead(E, Acl);
+    If B <> Nil Then
+    Begin
+      If MemL[0:B^.Data + 4] <= 1 Then ExFreeBlock(E, Acl)
+      Else
+      Begin
+        MemL[0:B^.Data + 4] := MemL[0:B^.Data + 4] - 1;
+        BDirty(B);
+      End;
+      BRelease(B);
+    End;
+    MemL[0:Blob + 104] := 0;
+  End;
+  I^.Size := 0;
+  I^.Blocks := 0;
+  I^.Nlink := 0;
+  MemL[0:Blob + 20] := NowSec;
+  I^.Dirty := 0;
+  ExWriteInode(I);
+  ExFreeInode(E, I^.Ino, T = S_IFDIR);
+  KFree(Blob);
+  I^.Priv := 0;
+End;
+
+Procedure ExClearInode(I : PInode);
+Begin
+  If I^.Priv <> 0 Then KFree(I^.Priv);
+  I^.Priv := 0;
+End;
+
+{ ---- Repertoires ---- }
+
+Function ExNeedLen(NameLen : LongInt) : LongInt;
+Begin
+  ExNeedLen := (8 + NameLen + 3) And Not 3;
+End;
+
+{ Recopier le nom de l'entree d'adresse A dans la chaine Nm }
+Procedure ExEntName(A : LongInt; Var Nm : String);
+Var N : LongInt;
+Begin
+  N := Mem[0:A + 6];
+  Mem[0:LongInt(@Nm)] := N;
+  MemCopy(LongInt(@Nm) + 1, A + 8, N);
+End;
+
+{ Chercher Nm dans le repertoire Dir. Retourne 0 et Ino, ou -ENOENT.
+  BlkIdx, EntOff : position de l'entree ; PrevOff : decalage de l'entree
+  precedente dans le meme bloc (-1 si premiere) }
+Function ExDirFind(Dir : PInode; Var Nm : String; Var Ino, BlkIdx, EntOff,
+    PrevOff : LongInt) : LongInt;
+Var E : PExSb; K, NB, Phys, R, Off, Rec, Prev, Len : LongInt; B : PBuf;
+    IsNew : Boolean; A : LongInt;
+Begin
+  E := ExOf(Dir^.Sb);
+  Len := Length(Nm);
+  NB := (Dir^.Size + E^.Bs - 1) Div E^.Bs;
+  For K := 0 To NB - 1 Do
+  Begin
+    R := ExBmap(Dir, K, False, 0, Phys, IsNew);
+    If R <> 0 Then
+    Begin
+      ExDirFind := R;
+      Exit;
+    End;
+    If Phys <> 0 Then
+    Begin
+      B := ExBRead(E, Phys);
+      If B = Nil Then
+      Begin
+        ExDirFind := -EIO;
+        Exit;
+      End;
+      Off := 0;
+      Prev := -1;
+      While Off < E^.Bs Do
+      Begin
+        A := B^.Data + Off;
+        Rec := MemW[0:A + 4];
+        If (Rec < 8) Or ((Rec And 3) <> 0) Or (Off + Rec > E^.Bs)
+            Or (8 + Mem[0:A + 6] > Rec) Then
+        Begin
+          KLog('ext2 : repertoire corrompu (inode ' + IntStr(Dir^.Ino) + ')');
+          BRelease(B);
+          ExDirFind := -EIO;
+          Exit;
+        End;
+        If (MemL[0:A] <> 0) And (Mem[0:A + 6] = Len) Then
+          If MemCmp(A + 8, LongInt(@Nm) + 1, Len) = 0 Then
+          Begin
+            Ino := MemL[0:A];
+            BlkIdx := K;
+            EntOff := Off;
+            PrevOff := Prev;
+            BRelease(B);
+            ExDirFind := 0;
+            Exit;
+          End;
+        Prev := Off;
+        Off := Off + Rec;
+      End;
+      BRelease(B);
+    End;
+  End;
+  ExDirFind := -ENOENT;
+End;
+
+Function ExLookup(Dir : PInode; Var Nm : String; Var Res : PInode) : LongInt;
+Var Ino, K, EO, PO, R : LongInt; I : PInode;
+Begin
+  If Length(Nm) > 255 Then
+  Begin
+    ExLookup := -ENAMETOOLONG;
+    Exit;
+  End;
+  R := ExDirFind(Dir, Nm, Ino, K, EO, PO);
+  If R <> 0 Then
+  Begin
+    ExLookup := R;
+    Exit;
+  End;
+  I := IGet(Dir^.Sb, Ino);
+  If I = Nil Then
+  Begin
+    ExLookup := -EIO;
+    Exit;
+  End;
+  Res := I;
+  ExLookup := 0;
+End;
+
+{ Type de fichier (octet file_type) d'un mode }
+Function ExFileType(Mode : LongInt) : LongInt;
+Begin
+  Case Mode And S_IFMT Of
+    S_IFREG : ExFileType := 1;
+    S_IFDIR : ExFileType := 2;
+    S_IFCHR : ExFileType := 3;
+    S_IFBLK : ExFileType := 4;
+    S_IFIFO : ExFileType := 5;
+    S_IFSOCK : ExFileType := 6;
+    S_IFLNK : ExFileType := 7;
+  Else
+    ExFileType := 0;
+  End;
+End;
+
+{ Ajouter l'entree (Nm -> Ino) dans le repertoire Dir }
+Function ExDirAdd(Dir : PInode; Var Nm : String; Ino, Mode : LongInt) : LongInt;
+Var E : PExSb; K, NB, Phys, R, Off, Rec, Used, Need, Len, Goal : LongInt;
+    B : PBuf; IsNew : Boolean; A, N : LongInt; Ft : LongInt;
+Begin
+  E := ExOf(Dir^.Sb);
+  Len := Length(Nm);
+  If Len = 0 Then
+  Begin
+    ExDirAdd := -EINVAL;
+    Exit;
+  End;
+  If Len > 255 Then
+  Begin
+    ExDirAdd := -ENAMETOOLONG;
+    Exit;
+  End;
+  Need := ExNeedLen(Len);
+  Ft := 0;
+  If (E^.Incompat And ExIncFiletype) <> 0 Then Ft := ExFileType(Mode);
+  NB := (Dir^.Size + E^.Bs - 1) Div E^.Bs;
+  For K := 0 To NB - 1 Do
+  Begin
+    R := ExBmap(Dir, K, False, 0, Phys, IsNew);
+    If (R = 0) And (Phys <> 0) Then
+    Begin
+      B := ExBRead(E, Phys);
+      If B = Nil Then
+      Begin
+        ExDirAdd := -EIO;
+        Exit;
+      End;
+      Off := 0;
+      While Off < E^.Bs Do
+      Begin
+        A := B^.Data + Off;
+        Rec := MemW[0:A + 4];
+        If (Rec < 8) Or ((Rec And 3) <> 0) Or (Off + Rec > E^.Bs) Then
+        Begin
+          KLog('ext2 : repertoire corrompu (inode ' + IntStr(Dir^.Ino) + ')');
+          BRelease(B);
+          ExDirAdd := -EIO;
+          Exit;
+        End;
+        If MemL[0:A] <> 0 Then Used := ExNeedLen(Mem[0:A + 6]) Else Used := 0;
+        If Rec - Used >= Need Then
+        Begin
+          If Used > 0 Then
+          Begin
+            MemW[0:A + 4] := Used;
+            N := A + Used;
+            MemW[0:N + 4] := Rec - Used;
+          End
+          Else N := A;
+          MemL[0:N] := Ino;
+          Mem[0:N + 6] := Len;
+          Mem[0:N + 7] := Ft;
+          MemCopy(N + 8, LongInt(@Nm) + 1, Len);
+          BDirty(B);
+          BRelease(B);
+          Dir^.Mtime := NowSec; Dir^.Ctime := Dir^.Mtime;
+          MemL[0:Dir^.Priv + 32] := MemL[0:Dir^.Priv + 32] And Not ExIndexFl;
+          ExWriteInode(Dir);
+          ExDirAdd := 0;
+          Exit;
+        End;
+        Off := Off + Rec;
+      End;
+      BRelease(B);
+    End;
+  End;
+  { pas de place : agrandir le repertoire d'un bloc }
+  Goal := 0;
+  If NB > 0 Then
+  Begin
+    ExBmap(Dir, NB - 1, False, 0, Phys, IsNew);
+    If Phys <> 0 Then Goal := Phys + 1;
+  End;
+  R := ExBmap(Dir, NB, True, Goal, Phys, IsNew);
+  If R <> 0 Then
+  Begin
+    ExDirAdd := R;
+    Exit;
+  End;
+  B := BGetBlk(E^.Dev, Phys, E^.Bs);
+  If B = Nil Then
+  Begin
+    ExDirAdd := -ENOMEM;
+    Exit;
+  End;
+  MemFill(B^.Data, 0, E^.Bs);
+  MemL[0:B^.Data] := Ino;
+  MemW[0:B^.Data + 4] := E^.Bs;
+  Mem[0:B^.Data + 6] := Len;
+  Mem[0:B^.Data + 7] := Ft;
+  MemCopy(B^.Data + 8, LongInt(@Nm) + 1, Len);
+  BDirty(B);
+  BRelease(B);
+  Dir^.Size := Dir^.Size + E^.Bs;
+  Dir^.Mtime := NowSec; Dir^.Ctime := Dir^.Mtime;
+  MemL[0:Dir^.Priv + 32] := MemL[0:Dir^.Priv + 32] And Not ExIndexFl;
+  ExWriteInode(Dir);
+  ExDirAdd := 0;
+End;
+
+{ Supprimer l'entree Nm du repertoire Dir (fusion avec la precedente) }
+Function ExDirDel(Dir : PInode; Var Nm : String; Var Ino : LongInt) : LongInt;
+Var E : PExSb; K, EO, PO, R, Phys : LongInt; B : PBuf; IsNew : Boolean;
+    A : LongInt;
+Begin
+  E := ExOf(Dir^.Sb);
+  R := ExDirFind(Dir, Nm, Ino, K, EO, PO);
+  If R <> 0 Then
+  Begin
+    ExDirDel := R;
+    Exit;
+  End;
+  R := ExBmap(Dir, K, False, 0, Phys, IsNew);
+  If (R <> 0) Or (Phys = 0) Then
+  Begin
+    ExDirDel := -EIO;
+    Exit;
+  End;
+  B := ExBRead(E, Phys);
+  If B = Nil Then
+  Begin
+    ExDirDel := -EIO;
+    Exit;
+  End;
+  A := B^.Data + EO;
+  If PO >= 0 Then
+    MemW[0:B^.Data + PO + 4] := MemW[0:B^.Data + PO + 4] + MemW[0:A + 4]
+  Else MemL[0:A] := 0;
+  BDirty(B);
+  BRelease(B);
+  Dir^.Mtime := NowSec; Dir^.Ctime := Dir^.Mtime;
+  MemL[0:Dir^.Priv + 32] := MemL[0:Dir^.Priv + 32] And Not ExIndexFl;
+  ExWriteInode(Dir);
+  ExDirDel := 0;
+End;
+
+{ Le repertoire I est-il vide (hors . et ..) ? 0 vide, -ENOTEMPTY, ou -EIO }
+Function ExDirEmpty(I : PInode) : LongInt;
+Var E : PExSb; K, NB, Phys, R, Off, Rec, N : LongInt; B : PBuf;
+    IsNew : Boolean; A : LongInt;
+Begin
+  E := ExOf(I^.Sb);
+  NB := (I^.Size + E^.Bs - 1) Div E^.Bs;
+  For K := 0 To NB - 1 Do
+  Begin
+    R := ExBmap(I, K, False, 0, Phys, IsNew);
+    If R <> 0 Then
+    Begin
+      ExDirEmpty := R;
+      Exit;
+    End;
+    If Phys <> 0 Then
+    Begin
+      B := ExBRead(E, Phys);
+      If B = Nil Then
+      Begin
+        ExDirEmpty := -EIO;
+        Exit;
+      End;
+      Off := 0;
+      While Off < E^.Bs Do
+      Begin
+        A := B^.Data + Off;
+        Rec := MemW[0:A + 4];
+        If (Rec < 8) Or ((Rec And 3) <> 0) Or (Off + Rec > E^.Bs) Then
+        Begin
+          BRelease(B);
+          ExDirEmpty := -EIO;
+          Exit;
+        End;
+        If MemL[0:A] <> 0 Then
+        Begin
+          N := Mem[0:A + 6];
+          If Not (((N = 1) And (Mem[0:A + 8] = 46)) Or
+             ((N = 2) And (Mem[0:A + 8] = 46) And (Mem[0:A + 9] = 46))) Then
+          Begin
+            BRelease(B);
+            ExDirEmpty := -ENOTEMPTY;
+            Exit;
+          End;
+        End;
+        Off := Off + Rec;
+      End;
+      BRelease(B);
+    End;
+  End;
+  ExDirEmpty := 0;
+End;
+
+{ Repertoire : une entree par appel, F^.Pos = decalage en octets }
+Function ExReaddir(F : PFile; Var Ino : LongInt; Var Nm : String;
+    Var DType : LongInt) : LongInt;
+Var D, T : PInode; E : PExSb; Pos, K, Off, Phys, R, P, Rec : LongInt;
+    B : PBuf; IsNew : Boolean; A : LongInt;
+Begin
+  D := F^.Inode;
+  E := ExOf(D^.Sb);
+  ExReaddir := 0;
+  While True Do
+  Begin
+    Pos := F^.Pos;
+    If (Pos < 0) Or (Pos >= D^.Size) Then Exit;
+    K := Pos Div E^.Bs;
+    Off := Pos Mod E^.Bs;
+    R := ExBmap(D, K, False, 0, Phys, IsNew);
+    If R <> 0 Then
+    Begin
+      ExReaddir := R;
+      Exit;
+    End;
+    If Phys = 0 Then F^.Pos := (K + 1) * E^.Bs
+    Else
+    Begin
+      B := ExBRead(E, Phys);
+      If B = Nil Then
+      Begin
+        ExReaddir := -EIO;
+        Exit;
+      End;
+      { retrouver une frontiere d'entree >= Off }
+      P := 0;
+      While P < Off Do
+      Begin
+        Rec := MemW[0:B^.Data + P + 4];
+        If (Rec < 8) Or ((Rec And 3) <> 0) Or (P + Rec > E^.Bs) Then
+        Begin
+          BRelease(B);
+          ExReaddir := -EIO;
+          Exit;
+        End;
+        P := P + Rec;
+      End;
+      While P < E^.Bs Do
+      Begin
+        A := B^.Data + P;
+        Rec := MemW[0:A + 4];
+        If (Rec < 8) Or ((Rec And 3) <> 0) Or (P + Rec > E^.Bs) Then
+        Begin
+          BRelease(B);
+          ExReaddir := -EIO;
+          Exit;
+        End;
+        If MemL[0:A] <> 0 Then
+        Begin
+          Ino := MemL[0:A];
+          ExEntName(A, Nm);
+          If (E^.Incompat And ExIncFiletype) <> 0 Then
+          Begin
+            Case Mem[0:A + 7] Of
+              1 : DType := DT_REG;
+              2 : DType := DT_DIR;
+              3 : DType := DT_CHR;
+              4 : DType := DT_BLK;
+              5 : DType := DT_FIFO;
+              7 : DType := DT_LNK;
+              6 : DType := 12;
+            Else
+              DType := DT_UNKNOWN;
+            End;
+          End
+          Else DType := DT_UNKNOWN;
+          F^.Pos := K * E^.Bs + P + Rec;
+          BRelease(B);
+          If DType = DT_UNKNOWN Then
+          Begin
+            T := IGet(D^.Sb, Ino);
+            If T <> Nil Then
+            Begin
+              Case T^.Mode And S_IFMT Of
+                S_IFREG : DType := DT_REG;
+                S_IFDIR : DType := DT_DIR;
+                S_IFCHR : DType := DT_CHR;
+                S_IFBLK : DType := DT_BLK;
+                S_IFIFO : DType := DT_FIFO;
+                S_IFLNK : DType := DT_LNK;
+              End;
+              InodePut(LongInt(T));
+            End;
+          End;
+          ExReaddir := 1;
+          Exit;
+        End;
+        P := P + Rec;
+      End;
+      BRelease(B);
+      F^.Pos := (K + 1) * E^.Bs;
+    End;
+  End;
+End;
+
+{ ---- Creation et suppression de noeuds ---- }
+
+{ Creer un nouvel inode de mode Mode dans le repertoire Dir (pas encore
+  lie par un nom). Retourne l'inode (compteur 1) ou Nil et l'erreur }
+Function ExNewNode(Dir : PInode; Mode, Rdev : LongInt;
+    Var Err : LongInt) : PInode;
+Var E : PExSb; Ino, R, Slot, Off, K : LongInt; I : PInode; Blob : LongInt;
+    B : PBuf; IsD : Boolean;
+Begin
+  E := ExOf(Dir^.Sb);
+  ExNewNode := Nil;
+  IsD := (Mode And S_IFMT) = S_IFDIR;
+  R := ExAllocInode(E, Dir^.Ino, IsD, Ino);
+  If R <> 0 Then
+  Begin
+    Err := R;
+    Exit;
+  End;
+  Blob := KMallocZ(128);
+  If Blob = 0 Then
+  Begin
+    ExFreeInode(E, Ino, IsD);
+    Err := -ENOMEM;
+    Exit;
+  End;
+  Dir^.Sb^.NextIno := Ino;
+  I := NewInode(Dir^.Sb, Mode);
+  If I = Nil Then
+  Begin
+    KFree(Blob);
+    ExFreeInode(E, Ino, IsD);
+    Err := -ENOMEM;
+    Exit;
+  End;
+  I^.Priv := Blob;
+  I^.Rdev := Rdev;
+  I^.Size := 0;
+  I^.Blocks := 0;
+  If IsD Then I^.Nlink := 2 Else I^.Nlink := 1;
+  If (Dir^.Mode And S_ISGID) <> 0 Then
+  Begin
+    I^.Gid := Dir^.Gid;
+    If IsD Then I^.Mode := I^.Mode Or S_ISGID;
+  End;
+  MemL[0:Blob + 100] := RandNext;
+  If (IsD = False) And (((Mode And S_IFMT) = S_IFCHR)
+      Or ((Mode And S_IFMT) = S_IFBLK)) Then
+  Begin
+    If ((Rdev Shr 8) < 256) And ((Rdev And $FF) < 256) Then
+      MemL[0:Blob + 40] := Rdev And $FFFF
+    Else MemL[0:Blob + 44] := (Rdev And $FF) Or ((Rdev Shr 8) Shl 8);
+  End;
+  ExSetOps(I);
+  { effacer tout l'emplacement de l'inode (inodes de plus de 128 octets) }
+  B := ExInodeBuf(E, Ino, Off);
+  If B <> Nil Then
+  Begin
+    MemFill(B^.Data + Off, 0, E^.InodeSize);
+    BDirty(B);
+    BRelease(B);
+  End;
+  Slot := 0;
+  K := 0;
+  ExWriteInode(I);
+  Err := 0;
+  ExNewNode := I;
+End;
+
+{ Defaire la creation d'un inode qui n'a pas pu etre lie }
+Procedure ExAbortNode(I : PInode);
+Begin
+  I^.Nlink := 0;
+  InodePut(LongInt(I));
+End;
+
+Function ExCreate(Dir : PInode; Var Nm : String; Mode : LongInt;
+    Var Res : PInode) : LongInt;
+Var I : PInode; R, Err : LongInt; Ino, K, EO, PO : LongInt;
+Begin
+  If ExDirFind(Dir, Nm, Ino, K, EO, PO) = 0 Then
+  Begin
+    ExCreate := -EEXIST;
+    Exit;
+  End;
+  I := ExNewNode(Dir, Mode, 0, Err);
+  If I = Nil Then
+  Begin
+    ExCreate := Err;
+    Exit;
+  End;
+  R := ExDirAdd(Dir, Nm, I^.Ino, I^.Mode);
+  If R <> 0 Then
+  Begin
+    ExAbortNode(I);
+    ExCreate := R;
+    Exit;
+  End;
+  Res := I;
+  ExCreate := 0;
+End;
+
+Function ExMknod(Dir : PInode; Var Nm : String; Mode, Rdev : LongInt) : LongInt;
+Var I : PInode; R, Err : LongInt; Ino, K, EO, PO : LongInt;
+Begin
+  If ExDirFind(Dir, Nm, Ino, K, EO, PO) = 0 Then
+  Begin
+    ExMknod := -EEXIST;
+    Exit;
+  End;
+  I := ExNewNode(Dir, Mode, Rdev, Err);
+  If I = Nil Then
+  Begin
+    ExMknod := Err;
+    Exit;
+  End;
+  R := ExDirAdd(Dir, Nm, I^.Ino, I^.Mode);
+  If R <> 0 Then ExAbortNode(I)
+  Else InodePut(LongInt(I));
+  ExMknod := R;
+End;
+
+Function ExMkdir(Dir : PInode; Var Nm : String; Mode : LongInt) : LongInt;
+Var E : PExSb; I : PInode; R, Err, Phys, Ft : LongInt; B : PBuf;
+    IsNew : Boolean; Ino, K, EO, PO : LongInt; Dot : String;
+Begin
+  E := ExOf(Dir^.Sb);
+  If ExDirFind(Dir, Nm, Ino, K, EO, PO) = 0 Then
+  Begin
+    ExMkdir := -EEXIST;
+    Exit;
+  End;
+  If Dir^.Nlink >= ExMaxLinks Then
+  Begin
+    ExMkdir := -EMLINK;
+    Exit;
+  End;
+  I := ExNewNode(Dir, Mode, 0, Err);
+  If I = Nil Then
+  Begin
+    ExMkdir := Err;
+    Exit;
+  End;
+  R := ExBmap(I, 0, True, 0, Phys, IsNew);
+  If R <> 0 Then
+  Begin
+    ExAbortNode(I);
+    ExMkdir := R;
+    Exit;
+  End;
+  B := BGetBlk(E^.Dev, Phys, E^.Bs);
+  If B = Nil Then
+  Begin
+    ExAbortNode(I);
+    ExMkdir := -ENOMEM;
+    Exit;
+  End;
+  Ft := 0;
+  If (E^.Incompat And ExIncFiletype) <> 0 Then Ft := 2;
+  MemFill(B^.Data, 0, E^.Bs);
+  MemL[0:B^.Data] := I^.Ino;
+  MemW[0:B^.Data + 4] := 12;
+  Mem[0:B^.Data + 6] := 1;
+  Mem[0:B^.Data + 7] := Ft;
+  Mem[0:B^.Data + 8] := 46;
+  MemL[0:B^.Data + 12] := Dir^.Ino;
+  MemW[0:B^.Data + 16] := E^.Bs - 12;
+  Mem[0:B^.Data + 18] := 2;
+  Mem[0:B^.Data + 19] := Ft;
+  Mem[0:B^.Data + 20] := 46;
+  Mem[0:B^.Data + 21] := 46;
+  BDirty(B);
+  BRelease(B);
+  I^.Size := E^.Bs;
+  ExWriteInode(I);
+  R := ExDirAdd(Dir, Nm, I^.Ino, I^.Mode);
+  If R <> 0 Then
+  Begin
+    ExAbortNode(I);
+    ExMkdir := R;
+    Exit;
+  End;
+  Inc(Dir^.Nlink);
+  ExWriteInode(Dir);
+  InodePut(LongInt(I));
+  Dot := '';
+  ExMkdir := 0;
+End;
+
+Function ExUnlink(Dir : PInode; Var Nm : String; I : PInode) : LongInt;
+Var R, Ino : LongInt;
+Begin
+  R := ExDirDel(Dir, Nm, Ino);
+  If R <> 0 Then
+  Begin
+    ExUnlink := R;
+    Exit;
+  End;
+  If I^.Nlink > 0 Then Dec(I^.Nlink);
+  I^.Ctime := NowSec;
+  ExWriteInode(I);
+  ExUnlink := 0;
+End;
+
+Function ExRmdir(Dir : PInode; Var Nm : String; I : PInode) : LongInt;
+Var R, Ino : LongInt;
+Begin
+  R := ExDirEmpty(I);
+  If R <> 0 Then
+  Begin
+    ExRmdir := R;
+    Exit;
+  End;
+  R := ExDirDel(Dir, Nm, Ino);
+  If R <> 0 Then
+  Begin
+    ExRmdir := R;
+    Exit;
+  End;
+  I^.Nlink := 0;
+  I^.Ctime := NowSec;
+  If Dir^.Nlink > 0 Then Dec(Dir^.Nlink);
+  ExWriteInode(I);
+  ExWriteInode(Dir);
+  ExRmdir := 0;
+End;
+
+Function ExLink(Old, Dir : PInode; Var Nm : String) : LongInt;
+Var R, Ino, K, EO, PO : LongInt;
+Begin
+  If Old^.Nlink >= ExMaxLinks Then
+  Begin
+    ExLink := -EMLINK;
+    Exit;
+  End;
+  If ExDirFind(Dir, Nm, Ino, K, EO, PO) = 0 Then
+  Begin
+    ExLink := -EEXIST;
+    Exit;
+  End;
+  R := ExDirAdd(Dir, Nm, Old^.Ino, Old^.Mode);
+  If R <> 0 Then
+  Begin
+    ExLink := R;
+    Exit;
+  End;
+  Inc(Old^.Nlink);
+  Old^.Ctime := NowSec;
+  ExWriteInode(Old);
+  ExLink := 0;
+End;
+
+Function ExSymlink(Dir : PInode; Var Nm : String; Var Tgt : String) : LongInt;
+Var E : PExSb; I : PInode; R, Err, Phys, L : LongInt; B : PBuf;
+    IsNew : Boolean; Ino, K, EO, PO : LongInt;
+Begin
+  E := ExOf(Dir^.Sb);
+  L := Length(Tgt);
+  If L = 0 Then
+  Begin
+    ExSymlink := -ENOENT;
+    Exit;
+  End;
+  If ExDirFind(Dir, Nm, Ino, K, EO, PO) = 0 Then
+  Begin
+    ExSymlink := -EEXIST;
+    Exit;
+  End;
+  I := ExNewNode(Dir, S_IFLNK Or $1FF, 0, Err);
+  If I = Nil Then
+  Begin
+    ExSymlink := Err;
+    Exit;
+  End;
+  If L < 60 Then
+  Begin
+    MemCopy(I^.Priv + 40, LongInt(@Tgt) + 1, L);     { lien rapide }
+  End
+  Else
+  Begin
+    R := ExBmap(I, 0, True, 0, Phys, IsNew);
+    If R <> 0 Then
+    Begin
+      ExAbortNode(I);
+      ExSymlink := R;
+      Exit;
+    End;
+    B := BGetBlk(E^.Dev, Phys, E^.Bs);
+    If B = Nil Then
+    Begin
+      ExAbortNode(I);
+      ExSymlink := -ENOMEM;
+      Exit;
+    End;
+    MemFill(B^.Data, 0, E^.Bs);
+    MemCopy(B^.Data, LongInt(@Tgt) + 1, L);
+    BDirty(B);
+    BRelease(B);
+  End;
+  I^.Size := L;
+  ExWriteInode(I);
+  R := ExDirAdd(Dir, Nm, I^.Ino, I^.Mode);
+  If R <> 0 Then ExAbortNode(I)
+  Else InodePut(LongInt(I));
+  ExSymlink := R;
+End;
+
+Function ExReadlink(I : PInode; Buf, Size : LongInt) : LongInt;
+Var E : PExSb; N, R, Phys : LongInt; B : PBuf; IsNew : Boolean;
+Begin
+  E := ExOf(I^.Sb);
+  N := I^.Size;
+  If N > Size Then N := Size;
+  If N > 255 Then N := 255;
+  If I^.Blocks = 0 Then
+  Begin
+    MemCopy(Buf, I^.Priv + 40, N);
+    ExReadlink := N;
+    Exit;
+  End;
+  R := ExBmap(I, 0, False, 0, Phys, IsNew);
+  If (R <> 0) Or (Phys = 0) Then
+  Begin
+    ExReadlink := -EIO;
+    Exit;
+  End;
+  B := ExBRead(E, Phys);
+  If B = Nil Then
+  Begin
+    ExReadlink := -EIO;
+    Exit;
+  End;
+  MemCopy(Buf, B^.Data, N);
+  BRelease(B);
+  ExReadlink := N;
+End;
+
+{ Renommer (OD, ON) en (ND, NN). Le dentry source est deplace par le VFS }
+Function ExRename(OD : PInode; Var ON : String; ND : PInode; Var NN : String;
+    Dummy : LongInt) : LongInt;
+Var E : PExSb; Ino, K, EO, PO, R, VIno, Phys : LongInt; I, V : PInode;
+    B : PBuf; IsNew : Boolean; A : LongInt; IsD : Boolean; Ft : LongInt;
+Begin
+  E := ExOf(OD^.Sb);
+  R := ExDirFind(OD, ON, Ino, K, EO, PO);
+  If R <> 0 Then
+  Begin
+    ExRename := R;
+    Exit;
+  End;
+  I := IGet(OD^.Sb, Ino);
+  If I = Nil Then
+  Begin
+    ExRename := -EIO;
+    Exit;
+  End;
+  IsD := IsDir(I);
+  V := Nil;
+  If ExDirFind(ND, NN, VIno, K, EO, PO) = 0 Then
+  Begin
+    V := IGet(OD^.Sb, VIno);
+    If V = Nil Then
+    Begin
+      InodePut(LongInt(I));
+      ExRename := -EIO;
+      Exit;
+    End;
+    If V = I Then
+    Begin
+      { deux noms du meme fichier : rien a faire }
+      InodePut(LongInt(V)); InodePut(LongInt(I));
+      ExRename := 0;
+      Exit;
+    End;
+    If IsDir(V) Then
+    Begin
+      R := ExDirEmpty(V);
+      If R <> 0 Then
+      Begin
+        InodePut(LongInt(V)); InodePut(LongInt(I));
+        ExRename := R;
+        Exit;
+      End;
+    End;
+  End
+  Else If IsD And (OD <> ND) And (ND^.Nlink >= ExMaxLinks) Then
+  Begin
+    InodePut(LongInt(I));
+    ExRename := -EMLINK;
+    Exit;
+  End;
+  Ft := 0;
+  If (E^.Incompat And ExIncFiletype) <> 0 Then Ft := ExFileType(I^.Mode);
+  If V <> Nil Then
+  Begin
+    { remplacer l'entree cible : pointer vers I }
+    R := ExDirFind(ND, NN, VIno, K, EO, PO);
+    If R = 0 Then R := ExBmap(ND, K, False, 0, Phys, IsNew);
+    If (R <> 0) Or (Phys = 0) Then
+    Begin
+      InodePut(LongInt(V)); InodePut(LongInt(I));
+      ExRename := -EIO;
+      Exit;
+    End;
+    B := ExBRead(E, Phys);
+    If B = Nil Then
+    Begin
+      InodePut(LongInt(V)); InodePut(LongInt(I));
+      ExRename := -EIO;
+      Exit;
+    End;
+    A := B^.Data + EO;
+    MemL[0:A] := I^.Ino;
+    Mem[0:A + 7] := Ft;
+    BDirty(B);
+    BRelease(B);
+    ND^.Mtime := NowSec; ND^.Ctime := ND^.Mtime;
+    ExWriteInode(ND);
+    If IsDir(V) Then
+    Begin
+      V^.Nlink := 0;
+      If ND^.Nlink > 0 Then Dec(ND^.Nlink);
+    End
+    Else If V^.Nlink > 0 Then Dec(V^.Nlink);
+    V^.Ctime := NowSec;
+    ExWriteInode(V);
+    InodePut(LongInt(V));
+  End
+  Else
+  Begin
+    R := ExDirAdd(ND, NN, I^.Ino, I^.Mode);
+    If R <> 0 Then
+    Begin
+      InodePut(LongInt(I));
+      ExRename := R;
+      Exit;
+    End;
+  End;
+  { retirer l'ancienne entree }
+  R := ExDirDel(OD, ON, Ino);
+  If R <> 0 Then KLog('ext2 : rename : ancienne entree introuvable');
+  If IsD And (OD <> ND) Then
+  Begin
+    { ".." du repertoire deplace }
+    R := ExBmap(I, 0, False, 0, Phys, IsNew);
+    If (R = 0) And (Phys <> 0) Then
+    Begin
+      B := ExBRead(E, Phys);
+      If B <> Nil Then
+      Begin
+        A := B^.Data + MemW[0:B^.Data + 4];
+        MemL[0:A] := ND^.Ino;
+        BDirty(B);
+        BRelease(B);
+      End;
+    End;
+    If OD^.Nlink > 0 Then Dec(OD^.Nlink);
+    Inc(ND^.Nlink);
+    ExWriteInode(OD);
+    ExWriteInode(ND);
+  End
+  Else If IsD And (V <> Nil) Then
+  Begin
+    ExWriteInode(ND);
+  End;
+  I^.Ctime := NowSec;
+  ExWriteInode(I);
+  InodePut(LongInt(I));
+  ExRename := 0;
+End;
+
+{ ---- Fichiers ordinaires ---- }
+
+Function ExRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var I : PInode; E : PExSb; N, Done, Idx, Off, Chunk, Phys, R : LongInt;
+    B : PBuf; IsNew : Boolean;
+Begin
+  I := F^.Inode;
+  E := ExOf(I^.Sb);
+  If F^.Pos >= I^.Size Then
+  Begin
+    ExRead := 0;
+    Exit;
+  End;
+  N := I^.Size - F^.Pos;
+  If N > Cnt Then N := Cnt;
+  Done := 0;
+  While Done < N Do
+  Begin
+    Idx := F^.Pos Div E^.Bs;
+    Off := F^.Pos Mod E^.Bs;
+    Chunk := E^.Bs - Off;
+    If Chunk > N - Done Then Chunk := N - Done;
+    R := ExBmap(I, Idx, False, 0, Phys, IsNew);
+    If R <> 0 Then
+    Begin
+      If Done = 0 Then ExRead := R Else ExRead := Done;
+      Exit;
+    End;
+    If Phys = 0 Then MemFill(Buf + Done, 0, Chunk)
+    Else
+    Begin
+      B := ExBRead(E, Phys);
+      If B = Nil Then
+      Begin
+        If Done = 0 Then ExRead := -EIO Else ExRead := Done;
+        Exit;
+      End;
+      MemCopy(Buf + Done, B^.Data + Off, Chunk);
+      BRelease(B);
+    End;
+    Done := Done + Chunk;
+    F^.Pos := F^.Pos + Chunk;
+  End;
+  I^.Atime := NowSec;
+  ExRead := Done;
+End;
+
+Function ExWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var I : PInode; E : PExSb; Done, Idx, Off, Chunk, Phys, R, Goal, Prev : LongInt;
+    B : PBuf; IsNew : Boolean; Res : LongInt;
+Begin
+  I := F^.Inode;
+  E := ExOf(I^.Sb);
+  If (F^.Pos < 0) Or (F^.Pos >= ExMaxFileSize) Then
+  Begin
+    ExWrite := -EFBIG;
+    Exit;
+  End;
+  If Cnt > ExMaxFileSize - F^.Pos Then Cnt := ExMaxFileSize - F^.Pos;
+  If MemL[0:I^.Priv + 108] <> 0 Then
+  Begin
+    ExWrite := -EFBIG;
+    Exit;
+  End;
+  Done := 0;
+  Res := 0;
+  While Done < Cnt Do
+  Begin
+    Idx := F^.Pos Div E^.Bs;
+    Off := F^.Pos Mod E^.Bs;
+    Chunk := E^.Bs - Off;
+    If Chunk > Cnt - Done Then Chunk := Cnt - Done;
+    Goal := 0;
+    If Idx > 0 Then
+    Begin
+      ExBmap(I, Idx - 1, False, 0, Prev, IsNew);
+      If Prev <> 0 Then Goal := Prev + 1;
+    End;
+    R := ExBmap(I, Idx, True, Goal, Phys, IsNew);
+    If R <> 0 Then
+    Begin
+      Res := R;
+      Break;
+    End;
+    If IsNew Then
+    Begin
+      B := BGetBlk(E^.Dev, Phys, E^.Bs);
+      If B <> Nil Then MemFill(B^.Data, 0, E^.Bs);
+    End
+    Else If Chunk = E^.Bs Then B := BGetBlk(E^.Dev, Phys, E^.Bs)
+    Else B := ExBRead(E, Phys);
+    If B = Nil Then
+    Begin
+      Res := -EIO;
+      Break;
+    End;
+    MemCopy(B^.Data + Off, Buf + Done, Chunk);
+    BDirty(B);
+    BRelease(B);
+    Done := Done + Chunk;
+    F^.Pos := F^.Pos + Chunk;
+    If F^.Pos > I^.Size Then I^.Size := F^.Pos;
+  End;
+  If Done > 0 Then
+  Begin
+    I^.Mtime := NowSec; I^.Ctime := I^.Mtime;
+    If (I^.Mode And (S_ISUID Or S_ISGID)) <> 0 Then
+      If Cur^.Fsuid <> 0 Then I^.Mode := I^.Mode And Not (S_ISUID Or S_ISGID);
+  End;
+  If (Done > 0) Or (I^.Dirty <> 0) Then ExWriteInode(I);
+  If Done > 0 Then ExWrite := Done Else ExWrite := Res;
+End;
+
+Function ExFsync(F : PFile) : LongInt;
+Begin
+  ExWriteInode(F^.Inode);
+  BSync(F^.Inode^.Sb^.Dev);
+  ExFsync := 0;
+End;
+
+Function ExSetattr(I : PInode) : LongInt;
+Begin
+  ExSetattr := ExWriteInode(I);
+End;
+
+{ ---- Montage ---- }
+
+{ Numero de peripherique bloc d'un chemin ou d'un nom (/dev/hda1, hdb2,
+  ram0) : 0 si inconnu }
+Function ExResolveDev(Const Name : String) : LongInt;
+Var D : PDentry; R, Dv, Mn, Part : LongInt; S : String; C : LongInt;
+Begin
+  ExResolveDev := 0;
+  R := PathWalk(Name, True, D);
+  If R = 0 Then
+  Begin
+    If (D^.Inode^.Mode And S_IFMT) = S_IFBLK Then Dv := D^.Inode^.Rdev
+    Else Dv := 0;
+    DentryPut(LongInt(D));
+    ExResolveDev := Dv;
+    Exit;
+  End;
+  S := Name;
+  If Copy(S, 1, 5) = '/dev/' Then Delete(S, 1, 5);
+  If S = 'ram0' Then
+  Begin
+    ExResolveDev := (MajRam Shl 8);
+    Exit;
+  End;
+  If (Length(S) >= 3) And (Copy(S, 1, 2) = 'hd') Then
+  Begin
+    C := Ord(S[3]) - 97;
+    If (C < 0) Or (C > 3) Then Exit;
+    Part := 0;
+    If Length(S) > 3 Then Part := StrVal(Copy(S, 4, 3));
+    If (Part < 0) Or (Part > 15) Then Exit;
+    If C < 2 Then Mn := C * 64 + Part Else Mn := (C - 2) * 64 + Part;
+    If C < 2 Then ExResolveDev := (MajIde0 Shl 8) Or Mn
+    Else ExResolveDev := (MajIde1 Shl 8) Or Mn;
+  End;
+End;
+
+{ Le groupe G contient-il une copie du superbloc et des descripteurs ? }
+Function ExHasSuper(E : PExSb; G : LongInt) : Boolean;
+Var Pw : LongInt;
+Begin
+  ExHasSuper := True;
+  If (E^.RoCompat And ExRoSparse) = 0 Then Exit;
+  If G <= 1 Then Exit;
+  If (G And 1) = 0 Then
+  Begin
+    ExHasSuper := False;
+    Exit;
+  End;
+  Pw := 3;
+  While Pw < G Do Pw := Pw * 3;
+  If Pw = G Then Exit;
+  Pw := 5;
+  While Pw < G Do Pw := Pw * 5;
+  If Pw = G Then Exit;
+  Pw := 7;
+  While Pw < G Do Pw := Pw * 7;
+  If Pw = G Then Exit;
+  ExHasSuper := False;
+End;
+
+Procedure ExFreeMount(E : PExSb);
+Var K : LongInt; B : PBuf;
+Begin
+  If E^.GdBufs <> 0 Then
+  Begin
+    For K := 0 To E^.GdtBlocks - 1 Do
+    Begin
+      B := Pointer(MemL[0:E^.GdBufs + K * 4]);
+      If B <> Nil Then BRelease(B);
+    End;
+    KFree(E^.GdBufs);
+  End;
+  If E^.SbBuf <> Nil Then BRelease(E^.SbBuf);
+  KFree(LongInt(E));
+End;
+
+{ Marquer le systeme propre ou sale (s_state) et ecrire le superbloc }
+Procedure ExSetState(E : PExSb; State : LongInt);
+Var A : LongInt;
+Begin
+  A := ExSbA(E);
+  MemW[0:A + 58] := State;
+  MemL[0:A + 48] := NowSec;
+  ExSbDirty(E);
+End;
+
+Function Ext2Mount(Sb : PSuper; Var DevName : String; Flags,
+    Data : LongInt) : LongInt;
+Var Dev, R, K, Bs, A, SbBlk, G, Gd, Bad, I2 : LongInt; B : PBuf;
+    E : PExSb; Ino : PInode; D : PDentry; Opt, Tok : String; ForceRo : Boolean;
+    Pos, Rsv : LongInt;
+Begin
+  Ext2Mount := -EINVAL;
+  Dev := ExResolveDev(DevName);
+  If Dev = 0 Then
+  Begin
+    Ext2Mount := -ENOTBLK;
+    Exit;
+  End;
+  If BlkSectors(Dev) = 0 Then
+  Begin
+    Ext2Mount := -ENXIO;
+    Exit;
+  End;
+  For K := 0 To MaxSupers - 1 Do
+    If (Supers[K] <> Nil) And (Supers[K] <> Sb) And (Supers[K]^.Dev = Dev) Then
+    Begin
+      Ext2Mount := -EBUSY;
+      Exit;
+    End;
+  B := BRead(Dev, 1, 1024);
+  If B = Nil Then
+  Begin
+    Ext2Mount := -EIO;
+    Exit;
+  End;
+  A := B^.Data;
+  If MemW[0:A + 56] <> ExMagic Then
+  Begin
+    BRelease(B);
+    Ext2Mount := -EINVAL;
+    Exit;
+  End;
+  If MemL[0:A + 24] > 2 Then
+  Begin
+    KLog('ext2 : taille de bloc non geree (' + IntStr(1024 Shl MemL[0:A + 24])
+        + ')');
+    BRelease(B);
+    Exit;
+  End;
+  Bs := 1024 Shl MemL[0:A + 24];
+  E := Pointer(KMallocZ(SizeOf(TExSb)));
+  If E = Nil Then
+  Begin
+    BRelease(B);
+    Ext2Mount := -ENOMEM;
+    Exit;
+  End;
+  E^.Dev := Dev;
+  E^.Bs := Bs;
+  E^.Ppb := Bs Div 4;
+  E^.InodesCount := MemL[0:A];
+  E^.BlocksCount := MemL[0:A + 4];
+  E^.FirstData := MemL[0:A + 20];
+  E^.Bpg := MemL[0:A + 32];
+  E^.Ipg := MemL[0:A + 40];
+  E^.Rev := MemL[0:A + 76];
+  E^.InodeSize := 128;
+  E^.FirstIno := 11;
+  E^.Compat := 0; E^.Incompat := 0; E^.RoCompat := 0;
+  If E^.Rev >= 1 Then
+  Begin
+    E^.InodeSize := MemW[0:A + 88];
+    E^.FirstIno := MemL[0:A + 84];
+    E^.Compat := MemL[0:A + 92];
+    E^.Incompat := MemL[0:A + 96];
+    E^.RoCompat := MemL[0:A + 100];
+  End;
+  Rsv := 0;
+  If E^.Rev >= 1 Then Rsv := MemW[0:A + 206];
+  E^.MountState := MemW[0:A + 58];
+  BRelease(B);
+  BInvalidate(Dev);
+  If (E^.Bpg <= 0) Or (E^.Ipg <= 0) Or (E^.Bpg > Bs * 8) Or (E^.Ipg > Bs * 8)
+     Or (E^.InodeSize < 128) Or (E^.InodeSize > Bs)
+     Or ((E^.InodeSize And (E^.InodeSize - 1)) <> 0)
+     Or (E^.BlocksCount <= E^.FirstData) Or (E^.FirstIno < 11) Then
+  Begin
+    KLog('ext2 : superbloc invalide');
+    KFree(LongInt(E));
+    Exit;
+  End;
+  If E^.BlocksCount > BlkSectors(Dev) Div (Bs Div 512) Then
+  Begin
+    KLog('ext2 : le systeme de fichiers depasse le peripherique');
+    KFree(LongInt(E));
+    Exit;
+  End;
+  Bad := E^.Incompat And Not (ExIncFiletype Or ExIncRecover Or ExIncFlexBg);
+  If Bad <> 0 Then
+  Begin
+    KLog('ext2 : fonctions incompatibles non gerees ('
+        + HexStr(Bad, 4) + ', ext4 : extents, 64bit...)');
+    KFree(LongInt(E));
+    Exit;
+  End;
+  ForceRo := False;
+  If (E^.Incompat And ExIncRecover) <> 0 Then
+  Begin
+    KLog('ext2 : journal a rejouer : lecture seule');
+    ForceRo := True;
+  End;
+  If (E^.RoCompat And Not (ExRoSparse Or ExRoLargeFile Or ExRoBtree
+      Or ExRoHugeFile Or ExRoDirNlink Or ExRoExtraIsize)) <> 0 Then
+  Begin
+    KLog('ext2 : fonctions en lecture seule non gerees (somme de controle)'
+        + ' : lecture seule');
+    ForceRo := True;
+  End;
+  E^.Groups := (E^.BlocksCount - E^.FirstData + E^.Bpg - 1) Div E^.Bpg;
+  If E^.Groups * E^.Ipg <> E^.InodesCount Then
+  Begin
+    KLog('ext2 : nombre d''inodes incoherent');
+    KFree(LongInt(E));
+    Exit;
+  End;
+  E^.GdPerBlk := Bs Div 32;
+  E^.GdtBlocks := (E^.Groups + E^.GdPerBlk - 1) Div E^.GdPerBlk;
+  E^.Itb := (E^.Ipg * E^.InodeSize + Bs - 1) Div Bs;
+  { superbloc epingle }
+  SbBlk := 1024 Div Bs;
+  E^.SbOff := 1024 Mod Bs;
+  E^.SbBuf := BRead(Dev, SbBlk, Bs);
+  If E^.SbBuf = Nil Then
+  Begin
+    KFree(LongInt(E));
+    Ext2Mount := -EIO;
+    Exit;
+  End;
+  E^.GdBufs := KMallocZ(E^.GdtBlocks * 4);
+  If E^.GdBufs = 0 Then
+  Begin
+    ExFreeMount(E);
+    Ext2Mount := -ENOMEM;
+    Exit;
+  End;
+  For K := 0 To E^.GdtBlocks - 1 Do
+  Begin
+    B := BRead(Dev, E^.FirstData + 1 + K, Bs);
+    If B = Nil Then
+    Begin
+      ExFreeMount(E);
+      Ext2Mount := -EIO;
+      Exit;
+    End;
+    MemL[0:E^.GdBufs + K * 4] := LongInt(B);
+  End;
+  { verification des descripteurs ; calcul des blocs de metadonnees }
+  E^.Overhead := E^.FirstData + E^.Groups * (2 + E^.Itb);
+  For G := 0 To E^.Groups - 1 Do
+  Begin
+    Gd := ExGd(E, G);
+    If (MemL[0:Gd] < E^.FirstData) Or (MemL[0:Gd] >= E^.BlocksCount)
+       Or (MemL[0:Gd + 4] < E^.FirstData) Or (MemL[0:Gd + 4] >= E^.BlocksCount)
+       Or (MemL[0:Gd + 8] < E^.FirstData)
+       Or (MemL[0:Gd + 8] + E^.Itb > E^.BlocksCount) Then
+    Begin
+      KLog('ext2 : descripteur du groupe ' + IntStr(G) + ' invalide');
+      ExFreeMount(E);
+      Exit;
+    End;
+    If ExHasSuper(E, G) Then E^.Overhead := E^.Overhead + 1 + E^.GdtBlocks
+        + Rsv;
+  End;
+  Sb^.Priv := LongInt(E);
+  Sb^.Dev := Dev;
+  Sb^.BlockSize := Bs;
+  Sb^.SOps := LongInt(@ExSOps[0]);
+  { options ("ro", "rw") }
+  If Data <> 0 Then
+    If GetUserStr(Data, Opt) = 0 Then
+    Begin
+      Pos := 1;
+      While Pos <= Length(Opt) Do
+      Begin
+        K := Pos;
+        While (K <= Length(Opt)) And (Opt[K] <> ',') Do Inc(K);
+        Tok := Copy(Opt, Pos, K - Pos);
+        If Tok = 'ro' Then Flags := Flags Or MS_RDONLY
+        Else If Tok = 'rw' Then Flags := Flags And Not MS_RDONLY;
+        Pos := K + 1;
+      End;
+    End;
+  If ForceRo Then Flags := Flags Or MS_RDONLY;
+  Sb^.Flags := Flags;
+  If ForceRo Then Sb^.Used := 1 Else Sb^.Used := 0;
+  Ino := IGet(Sb, ExRootIno);
+  If (Ino = Nil) Or (Not IsDir(Ino)) Then
+  Begin
+    KLog('ext2 : inode racine illisible');
+    If Ino <> Nil Then InodePut(LongInt(Ino));
+    InodePurgeSb(Sb);
+    ExFreeMount(E);
+    Sb^.Priv := 0;
+    Exit;
+  End;
+  D := DentryNew(Nil, '', Ino, Sb);
+  If D = Nil Then
+  Begin
+    InodePut(LongInt(Ino));
+    InodePurgeSb(Sb);
+    ExFreeMount(E);
+    Sb^.Priv := 0;
+    Ext2Mount := -ENOMEM;
+    Exit;
+  End;
+  Sb^.Root := D;
+  If (E^.MountState And ExStValid) = 0 Then
+    KLog('ext2 : ' + DevName + ' n''a pas ete demonte proprement');
+  If (Flags And MS_RDONLY) = 0 Then
+  Begin
+    I2 := ExSbA(E);
+    MemW[0:I2 + 52] := MemW[0:I2 + 52] + 1;
+    ExSetState(E, E^.MountState And Not ExStValid);
+    MemL[0:I2 + 44] := NowSec;
+    BSync(Dev);
+  End;
+  Ext2Mount := 0;
+End;
+
+{ Demontage : etat propre, ecriture, liberation des tampons epingles }
+Procedure Ext2Umount(Sb : PSuper);
+Var E : PExSb;
+Begin
+  E := ExOf(Sb);
+  If E = Nil Then Exit;
+  If (Sb^.Flags And MS_RDONLY) = 0 Then ExSetState(E, E^.MountState);
+  BSync(E^.Dev);
+  ExFreeMount(E);
+  Sb^.Priv := 0;
+End;
+
+Procedure Ext2Sync(Sb : PSuper);
+Var E : PExSb;
+Begin
+  E := ExOf(Sb);
+  If E = Nil Then Exit;
+  If (Sb^.Flags And MS_RDONLY) = 0 Then
+  Begin
+    MemL[0:ExSbA(E) + 48] := NowSec;
+    ExSbDirty(E);
+  End;
+  BSync(E^.Dev);
+End;
+
+{ Remontage (MS_REMOUNT) : bascule lecture seule / lecture-ecriture }
+Function Ext2Remount(Sb : PSuper; NewFlags : LongInt) : LongInt;
+Var E : PExSb; WasRo, WantRo : Boolean;
+Begin
+  E := ExOf(Sb);
+  WasRo := (Sb^.Flags And MS_RDONLY) <> 0;
+  WantRo := (NewFlags And MS_RDONLY) <> 0;
+  If WasRo And (Not WantRo) Then
+  Begin
+    If Sb^.Used <> 0 Then
+    Begin
+      Ext2Remount := -EROFS;
+      Exit;
+    End;
+    ExSetState(E, E^.MountState And Not ExStValid);
+    BSync(E^.Dev);
+  End
+  Else If (Not WasRo) And WantRo Then
+  Begin
+    ExSetState(E, E^.MountState);
+    BSync(E^.Dev);
+  End;
+  Sb^.Flags := (Sb^.Flags And Not MS_RDONLY) Or (NewFlags And MS_RDONLY);
+  Ext2Remount := 0;
+End;
+
+{ statfs : Buf = bsize, blocks, bfree, bavail, files, ffree, namelen, magic }
+Procedure Ext2Statfs(Sb : PSuper; Buf : LongInt);
+Var E : PExSb; A, Fb, Rb : LongInt;
+Begin
+  E := ExOf(Sb);
+  A := ExSbA(E);
+  Fb := MemL[0:A + 12];
+  Rb := Fb - MemL[0:A + 8];
+  If Rb < 0 Then Rb := 0;
+  MemL[0:Buf] := E^.Bs;
+  MemL[0:Buf + 4] := E^.BlocksCount - E^.Overhead;
+  MemL[0:Buf + 8] := Fb;
+  MemL[0:Buf + 12] := Rb;
+  MemL[0:Buf + 16] := E^.InodesCount;
+  MemL[0:Buf + 20] := MemL[0:A + 16];
+  MemL[0:Buf + 24] := 255;
+  MemL[0:Buf + 28] := ExMagic;
+End;
+
+Procedure InitExt2;
+Begin
+  MemFill(LongInt(@ExFileIOps[0]), 0, SizeOf(ExFileIOps));
+  ExFileIOps[IoTruncate] := LongInt(@ExTruncate);
+  ExFileIOps[IoSetattr] := LongInt(@ExSetattr);
+  MemFill(LongInt(@ExDirIOps[0]), 0, SizeOf(ExDirIOps));
+  ExDirIOps[IoLookup] := LongInt(@ExLookup);
+  ExDirIOps[IoCreate] := LongInt(@ExCreate);
+  ExDirIOps[IoMkdir] := LongInt(@ExMkdir);
+  ExDirIOps[IoMknod] := LongInt(@ExMknod);
+  ExDirIOps[IoUnlink] := LongInt(@ExUnlink);
+  ExDirIOps[IoRmdir] := LongInt(@ExRmdir);
+  ExDirIOps[IoRename] := LongInt(@ExRename);
+  ExDirIOps[IoLink] := LongInt(@ExLink);
+  ExDirIOps[IoSymlink] := LongInt(@ExSymlink);
+  ExDirIOps[IoSetattr] := LongInt(@ExSetattr);
+  MemFill(LongInt(@ExLnkIOps[0]), 0, SizeOf(ExLnkIOps));
+  ExLnkIOps[IoReadlink] := LongInt(@ExReadlink);
+  ExLnkIOps[IoSetattr] := LongInt(@ExSetattr);
+  MemFill(LongInt(@ExSpecIOps[0]), 0, SizeOf(ExSpecIOps));
+  ExSpecIOps[IoSetattr] := LongInt(@ExSetattr);
+  MemFill(LongInt(@ExFileFOps[0]), 0, SizeOf(ExFileFOps));
+  ExFileFOps[FoRead] := LongInt(@ExRead);
+  ExFileFOps[FoWrite] := LongInt(@ExWrite);
+  ExFileFOps[FoFsync] := LongInt(@ExFsync);
+  MemFill(LongInt(@ExDirFOps[0]), 0, SizeOf(ExDirFOps));
+  ExDirFOps[FoReaddir] := LongInt(@ExReaddir);
+  ExDirFOps[FoFsync] := LongInt(@ExFsync);
+  MemFill(LongInt(@ExSOps[0]), 0, SizeOf(ExSOps));
+  ExSOps[SoReadInode] := LongInt(@ExReadInode);
+  ExSOps[SoPutInode] := LongInt(@ExDeleteInode);
+  ExSOps[SoWriteInode] := LongInt(@ExWriteInode);
+  ExSOps[SoStatfs] := LongInt(@Ext2Statfs);
+  ExSOps[SoSync] := LongInt(@Ext2Sync);
+  ExSOps[SoUmount] := LongInt(@Ext2Umount);
+  ExSOps[SoClearInode] := LongInt(@ExClearInode);
+  ExSOps[SoRemount] := LongInt(@Ext2Remount);
+  RegisterFs('ext2', LongInt(@Ext2Mount));
+  RegisterFs('ext3', LongInt(@Ext2Mount));
 End;
 
 { ==================================================================== }
@@ -7745,7 +10463,7 @@ Begin
 End;
 
 Function TtyRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
-Var T : PTty; N, V, R, Vmin, Vtime, Tmo, P : LongInt; Done : Boolean;
+Var T : PTty; N, V, R, Vmn, Vtm, Tmo, P : LongInt; Done : Boolean;
 Begin
   T := TtyOf(F);
   If T = Nil Then
@@ -7799,13 +10517,13 @@ Begin
     Exit;
   End;
   { mode brut : VMIN / VTIME }
-  Vmin := T^.Cc[VMIN];
-  Vtime := T^.Cc[VTIME];
+  Vmn := T^.Cc[VMIN];
+  Vtm := T^.Cc[VTIME];
   If (F^.Flags And O_NONBLOCK) <> 0 Then
   Begin
-    Vmin := 0; Vtime := 0;
+    Vmn := 0; Vtm := 0;
   End;
-  If Vmin > Cnt Then Vmin := Cnt;
+  If Vmn > Cnt Then Vmn := Cnt;
   N := 0;
   While True Do
   Begin
@@ -7816,13 +10534,13 @@ Begin
       Inc(N);
     End;
     If N >= Cnt Then Break;
-    If (N >= Vmin) And ((Vmin > 0) Or (N > 0) Or (Vtime = 0)) And (N > 0)
+    If (N >= Vmn) And ((Vmn > 0) Or (N > 0) Or (Vtm = 0)) And (N > 0)
         Then Break;
-    If (Vmin = 0) And (Vtime = 0) Then Break;
-    If (Vmin = 0) And (N = 0) And (Vtime > 0) Then
+    If (Vmn = 0) And (Vtm = 0) Then Break;
+    If (Vmn = 0) And (N = 0) And (Vtm > 0) Then
     Begin
       { attente bornee du premier octet }
-      Tmo := Vtime * (HZ Div 10);
+      Tmo := Vtm * (HZ Div 10);
       R := SleepOn(T^.Wchan, Tmo, True);
       If R = WakeSignal Then
       Begin
@@ -7832,9 +10550,9 @@ Begin
       If TtyCount(T) = 0 Then Break;
       Continue;
     End;
-    If (Vmin > 0) And (Vtime > 0) And (N > 0) Then
+    If (Vmn > 0) And (Vtm > 0) And (N > 0) Then
     Begin
-      R := SleepOn(T^.Wchan, Vtime * (HZ Div 10), True);
+      R := SleepOn(T^.Wchan, Vtm * (HZ Div 10), True);
       If (R = WakeTimeout) Or (R = WakeSignal) Then Break;
       Continue;
     End;
@@ -8335,6 +11053,7 @@ Var
   ExUsed     : LongInt;
   ExArgc, ExEnvc : LongInt;
   ExPath     : String;          { nom du programme (execfn) }
+  ExAtBase   : LongInt;         { AT_BASE : base de l'interpreteur (0 : aucun) }
 
 { Ajouter une chaine a la fin du tampon ; faux si trop gros }
 Function ExAdd(Const S : String) : Boolean;
@@ -8478,7 +11197,7 @@ Begin
   MemL[0:P] := AT_PHENT; MemL[0:P + 4] := Phent; P := P + 8;
   MemL[0:P] := AT_PHNUM; MemL[0:P + 4] := Phnum; P := P + 8;
   MemL[0:P] := AT_PAGESZ; MemL[0:P + 4] := 4096; P := P + 8;
-  MemL[0:P] := AT_BASE; MemL[0:P + 4] := 0; P := P + 8;
+  MemL[0:P] := AT_BASE; MemL[0:P + 4] := ExAtBase; P := P + 8;
   MemL[0:P] := AT_FLAGS; MemL[0:P + 4] := 0; P := P + 8;
   MemL[0:P] := AT_ENTRY; MemL[0:P + 4] := Entry; P := P + 8;
   MemL[0:P] := AT_UID; MemL[0:P + 4] := Cur^.Uid; P := P + 8;
@@ -8582,6 +11301,72 @@ Begin
   ExecScript := 0;
 End;
 
+{ Projeter les segments PT_LOAD du fichier I (en-tetes de programme en
+  Ph) a l'adresse Bias + p_vaddr. Retourne la fin du dernier segment (tas),
+  l'adresse des en-tetes en memoire (HdrAddr) et les bornes du code et des
+  donnees. Appele apres le point de non retour : un echec tue le processus }
+Procedure ExMapSegs(I : PInode; Ph, Phnum, Phoff, Bias : LongInt; Mm : PMm;
+    Var BrkOut, HdrAddr, StartCode, EndCode, StartData, EndData : LongInt);
+Var K, PType, POff, PVaddr, PFilesz, PMemsz, PFlags, Prot, Start, Fin,
+    FileEnd, BssEnd, FirstLoad : LongInt; V : PVma;
+Begin
+  BrkOut := 0;
+  HdrAddr := 0;
+  FirstLoad := 1;
+  StartCode := 0; EndCode := 0; StartData := 0; EndData := 0;
+  For K := 0 To Phnum - 1 Do
+  Begin
+    PType := MemL[0:Ph + K * 32];
+    POff := MemL[0:Ph + K * 32 + 4];
+    PVaddr := MemL[0:Ph + K * 32 + 8] + Bias;
+    PFilesz := MemL[0:Ph + K * 32 + 16];
+    PMemsz := MemL[0:Ph + K * 32 + 20];
+    PFlags := MemL[0:Ph + K * 32 + 24];
+    If PType = 1 Then
+    Begin
+      Prot := 0;
+      If (PFlags And 4) <> 0 Then Prot := Prot Or PROT_READ;
+      If (PFlags And 2) <> 0 Then Prot := Prot Or PROT_WRITE;
+      If (PFlags And 1) <> 0 Then Prot := Prot Or PROT_EXEC;
+      Start := PageDown(PVaddr);
+      FileEnd := PVaddr + PFilesz;
+      BssEnd := PVaddr + PMemsz;
+      If PFilesz > 0 Then
+      Begin
+        Fin := PageUp(FileEnd);
+        V := VmaNew(Start, Fin, Prot, MAP_PRIVATE);
+        If V = Nil Then DieBySignal(SIGKILL, False);
+        V^.Ino := InodeRef(LongInt(I));
+        V^.Off := POff - (PVaddr - Start);
+        V^.FLen := PFilesz + (PVaddr - Start);
+        VmaInsert(Mm, V);
+      End
+      Else Fin := Start;
+      If PageUp(BssEnd) > Fin Then
+      Begin
+        V := VmaNew(Fin, PageUp(BssEnd), Prot, MAP_PRIVATE Or MAP_ANONYMOUS);
+        If V = Nil Then DieBySignal(SIGKILL, False);
+        VmaInsert(Mm, V);
+      End;
+      If FirstLoad <> 0 Then
+      Begin
+        HdrAddr := PVaddr - POff + Phoff;
+        FirstLoad := 0;
+      End;
+      If (PFlags And 1) <> 0 Then
+      Begin
+        StartCode := PVaddr; EndCode := FileEnd;
+      End
+      Else
+      Begin
+        If StartData = 0 Then StartData := PVaddr;
+        EndData := FileEnd;
+      End;
+      If PageUp(BssEnd) > BrkOut Then BrkOut := PageUp(BssEnd);
+    End;
+  End;
+End;
+
 { Charger le programme Path dans un nouvel espace d'adressage (les arguments
   sont dans ExArgs). Retourne 0 ou -errno. Au-dela du point de non retour,
   un echec tue le processus. }
@@ -8595,6 +11380,9 @@ Var D : PDentry; I : PInode; R, N, K, Phoff, Phnum, Phent, Entry, Etype,
     FirstLoad, Secure : LongInt; Fr : PFrame; Intp : String; Nm : String;
         V : PVma;
     EndCode, StartCode, StartData, EndData : LongInt; Perm : LongInt;
+    Bias, IBias, IBrk, IHdr, ISc, IEc, ISd, IEd, MainEntry, IPh, IPhnum,
+    ISpan, IMin, IMax, IEntry : LongInt;
+    IntpPath : String; IDent : PDentry; IIno : PInode; IHdrB : Array[0..63] Of Byte;
 Begin
   If Depth > 4 Then
   Begin
@@ -8655,8 +11443,8 @@ Begin
   Phoff := MemL[0:LongInt(@Hdr[0]) + 28];
   Phent := MemW[0:LongInt(@Hdr[0]) + 42];
   Phnum := MemW[0:LongInt(@Hdr[0]) + 44];
-  If (Etype <> 2) Or (Machine <> 3) Or (Phent <> 32) Or (Phnum = 0)
-      Or (Phnum > 64) Then
+  If ((Etype <> 2) And (Etype <> 3)) Or (Machine <> 3) Or (Phent <> 32)
+      Or (Phnum = 0) Or (Phnum > 64) Then
   Begin
     DentryPut(LongInt(D));
     ExecLoad := -ENOEXEC;
@@ -8696,9 +11484,86 @@ Begin
       End;
     End;
   End;
+  { biais des executables PIE (ET_DYN) et interpreteur (PT_INTERP) }
+  Bias := 0;
+  If Etype = 3 Then Bias := $08048000;
+  IntpPath := '';
+  IIno := Nil; IDent := Nil; IPh := 0; IPhnum := 0; IEntry := 0;
+  For K := 0 To Phnum - 1 Do
+    If MemL[0:Ph + K * 32] = 3 Then
+    Begin
+      POff := MemL[0:Ph + K * 32 + 4];
+      PFilesz := MemL[0:Ph + K * 32 + 16];
+      If (PFilesz > 1) And (PFilesz < 256) Then
+      Begin
+        MemFill(LongInt(@IHdrB[0]), 0, 64);
+        N := InodeReadAt(LongInt(I), LongInt(@IHdrB[0]), POff, PFilesz);
+        If N = PFilesz Then
+          For R := 0 To PFilesz - 2 Do IntpPath := IntpPath + Chr(IHdrB[R]);
+        MemFill(LongInt(@IHdrB[0]), 0, 64);
+      End;
+    End;
+  If IntpPath <> '' Then
+  Begin
+    R := PathWalk(IntpPath, True, IDent);
+    If R <> 0 Then
+    Begin
+      KFree(Ph);
+      DentryPut(LongInt(D));
+      ExecLoad := R;
+      Exit;
+    End;
+    IIno := IDent^.Inode;
+    If ((IIno^.Mode And S_IFMT) <> S_IFREG)
+       Or (InodeReadAt(LongInt(IIno), LongInt(@IHdrB[0]), 0, 52) <> 52)
+       Or (MemL[0:LongInt(@IHdrB[0])] <> $464C457F) Or (IHdrB[4] <> 1)
+       Or (MemW[0:LongInt(@IHdrB[0]) + 16] <> 3)
+       Or (MemW[0:LongInt(@IHdrB[0]) + 18] <> 3)
+       Or (MemW[0:LongInt(@IHdrB[0]) + 42] <> 32)
+       Or (MemW[0:LongInt(@IHdrB[0]) + 44] = 0)
+       Or (MemW[0:LongInt(@IHdrB[0]) + 44] > 64) Then
+    Begin
+      DentryPut(LongInt(IDent));
+      KFree(Ph);
+      DentryPut(LongInt(D));
+      ExecLoad := -ELIBBAD;
+      Exit;
+    End;
+    IPhnum := MemW[0:LongInt(@IHdrB[0]) + 44];
+    IEntry := MemL[0:LongInt(@IHdrB[0]) + 24];
+    IPh := KMalloc(IPhnum * 32);
+    If (IPh = 0) Or (InodeReadAt(LongInt(IIno), IPh,
+        MemL[0:LongInt(@IHdrB[0]) + 28], IPhnum * 32) <> IPhnum * 32) Then
+    Begin
+      If IPh <> 0 Then KFree(IPh);
+      DentryPut(LongInt(IDent));
+      KFree(Ph);
+      DentryPut(LongInt(D));
+      ExecLoad := -ELIBBAD;
+      Exit;
+    End;
+    { etendue de l'interpreteur }
+    IMin := -1; IMax := 0;
+    For K := 0 To IPhnum - 1 Do
+      If MemL[0:IPh + K * 32] = 1 Then
+      Begin
+        PVaddr := MemL[0:IPh + K * 32 + 8];
+        PMemsz := MemL[0:IPh + K * 32 + 20];
+        If (IMin = -1) Or ULt(PVaddr, IMin) Then IMin := PVaddr;
+        If ULt(IMax, PVaddr + PMemsz) Then IMax := PVaddr + PMemsz;
+      End;
+    If IMin = -1 Then IMin := 0;
+    IMin := PageDown(IMin);
+    ISpan := PageUp(IMax) - IMin;
+  End;
   NewMm := MmNew;
   If NewMm = Nil Then
   Begin
+    If IIno <> Nil Then
+    Begin
+      KFree(IPh);
+      DentryPut(LongInt(IDent));
+    End;
     KFree(Ph);
     DentryPut(LongInt(D));
     ExecLoad := -ENOMEM;
@@ -8711,71 +11576,23 @@ Begin
   WriteCr3(NewMm^.PgdPhys);
   If OldMm <> Nil Then MmRelease(OldMm);
   ExecResetState;
-  Brk := 0;
-  HdrAddr := 0;
-  FirstLoad := 1;
-  StartCode := 0; EndCode := 0; StartData := 0; EndData := 0;
-  For K := 0 To Phnum - 1 Do
+  ExMapSegs(I, Ph, Phnum, Phoff, Bias, NewMm, Brk, HdrAddr, StartCode,
+      EndCode, StartData, EndData);
+  MainEntry := Entry + Bias;
+  ExAtBase := 0;
+  If IIno <> Nil Then
   Begin
-    PType := MemL[0:Ph + K * 32];
-    POff := MemL[0:Ph + K * 32 + 4];
-    PVaddr := MemL[0:Ph + K * 32 + 8];
-    PFilesz := MemL[0:Ph + K * 32 + 16];
-    PMemsz := MemL[0:Ph + K * 32 + 20];
-    PFlags := MemL[0:Ph + K * 32 + 24];
-    If PType = 1 Then
-    Begin
-      Prot := 0;
-      If (PFlags And 4) <> 0 Then Prot := Prot Or PROT_READ;
-      If (PFlags And 2) <> 0 Then Prot := Prot Or PROT_WRITE;
-      If (PFlags And 1) <> 0 Then Prot := Prot Or PROT_EXEC;
-      Start := PageDown(PVaddr);
-      FileEnd := PVaddr + PFilesz;
-      BssEnd := PVaddr + PMemsz;
-      If PFilesz > 0 Then
-      Begin
-        Fin := PageUp(FileEnd);
-        V := VmaNew(Start, Fin, Prot, MAP_PRIVATE);
-        If V = Nil Then
-        Begin
-          KFree(Ph);
-          DentryPut(LongInt(D));
-          DieBySignal(SIGKILL, False);
-        End;
-        V^.Ino := InodeRef(LongInt(I));
-        V^.Off := POff - (PVaddr - Start);
-        V^.FLen := PFilesz + (PVaddr - Start);
-        VmaInsert(NewMm, V);
-      End
-      Else Fin := Start;
-      If PageUp(BssEnd) > Fin Then
-      Begin
-        V := VmaNew(Fin, PageUp(BssEnd), Prot, MAP_PRIVATE Or MAP_ANONYMOUS);
-        If V = Nil Then
-        Begin
-          KFree(Ph);
-          DentryPut(LongInt(D));
-          DieBySignal(SIGKILL, False);
-        End;
-        VmaInsert(NewMm, V);
-      End;
-      If FirstLoad <> 0 Then
-      Begin
-        HdrAddr := PVaddr - POff + Phoff;
-        FirstLoad := 0;
-      End;
-      If (PFlags And 1) <> 0 Then
-      Begin
-        StartCode := PVaddr; EndCode := FileEnd;
-      End
-      Else
-      Begin
-        If StartData = 0 Then StartData := PVaddr;
-        EndData := FileEnd;
-      End;
-      If PageUp(BssEnd) > Brk Then Brk := PageUp(BssEnd);
-    End;
-  End;
+    IBias := FindFreeArea(NewMm, ISpan);
+    If IBias = 0 Then DieBySignal(SIGKILL, False);
+    IBias := IBias - IMin;
+    ExMapSegs(IIno, IPh, IPhnum, MemL[0:LongInt(@IHdrB[0]) + 28], IBias,
+        NewMm, IBrk, IHdr, ISc, IEc, ISd, IEd);
+    KFree(IPh);
+    DentryPut(LongInt(IDent));
+    ExAtBase := IBias;
+    Entry := IBias + IEntry;
+  End
+  Else Entry := MainEntry;
   KFree(Ph);
   NewMm^.StartCode := StartCode; NewMm^.EndCode := EndCode;
   NewMm^.StartData := StartData; NewMm^.EndData := EndData;
@@ -8801,7 +11618,8 @@ Begin
   For K := 0 To 15 Do Cur^.Comm[K] := 0;
   For K := 1 To Length(Nm) Do Cur^.Comm[K - 1] := Ord(Nm[K]);
   DentryPut(LongInt(D));
-  Sp := ExecSetupStack(NewMm, Entry, HdrAddr, Phnum, Phent, Secure);
+  Sp := ExecSetupStack(NewMm, MainEntry, HdrAddr, Phnum, Phent,
+      Secure);
   If (Sp < 0) And (Sp > -4096) Then DieBySignal(SIGKILL, False);
   { retour en mode utilisateur au point d'entree }
   Fr := Pointer(Cur^.Frame);
@@ -9588,34 +12406,48 @@ Begin
   F := Nil;
 End;
 
-{ statfs : valeurs generiques ou propres au systeme de fichiers }
+{ statfs : valeurs generiques ou propres au systeme de fichiers (SoStatfs) }
 Procedure FillStatfs(Sb : PSuper; A : LongInt; Is64 : Boolean);
-Var Magic, Bs, Blocks, Fre : LongInt; O : LongInt;
+Var Magic, Bs, Blocks, Fre, Avail, Files, FFree, Fl, Fn : LongInt;
+    St : Array[0..7] Of LongInt;
 Begin
   Magic := $01021994;
   If FsNames[Sb^.FsType] = 'ramfs' Then Magic := $858458F6
-  Else If FsNames[Sb^.FsType] = 'ext2' Then Magic := $EF53
   Else If FsNames[Sb^.FsType] = 'proc' Then Magic := $9FA0;
   Bs := 4096;
   Blocks := TotalFreePages;
   Fre := FreePagesCnt;
+  Avail := Fre;
+  Files := InodeCount + 1024;
+  FFree := 1024;
+  Fn := GetOp(Sb^.SOps, SoStatfs);
+  If Fn <> 0 Then
+  Begin
+    MemFill(LongInt(@St[0]), 0, 32);
+    Call2(Fn, LongInt(Sb), LongInt(@St[0]));
+    Bs := St[0]; Blocks := St[1]; Fre := St[2]; Avail := St[3];
+    Files := St[4]; FFree := St[5]; Magic := St[7];
+  End;
+  Fl := 0;
+  If (Sb^.Flags And MS_RDONLY) <> 0 Then Fl := 1;
   If Is64 Then
   Begin
     MemFill(A, 0, 84);
     MemL[0:A] := Magic; MemL[0:A + 4] := Bs;
-    MemL[0:A + 8] := Blocks; MemL[0:A + 16] := Fre; MemL[0:A + 24] := Fre;
-    MemL[0:A + 32] := InodeCount + 1024; MemL[0:A + 40] := 1024;
-    MemL[0:A + 56] := 255; MemL[0:A + 60] := Bs;
+    MemL[0:A + 8] := Blocks; MemL[0:A + 16] := Fre; MemL[0:A + 24] := Avail;
+    MemL[0:A + 32] := Files; MemL[0:A + 40] := FFree;
+    MemL[0:A + 48] := Sb^.Dev;
+    MemL[0:A + 56] := 255; MemL[0:A + 60] := Bs; MemL[0:A + 64] := Fl;
   End
   Else
   Begin
     MemFill(A, 0, 64);
     MemL[0:A] := Magic; MemL[0:A + 4] := Bs;
-    MemL[0:A + 8] := Blocks; MemL[0:A + 12] := Fre; MemL[0:A + 16] := Fre;
-    MemL[0:A + 20] := InodeCount + 1024; MemL[0:A + 24] := 1024;
-    MemL[0:A + 36] := 255; MemL[0:A + 40] := Bs;
+    MemL[0:A + 8] := Blocks; MemL[0:A + 12] := Fre; MemL[0:A + 16] := Avail;
+    MemL[0:A + 20] := Files; MemL[0:A + 24] := FFree;
+    MemL[0:A + 28] := Sb^.Dev;
+    MemL[0:A + 36] := 255; MemL[0:A + 40] := Bs; MemL[0:A + 44] := Fl;
   End;
-  O := 0;
 End;
 
 Function SysStatfs(PathAddr, Buf : LongInt) : LongInt;
@@ -10494,6 +13326,8 @@ Begin
     SysMount := -EPERM;
     Exit;
   End;
+  If (Flags And LongInt($FFFF0000)) = LongInt($C0ED0000) Then
+    Flags := Flags And $FFFF;
   Dv := '';
   If DevA <> 0 Then
   Begin
@@ -10508,6 +13342,21 @@ Begin
   If R < 0 Then
   Begin
     SysMount := R;
+    Exit;
+  End;
+  If (Flags And MS_REMOUNT) <> 0 Then
+  Begin
+    SysMount := VfsRemount(Dr, Flags);
+    Exit;
+  End;
+  If (Flags And MS_BIND) <> 0 Then
+  Begin
+    SysMount := VfsBind(Dv, Dr);
+    Exit;
+  End;
+  If (Flags And 8192) <> 0 Then
+  Begin
+    SysMount := VfsMoveMount(Dv, Dr);
     Exit;
   End;
   If TypeA = 0 Then
@@ -10538,7 +13387,30 @@ Begin
     SysUmount2 := R;
     Exit;
   End;
-  SysUmount2 := VfsUmount(P);
+  SysUmount2 := VfsUmount(P, Flags);
+End;
+
+Function SysPivotRoot(NewA, OldA : LongInt) : LongInt;
+Var Np, Op : String; R : LongInt;
+Begin
+  If Cur^.Euid <> 0 Then
+  Begin
+    SysPivotRoot := -EPERM;
+    Exit;
+  End;
+  R := GetUserStr(NewA, Np);
+  If R < 0 Then
+  Begin
+    SysPivotRoot := R;
+    Exit;
+  End;
+  R := GetUserStr(OldA, Op);
+  If R < 0 Then
+  Begin
+    SysPivotRoot := R;
+    Exit;
+  End;
+  SysPivotRoot := VfsPivotRoot(Np, Op);
 End;
 
 Function SysUmount(PathA : LongInt) : LongInt;
@@ -11996,7 +14868,7 @@ Begin
   MemFill(Buf, 0, 390);
   PutField(Buf, 0, 'LINUX-0');
   PutField(Buf, 1, HostName);
-  PutField(Buf, 2, 'KERNEL32');
+  PutField(Buf, 2, UnameRel);
   PutField(Buf, 3, '0.1');
   PutField(Buf, 4, 'i386');
   PutField(Buf, 5, DomainName);
@@ -12151,18 +15023,18 @@ Begin
   Case Cmd Of
     $01234567, LongInt($A1B2C3D4) :
       Begin
-        VfsSyncAll;
+        VfsShutdown;
         RebootCpu;
       End;
     LongInt($CDEF0123) :
       Begin
-        VfsSyncAll;
+        VfsShutdown;
         KLog('Systeme arrete.');
         CpuHalt;
       End;
     $4321FEDC :
       Begin
-        VfsSyncAll;
+        VfsShutdown;
         PowerOff;
       End;
     LongInt($89ABCDEF), 0 : SysReboot := 0;
@@ -12610,7 +15482,7 @@ Begin
       3);
   SysReg(212, LongInt(@SysChown32), 3);   SysReg(213, LongInt(@SysSetuid32), 1);
   SysReg(214, LongInt(@SysSetgid32), 1);  SysReg(215, LongInt(@SysSetfsuid), 1);
-  SysReg(216, LongInt(@SysSetfsgid), 1);  SysReg(219, LongInt(@SysMadvise), 3);
+  SysReg(216, LongInt(@SysSetfsgid), 1); SysReg(217, LongInt(@SysPivotRoot), 2);  SysReg(219, LongInt(@SysMadvise), 3);
   SysReg(220, LongInt(@SysGetdents64), 3); SysReg(221, LongInt(@SysFcntl), 3);
   SysReg(224, LongInt(@SysGettid), 0);    SysReg(238, LongInt(@SysTkill), 2);
   SysReg(240, LongInt(@SysFutex), 5);     SysReg(243,
@@ -12779,7 +15651,7 @@ Begin
   If CtrlAltDel Then
   Begin
     CtrlAltDel := False;
-    VfsSyncAll;
+    VfsShutdown;
     RebootCpu;
   End;
   If NeedResched Then Schedule;
@@ -12943,8 +15815,8 @@ End;
   encodes en base64, ecrits dans le tmpfs racine au demarrage. }
 
 Const
-  EmbCount = 14;
-  EmbPath : Array[0..13] Of String[20] = (
+  EmbCount = 15;
+  EmbPath : Array[0..14] Of String[20] = (
     '/sbin/init',
     '/bin/hello',
     '/bin/forkwait',
@@ -12958,79 +15830,86 @@ Const
     '/bin/misctest',
     '/bin/proctest',
     '/bin/stress',
-    '/bin/kbdtest');
-  EmbSize : Array[0..13] Of LongInt = (
-    2964, 1632, 1900, 2204, 2196, 2200, 3884, 1644, 1588, 2232, 4368, 2660,
-    2208, 1040);
-  EmbStart : Array[0..14] Of LongInt = (
-    0, 66, 103, 146, 195, 244, 293, 380, 417, 453, 503, 601, 661, 711, 735);
-  EmbData : Array[0..734] Of String[60] = (
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAw4QECDQAAAB8CgAAAAAAADQAIAAC',
-    'ACgABwAGAAEAAAAAAAAAAIAECACABAjUCAAA1AgAAAUAAAAAEAAAUeV0ZAAA',
+    '/bin/kbdtest',
+    '/bin/ext2test');
+  EmbSize : Array[0..14] Of LongInt = (
+    3160, 1632, 1900, 2204, 2196, 2200, 3884, 1644, 1588, 2232, 4380, 2660,
+    2256, 1040, 11872);
+  EmbStart : Array[0..15] Of LongInt = (
+    0, 71, 108, 151, 200, 249, 298, 385, 422, 458, 508, 606, 666, 717, 741,
+    1005);
+  EmbData : Array[0..1004] Of String[60] = (
+    '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',
-    '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',
-    'QVRIPS9iaW46L3NiaW46L3Vzci9iaW4ASE9NRT0vcm9vdABURVJNPWxpbnV4',
-    'ADAxMjM0NTY3ODlhYmNkZWYALgAvCgBpbml0OiBkb2l0IGV0cmUgbGUgcHJv',
-    'Y2Vzc3VzIDEKAAo9PT0gTElOVVgtMCBLRVJORUwzMiA6IGluaXQgKGJhbmMg',
-    'ZCdlc3NhaSkgPT09CgBLUFJPRzogACBPSwoAIEZBSUwgc3RhdHVzPQBLVEVT',
-    'VDogRE9ORSBwcm9ncz0AIGZhaWw9AHBvd2Vyb2ZmAEludGVycHJldGV1ciBk',
-    'ZSBjb21tYW5kZXMgKGhhbHQgcG91ciBhcnJldGVyKSA6CgAjIABoYWx0AGV4',
-    'aXQAY2QAY2Q6IGVycmV1cgoAcHdkAGxzAGxzOiBlcnJldXIKAGNhdABjYXQ6',
-    'IGVycmV1cgoAZWNobwBta2RpcgBta2RpcjogZXJyZXVyCgBybQBybTogZXJy',
-    'ZXVyCgBbc3RhdHV0IABdCgAvYmluL2hlbGxvAC9iaW4vZm9ya3dhaXQAL2Jp',
-    'bi9waXBldGVzdAAvYmluL3NpZ3Rlc3QAL2Jpbi9tbWFwdGVzdAAvYmluL2Rp',
-    'cnRlc3QAL2Jpbi90dHl0ZXN0AC9iaW4vc2NoZWR0ZXN0AC9iaW4vYmxrdGVz',
-    'dAAvYmluL21pc2N0ZXN0AC9iaW4vcHJvY3Rlc3QAL2Jpbi9zdHJlc3MAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAFOGBAhshgQId4YECAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAzYcECNiHBAjmhwQI9IcECAGIBAgPiAQIHIgECCmIBAg4iAQIRYgECFOI',
-    'BAhhiAQIAAAAAEdDQzogKFVidW50dSAxMy4zLjAtNnVidW50dTJ+MjQuMDQu',
-    'MSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAEAPH/',
-    'CAAAANCEBAggAAAAAgABAA8AAADwhAQIHQAAAAIAAQAXAAAADYUECAkAAAAC',
-    'AAEAHAAAABaFBAiSAAAAAgABACAAAACohQQIXQAAAAIAAQAlAAAAoIgECDQA',
-    'AAABAAIAKwAAAAWGBAgpAAAAEgABADEAAAC8hAQIAAAAABAAAQBDAAAAw4QE',
-    'CAAAAAAQAAEAPgAAANSYBAgAAAAAEAACACwAAAB0gAQISAQAABIAAQBKAAAA',
-    '1JgECAAAAAAQAAIAUQAAANSYBAgAAAAAEAACAABpbml0LmMAc3RyY21wAHB1',
-    'dHNfZmQAcHV0cwBydW4AcHV0ZAB0ZXN0cwBjbWFpbgBfX3Jlc3RvcmVfcnQA',
-    'X19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hz',
-    'dHJ0YWIALnRleHQALnJvZGF0YQAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAdIAECHQAAAC6',
-    'BQAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAAgAAAECGBAhABgAAlAIAAAAA',
-    'AAAAAAAAIAAAAAAAAAApAAAAAQAAADAAAAAAAAAA1AgAAC0AAAAAAAAAAAAA',
-    'AAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAAAQJAADwAAAABQAAAAgAAAAEAAAA',
-    'EAAAAAkAAAADAAAAAAAAAAAAAAD0CQAAVgAAAAAAAAAAAAAAAQAAAAAAAAAR',
-    'AAAAAwAAAAAAAAAAAAAASgoAADIAAAAAAAAAAAAAAAEAAAAAAAAA',
+    'AM2ASHQUuDiHBAjoHgUAALgBAAAA6bsEAAC4QgAAAM2AuFiHBAgx/zHb6P8E',
+    'AACLDJ1giQQIhcl0XzHSiYwkkAEAAInIQ4mUJJQBAACNlCSQAQAAiUwkDOja',
+    'BAAAica4iYcECOjFBAAAi0QkDOi8BAAAuJGHBAiF9nQXuJaHBAhH6KgEAACJ',
+    '8Og8BQAAuDaHBAjolwQAAOuWuKSHBAjoiwQAAInY6B8FAAC4t4cECOh6BAAA',
+    'ifjoDgUAALg2hwQI6GkEAACDfQgBfjOLRQy6vocECItABOgWBAAAicaFwHUd',
+    'uCQAAADNgLhYAAAAu63e4f65aRkSKLrc/iFDzYAx0r4FAAAAu8eHBAiJ8InR',
+    'zYCJxoXAeQq41YcECOlAAQAAjYwkkAEAALr/AAAAuAMAAACJ882AiUQkDLgG',
+    'AAAAzYCDfCQMAH7Pi0QkDInPxoQEkAEAAAC4BwAAACnIiUQkCItEJAgB+DlE',
+    'JAx+qjHAipAGiAQIOBQHdSVAg/gIde+4JAAAAM2AuFgAAAC7rd7h/rlpGRIo',
+    'Mfa63P4hQ82AR+u/D4QsAwAAuA+IBAgx2+h7AwAAuAMAAAC6/wAAAI2MJJAA',
+    'AADNgIXAfteAvASPAAAACsaEBJAAAAAAdQjGhASPAAAAADH2gDkAdX8xwIlE',
+    'tBCF9nSyi3wkELoSiAQIifjo7AIAAIXAD4SDAAAAur6HBAiJ+OjYAgAAhcB0',
+    'c7oXiAQIifjoyAIAAIXAD4SiAgAAuhyIBAiJ+Oi0AgAAhcB1c04PhF////+L',
+    'XCQUuAwAAADNgIXAD4lM////uB+IBAjoyQIAAOk9////igE8IHUHQcZB/wDr',
+    '84TAD4Rn////RolMtAz2Ad8PhFn///9B6/S4JAAAAM2AuFgAAAC7rd7h/rlp',
+    'GRIoMfa63P4hQ82A6fP+//+6K4gECIn46DECAACFwHUfjZwkkAEAALi3AAAA',
+    'ucgAAADNgInY6FACAADpTwEAALoviAQIifjoAgIAAIXAD4WMAAAATrszhwQI',
+    'dASLXCQUuQAAAQAx0rgFAAAAzYCJRCQMhcB5PLgyiAQI6T3///+NhCSQAQAA',
+    'jTwYjUcT6PkBAACAfxIEuTWHBAi4NocECA9EwejjAQAAD7dHEAHDOfN8zr7c',
+    'AAAAi1wkDLoABAAAjYwkkAEAAInwzYCJxoXAfgQx2+uri1wkDLgGAAAA62+6',
+    'PogECIn46GIBAACD/gEPlcOFwHVghNt0XDHSvgUAAACLXCQUifCJ0c2AicaF',
+    'wHgJjYwkkAEAAOsKuEKIBAjpmf7//78DAAAAugACAACJ84n4zYCJx4XAfhC4',
+    'BAAAALsBAAAAifrNgOvauAYAAADNgOmu/f//uk+IBAiJ+OjsAAAAhcB1M7sB',
+    'AAAAOfN9IItEnBBD6BIBAAA587oQiAQIuDeHBAgPTMLo/gAAAOvcuDaHBAjp',
+    'JP7//7pUiAQIifjoqQAAAIXAdSaE23Qii1wkFLgnAAAAue0BAADNgIXAD4k/',
+    '/f//uFqIBAjp7v3//7ppiAQIifjocwAAAIXAdSGE23Qdi1wkFLgKAAAAzYCF',
+    'wA+JDv3//7hsiAQI6b39//+NVCQQifjoiQAAAInDhcAPhO/8//+4eIgECOhs',
+    'AAAAidjoAAEAALiBiAQI6Y39//8xwI1l9FteX13DuK0AAADNgDHtieCD5PBQ',
+    '6DUBAABVieVWicZTMdsPtgQeD7YMGoTAdAVDOMh071spyF5dw1WJ0THSieVT',
+    'icOAPBEAdANC6/e4BAAAAM2AW13DicK4AQAAAOvaVYnlV1ZTg+wsiUXUuAIA',
+    'AACJVdDNgIXAdViNfdi+QIkECLkEAAAAi13U86WNVdi4CwAAAItN0M2AuuCG',
+    'BAi4AgAAALt/AAAA6I3///+LVdS4AgAAAOiA////uumGBAi4AgAAAOhx////',
+    'uAEAAADNgOv+icO4/////3gPjU3YuAcAAAAx0s2Ai0XYg8QsW15fXcNVieVW',
+    'U4nDg+wwxkX3AIXAeQ732LkhAAAAvgoAAADrDXXyxkX2MLkgAAAA6x+FwHQR',
+    'MdJJ9/aKkiKHBAiIVA3W6+uF23kGxkQN1S1JjUXWAcjoD////4PEMFteXcNV',
+    'ieVTg+wIi0UIixCNSASNRJAIUFFS6Kz5//+Jw7gBAAAAzYCDxBDr/gAAAAAA',
+    'AAAAAABleGVjdmU6IAAgOiBlY2hlYwoAUEFUSD0vYmluOi9zYmluOi91c3Iv',
+    'YmluAEhPTUU9L3Jvb3QAVEVSTT1saW51eAAwMTIzNDU2Nzg5YWJjZGVmAC4A',
+    'LwoAaW5pdDogZG9pdCBldHJlIGxlIHByb2Nlc3N1cyAxCgAKPT09IExJTlVY',
+    'LTAgS0VSTkVMMzIgOiBpbml0IChiYW5jIGQnZXNzYWkpID09PQoAS1BST0c6',
+    'IAAgT0sKACBGQUlMIHN0YXR1cz0AS1RFU1Q6IERPTkUgcHJvZ3M9ACBmYWls',
+    'PQBwb3dlcm9mZgAvcHJvYy9jbWRsaW5lAEludGVycHJldGV1ciBkZSBjb21t',
+    'YW5kZXMgKGhhbHQgcG91ciBhcnJldGVyKSA6CgBrMzJwb3dlcgAjIABoYWx0',
+    'AGV4aXQAY2QAY2Q6IGVycmV1cgoAcHdkAGxzAGxzOiBlcnJldXIKAGNhdABj',
+    'YXQ6IGVycmV1cgoAZWNobwBta2RpcgBta2RpcjogZXJyZXVyCgBybQBybTog',
+    'ZXJyZXVyCgBbc3RhdHV0IABdCgAvYmluL2hlbGxvAC9iaW4vZm9ya3dhaXQA',
+    'L2Jpbi9waXBldGVzdAAvYmluL3NpZ3Rlc3QAL2Jpbi9tbWFwdGVzdAAvYmlu',
+    'L2RpcnRlc3QAL2Jpbi90dHl0ZXN0AC9iaW4vc2NoZWR0ZXN0AC9iaW4vYmxr',
+    'dGVzdAAvYmluL21pc2N0ZXN0AC9iaW4vcHJvY3Rlc3QAL2Jpbi9zdHJlc3MA',
+    'L2Jpbi9leHQydGVzdAAAAAAAAAAAAAAAAAAAAPOGBAgMhwQIF4cECAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAhIgECI+IBAidiAQIq4gECLiIBAjGiAQI04gECOCI',
+    'BAjviAQI/IgECAqJBAgYiQQIJIkECAAAAABHQ0M6IChVYnVudHUgMTMuMy4w',
+    'LTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AQAAAAAAAAAAAAAABADx/wgAAAB4hQQIIAAAAAIAAQAPAAAAmIUECB0AAAAC',
+    'AAEAFwAAALWFBAgJAAAAAgABABwAAAC+hQQIkgAAAAIAAQAgAAAAUIYECF0A',
+    'AAACAAEAJQAAAGCJBAg4AAAAAQACACsAAACthgQIKQAAABIAAQAxAAAAZIUE',
+    'CAAAAAAQAAEAQwAAAGuFBAgAAAAAEAABAD4AAACYmQQIAAAAABAAAgAsAAAA',
+    'dIAECPAEAAASAAEASgAAAJiZBAgAAAAAEAACAFEAAACYmQQIAAAAABAAAgAA',
+    'aW5pdC5jAHN0cmNtcABwdXRzX2ZkAHB1dHMAcnVuAHB1dGQAdGVzdHMAY21h',
+    'aW4AX19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3lt',
+    'dGFiAC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmNvbW1lbnQA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAAB',
+    'AAAABgAAAHSABAh0AAAAYgYAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAAAIA',
+    'AADghgQI4AYAALgCAAAAAAAAAAAAACAAAAAAAAAAKQAAAAEAAAAwAAAAAAAA',
+    'AJgJAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAADICQAA',
+    '8AAAAAUAAAAIAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAAuAoAAFYAAAAA',
+    'AAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAAA4LAAAyAAAAAAAAAAAA',
+    'AAABAAAAAAAAAA==',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAEoIECDQAAAAgBQAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAiAAwAAgAMAAAUAAAAAEAAAAQAAAIAD',
     'AACAkwQIgJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -13468,104 +16347,104 @@ Const
     'AAIAAAAAAAAAAAAAAAgGAADgAAAABgAAAAcAAAAEAAAAEAAAAAkAAAADAAAA',
     'AAAAAAAAAADoBgAAWQAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAA',
     'AAAAQQcAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '+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',
+    '+AW41IwECA+UwuisBgAAjUQkAYtcJBCJ8olEJFCNRCQMjUwkUIlEJFi4kQAA',
+    'AMdEJFQCAAAAx0QkXAMAAADNgDHSg/gFdRGAfCQBYXUKMdKAfCQOZQ+Uwrjb',
+    'jAQIuwUAAADoVAYAAInYuUIAAAC6gAEAALvhjAQIzYC6CgAAAInDuemMBAi4',
     'BAAAAM2AuLQAAAC+BgAAADH/ugQAAACNjCQwAgAAzYAxyYP4BHUegLwkMAIA',
-    'ADZ1FLgTAAAAugEAAADNgDHJg/gKD5TBicq46IwECOjXBQAAuAYAAADNgLgK',
-    'AAAAu9WMBAjNgLgpAAAAuwEAAADNgDHSg/gCicO+NwAAAA+fwrjwjAQI6J8F',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
-    'D5TC6BUCAACNjCQQAQAAuGoAAADNgDHSg7wkJAEAAAN1FIuEJBgBAAAx0mYl',
-    'APBmPQCAD5TCuHqNBAiJ8+jbAQAAuAoAAADNgL4FAAAAuUIAAAC6gAEAALuD',
-    'jQQIifDNgInGuAYAAACJ882AvuSNBAi5BAAAALgPAQAAu4ONBAiNvCSAAAAA',
-    '86WNjCSAAAAAzYAx0oXAuIuNBAgPlMLoegEAAI2MJFABAAC4wwAAAM2AMdKB',
-    'vCSYAQAAgIQeAHUQMdKBvCSQAQAAQEIPAA+UwriSjQQIu4ONBAjoPgEAALgK',
-    'AAAAzYC+BQAAALtAjAQIuQAAAQAx0onwzYCJxroAAQAAuI0AAACJ842MJDAC',
-    'AADNgDHShcB+DjHSZoO8JDgCAAALD5fCuJ+NBAiJ8+jrAAAAuAYAAADNgDHA',
-    'uwAAAFC5ACAAAIPP/4lEJAi+MgAAALjAAAAAugMAAABVi2wkCM2AXTHSPQAA',
-    'AFC4rI0ECA+UwuimAAAAuL4AAADNgInDhcB1DrgBAAAAuwMAAADNgOv+uAcA',
-    'AAAx0o1MJATNgItEJAQx0iUA/wAAPQADAAC4t40ECA+UwuhhAAAAMcCDPfyd',
-    'BAgAD5XAjWX0W15fXcO4rQAAAM2AMe2J4IPk8FDofQAAAFWJ5YtFCF2j+J0E',
-    'CMOh9J0ECECj9J0ECMNVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtd',
-    'w1WJ5VaJxri8iwQIU4nT6M3///+J8OjG////hdu4tYsECLqwiwQID0XC6LL/',
-    '//+F23QI/wUAngQI6wb/BfydBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBR',
-    'Uuj09P//icO4AQAAAM2Ag8QQ6/4AACBPSwoAIEZBSUwKAEtURVNUOiAAL21u',
-    'dC90AG5vbmUAbW91bnQudG1wZnMAL21udC90L3gAYWJjAG1vdW50LmZpbGUA',
-    'dW1vdW50AHVtb3VudC5nb25lAHVtb3VudC5laW52YWwAL3RtcC9yb290AC90',
-    'bXAvcm9vdC9ldGMAL3RtcC9yb290L2V0Yy9mAGluAC8AL3RtcABjaHJvb3QA',
-    'L3RtcC9sYgAvdG1wL2xhAHN5bWxpbmsuZWxvb3AAcG9sbC53cml0ZV9yZWFk',
-    'eQB6AHBvbGwucmVhZF9yZWFkeQBwb2xsLnRpbWVvdXQAcG9sbC50aW1lb3V0',
-    'MABzZWxlY3QudGltZW91dABxAHNlbGVjdC5yZWFkeQB3cml0ZXYAcmVhZHYA',
-    'L3RtcC9wcgAwMTIzNDU2Nzg5AHByZWFkNjQAZHVwAGZjbnRsLmdldGZkAGZj',
-    'bnRsLmR1cGZkAHNldGl0aW1lcgBzaWdhY3Rpb24ub2xkAGlkcwBzZXRzaWQA',
-    'c2V0dWlkLmVwZXJtAHVtYXNrAGdldHJsaW1pdABzeXNpbmZvAGNsb2NrX2dl',
-    'dHRpbWUAc3RhdGZzAC90bXAvdHIAdHJ1bmNhdGUAc3RhdC5vbGQAL3RtcC91',
-    'dAB1dGltZXMAdXRpbWVzLm10aW1lAGdldGRlbnRzLm9sZABtbWFwLmZpeGVk',
-    'AHZmb3JrAGFiAGNkZQC9jQQIAgAAAMCNBAgDAAAAAAAAAFDDAAAAAAAAUMMA',
-    'AEBCDwAAAAAAgIQeAAAAAABHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUy',
-    'fjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAA',
-    'AAAABADx/wwAAAAIiwQIDQAAAAIAAQARAAAA+J0ECAQAAAABAAMAGQAAABWL',
-    'BAgMAAAAAgABABoAAAD0nQQIBAAAAAEAAwAeAAAAIYsECCAAAAACAAEAIwAA',
-    'AEGLBAhEAAAAAgABACkAAAAAngQIBAAAAAEAAwAxAAAA/J0ECAQAAAABAAMA',
-    'OQAAAIWLBAgpAAAAEgABAD8AAAD0igQIAAAAABAAAQBRAAAA+4oECAAAAAAQ',
-    'AAEATAAAAPSdBAgAAAAAEAADADoAAACUgAQIYAoAABIAAQBYAAAA9J0ECAAA',
-    'AAAQAAMAXwAAAASeBAgAAAAAEAADAABtaXNjdGVzdC5jAG9sZGgAb2xkX3Np',
-    'ZwBoaXR2AHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGNtYWluAF9fcmVz',
-    'dG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3Ry',
-    'dGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAA',
-    'AAYAAACUgAQIlAAAABoLAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAACAAAA',
-    'sIsECLALAABEAgAAAAAAAAAAAAAEAAAAAAAAACkAAAAIAAAAAwAAAPSdBAj0',
-    'DQAAEAAAAAAAAAAAAAAABAAAAAAAAAAuAAAAAQAAADAAAAAAAAAA9A0AAC0A',
-    'AAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAACQOAAAQAQAABgAA',
-    'AAoAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAAA0DwAAZAAAAAAAAAAAAAAA',
-    'AQAAAAAAAAARAAAAAwAAAAAAAAAAAAAAmA8AADcAAAAAAAAAAAAAAAEAAAAA',
-    'AAAA',
+    'ALg7jQQIuz8AAAAPlMLoUQMAALo8AAAAidDNgInBMcCD+RJ1D4nQicvNgIP4',
+    'Pw+UwA+2wInCuEiNBAi7BwAAAOgfAwAAjUwkILhMAAAAzYAx0oF8JCD/AAAA',
+    'uE6NBAgPn8KNnCSQAAAA6PYCAAC4dAAAAM2AMdKFwHUNMdKDvCSgAAAAAA+f',
+    'wrhYjQQIuwEAAADozQIAAI1MJCi4CQEAAM2AMdKFwHUJi1QkKPfSweofuGCN',
+    'BAi7TowECOikAgAAjYwk0AAAALhjAAAAzYAx0oXAdRyLhCTQAAAAPZQZAgEP',
+    'lMI9U+8AAA+UwAnCD7bSuG6NBAi+dY0ECL8FAAAA6GACAACJ87lCAAAAifi6',
+    'gAEAAM2Aice6CgAAALgEAAAAuemMBAiJ+82AuAYAAADNgLhcAAAAuQMAAACJ',
+    '882AMdKFwLh9jQQID5TC6BUCAACNjCQQAQAAuGoAAADNgDHSg7wkJAEAAAN1',
+    'FIuEJBgBAAAx0mYlAPBmPQCAD5TCuIaNBAiJ8+jbAQAAuAoAAADNgL4FAAAA',
+    'uUIAAAC6gAEAALuPjQQIifDNgInGuAYAAACJ882AvvCNBAi5BAAAALgPAQAA',
+    'u4+NBAiNvCSAAAAA86WNjCSAAAAAzYAx0oXAuJeNBAgPlMLoegEAAI2MJFAB',
+    'AAC4wwAAAM2AMdKBvCSYAQAAgIQeAHUQMdKBvCSQAQAAQEIPAA+UwriejQQI',
+    'u4+NBAjoPgEAALgKAAAAzYC+BQAAALtMjAQIuQAAAQAx0onwzYCJxroAAQAA',
+    'uI0AAACJ842MJDACAADNgDHShcB+DjHSZoO8JDgCAAALD5fCuKuNBAiJ8+jr',
+    'AAAAuAYAAADNgDHAuwAAAFC5ACAAAIPP/4lEJAi+MgAAALjAAAAAugMAAABV',
+    'i2wkCM2AXTHSPQAAAFC4uI0ECA+UwuimAAAAuL4AAADNgInDhcB1DrgBAAAA',
+    'uwMAAADNgOv+uAcAAAAx0o1MJATNgItEJAQx0iUA/wAAPQADAAC4w40ECA+U',
+    'wuhhAAAAMcCDPQieBAgAD5XAjWX0W15fXcO4rQAAAM2AMe2J4IPk8FDofQAA',
+    'AFWJ5YtFCF2jBJ4ECMOhAJ4ECECjAJ4ECMNVicEx0onlU4A8EQB0A0Lr97gE',
+    'AAAAuwEAAADNgFtdw1WJ5VaJxrjIiwQIU4nT6M3///+J8OjG////hdu4wYsE',
+    'CLq8iwQID0XC6LL///+F23QI/wUMngQI6wb/BQieBAhbXl3DVYnlU4PsCItF',
+    'CIsQjUgEjUSQCFBRUujo9P//icO4AQAAAM2Ag8QQ6/4AACBPSwoAIEZBSUwK',
+    'AEtURVNUOiAAL21udC90AG5vbmUAbW91bnQudG1wZnMAL21udC90L3gAYWJj',
+    'AG1vdW50LmZpbGUAdW1vdW50AHVtb3VudC5nb25lAHVtb3VudC5laW52YWwA',
+    'L3RtcC9yb290AC90bXAvcm9vdC9ldGMAL3RtcC9yb290L2V0Yy9mAGluAC8A',
+    'L3RtcABjaHJvb3QAL3RtcC9sYgAvdG1wL2xhAHN5bWxpbmsuZWxvb3AAcG9s',
+    'bC53cml0ZV9yZWFkeQB6AHBvbGwucmVhZF9yZWFkeQBwb2xsLnRpbWVvdXQA',
+    'cG9sbC50aW1lb3V0MABzZWxlY3QudGltZW91dABxAHNlbGVjdC5yZWFkeQB3',
+    'cml0ZXYAcmVhZHYAL3RtcC9wcgAwMTIzNDU2Nzg5AHByZWFkNjQAZHVwAGZj',
+    'bnRsLmdldGZkAGZjbnRsLmR1cGZkAHNldGl0aW1lcgBzaWdhY3Rpb24ub2xk',
+    'AGlkcwBzZXRzaWQAc2V0dWlkLmVwZXJtAHVtYXNrAGdldHJsaW1pdABzeXNp',
+    'bmZvAGNsb2NrX2dldHRpbWUAc3RhdGZzAC90bXAvdHIAdHJ1bmNhdGUAc3Rh',
+    'dC5vbGQAL3RtcC91dAB1dGltZXMAdXRpbWVzLm10aW1lAGdldGRlbnRzLm9s',
+    'ZABtbWFwLmZpeGVkAHZmb3JrAGFiAGNkZQDJjQQIAgAAAMyNBAgDAAAAAAAA',
+    'AFDDAAAAAAAAUMMAAEBCDwAAAAAAgIQeAAAAAABHQ0M6IChVYnVudHUgMTMu',
+    'My4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAQAAAAAAAAAAAAAABADx/wwAAAAUiwQIDQAAAAIAAQARAAAABJ4ECAQA',
+    'AAABAAMAGQAAACGLBAgMAAAAAgABABoAAAAAngQIBAAAAAEAAwAeAAAALYsE',
+    'CCAAAAACAAEAIwAAAE2LBAhEAAAAAgABACkAAAAMngQIBAAAAAEAAwAxAAAA',
+    'CJ4ECAQAAAABAAMAOQAAAJGLBAgpAAAAEgABAD8AAAAAiwQIAAAAABAAAQBR',
+    'AAAAB4sECAAAAAAQAAEATAAAAACeBAgAAAAAEAADADoAAACUgAQIbAoAABIA',
+    'AQBYAAAAAJ4ECAAAAAAQAAMAXwAAABCeBAgAAAAAEAADAABtaXNjdGVzdC5j',
+    'AG9sZGgAb2xkX3NpZwBoaXR2AHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWls',
+    'AGNtYWluAF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAA',
+    'LnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5ic3MA',
+    'LmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAACYLAAAAAAAAAAAAAAEAAAAAAAAA',
+    'IQAAAAEAAAACAAAAvIsECLwLAABEAgAAAAAAAAAAAAAEAAAAAAAAACkAAAAI',
+    'AAAAAwAAAACeBAgADgAAEAAAAAAAAAAAAAAABAAAAAAAAAAuAAAAAQAAADAA',
+    'AAAAAAAAAA4AAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAA',
+    'ADAOAAAQAQAABgAAAAoAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAABADwAA',
+    'ZAAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAApA8AADcAAAAA',
+    'AAAAAAAAAAEAAAAAAAAA',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAZIQECDQAAAAkCQAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAhiBwAAYgcAAAUAAAAAEAAAAQAAAGQH',
     'AABklwQIZJcECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -13626,56 +16505,57 @@ Const
     'AAAACAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAIAIAABqAAAAAAAAAAAA',
     'AAABAAAAAAAAABEAAAADAAAAAAAAAAAAAADqCAAANwAAAAAAAAAAAAAAAQAA',
     'AAAAAAA=',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
-    'XcNVieVWU4nDg+wwxkX3AIXAeQ732LkhAAAAvgoAAADrDXXyxkX2MLkgAAAA',
-    '6x+FwHQRMdJJ9/aKkg+FBAiIVA3W6+uF23kGxkQN1S1JjUXWAcjoRv///4PE',
-    'MFteXcNVieVTg+wIi0UIixCNSASNRJAIUFFS6LX7//+Jw7gBAAAAzYCDxBDr',
-    '/i9wcm9jL21lbWluZm8AIE9LCgAgRkFJTAoAS1RFU1Q6IAAwMTIzNDU2Nzg5',
-    'YWJjZGVmAC9kZXYvbnVsbAAvYmluL2hlbGxvAFBBVEg9L2JpbgBzdHJlc3Mu',
-    'Zm9ya19mYWlsAHN0cmVzcy5mb3JrZXhlYwBzdHJlc3MuY3JlYXRlAHgAICBN',
-    'ZW1GcmVlIGF2YW50PQAgYXByZXM9ACBrQgoAc3RyZXNzLm5vbGVhawBHQ0M6',
-    'IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/woAAABMgwQItwAAAAIA',
-    'AQASAAAAA4QECCAAAAACAAEAFwAAACOEBAhEAAAAAgABAB0AAACglQQIBAAA',
-    'AAEAAwAlAAAAnJUECAQAAAABAAMALQAAAGeEBAhdAAAAAgABAEAAAADEhAQI',
-    'KQAAABIAAQBGAAAAOIMECAAAAAAQAAEAWAAAAD+DBAgAAAAAEAABAFMAAACc',
-    'lQQIAAAAABAAAwBBAAAAlIAECKQCAAASAAEAXwAAAJyVBAgAAAAAEAADAGYA',
-    'AACklQQIAAAAABAAAwAAc3RyZXNzLmMAbWVtZnJlZQBwdXRzAGt0ZXN0AGt1',
-    'X3Bhc3MAa3VfZmFpbABwdXRudW0uY29uc3Rwcm9wLjAAY21haW4AX19yZXN0',
-    'b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0',
-    'YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAA',
-    'AAYAAACUgAQIlAAAAFkEAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAA',
-    '7YQECO0EAACvAAAAAAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAAJyVBAic',
-    'BQAACAAAAAAAAAAAAAAABAAAAAAAAAAuAAAAAQAAADAAAAAAAAAAnAUAAC0A',
-    'AAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAAMwFAADwAAAABgAA',
-    'AAgAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAAC8BgAAawAAAAAAAAAAAAAA',
-    'AQAAAAAAAAARAAAAAwAAAAAAAAAAAAAAJwcAADcAAAAAAAAAAAAAAAEAAAAA',
-    'AAAA',
+    'GM2AuAQAAACLXCQcuZqFBAi6AQAAAM2AugYAAACLXCQYidDNgItcJByJ0M2A',
+    'TnXL6KAAAAC7uoUECInGuJyFBAjoRgEAAItEJAzooQEAALithQQI6DMBAACJ',
+    '8OiQAQAAuLWFBAjoIgEAAI1MJEC4YwAAAM2AhcB1F4F8JEBT7wAAdQ2LRCQM',
+    'ugAQAAAp8OsLi0QkDLoAAQAAKfA5wri/hQQID5/CD7bS6P8AAAAxwIM90JUE',
+    'CAAPlcCNZfRbXl9dw7itAAAAzYAx7Yngg+TwUOh4AQAAVTHSidGJ5Ve/BQAA',
+    'AFaJ+FO7GYUECIHsAAIAAM2Ag8r/hcAPiIEAAACJx74DAAAAjY30/f//uv8B',
+    'AACJ8In7zYCJxrgGAAAAzYAxwIX2D0jwicjGhDX0/f//AIoQhNJ0R4D6RnU/',
+    'gHgBcnU5gHgCZXUzgHgDZXUtgHgEOnUnKciDwAWAPAEgdQNA6/cByDHSD74I',
+    'QI1Z0ID7CXcOa9IKjVQK0OvrQOuzMdKBxAACAACJ0FteX13DVYnBMdKJ5VOA',
+    'PBEAdANC6/e4BAAAALsBAAAAzYBbXcNVieVWica4M4UECFOJ0+jN////ifDo',
+    'xv///4XbuCyFBAi6J4UECA9Fwuiy////hdt0CP8F1JUECOsG/wXQlQQIW15d',
+    'w1WJ5VZTicOD7DDGRfcAhcB5DvfYuSEAAAC+CgAAAOsNdfLGRfYwuSAAAADr',
+    'H4XAdBEx0kn39oqSO4UECIhUDdbr64XbeQbGRA3VLUmNRdYByOhG////g8Qw',
+    'W15dw1WJ5VOD7AiLRQiLEI1IBI1EkAhQUVLoifv//4nDuAEAAADNgIPEEOv+',
+    'L3Byb2MvbWVtaW5mbwAgT0sKACBGQUlMCgBLVEVTVDogADAxMjM0NTY3ODlh',
+    'YmNkZWYAL2Rldi9udWxsAC9iaW4vaGVsbG8AUEFUSD0vYmluAHN0cmVzcy5m',
+    'b3JrX2ZhaWwAc3RyZXNzLmZvcmtleGVjAHN0cmVzcy5jcmVhdGUAeAAgIE1l',
+    'bUZyZWUgYXZhbnQ9ACBhcHJlcz0AIGtCCgAvdG1wAHN0cmVzcy5ub2xlYWsA',
+    'R0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/woAAAB4gwQItwAA',
+    'AAIAAQASAAAAL4QECCAAAAACAAEAFwAAAE+EBAhEAAAAAgABAB0AAADUlQQI',
+    'BAAAAAEAAwAlAAAA0JUECAQAAAABAAMALQAAAJOEBAhdAAAAAgABAEAAAADw',
+    'hAQIKQAAABIAAQBGAAAAZIMECAAAAAAQAAEAWAAAAGuDBAgAAAAAEAABAFMA',
+    'AADQlQQIAAAAABAAAwBBAAAAlIAECNACAAASAAEAXwAAAM2VBAgAAAAAEAAD',
+    'AGYAAADYlQQIAAAAABAAAwAAc3RyZXNzLmMAbWVtZnJlZQBwdXRzAGt0ZXN0',
+    'AGt1X3Bhc3MAa3VfZmFpbABwdXRudW0uY29uc3Rwcm9wLjAAY21haW4AX19y',
+    'ZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5z',
+    'dHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAA',
+    'AQAAAAYAAACUgAQIlAAAAIUEAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAy',
+    'AAAAGYUECBkFAAC0AAAAAAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAANCV',
+    'BAjQBQAACAAAAAAAAAAAAAAABAAAAAAAAAAuAAAAAQAAADAAAAAAAAAAzQUA',
+    'AC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAAPwFAADwAAAA',
+    'BgAAAAgAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAADsBgAAawAAAAAAAAAA',
+    'AAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAAVwcAADcAAAAAAAAAAAAAAAEA',
+    'AAAAAAAA',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAbYEECDQAAAD4AgAAAAAAADQAIAAC',
     'ACgABwAGAAEAAAAAAAAAAIAECACABAjTAQAA0wEAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVMdK5AgAAAInlV78FAAAAVon4',
@@ -13699,7 +16579,271 @@ Const
     'LQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAAAAIAAJAAAAAF',
     'AAAAAgAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAJACAAA2AAAAAAAAAAAA',
     'AAABAAAAAAAAABEAAAADAAAAAAAAAAAAAADGAgAAMgAAAAAAAAAAAAAAAQAA',
-    'AAAAAAA=');
+    'AAAAAAA=',
+    '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',
+    'gL4EAAAAuYmjBAi6AQAAAInwzYC5IE4AAImF5Pv//zHSifjNgLmLowQIifC6',
+    'AQAAAM2AuUBLTACJheD7//8x0on4zYC5jaMECInwugEAAADNgLkAAGAEiYXM',
+    '+///MdKJ+M2AuY+jBAiJ8LoBAAAAzYCDveT7//8BD5TBg73g+///AQ+UwiHR',
+    'g73M+///AQ+UwiHRMdJIuJGjBAgPlMIhyugrFQAAuMUAAAC5gNoECM2AMdKB',
+    'PazaBAgBAGAEdQ8x0oE9uNoECMcAAAAPlsK4o6MECOj4FAAAuBMAAAC5BQAA',
+    'ADHSzYC+AwAAAI2N6P3//7oBAAAAifDNgIC96P3//0G5IE4AAA+UwDHSice4',
+    'EwAAAM2AugEAAACJ8I2N6P3//82AgL3o/f//QrlAS0wAD5TAMdIhx7gTAAAA',
+    'zYC6AQAAAInwjY3o/f//zYCAvej9//9DuQAAYAQPlMAx0iHHuBMAAADNgLoB',
+    'AAAAifCNjej9///NgDHAgL3o/f//RLnAxi0AD5TAMdIhx7gTAAAAzYC6CAAA',
+    'AInwjY3o/f//zYAxwDHSgLwo6P3//wAPRfpAg/gIde+J+ri0owQI6A8UAAC4',
+    'BgAAAM2AuAoAAAC7e6MECM2AMdKFwLjFowQIu9ajBAgPlMLo5hMAALonAAAA',
+    'ue0BAACJ0M2AMduFwHUQidC736MECM2AMduFwA+Uw7jqowQIidrothMAADHA',
+    'iYXk+///McCNvfT7//++IaoECLkuAAAA86SNvSL8//+5IgAAALtkAAAA86qN',
+    'hfT7///ouRAAAInBi4Xk+///jXEDmff7uwoAAACDwDCIhA30+///i4Xk+///',
+    'mff7ideZ9/uNRzC/BQAAAI2d9Pv//4iEDfb7//+J+IPCMIiUDfX7//+5QQAA',
+    'ALqkAQAAxoQ19Pv//wDNgInHhcB5BDHS60K4BAAAAIn7jY30+///ifLNgLgG',
+    'AAAAzYD/heT7//+BveT7//8sAQAAD4U3////uNajBAjo+REAADHSPS8BAAAP',
+    'lMK4+aMECLvWowQI6MISAAC4wwAAALmA2gQIzYAx0oE9rNoECP8LAAB2DDHS',
+    'gz2U2gQIAw+UwrgLpAQIMf/okBIAAIm94Pv//8eF5Pv//wEAAACNvfT7//++',
+    'IaoECLkuAAAAMcDzpI29Ivz//4mNzPv//7kiAAAA86qNhfT7//+5ZAAAAOiF',
+    'DwAAicOLheD7///GhB33+///AJn3+bkKAAAAg8AwiIQd9Pv//4uF4Pv//5n3',
+    '+YnWmff5jUYwiIQd9vv//4nIg8IwiJQd9fv//42d9Pv//82AhcCLhcz7//8P',
+    'RIXk+///g4Xg+///AoG94Pv//ywBAACJheT7//8PhU////+FwHQbuNajBAjo',
+    '3xAAAD2ZAAAAD5TAD7bAiYXk+///i5Xk+///uCCkBAgx9uieEQAAibXg+///',
+    'x4Xk+///AQAAADHAjb30+///vk+qBAi5CwAAAPOkjb3/+///uUUAAAC7ZAAA',
+    'APOqjYX0+///6JkOAACJwYuF4Pv//8aEDff7//8Amff7uwoAAACDwDCIhA30',
+    '+///i4Xg+///mff7idaZ9/uNRjC+BQAAAI2d9Pv//4iEDfb7//+J8IPCMIiU',
+    'DfX7//+5QQAAALqkAQAAzYCJxoXAeAu4BgAAAInzzYDrCDHbiZ3k+///g4Xg',
+    '+///AoG94Pv//ywBAAAPhUL///+DveT7//8AdBu41qMECOjbDwAAPS8BAAAP',
+    'lMAPtsCJheT7//+LleT7//+4MaQECL4oAAAAu9ajBAjokhAAAInwzYAx0oP4',
+    '2bhGpAQIu6qgBAgPlMLodxAAAInwzYAx0oP47LhapAQIu9+jBAgPlMLoXBAA',
+    'AInwzYAx0oXAdRG4IQAAAInRzYAx0oP4/g+UwrhqpAQIu9ajBAjoMhAAALgK',
+    'AAAAzYAx0oP467h4pAQIu5OkBAgPlMLoFBAAALqIpAQIuJOkBAjoSRAAALqd',
+    'pAQIuKikBAjoOhAAALgmAAAAuaikBAjNgDHShcC4sqQECA+UwujZDwAAjZXo',
+    '/f//uKikBAjoaQ8AADHJg/gKdS+6iKQECI2F6P3//4mN5Pv//+j2DAAAi43k',
+    '+///hcB1D7ghAAAAzYAxyYP4/g+UwYnKuMakBAi+JwAAALvapAQI6H0PAACJ',
+    '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',
+    'FgAAzYAx0oXAuBSoBAgPlMLoEgkAAInwuYDaBAjNgDHSgT2Y2gQI0gQAAHUP',
+    'MdKBPZzaBAguFgAAD5TCuB+oBAiNvfT7//++XKoECOjXCAAAuQQAAAC4DwEA',
+    'APOljY30+///zYAx0oXAuC+oBAgPlMLosggAALjDAAAAuYDaBAjNgDHSuDuo',
+    'BAiBPcjaBAgAq5BBD5TC6I0IAAC6CgAAAInQzYC7a6cECInQzYC7aaYECInQ',
+    'zYC7nacECInQzYC7t6cECInQzYC70KcECInQzYC7qKQECInQzYC7lKUECInQ',
+    'zYC5KAAAALuIpQQIicjNgLsApgQIidDNgLv2pQQIicjNgLvapAQIicjNgLvj',
+    'pAQIicjNgLujogQIidDNgDHSjZ30+///iZXk+///McCNvfT7//++IaoECLku',
+    'AAAA86SNvSL8//+5IgAAAPOqjYX0+///uWQAAADoBwUAAInGi4Xk+///xoQ1',
+    '9/v//wCZ9/m5CgAAAIPAMIiENfT7//+LheT7//+Z9/mJ15n3+Y1HMIiENfb7',
+    '//+JyIPCMIiUNfX7///NgP+F5Pv//4G95Pv//ywBAAAPhXH///8xwImF5Pv/',
+    '/zHAjb30+///vk+qBAi5CwAAAPOkjb3/+///uUUAAADzqo2F9Pv//7lkAAAA',
+    '6HAEAACJw4uF5Pv//8aEHff7//8Amff5uQoAAACDwDCIhB30+///i4Xk+///',
+    'mff5idaZ9/mNRjCIhB32+///iciDwjCIlB31+///jZ30+///zYCDheT7//8C',
+    'gb3k+///LAEAAA+Fav///74oAAAAu9ajBAiJ8M2AMdKFwLhMqAQIu4CiBAgP',
+    'lMLoqwYAAInwzYAx0oXAuF+oBAi7j6AECA+UwuiRBgAAumMAAACNjfT7//+J',
+    '0M2AMcCLvdD7//87vQD8//91FonQzYCLhdT7//87hQz8//8PlMAPtsCJwjH/',
+    'uGyoBAi7IqAECOhJBgAAif64FQAAALmBqAQIuoqgBAjNgDHSg/jwuIaoBAi7',
+    'BKAECA+UwugfBgAAugwAAACJ0M2AvhYAAAC7j6AECInwzYC7YaUECInBidDN',
+    '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',
+    'BQAAAFOJw4nwg+wMzYCFwHgdicaJ+In56Mn8//+J84nCuAQAAADNgLgGAAAA',
+    'zYCDxAxbXl9dw1WJ5VOD7AiLRQiLEI1IBI1EkAhQUVLonuD//4nDuAEAAADN',
+    'gIPEEOv+L21udC9kaXIxACBPSwoAIEZBSUwKAEtURVNUOiAAL2Rldi9oZGEx',
+    'ACAgKHBhcyBkZSAvZGV2L2hkYTEgOiB0ZXN0cyBleHQyIGlnbm9yZXMpCgAg',
+    'IChwYXMgZCdleHQyIHN1ciAvZGV2L2hkYTEgOiB0ZXN0cyBleHQyIGlnbm9y',
+    'ZXMpCgBleHQyAC9tbnQAZXh0Mi5tb3VudAAgPC0gbW91bnQKAC9tbnQvaGVs',
+    'bG8udHh0AGhlbGxvIGZyb20gZXh0MgoAZXh0Mi5yZWFkX3NtYWxsAC9tbnQv',
+    'YmlnLmJpbgBleHQyLmJpZ19vcGVuAGV4dDIuYmlnX3JlYWRfc2VxAGV4dDIu',
+    'YmlnX3JlYWRfb2ZmAGV4dDIuYmlnX3N0YXQAZXh0Mi5yZWFkZGlyX2NvdW50',
+    'AGYxLnR4dABmMTAwLnR4dABmMTAxLnR4dABleHQyLnJlYWRkaXJfbmFtZXMA',
+    'L21udC9kaXIxL2Y1Ny50eHQAZmlsZSA1NwoAZXh0Mi5yZWFkX2luX2RpcgAv',
+    'bW50L2Zhc3RsaW5rAGV4dDIucmVhZGxpbmtfZmFzdAAvbW50L3Nsb3dsaW5r',
+    'AC90YXJnZXQAZXh0Mi5yZWFkbGlua19zbG93AGV4dDIuZm9sbG93X3N5bWxp',
+    'bmsAL21udC9oYXJkLnR4dABleHQyLmhhcmRsaW5rX25saW5rAGV4dDIubHN0',
+    'YXRfc3ltbGluawAvbW50L2VtcHR5ZGlyAGV4dDIuc3RhdF9kaXIAL21udC9u',
+    'ZXhpc3RlAC9tbnQvaGVsbG8udHh0L3gAZXh0Mi5lbm9lbnQAZXh0Mi5yZWFk',
+    'X2Rpcl9laXNkaXIAL21udC93AGV4dDIubWtkaXIAZXh0Mi5ta2Rpcl9leGlz',
+    'dAAvbW50L3cvYS5kYXQAZXh0Mi5jcmVhdGUAZXh0Mi53cml0ZV9wYXR0ZXJu',
+    'AGV4dDIud3JpdGVfcmVhZGJhY2sAZXh0Mi53cml0ZV9zaXplAEVORE1BUksA',
+    'ZXh0Mi5hcHBlbmQAZXh0Mi50cnVuY2F0ZV9zaHJpbmsAZXh0Mi50cnVuY2F0',
+    'ZV9zaXplAGV4dDIuZnRydW5jYXRlX2V4dGVuZABleHQyLmV4dGVuZF96ZXJv',
+    'cwBleHQyLnRydW5jYXRlX3RhaWxfemVybwBleHQyLm90cnVuYwAvbW50L3cv',
+    'c3BhcnNlAEEAQgBDAEQAZXh0Mi5zcGFyc2Vfd3JpdGUAZXh0Mi5zcGFyc2Vf',
+    'c2l6ZQBleHQyLnNwYXJzZV9yZWFkAGV4dDIuc3BhcnNlX2ZyZWUAL21udC93',
+    'L2QAL21udC93L2QvZQBleHQyLm1rZGlyX3N1YgBleHQyLmRpcl9ncm93XzMw',
+    'MABleHQyLmRpcl9zaXplX2Jsb2NrcwBleHQyLnVubGlua19oYWxmAGV4dDIu',
+    'ZGlyX3JldXNlX3Nsb3RzAGV4dDIucm1kaXJfbm90ZW1wdHkAZXh0Mi5ybWRp',
+    'cl9maWxlAGV4dDIucm1kaXJfb2sAZXh0Mi51bmxpbmtfZGlyAGNvbnRlbnUt',
+    'cjEAL21udC93L3IxAGNvbnRlbnUtcjIAL21udC93L3IyAGV4dDIucmVuYW1l',
+    'X3JlcGxhY2UAZXh0Mi5yZW5hbWVfY29udGVudAAvbW50L3cveAAvbW50L3cv',
+    'eQAvbW50L3cveC9zb3VzAGRlZGFucwAvbW50L3cveC9zb3VzL2YAL21udC93',
+    'L3kvc291czIAZXh0Mi5yZW5hbWVfZGlyX21vdmUAL21udC93L3kvc291czIv',
+    'ZgBleHQyLnJlbmFtZV9kaXJfY29udGVudAAuLgAvAGV4dDIucmVuYW1lX2Rv',
+    'dGRvdABleHQyLnJlbmFtZV9ubGluawAvbW50L3cvdmlkZQAvbW50L3cvdmlk',
+    'ZS9mAGV4dDIucmVuYW1lX2Rpcl9vdmVyX2VtcHR5AGV4dDIucmVuYW1lX292',
+    'ZXJfbmxpbmsAL21udC93L3kvenoAZXh0Mi5yZW5hbWVfaW50b19zZWxmAC9t',
+    'bnQvdy9uZQAvbW50L3cvbmUvZgBleHQyLnJlbmFtZV9vdmVyX25vdGVtcHR5',
+    'AGV4dDIucmVuYW1lX2ZpbGVfb3Zlcl9kaXIAZXh0Mi5yZW5hbWVfZGlyX292',
+    'ZXJfZmlsZQBsaWVuAC9tbnQvdy9sMQAvbW50L3cvbDIAZXh0Mi5saW5rAGV4',
+    'dDIubGlua19ubGluawBleHQyLnVubGlua19vbmVfbGluawBleHQyLmxpbmtf',
+    'ZXhpc3QAL21udC93L2RsAGV4dDIubGlua19kaXIAL21udC93L29wZW5fdW5s',
+    'aW5rAGV4dDIudW5saW5rX29wZW4AL21udC93L3MxAGNpYmxlAGV4dDIuc3lt',
+    'bGlua19mYXN0AGV4dDIuc3ltbGlua19mYXN0X3JlYWQAL21udC93L3MyAGV4',
+    'dDIuc3ltbGlua19zbG93AGV4dDIuc3ltbGlua19zbG93X3JlYWQAcmVlbAAv',
+    'bW50L3cvcmVhbAAvbW50L3cvczMAZXh0Mi5zeW1saW5rX2ZvbGxvdwBleHQy',
+    'LnN5bWxpbmtfdW5saW5rAC9tbnQvdy9mZgBleHQyLm1rbm9kX2ZpZm8AL21u',
+    'dC93L2NjAGV4dDIubWtub2RfY2hyAC9tbnQvdy9iYgBleHQyLm1rbm9kX2Js',
+    'awBleHQyLm1rbm9kX3N0YXQAZXh0Mi5jaG1vZABleHQyLmNobW9kX3N0YXQA',
+    'ZXh0Mi5jaG93bgBleHQyLmNob3duX3N0YXQAZXh0Mi51dGltZXMAZXh0Mi51',
+    'dGltZXNfc3RhdABleHQyLnJtZGlyX2VtcHRpZWQAZXh0Mi5ybWRpcl93AGV4',
+    'dDIuc3RhdGZzX3Jlc3RvcmVkAC90bXAAZXh0Mi5tb3VudF90d2ljZQBleHQy',
+    'LnVtb3VudF9idXN5AHBlcnNpc3RhbnQKAC9tbnQvcGVyc2lzdC50eHQAL21u',
+    'dC9wZGlyAGRhbnMgcGRpcgoAL21udC9wZGlyL2ZpY2hpZXIAL21udC9wbGlu',
+    'awAvbW50L3BiaWcAZXh0Mi51bW91bnQAZXh0Mi5yZW1vdW50X3JvAGV4dDIu',
+    'cGVyc2lzdF9maWxlAGV4dDIucGVyc2lzdF9kaXIAZXh0Mi5wZXJzaXN0X2Jp',
+    'ZwBleHQyLnBlcnNpc3RfbGluawAvbW50L25vdXZlYXUAZXh0Mi5yb19jcmVh',
+    'dGUAZXh0Mi5yb193cml0ZQAvbW50L3p6AGV4dDIucm9fbWtkaXIAZXh0Mi5y',
+    'b191bmxpbmsAL21udC9oMgBleHQyLnJvX3JlbmFtZQBleHQyLnN0YXRmc19t',
+    'YWdpYwBleHQyLnVtb3VudF9ybwBleHQyLm1vdW50X3J3X2FnYWluAEtURVNU',
+    'OiBleHQyIERPTkUKADAxMjM0NTY3ODlhYmNkZWYAL21udC93L2QvdW5fbm9t',
+    'X2RlX2ZpY2hpZXJfYXNzZXpfbG9uZ19udW1lcm9fAC9tbnQvdy9kL3oAAAAA',
+    'ypo7AAAAAACrkEEAAAAAR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4y',
+    'NC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAA',
+    'AAQA8f8MAAAAipwECA4AAAACAAEAEwAAAJicBAggAAAAAgABABoAAAC4nAQI',
+    'JQAAAAIAAQAiAAAA3ZwECIkAAAACAAEALAAAAGadBAhiAAAAAgABADYAAACA',
+    'ugQIACAAAAEAAwA7AAAAyJ0ECKQAAAACAAEATwAAAGyeBAiCAAAAAgABAGQA',
+    'AADungQIQgAAAAIAAQB2AAAAMJ8ECB4AAAACAAEAewAAAE6fBAhEAAAAAgAB',
+    'AIEAAADk2gQIBAAAAAEAAwCJAAAA4NoECAQAAAABAAMAkQAAAJKfBAhJAAAA',
+    'AgABAJwAAACA2gQIYAAAAAEAAwCgAAAA258ECCkAAAASAAEApgAAAHacBAgA',
+    'AAAAEAABALgAAAB9nAQIAAAAABAAAQCzAAAAgLoECAAAAAAQAAMAoQAAAJSA',
+    'BAjiGwAAEgABAL8AAABsugQIAAAAABAAAwDGAAAA6NoECAAAAAAQAAMAAGV4',
+    'dDJ0ZXN0LmMAc3RybGVuAHN0cmNtcABtZW1jbXBfAGZpbGxjaGVjawBmaWxs',
+    'd3JpdGUAd2J1ZgBoYXNuYW1lLmNvbnN0cHJvcC4wAGNvdW50ZGlyLmNvbnN0',
+    'cHJvcC4wAHNsdXJwLmNvbnN0cHJvcC4wAHB1dHMAa3Rlc3QAa3VfcGFzcwBr',
+    'dV9mYWlsAHB1dC5pc3JhLjAAc2JfAGNtYWluAF9fcmVzdG9yZV9ydABfX2Jz',
+    'c19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRh',
+    'YgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAECJQA',
+    'AABwHwAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAAgAAAASgBAgEIAAAaAoA',
+    'AAAAAAAAAAAABAAAAAAAAAApAAAACAAAAAMAAACAugQIgCoAAGggAAAAAAAA',
+    'AAAAACAAAAAAAAAALgAAAAEAAAAwAAAAAAAAAGwqAAAtAAAAAAAAAAAAAAAB',
+    'AAAAAQAAAAEAAAACAAAAAAAAAAAAAACcKgAAgAEAAAYAAAARAAAABAAAABAA',
+    'AAAJAAAAAwAAAAAAAAAAAAAAHCwAAMsAAAAAAAAAAAAAAAEAAAAAAAAAEQAA',
+    'AAMAAAAAAAAAAAAAAOcsAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==');
 
 { END-EMBED }
 { Installer les programmes embarques dans le tmpfs racine }
@@ -13738,6 +16882,130 @@ Begin
     KFree(Buf);
   End;
   Line := 0; N := 0;
+End;
+
+{ ---- Racine reelle : root=/dev/hdaN (ext2) ---- }
+
+{ Creer un repertoire de point de montage, meme si le systeme de fichiers
+  est monte en lecture seule (le drapeau est leve le temps de la creation) }
+Procedure KMkdirForce(Sb : PSuper; Const P : String);
+Var Fl : LongInt; D : PDentry;
+Begin
+  If PathWalk(P, True, D) = 0 Then
+  Begin
+    DentryPut(LongInt(D));
+    Exit;
+  End;
+  Fl := Sb^.Flags;
+  Sb^.Flags := Fl And Not MS_RDONLY;
+  KMkdir(P, $1ED);
+  Sb^.Flags := Fl;
+End;
+
+{ Abandonner un systeme de fichiers monte comme racine (pas de Covered) }
+Procedure SbDrop(Sb : PSuper);
+Var D : PDentry; Fn : LongInt;
+Begin
+  Fn := GetOp(Sb^.SOps, SoSync);
+  If Fn <> 0 Then Call1(Fn, LongInt(Sb));
+  D := Sb^.Root;
+  Sb^.Root := Nil;
+  DentryPurgeSb(Sb);
+  DentryPut(LongInt(D));
+  InodePurgeSb(Sb);
+  Fn := GetOp(Sb^.SOps, SoUmount);
+  If Fn <> 0 Then Call1(Fn, LongInt(Sb));
+  If Sb^.Dev <> 0 Then BInvalidate(Sb^.Dev);
+  SuperRelease(Sb);
+End;
+
+{ Un programme ordinaire existe-t-il a ce chemin ? }
+Function IsProg(Const P : String) : Boolean;
+Var D : PDentry; R : LongInt;
+Begin
+  IsProg := False;
+  If P = '' Then Exit;
+  R := PathWalk(P, True, D);
+  If R <> 0 Then
+  Begin
+    KLog('racine : ' + P + ' : erreur ' + IntStr(-R));
+    Exit;
+  End;
+  If (D^.Inode^.Mode And S_IFMT) = S_IFREG Then IsProg := True;
+  DentryPut(LongInt(D));
+End;
+
+{ Un programme init existe-t-il (dans la racine courante du processus) ? }
+Function FindInit : Boolean;
+Begin
+  FindInit := IsProg(InitPath) Or IsProg('/sbin/init') Or IsProg('/etc/init')
+      Or IsProg('/bin/init') Or IsProg('/bin/sh');
+End;
+
+{ Monter root= comme racine : le systeme de fichiers ext2 remplace la racine
+  en memoire (type pivot_root), /dev et /proc y sont remontes. Retourne
+  Faux (et garde la racine en memoire) si root= est absent, illisible, ou
+  si le disque ne contient aucun programme init. }
+Function TryRealRoot : Boolean;
+Var T, R, Fl : LongInt; Sb, OldSb : PSuper; Dn : String;
+    OldRoot, OldPwd : LongInt; D : PDentry;
+Begin
+  TryRealRoot := False;
+  If RootDev = '' Then Exit;
+  T := FindFsType('ext2');
+  If T < 0 Then Exit;
+  Sb := SuperNew(T);
+  If Sb = Nil Then Exit;
+  Dn := RootDev;
+  Sb^.DevName := KMalloc(Length(Dn) + 1);
+  MemCopy(Sb^.DevName, LongInt(@Dn), Length(Dn) + 1);
+  If CmdHas('rw') Then Fl := 0 Else Fl := MS_RDONLY;
+  Sb^.Flags := Fl;
+  R := Call4(FsMount[T], LongInt(Sb), LongInt(@Dn), Fl, 0);
+  If R <> 0 Then
+  Begin
+    KLog('racine : impossible de monter ' + RootDev + ' (erreur '
+        + IntStr(-R) + '), racine en memoire');
+    SuperRelease(Sb);
+    Exit;
+  End;
+  { basculer la racine du processus 0 (et celle des futurs processus) }
+  OldRoot := IdleTask^.Fs^.Root;
+  OldPwd := IdleTask^.Fs^.Pwd;
+  DentryGet(LongInt(Sb^.Root));
+  DentryGet(LongInt(Sb^.Root));
+  IdleTask^.Fs^.Root := LongInt(Sb^.Root);
+  IdleTask^.Fs^.Pwd := LongInt(Sb^.Root);
+  If Not FindInit Then
+  Begin
+    KLog('racine : aucun programme init sur ' + RootDev
+        + ', racine en memoire');
+    IdleTask^.Fs^.Root := OldRoot;
+    IdleTask^.Fs^.Pwd := OldPwd;
+    DentryPut(LongInt(Sb^.Root));
+    DentryPut(LongInt(Sb^.Root));
+    SbDrop(Sb);
+    Exit;
+  End;
+  { oublier l'ancienne racine en memoire (et ses montages /dev, /proc) }
+  OldSb := PDentry(OldRoot)^.Sb;
+  If WalkFrom(PDentry(OldRoot), 'dev', True, D) = 0 Then VfsUmountD(D, 0);
+  If WalkFrom(PDentry(OldRoot), 'proc', True, D) = 0 Then VfsUmountD(D, 0);
+  DentryPut(OldRoot);
+  DentryPut(OldPwd);
+  DentryPut(LongInt(RootDentry));
+  SbDrop(OldSb);
+  RootDentry := Sb^.Root;
+  KMkdirForce(Sb, '/dev');
+  KMkdirForce(Sb, '/proc');
+  KMkdirForce(Sb, '/sys');
+  VfsMount('devfs', '/dev', 'devtmpfs', 0, 0);
+  VfsMount('proc', '/proc', 'proc', 0, 0);
+  MakeDevNodes;
+  If (Sb^.Flags And MS_RDONLY) <> 0 Then
+    KLog('racine : ' + RootDev + ' montee en lecture seule')
+  Else KLog('racine : ' + RootDev + ' montee en lecture-ecriture');
+  TryRealRoot := True;
 End;
 
 { Premier processus : ouvre la console, lance /sbin/init (ou init=) }
@@ -13831,6 +17099,7 @@ Begin
   InitBlock;
   InitVfs;
   InitTmpfs;
+  InitExt2;
   InitProc;
   InitDevices;
   MountRoot;
@@ -13839,7 +17108,8 @@ Begin
   KLog('disque IDE : ' + IntStr(Ord(DiskPresent[0]) + Ord(DiskPresent[1])
       + Ord(DiskPresent[2]) + Ord(DiskPresent[3])) +
        ' lecteur(s), ramdisk ' + IntStr(RamSizeKb) + ' Ko');
-  InstallEmbedded;
+  If Not TryRealRoot Then InstallEmbedded;
+  FpuDetect;
   InitFpu;
   T := KernelThread(LongInt(@InitThread));
   If T = Nil Then KPanic('creation de init impossible');

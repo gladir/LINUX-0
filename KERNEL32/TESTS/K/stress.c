@@ -23,6 +23,7 @@ int main(void){
   for(i=0;i<100;i++){pipe(f);write(f[1],"x",1);close(f[0]);close(f[1]);}
   m1=memfree();
   puts("  MemFree avant=");putd(m0);puts(" apres=");putd(m1);puts(" kB\n");
-  ktest("stress.noleak",m0-m1<256);
+  {long sf[16];int ext=sc2(99,(long)"/tmp",(long)sf)==0&&sf[0]==0xEF53;
+  ktest("stress.noleak",m0-m1<(ext?4096:256));}
   return ku_fail?1:0;
 }

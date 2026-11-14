@@ -1263,7 +1263,7 @@ Begin
   Pid := LnxPid[I];
   If LnxExit[I] = 259 Then
   Begin
-    R := LnxSys3(114, Pid, LongInt(@LnxTmp), 0);   { wait4 }
+    R := LnxSys6(114, Pid, LongInt(@LnxTmp), 0, 0, 0, 0);   { wait4 }
     If R >= 0 Then
     Begin
       If (LnxTmp[0] And $7F) = 0 Then LnxExit[I] := (LnxTmp[0] Shr 8) And $FF
@@ -1872,6 +1872,47 @@ Begin
 End;
 
 { ---------- interface systeme Linux (unite Unix des programmes) ---------- }
+{ Les fonctions Sys* rendent la valeur de l'appel systeme, ou -1 avec le
+  code d'erreur Linux dans SysErrno (comme la libc). SysCall rend le
+  resultat brut (-errno). Les chemins sont des chaines Pascal (separateur /,
+  rien n'est converti). }
+
+Const
+  O_RDONLY = 0;  O_WRONLY = 1;  O_RDWR = 2;     O_CREAT = $40;
+  O_EXCL = $80;  O_NOCTTY = $100; O_TRUNC = $200; O_APPEND = $400;
+  O_NONBLOCK = $800; O_DIRECTORY = $10000;
+  SEEK_SET = 0;  SEEK_CUR = 1;  SEEK_END = 2;
+  SIGHUP = 1;  SIGINT = 2;  SIGQUIT = 3;  SIGILL = 4;  SIGABRT = 6;
+  SIGBUS = 7;  SIGFPE = 8;  SIGKILL = 9;  SIGUSR1 = 10;  SIGSEGV = 11;
+  SIGUSR2 = 12;  SIGPIPE = 13;  SIGALRM = 14;  SIGTERM = 15;
+  SIGCHLD = 17;  SIGCONT = 18;  SIGSTOP = 19;  SIGTSTP = 20;
+  SIGTTIN = 21;  SIGTTOU = 22;
+  SIG_DFL = 0;  SIG_IGN = 1;
+  SA_RESTART = $10000000;
+  WNOHANG = 1;  WUNTRACED = 2;
+  TCGETS = $5401;  TCSETS = $5402;  TCSETSW = $5403;  TCSETSF = $5404;
+  TIOCSCTTY = $540E;  TIOCGPGRP = $540F;  TIOCSPGRP = $5410;
+  TIOCGWINSZ = $5413;  TIOCNOTTY = $5422;  FIONREAD = $541B;
+  { termios : c_iflag }
+  TTY_ICRNL = $100;  TTY_IXON = $400;  TTY_INLCR = $40;  TTY_ISTRIP = $20;
+  { c_oflag }
+  TTY_OPOST = 1;  TTY_ONLCR = 4;
+  { c_lflag }
+  TTY_ISIG = 1;  TTY_ICANON = 2;  TTY_ECHO = 8;  TTY_ECHOE = $10;
+  TTY_ECHOK = $20;  TTY_ECHONL = $40;  TTY_IEXTEN = $8000;
+  { indices de c_cc }
+  TTY_VINTR = 0;  TTY_VQUIT = 1;  TTY_VERASE = 2;  TTY_VKILL = 3;
+  TTY_VEOF = 4;  TTY_VTIME = 5;  TTY_VMIN = 6;  TTY_VSUSP = 10;
+  { reboot }
+  LINUX_REBOOT_MAGIC1 = $FEE1DEAD;
+  LINUX_REBOOT_MAGIC2 = 672274793;
+  LINUX_REBOOT_RESTART = $01234567;
+  LINUX_REBOOT_HALT = $CDEF0123;
+  LINUX_REBOOT_POWER_OFF = $4321FEDC;
+  { modes de fichiers }
+  S_IFMT = $F000;  S_IFDIR = $4000;  S_IFREG = $8000;  S_IFLNK = $A000;
+  S_IFCHR = $2000;  S_IFBLK = $6000;  S_IFIFO = $1000;
+  MS_RDONLY = 1;  MS_REMOUNT = 32;
 
 Type
   TUtsName = Record
@@ -1881,6 +1922,98 @@ Type
     Version  : String[64];
     Machine  : String[64];
   End;
+
+  { struct stat de Linux i386 (stat, lstat, fstat : 64 octets) }
+  TSysStat = Record
+    Dev : Word;  Pad1 : Word;  Ino : LongInt;
+    Mode, NLink, Uid, Gid, RDev, Pad2 : Word;
+    Size, BlkSize, Blocks, ATime, Pad3, MTime, Pad4, CTime, Pad5,
+    Res1, Res2 : LongInt;
+  End;
+
+  { struct termios de Linux i386 (36 octets) }
+  TSysTermios = Record
+    IFlag, OFlag, CFlag, LFlag : LongInt;
+    Line : Byte;
+    CC : Array[0..18] Of Byte;
+  End;
+
+  TSysWinSize = Record
+    Row, Col, XPix, YPix : Word;
+  End;
+
+  { rt_sigaction du noyau }
+  TSysSigAct = Record
+    Handler, Flags, Restorer, MaskLo, MaskHi : LongInt;
+  End;
+
+  TSysPasswd = Record
+    Name : String[32];
+    Pw : String[16];
+    Uid, Gid : LongInt;
+    Gecos : String[64];
+    Home : String[64];
+    Shell : String[64];
+  End;
+
+Var
+  SysErrno : LongInt;                 { derniere erreur Linux (positive) }
+  LnxZBuf  : Array[0..1279] Of Char;  { chaines ASCIIZ temporaires }
+  LnxZNo   : LongInt;
+  LnxStBuf : Array[0..15] Of LongInt;
+  LnxLangV : LongInt;                 { langue : 0 inconnue, 1..5 }
+  LnxDirFd  : Array[0..15] Of LongInt;
+  LnxDirBuf : Array[0..15] Of LongInt;
+  LnxDirPos : Array[0..15] Of LongInt;
+  LnxDirLen : Array[0..15] Of LongInt;
+
+{ resultat brut -> valeur libc (erreur : -1 et SysErrno) }
+Function LnxRes(R : LongInt) : LongInt;
+Begin
+  If (R < 0) And (R > -4096) Then
+  Begin
+    SysErrno := -R;
+    LnxRes := -1;
+  End
+  Else LnxRes := R;
+End;
+
+{ chaine Pascal -> ASCIIZ dans un tampon tournant (5 chaines vivantes) }
+Function LnxZ(Const S : String) : LongInt;
+Var P, K, N : LongInt;
+Begin
+  P := LongInt(@LnxZBuf) + (LnxZNo Mod 5) * 256;
+  Inc(LnxZNo);
+  N := Length(S);
+  For K := 1 To N Do Mem[0:P + K - 1] := Ord(S[K]);
+  Mem[0:P + N] := 0;
+  LnxZ := P;
+End;
+
+{ ASCIIZ (adresse) -> chaine Pascal }
+Function SysZStr(P : LongInt) : String;
+Var K : LongInt; S : String;
+Begin
+  K := 0;
+  While (Mem[0:P + K] <> 0) And (K < 255) Do
+  Begin
+    S[K + 1] := Chr(Mem[0:P + K]);
+    Inc(K);
+  End;
+  S[0] := Chr(K);
+  SysZStr := S;
+End;
+
+{ copie d'une chaine Pascal dans le tas en ASCIIZ (adresse, jamais liberee) }
+Function SysNewZ(Const S : String) : LongInt;
+Var P, K, N : LongInt;
+Begin
+  N := Length(S);
+  P := HeapAlloc(1, 0, N + 1);
+  For K := 1 To N Do Mem[0:P + K - 1] := Ord(S[K]);
+  Mem[0:P + N] := 0;
+  SysNewZ := P;
+End;
 
 Function SysCall(N, A, B, C, D, E : LongInt) : LongInt;
 Begin
@@ -1895,58 +2028,119 @@ End;
 
 Function SysFork : LongInt;
 Begin
-  SysFork := LnxSys3(2, 0, 0, 0);
+  SysFork := LnxRes(LnxSys3(2, 0, 0, 0));
 End;
 
 Function SysRead(Fd : LongInt; Var Buf; Count : LongInt) : LongInt;
 Begin
-  SysRead := LnxSys3(3, Fd, LongInt(@Buf), Count);
+  SysRead := LnxRes(LnxSys3(3, Fd, LongInt(@Buf), Count));
 End;
 
 Function SysWrite(Fd : LongInt; Var Buf; Count : LongInt) : LongInt;
 Begin
-  SysWrite := LnxSys3(4, Fd, LongInt(@Buf), Count);
+  SysWrite := LnxRes(LnxSys3(4, Fd, LongInt(@Buf), Count));
 End;
 
-Function SysOpen(Path : LongInt; Flags, Mode : LongInt) : LongInt;
+{ ecrit une chaine Pascal sur Fd (ecritures partielles reprises) }
+Function SysPut(Fd : LongInt; Const S : String) : LongInt;
+Var Done, R, N : LongInt;
 Begin
-  SysOpen := LnxSys3(5, Path, Flags, Mode);
+  N := Length(S);
+  Done := 0;
+  SysPut := 0;
+  While Done < N Do
+  Begin
+    R := LnxSys3(4, Fd, LongInt(@S) + 1 + Done, N - Done);
+    If R <= 0 Then
+    Begin
+      SysPut := LnxRes(R);
+      Exit;
+    End;
+    Done := Done + R;
+  End;
+  SysPut := N;
+End;
+
+Function SysOpen(Const Path : String; Flags, Mode : LongInt) : LongInt;
+Begin
+  SysOpen := LnxRes(LnxSys3(5, LnxZ(Path), Flags, Mode));
+End;
+
+Function SysCreat(Const Path : String; Mode : LongInt) : LongInt;
+Begin
+  SysCreat := LnxRes(LnxSys3(5, LnxZ(Path), $241, Mode));
 End;
 
 Function SysClose(Fd : LongInt) : LongInt;
 Begin
-  SysClose := LnxSys3(6, Fd, 0, 0);
+  SysClose := LnxRes(LnxSys3(6, Fd, 0, 0));
 End;
 
 Function SysWaitPid(Pid : LongInt; Var Status : LongInt; Options : LongInt)
     : LongInt;
 Begin
-  SysWaitPid := LnxSys3(114, Pid, LongInt(@Status), Options);
+  SysWaitPid := LnxRes(LnxSys6(114, Pid, LongInt(@Status), Options, 0, 0, 0));
 End;
 
-Function SysExecve(Path, Argv, Envp : LongInt) : LongInt;
+{ interpretation de l'etat rendu par wait }
+Function SysWIfExited(St : LongInt) : Boolean;
 Begin
-  SysExecve := LnxSys3(11, Path, Argv, Envp);
+  SysWIfExited := (St And $7F) = 0;
+End;
+
+Function SysWExitStatus(St : LongInt) : LongInt;
+Begin
+  SysWExitStatus := (St Shr 8) And $FF;
+End;
+
+Function SysWIfSignaled(St : LongInt) : Boolean;
+Begin
+  SysWIfSignaled := ((St And $7F) <> 0) And ((St And $7F) <> $7F);
+End;
+
+Function SysWTermSig(St : LongInt) : LongInt;
+Begin
+  SysWTermSig := St And $7F;
+End;
+
+Function SysWIfStopped(St : LongInt) : Boolean;
+Begin
+  SysWIfStopped := (St And $FF) = $7F;
+End;
+
+Function SysWStopSig(St : LongInt) : LongInt;
+Begin
+  SysWStopSig := (St Shr 8) And $FF;
+End;
+
+Function SysExecve(Const Path : String; Argv, Envp : LongInt) : LongInt;
+Begin
+  SysExecve := LnxRes(LnxSys3(11, LnxZ(Path), Argv, Envp));
 End;
 
 Function SysPipe(Var Fds : LongInt) : LongInt;
 Begin
-  SysPipe := LnxSys3(42, LongInt(@Fds), 0, 0);
+  SysPipe := LnxRes(LnxSys3(42, LongInt(@Fds), 0, 0));
 End;
 
 Function SysDup(Fd : LongInt) : LongInt;
 Begin
-  SysDup := LnxSys3(41, Fd, 0, 0);
+  SysDup := LnxRes(LnxSys3(41, Fd, 0, 0));
 End;
 
 Function SysDup2(Fd, Fd2 : LongInt) : LongInt;
 Begin
-  SysDup2 := LnxSys3(63, Fd, Fd2, 0);
+  SysDup2 := LnxRes(LnxSys3(63, Fd, Fd2, 0));
+End;
+
+Function SysFcntl(Fd, Cmd, Arg : LongInt) : LongInt;
+Begin
+  SysFcntl := LnxRes(LnxSys3(55, Fd, Cmd, Arg));
 End;
 
 Function SysKill(Pid, Sig : LongInt) : LongInt;
 Begin
-  SysKill := LnxSys3(37, Pid, Sig, 0);
+  SysKill := LnxRes(LnxSys3(37, Pid, Sig, 0));
 End;
 
 Function SysGetPid : LongInt;
@@ -1961,37 +2155,95 @@ End;
 
 Function SysGetUid : LongInt;
 Begin
-  SysGetUid := LnxSys3(24, 0, 0, 0);
+  SysGetUid := LnxSys3(199, 0, 0, 0) And $FFFF;
 End;
 
-Function SysChdir(Path : LongInt) : LongInt;
+Function SysGetGid : LongInt;
 Begin
-  SysChdir := LnxSys3(12, Path, 0, 0);
+  SysGetGid := LnxSys3(200, 0, 0, 0) And $FFFF;
+End;
+
+Function SysGetEUid : LongInt;
+Begin
+  SysGetEUid := LnxSys3(201, 0, 0, 0) And $FFFF;
+End;
+
+Function SysGetEGid : LongInt;
+Begin
+  SysGetEGid := LnxSys3(202, 0, 0, 0) And $FFFF;
+End;
+
+Function SysSetUid(Uid : LongInt) : LongInt;
+Begin
+  SysSetUid := LnxRes(LnxSys3(213, Uid, 0, 0));
+End;
+
+Function SysSetGid(Gid : LongInt) : LongInt;
+Begin
+  SysSetGid := LnxRes(LnxSys3(214, Gid, 0, 0));
+End;
+
+Function SysSetSid : LongInt;
+Begin
+  SysSetSid := LnxRes(LnxSys3(66, 0, 0, 0));
+End;
+
+Function SysSetPgid(Pid, Pgid : LongInt) : LongInt;
+Begin
+  SysSetPgid := LnxRes(LnxSys3(57, Pid, Pgid, 0));
+End;
+
+Function SysGetPgrp : LongInt;
+Begin
+  SysGetPgrp := LnxSys3(65, 0, 0, 0);
+End;
+
+Function SysGetPgid(Pid : LongInt) : LongInt;
+Begin
+  SysGetPgid := LnxRes(LnxSys3(132, Pid, 0, 0));
+End;
+
+Function SysGetSid(Pid : LongInt) : LongInt;
+Begin
+  SysGetSid := LnxRes(LnxSys3(147, Pid, 0, 0));
+End;
+
+Function SysChdir(Const Path : String) : LongInt;
+Begin
+  SysChdir := LnxRes(LnxSys3(12, LnxZ(Path), 0, 0));
+End;
+
+Function SysChroot(Const Path : String) : LongInt;
+Begin
+  SysChroot := LnxRes(LnxSys3(61, LnxZ(Path), 0, 0));
+End;
+
+Function SysGetCwd : String;
+Var R : LongInt; S : String;
+Begin
+  R := LnxSys3(183, LongInt(@LnxZBuf), 255, 0);
+  If R <= 0 Then S := '' Else S := SysZStr(LongInt(@LnxZBuf));
+  SysGetCwd := S;
 End;
 
 Function SysLSeek(Fd, Offset, Whence : LongInt) : LongInt;
 Begin
-  SysLSeek := LnxSys3(19, Fd, Offset, Whence);
+  SysLSeek := LnxRes(LnxSys3(19, Fd, Offset, Whence));
 End;
 
 Function SysIoctl(Fd, Request : LongInt; Var Arg) : LongInt;
 Begin
-  SysIoctl := LnxSys3(54, Fd, Request, LongInt(@Arg));
+  SysIoctl := LnxRes(LnxSys3(54, Fd, Request, LongInt(@Arg)));
+End;
+
+Function SysIoctlL(Fd, Request, Arg : LongInt) : LongInt;
+Begin
+  SysIoctlL := LnxRes(LnxSys3(54, Fd, Request, Arg));
 End;
 
 Function SysTime : LongInt;
 Begin
   SysTime := LnxSys3(13, 0, 0, 0);
-End;
-
-Function SysSigaction(Sig, Act, OldAct : LongInt) : LongInt;
-Begin
-  SysSigaction := LnxSys3(67, Sig, Act, OldAct);
-End;
-
-Function SysSignal(Sig, Handler : LongInt) : LongInt;
-Begin
-  SysSignal := LnxSys3(48, Sig, Handler, 0);
 End;
 
 Function SysSync : LongInt;
@@ -2001,20 +2253,258 @@ End;
 
 Function SysReboot(Magic1, Magic2, Cmd : LongInt) : LongInt;
 Begin
-  SysReboot := LnxSys3(88, Magic1, Magic2, Cmd);
+  SysReboot := LnxRes(LnxSys6(88, Magic1, Magic2, Cmd, 0, 0, 0));
 End;
 
-{ nom d'un champ ASCIIZ de la structure new_utsname (6 champs de 65 octets) }
-Procedure LnxUtsField(Base : LongInt; Var S : String);
-Var K : LongInt;
+Function SysUmask(Mask : LongInt) : LongInt;
 Begin
-  K := 0;
-  While (Mem[0:Base + K] <> 0) And (K < 64) Do
+  SysUmask := LnxSys3(60, Mask, 0, 0);
+End;
+
+Function SysAlarm(Seconds : LongInt) : LongInt;
+Begin
+  SysAlarm := LnxSys3(27, Seconds, 0, 0);
+End;
+
+Function SysPause : LongInt;
+Begin
+  SysPause := LnxRes(LnxSys3(29, 0, 0, 0));
+End;
+
+Function SysSleep(Seconds : LongInt) : LongInt;
+Begin
+  LnxTmp[2] := Seconds;
+  LnxTmp[3] := 0;
+  SysSleep := LnxRes(LnxSys3(162, LongInt(@LnxTmp[2]), 0, 0));
+End;
+
+{ sigaction : gestionnaire = adresse de procedure (Procedure(Sig:LongInt))
+  ou SIG_DFL / SIG_IGN ; rend l'ancien gestionnaire }
+Function SysSigAction(Sig, Handler, Flags : LongInt) : LongInt;
+Var A, O : TSysSigAct; R : LongInt;
+Begin
+  A.Handler := Handler;
+  A.Flags := Flags;
+  A.Restorer := 0;
+  A.MaskLo := 0;
+  A.MaskHi := 0;
+  R := LnxSys6(174, Sig, LongInt(@A), LongInt(@O), 8, 0, 0);
+  If R < 0 Then SysSigAction := LnxRes(R) Else SysSigAction := O.Handler;
+End;
+
+Function SysSignal(Sig, Handler : LongInt) : LongInt;
+Begin
+  SysSignal := SysSigAction(Sig, Handler, SA_RESTART);
+End;
+
+{ blocage des signaux : How 0 bloquer, 1 debloquer, 2 remplacer }
+Function SysSigProcMask(How, SetLo : LongInt; Var Old : LongInt) : LongInt;
+Var S : Array[0..1] Of LongInt; O : Array[0..1] Of LongInt; R : LongInt;
+Begin
+  S[0] := SetLo;
+  S[1] := 0;
+  R := LnxSys6(175, How, LongInt(@S), LongInt(@O), 8, 0, 0);
+  Old := O[0];
+  SysSigProcMask := LnxRes(R);
+End;
+
+Function SysUnlink(Const Path : String) : LongInt;
+Begin
+  SysUnlink := LnxRes(LnxSys3(10, LnxZ(Path), 0, 0));
+End;
+
+Function SysLink(Const Old, New : String) : LongInt;
+Begin
+  SysLink := LnxRes(LnxSys3(9, LnxZ(Old), LnxZ(New), 0));
+End;
+
+Function SysSymlink(Const Target, Path : String) : LongInt;
+Begin
+  SysSymlink := LnxRes(LnxSys3(83, LnxZ(Target), LnxZ(Path), 0));
+End;
+
+Function SysReadlink(Const Path : String) : String;
+Var R : LongInt; S : String;
+Begin
+  S := '';
+  R := LnxSys3(85, LnxZ(Path), LongInt(@LnxZBuf) + 1280 - 256, 255);
+  If R > 0 Then
   Begin
-    S[K + 1] := Chr(Mem[0:Base + K]);
-    Inc(K);
+    Mem[0:LongInt(@LnxZBuf) + 1280 - 256 + R] := 0;
+    S := SysZStr(LongInt(@LnxZBuf) + 1280 - 256);
   End;
-  S[0] := Chr(K);
+  SysReadlink := S;
+End;
+
+Function SysRename(Const Old, New : String) : LongInt;
+Begin
+  SysRename := LnxRes(LnxSys3(38, LnxZ(Old), LnxZ(New), 0));
+End;
+
+Function SysMkdir(Const Path : String; Mode : LongInt) : LongInt;
+Begin
+  SysMkdir := LnxRes(LnxSys3(39, LnxZ(Path), Mode, 0));
+End;
+
+Function SysRmdir(Const Path : String) : LongInt;
+Begin
+  SysRmdir := LnxRes(LnxSys3(40, LnxZ(Path), 0, 0));
+End;
+
+Function SysChmod(Const Path : String; Mode : LongInt) : LongInt;
+Begin
+  SysChmod := LnxRes(LnxSys3(15, LnxZ(Path), Mode, 0));
+End;
+
+Function SysChown(Const Path : String; Uid, Gid : LongInt) : LongInt;
+Begin
+  SysChown := LnxRes(LnxSys3(212, LnxZ(Path), Uid, Gid));
+End;
+
+Function SysFChown(Fd, Uid, Gid : LongInt) : LongInt;
+Begin
+  SysFChown := LnxRes(LnxSys3(207, Fd, Uid, Gid));
+End;
+
+Function SysFChmod(Fd, Mode : LongInt) : LongInt;
+Begin
+  SysFChmod := LnxRes(LnxSys3(94, Fd, Mode, 0));
+End;
+
+Function SysAccess(Const Path : String; Mode : LongInt) : LongInt;
+Begin
+  SysAccess := LnxRes(LnxSys3(33, LnxZ(Path), Mode, 0));
+End;
+
+Function SysMknod(Const Path : String; Mode, Dev : LongInt) : LongInt;
+Begin
+  SysMknod := LnxRes(LnxSys3(14, LnxZ(Path), Mode, Dev));
+End;
+
+Function SysTruncate(Const Path : String; Len : LongInt) : LongInt;
+Begin
+  SysTruncate := LnxRes(LnxSys3(92, LnxZ(Path), Len, 0));
+End;
+
+Function SysStat(Const Path : String; Var St : TSysStat) : LongInt;
+Begin
+  SysStat := LnxRes(LnxSys3(106, LnxZ(Path), LongInt(@St), 0));
+End;
+
+Function SysLStat(Const Path : String; Var St : TSysStat) : LongInt;
+Begin
+  SysLStat := LnxRes(LnxSys3(107, LnxZ(Path), LongInt(@St), 0));
+End;
+
+Function SysFStat(Fd : LongInt; Var St : TSysStat) : LongInt;
+Begin
+  SysFStat := LnxRes(LnxSys3(108, Fd, LongInt(@St), 0));
+End;
+
+Function SysMount(Const Src, Target, FsType : String; Flags : LongInt)
+    : LongInt;
+Begin
+  SysMount := LnxRes(LnxSys6(21, LnxZ(Src), LnxZ(Target), LnxZ(FsType),
+                             Flags, 0, 0));
+End;
+
+Function SysUmount(Const Target : String) : LongInt;
+Begin
+  SysUmount := LnxRes(LnxSys3(22, LnxZ(Target), 0, 0));
+End;
+
+{ repertoires : SysOpenDir rend un identificateur (0..15) ou -1 }
+Function SysOpenDir(Const Path : String) : LongInt;
+Var D, Fd : LongInt;
+Begin
+  SysOpenDir := -1;
+  D := 0;
+  While (D < 16) And (LnxDirBuf[D] <> 0) Do Inc(D);
+  If D >= 16 Then
+  Begin
+    SysErrno := 24;
+    Exit;
+  End;
+  Fd := LnxRes(LnxSys3(5, LnxZ(Path), $10000, 0));
+  If Fd < 0 Then Exit;
+  LnxDirFd[D] := Fd;
+  LnxDirBuf[D] := HeapAlloc(1, 0, 2048);
+  LnxDirPos[D] := 0;
+  LnxDirLen[D] := 0;
+  SysOpenDir := D;
+End;
+
+{ entree suivante (nom, numero d'inode) ; Faux a la fin }
+Function SysReadDir(D : LongInt; Var Name : String; Var Ino : LongInt)
+    : Boolean;
+Var E, R, L : LongInt;
+Begin
+  SysReadDir := False;
+  If (D < 0) Or (D > 15) Or (LnxDirBuf[D] = 0) Then Exit;
+  While True Do
+  Begin
+    If LnxDirPos[D] >= LnxDirLen[D] Then
+    Begin
+      R := LnxSys3(141, LnxDirFd[D], LnxDirBuf[D], 2048);
+      If R <= 0 Then Exit;
+      LnxDirLen[D] := R;
+      LnxDirPos[D] := 0;
+    End;
+    E := LnxDirBuf[D] + LnxDirPos[D];
+    LnxDirPos[D] := LnxDirPos[D] + MemW[0:E + 8];
+    If MemL[0:E] <> 0 Then
+    Begin
+      Ino := MemL[0:E];
+      Name := SysZStr(E + 10);
+      SysReadDir := True;
+      Exit;
+    End;
+  End;
+End;
+
+Procedure SysCloseDir(D : LongInt);
+Begin
+  If (D < 0) Or (D > 15) Or (LnxDirBuf[D] = 0) Then Exit;
+  LnxSys3(6, LnxDirFd[D], 0, 0);
+  HeapFree(1, 0, LnxDirBuf[D]);
+  LnxDirBuf[D] := 0;
+End;
+
+{ terminaux }
+Function SysTcGetAttr(Fd : LongInt; Var T : TSysTermios) : LongInt;
+Begin
+  SysTcGetAttr := LnxRes(LnxSys3(54, Fd, TCGETS, LongInt(@T)));
+End;
+
+Function SysTcSetAttr(Fd, Action : LongInt; Var T : TSysTermios) : LongInt;
+Begin
+  SysTcSetAttr := LnxRes(LnxSys3(54, Fd, TCSETS + Action, LongInt(@T)));
+End;
+
+Function SysIsATty(Fd : LongInt) : Boolean;
+Var T : TSysTermios;
+Begin
+  SysIsATty := LnxSys3(54, Fd, TCGETS, LongInt(@T)) >= 0;
+End;
+
+Function SysTcGetPgrp(Fd : LongInt) : LongInt;
+Var P : LongInt;
+Begin
+  If LnxRes(LnxSys3(54, Fd, TIOCGPGRP, LongInt(@P))) < 0 Then
+    SysTcGetPgrp := -1
+  Else SysTcGetPgrp := P;
+End;
+
+Function SysTcSetPgrp(Fd, Pgrp : LongInt) : LongInt;
+Var P : LongInt;
+Begin
+  P := Pgrp;
+  SysTcSetPgrp := LnxRes(LnxSys3(54, Fd, TIOCSPGRP, LongInt(@P)));
+End;
+
+Function SysGetWinSize(Fd : LongInt; Var W : TSysWinSize) : LongInt;
+Begin
+  SysGetWinSize := LnxRes(LnxSys3(54, Fd, TIOCGWINSZ, LongInt(@W)));
 End;
 
 Function SysUname(Var U : TUtsName) : LongInt;
@@ -2024,12 +2514,536 @@ Begin
   R := LnxSys3(122, B, 0, 0);
   If R >= 0 Then
   Begin
-    LnxUtsField(B, U.SysName);
-    LnxUtsField(B + 65, U.NodeName);
-    LnxUtsField(B + 130, U.Release);
-    LnxUtsField(B + 195, U.Version);
-    LnxUtsField(B + 260, U.Machine);
+    U.SysName := SysZStr(B);
+    U.NodeName := SysZStr(B + 65);
+    U.Release := SysZStr(B + 130);
+    U.Version := SysZStr(B + 195);
+    U.Machine := SysZStr(B + 260);
   End;
   HeapFree(1, 0, B);
-  SysUname := R;
+  SysUname := LnxRes(R);
+End;
+
+{ environnement : valeur de la variable Name, ou '' }
+Function SysGetEnv(Const Name : String) : String;
+Var I, A, K, L : LongInt; Ok : Boolean;
+Begin
+  SysGetEnv := '';
+  L := Length(Name);
+  I := 0;
+  While MemL[0:LnxEnvp + I * 4] <> 0 Do
+  Begin
+    A := MemL[0:LnxEnvp + I * 4];
+    Ok := True;
+    K := 0;
+    While Ok And (K < L) Do
+    Begin
+      If Mem[0:A + K] <> Ord(Name[K + 1]) Then Ok := False;
+      Inc(K);
+    End;
+    If Ok And (Mem[0:A + L] = 61) Then
+    Begin
+      SysGetEnv := SysZStr(A + L + 1);
+      Exit;
+    End;
+    Inc(I);
+  End;
+End;
+
+Function SysEnvCount : LongInt;
+Var I : LongInt;
+Begin
+  I := 0;
+  While MemL[0:LnxEnvp + I * 4] <> 0 Do Inc(I);
+  SysEnvCount := I;
+End;
+
+Function SysEnvStr(I : LongInt) : String;
+Begin
+  If (I < 0) Or (I >= SysEnvCount) Then SysEnvStr := ''
+  Else SysEnvStr := SysZStr(MemL[0:LnxEnvp + I * 4]);
+End;
+
+{ arguments : adresse de argv, nombre, chaine n }
+Function SysArgv : LongInt;
+Begin
+  SysArgv := LnxArgv;
+End;
+
+Function SysEnvp : LongInt;
+Begin
+  SysEnvp := LnxEnvp;
+End;
+
+Function SysArgCount : LongInt;
+Begin
+  SysArgCount := LnxArgc;
+End;
+
+Function SysArgStr(I : LongInt) : String;
+Begin
+  If (I < 0) Or (I >= LnxArgc) Then SysArgStr := ''
+  Else SysArgStr := SysZStr(MemL[0:LnxArgv + I * 4]);
+End;
+
+{ construction de argv / envp pour SysArgExec }
+Var
+  LnxXArg : Array[0..127] Of LongInt;
+  LnxXEnv : Array[0..127] Of LongInt;
+  LnxXArgN, LnxXEnvN : LongInt;
+
+Procedure SysArgReset;
+Begin
+  LnxXArgN := 0;
+  LnxXEnvN := 0;
+End;
+
+Procedure SysArgAdd(Const S : String);
+Begin
+  If LnxXArgN < 126 Then
+  Begin
+    LnxXArg[LnxXArgN] := SysNewZ(S);
+    Inc(LnxXArgN);
+  End;
+End;
+
+Procedure SysEnvAdd(Const S : String);
+Begin
+  If LnxXEnvN < 126 Then
+  Begin
+    LnxXEnv[LnxXEnvN] := SysNewZ(S);
+    Inc(LnxXEnvN);
+  End;
+End;
+
+Procedure SysEnvInherit;
+Var I : LongInt;
+Begin
+  I := 0;
+  While (MemL[0:LnxEnvp + I * 4] <> 0) And (LnxXEnvN < 126) Do
+  Begin
+    LnxXEnv[LnxXEnvN] := MemL[0:LnxEnvp + I * 4];
+    Inc(LnxXEnvN);
+    Inc(I);
+  End;
+End;
+
+Function SysArgExec(Const Path : String) : LongInt;
+Begin
+  LnxXArg[LnxXArgN] := 0;
+  LnxXEnv[LnxXEnvN] := 0;
+  SysArgExec := SysExecve(Path, LongInt(@LnxXArg), LongInt(@LnxXEnv));
+End;
+
+{ ---------- langue et messages d'erreur ---------- }
+
+{ langue d'une valeur de LANGUAGE : 1 francais (defaut), 2 EN, 3 GR, 4 SP,
+  5 IT }
+Function SysLangOf(Const V : String) : LongInt;
+Var A, B : Char;
+Begin
+  SysLangOf := 1;
+  If Length(V) < 2 Then Exit;
+  A := UpCase(V[1]);
+  B := UpCase(V[2]);
+  If (A = 'E') And (B = 'N') Then SysLangOf := 2
+  Else If (A = 'G') And (B = 'R') Then SysLangOf := 3
+  Else If (A = 'D') And (B = 'E') Then SysLangOf := 3
+  Else If (A = 'S') And (B = 'P') Then SysLangOf := 4
+  Else If (A = 'E') And (B = 'S') Then SysLangOf := 4
+  Else If (A = 'I') And (B = 'T') Then SysLangOf := 5;
+End;
+
+Function SysLang : LongInt;
+Begin
+  If LnxLangV = 0 Then LnxLangV := SysLangOf(SysGetEnv('LANGUAGE'));
+  SysLang := LnxLangV;
+End;
+
+Procedure SysSetLang(L : LongInt);
+Begin
+  LnxLangV := L;
+End;
+
+{ texte d'une erreur Linux dans la langue courante }
+Function SysErrorText(E : LongInt) : String;
+Var L : LongInt; S : String;
+Begin
+  L := SysLang;
+  Case E Of
+    1 : Case L Of
+          1 : S := 'Operation non permise';
+          2 : S := 'Operation not permitted';
+          3 : S := 'Operation nicht erlaubt';
+          4 : S := 'Operacion no permitida';
+          5 : S := 'Operazione non permessa';
+        End;
+    2 : Case L Of
+          1 : S := 'Fichier ou repertoire inexistant';
+          2 : S := 'No such file or directory';
+          3 : S := 'Datei oder Verzeichnis nicht gefunden';
+          4 : S := 'No existe el fichero o directorio';
+          5 : S := 'File o directory inesistente';
+        End;
+    3 : Case L Of
+          1 : S := 'Processus inexistant';
+          2 : S := 'No such process';
+          3 : S := 'Prozess nicht gefunden';
+          4 : S := 'No existe el proceso';
+          5 : S := 'Processo inesistente';
+        End;
+    4 : Case L Of
+          1 : S := 'Appel systeme interrompu';
+          2 : S := 'Interrupted system call';
+          3 : S := 'Systemaufruf unterbrochen';
+          4 : S := 'Llamada al sistema interrumpida';
+          5 : S := 'Chiamata di sistema interrotta';
+        End;
+    5 : Case L Of
+          1 : S := 'Erreur d''entree/sortie';
+          2 : S := 'Input/output error';
+          3 : S := 'Ein-/Ausgabefehler';
+          4 : S := 'Error de entrada/salida';
+          5 : S := 'Errore di ingresso/uscita';
+        End;
+    8 : Case L Of
+          1 : S := 'Format d''executable invalide';
+          2 : S := 'Exec format error';
+          3 : S := 'Ausfuehrungsformat ungueltig';
+          4 : S := 'Formato de ejecutable no valido';
+          5 : S := 'Formato eseguibile non valido';
+        End;
+    9 : Case L Of
+          1 : S := 'Descripteur de fichier invalide';
+          2 : S := 'Bad file descriptor';
+          3 : S := 'Ungueltiger Dateideskriptor';
+          4 : S := 'Descriptor de fichero erroneo';
+          5 : S := 'Descrittore di file non valido';
+        End;
+    10 : Case L Of
+          1 : S := 'Pas de processus fils';
+          2 : S := 'No child processes';
+          3 : S := 'Keine Kindprozesse';
+          4 : S := 'No hay procesos hijos';
+          5 : S := 'Nessun processo figlio';
+        End;
+    11 : Case L Of
+          1 : S := 'Ressource temporairement indisponible';
+          2 : S := 'Resource temporarily unavailable';
+          3 : S := 'Ressource voruebergehend nicht verfuegbar';
+          4 : S := 'Recurso no disponible temporalmente';
+          5 : S := 'Risorsa temporaneamente non disponibile';
+        End;
+    12 : Case L Of
+          1 : S := 'Memoire insuffisante';
+          2 : S := 'Out of memory';
+          3 : S := 'Nicht genug Speicher';
+          4 : S := 'Memoria agotada';
+          5 : S := 'Memoria esaurita';
+        End;
+    13 : Case L Of
+          1 : S := 'Permission refusee';
+          2 : S := 'Permission denied';
+          3 : S := 'Zugriff verweigert';
+          4 : S := 'Permiso denegado';
+          5 : S := 'Permesso negato';
+        End;
+    16 : Case L Of
+          1 : S := 'Peripherique ou ressource occupe';
+          2 : S := 'Device or resource busy';
+          3 : S := 'Geraet oder Ressource belegt';
+          4 : S := 'Dispositivo o recurso ocupado';
+          5 : S := 'Dispositivo o risorsa occupata';
+        End;
+    17 : Case L Of
+          1 : S := 'Le fichier existe deja';
+          2 : S := 'File exists';
+          3 : S := 'Datei existiert bereits';
+          4 : S := 'El fichero ya existe';
+          5 : S := 'Il file esiste gia''';
+        End;
+    18 : Case L Of
+          1 : S := 'Lien entre peripheriques invalide';
+          2 : S := 'Invalid cross-device link';
+          3 : S := 'Ungueltiger Link ueber Geraete';
+          4 : S := 'Enlace entre dispositivos no valido';
+          5 : S := 'Collegamento tra dispositivi non valido';
+        End;
+    19 : Case L Of
+          1 : S := 'Peripherique inexistant';
+          2 : S := 'No such device';
+          3 : S := 'Geraet nicht gefunden';
+          4 : S := 'No existe el dispositivo';
+          5 : S := 'Dispositivo inesistente';
+        End;
+    20 : Case L Of
+          1 : S := 'Ce n''est pas un repertoire';
+          2 : S := 'Not a directory';
+          3 : S := 'Kein Verzeichnis';
+          4 : S := 'No es un directorio';
+          5 : S := 'Non e'' una directory';
+        End;
+    21 : Case L Of
+          1 : S := 'C''est un repertoire';
+          2 : S := 'Is a directory';
+          3 : S := 'Ist ein Verzeichnis';
+          4 : S := 'Es un directorio';
+          5 : S := 'E'' una directory';
+        End;
+    22 : Case L Of
+          1 : S := 'Argument invalide';
+          2 : S := 'Invalid argument';
+          3 : S := 'Ungueltiges Argument';
+          4 : S := 'Argumento no valido';
+          5 : S := 'Argomento non valido';
+        End;
+    24 : Case L Of
+          1 : S := 'Trop de fichiers ouverts';
+          2 : S := 'Too many open files';
+          3 : S := 'Zu viele offene Dateien';
+          4 : S := 'Demasiados ficheros abiertos';
+          5 : S := 'Troppi file aperti';
+        End;
+    25 : Case L Of
+          1 : S := 'Ce n''est pas un terminal';
+          2 : S := 'Not a tty';
+          3 : S := 'Kein Terminal';
+          4 : S := 'No es un terminal';
+          5 : S := 'Non e'' un terminale';
+        End;
+    26 : Case L Of
+          1 : S := 'Fichier executable en cours d''utilisation';
+          2 : S := 'Text file busy';
+          3 : S := 'Programmdatei belegt';
+          4 : S := 'Fichero de texto ocupado';
+          5 : S := 'File di testo occupato';
+        End;
+    27 : Case L Of
+          1 : S := 'Fichier trop grand';
+          2 : S := 'File too large';
+          3 : S := 'Datei zu gross';
+          4 : S := 'Fichero demasiado grande';
+          5 : S := 'File troppo grande';
+        End;
+    28 : Case L Of
+          1 : S := 'Plus de place sur le peripherique';
+          2 : S := 'No space left on device';
+          3 : S := 'Kein Speicherplatz mehr auf dem Geraet';
+          4 : S := 'No queda espacio en el dispositivo';
+          5 : S := 'Spazio esaurito sul dispositivo';
+        End;
+    29 : Case L Of
+          1 : S := 'Positionnement impossible';
+          2 : S := 'Illegal seek';
+          3 : S := 'Ungueltiges Positionieren';
+          4 : S := 'Posicionamiento ilegal';
+          5 : S := 'Posizionamento non valido';
+        End;
+    30 : Case L Of
+          1 : S := 'Systeme de fichiers en lecture seule';
+          2 : S := 'Read-only file system';
+          3 : S := 'Dateisystem ist schreibgeschuetzt';
+          4 : S := 'Sistema de ficheros de solo lectura';
+          5 : S := 'File system di sola lettura';
+        End;
+    31 : Case L Of
+          1 : S := 'Trop de liens';
+          2 : S := 'Too many links';
+          3 : S := 'Zu viele Links';
+          4 : S := 'Demasiados enlaces';
+          5 : S := 'Troppi collegamenti';
+        End;
+    32 : Case L Of
+          1 : S := 'Tube casse';
+          2 : S := 'Broken pipe';
+          3 : S := 'Unterbrochene Pipe';
+          4 : S := 'Tuberia rota';
+          5 : S := 'Pipe interrotta';
+        End;
+    36 : Case L Of
+          1 : S := 'Nom de fichier trop long';
+          2 : S := 'File name too long';
+          3 : S := 'Dateiname zu lang';
+          4 : S := 'Nombre de fichero demasiado largo';
+          5 : S := 'Nome di file troppo lungo';
+        End;
+    38 : Case L Of
+          1 : S := 'Fonction non implantee';
+          2 : S := 'Function not implemented';
+          3 : S := 'Funktion nicht implementiert';
+          4 : S := 'Funcion no implementada';
+          5 : S := 'Funzione non implementata';
+        End;
+    39 : Case L Of
+          1 : S := 'Le repertoire n''est pas vide';
+          2 : S := 'Directory not empty';
+          3 : S := 'Verzeichnis nicht leer';
+          4 : S := 'El directorio no esta vacio';
+          5 : S := 'La directory non e'' vuota';
+        End;
+    40 : Case L Of
+          1 : S := 'Trop de liens symboliques';
+          2 : S := 'Too many levels of symbolic links';
+          3 : S := 'Zu viele symbolische Links';
+          4 : S := 'Demasiados enlaces simbolicos';
+          5 : S := 'Troppi collegamenti simbolici';
+        End;
+  Else
+    Begin
+      Str(E, S);
+      S := 'Error ' + S;
+    End;
+  End;
+  SysErrorText := S;
+End;
+
+{ ---------- noms de comptes : /etc/passwd ---------- }
+
+{ ligne de /etc/passwd -> enregistrement }
+Function LnxPwField(Const L : String; N : LongInt) : String;
+Var I, K, Cur : LongInt; S : String;
+Begin
+  Cur := 1;
+  K := 1;
+  S := '';
+  For I := 1 To Length(L) Do
+  Begin
+    If L[I] = ':' Then
+    Begin
+      If Cur = N Then Break;
+      Inc(Cur);
+      S := '';
+    End
+    Else If Cur = N Then S := S + L[I];
+  End;
+  LnxPwField := S;
+End;
+
+Function LnxToNum(Const S : String) : LongInt;
+Var K, V : LongInt;
+Begin
+  V := 0;
+  K := 1;
+  While (K <= Length(S)) And (S[K] >= '0') And (S[K] <= '9') Do
+  Begin
+    V := V * 10 + Ord(S[K]) - 48;
+    Inc(K);
+  End;
+  LnxToNum := V;
+End;
+
+Function SysReadLine(Fd : LongInt; Var S : String) : Boolean;
+{ ligne suivante de Fd (lecture octet par octet) ; Faux a la fin }
+Var C : LongInt; N : LongInt;
+Begin
+  S := '';
+  SysReadLine := False;
+  While True Do
+  Begin
+    N := LnxSys3(3, Fd, LongInt(@LnxTmp[12]), 1);
+    If N <= 0 Then Exit;
+    SysReadLine := True;
+    C := Mem[0:LongInt(@LnxTmp[12])];
+    If C = 10 Then Exit;
+    If Length(S) < 255 Then S := S + Chr(C);
+  End;
+End;
+
+Function SysGetPw(Const Name : String; ByUid : Boolean; Uid : LongInt;
+    Var P : TSysPasswd) : Boolean;
+Var Fd : LongInt; L : String;
+Begin
+  SysGetPw := False;
+  Fd := LnxSys3(5, LnxZ('/etc/passwd'), 0, 0);
+  If Fd < 0 Then Exit;
+  While SysReadLine(Fd, L) Do
+  Begin
+    If (L = '') Or (L[1] = '#') Then Continue;
+    If ((Not ByUid) And (LnxPwField(L, 1) = Name)) Or
+       (ByUid And (LnxToNum(LnxPwField(L, 3)) = Uid)) Then
+    Begin
+      P.Name := LnxPwField(L, 1);
+      P.Pw := LnxPwField(L, 2);
+      P.Uid := LnxToNum(LnxPwField(L, 3));
+      P.Gid := LnxToNum(LnxPwField(L, 4));
+      P.Gecos := LnxPwField(L, 5);
+      P.Home := LnxPwField(L, 6);
+      P.Shell := LnxPwField(L, 7);
+      SysGetPw := True;
+      Break;
+    End;
+  End;
+  LnxSys3(6, Fd, 0, 0);
+End;
+
+Function SysGetPwNam(Const Name : String; Var P : TSysPasswd) : Boolean;
+Begin
+  SysGetPwNam := SysGetPw(Name, False, 0, P);
+End;
+
+Function SysGetPwUid(Uid : LongInt; Var P : TSysPasswd) : Boolean;
+Begin
+  SysGetPwUid := SysGetPw('', True, Uid, P);
+End;
+
+{ nom du groupe de numero Gid (/etc/group) ; '' si absent }
+Function SysGroupName(Gid : LongInt) : String;
+Var Fd : LongInt; L : String;
+Begin
+  SysGroupName := '';
+  Fd := LnxSys3(5, LnxZ('/etc/group'), 0, 0);
+  If Fd < 0 Then Exit;
+  While SysReadLine(Fd, L) Do
+    If (L <> '') And (LnxToNum(LnxPwField(L, 3)) = Gid) Then
+    Begin
+      SysGroupName := LnxPwField(L, 1);
+      Break;
+    End;
+  LnxSys3(6, Fd, 0, 0);
+End;
+
+{ mot de passe code (format V7 de LINUX-0, 13 caracteres : sel de 2 + 11) }
+Function SysCrypt(Const Pw, Salt : String) : String;
+Const Ch : String[64] =
+  './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+Var
+  A, B, C, D, X, R, K, Bit, V, W : LongInt;
+  S, T : String;
+Begin
+  T := Salt + '..';
+  T := Copy(T, 1, 2);
+  S := T + Pw;
+  A := $6A09; B := $BB67; C := $3C6E; D := $A54F;
+  For R := 1 To 32 Do
+    For K := 1 To Length(S) Do
+    Begin
+      X := Ord(S[K]);
+      A := ((A Xor X) * 31421 + 1) And $FFFF;
+      B := ((B Xor A) * 31421 + X) And $FFFF;
+      C := ((C Xor B) * 31421 + 7) And $FFFF;
+      D := ((D Xor C) * 31421 + A) And $FFFF;
+    End;
+  Bit := 0;
+  For K := 1 To 11 Do
+  Begin
+    V := 0;
+    For R := 1 To 6 Do
+    Begin
+      If Bit >= 64 Then W := 0
+      Else
+      Begin
+        Case Bit Div 16 Of
+          0 : W := A;
+          1 : W := B;
+          2 : W := C;
+        Else W := D;
+        End;
+        W := (W Shr (15 - Bit Mod 16)) And 1;
+      End;
+      V := V * 2 + W;
+      Inc(Bit);
+    End;
+    T := T + Ch[V + 1];
+  End;
+  SysCrypt := T;
 End;

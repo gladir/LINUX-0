@@ -15,14 +15,20 @@ Unit L32SYS;
 Interface
 
 Procedure L32MakeExec(Const Path : String);
+Function L32GetEnv(Const Name : String) : String;
 
 Implementation
 
-Uses BaseUnix;
+Uses BaseUnix, Strings;
 
 Procedure L32MakeExec(Const Path : String);
 Begin
   FpChmod(Path, 493);   { 0755 octal }
+End;
+
+Function L32GetEnv(Const Name : String) : String;
+Begin
+  L32GetEnv := StrPas(fpGetEnv(Name));
 End;
 
 End.

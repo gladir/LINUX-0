@@ -103,7 +103,7 @@ int main(void){
   ktest("clock_gettime",sc2(SYS_clock_gettime,1,(long)ts)==0&&ts[0]>=0);
   /* statfs */
   long sf[16];
-  ktest("statfs",sc2(99,(long)"/tmp",(long)sf)==0&&sf[0]==0x01021994);
+  ktest("statfs",sc2(99,(long)"/tmp",(long)sf)==0&&(sf[0]==0x01021994||sf[0]==0xEF53));
   /* truncate par chemin et stat ancien */
   fd=open("/tmp/tr",O_CREAT|O_RDWR,0600);write(fd,"0123456789",10);close(fd);
   ktest("truncate",sc2(92,(long)"/tmp/tr",3)==0);

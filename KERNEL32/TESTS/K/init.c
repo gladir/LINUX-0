@@ -1,7 +1,7 @@
 /* init : lance la suite de tests (banc d'essai) puis un petit interpreteur de
    commandes sur /dev/console. */
 #include "ku.h"
-static const char*tests[]={"/bin/hello","/bin/forkwait","/bin/pipetest","/bin/sigtest","/bin/mmaptest","/bin/dirtest","/bin/ttytest","/bin/schedtest","/bin/blktest","/bin/misctest","/bin/proctest","/bin/stress",0};
+static const char*tests[]={"/bin/hello","/bin/forkwait","/bin/pipetest","/bin/sigtest","/bin/mmaptest","/bin/dirtest","/bin/ttytest","/bin/schedtest","/bin/blktest","/bin/misctest","/bin/proctest","/bin/stress","/bin/ext2test",0};
 static int run(const char*prog,char*const argv[]){
   int p=fork(),st;
   if(p==0){char*e[]={"PATH=/bin:/sbin:/usr/bin","HOME=/root","TERM=linux",0};execve(prog,argv,e);puts_fd(2,"execve: ");puts_fd(2,prog);puts_fd(2," : echec\n");_exit(127);}
@@ -29,6 +29,9 @@ int main(int argc,char**argv){
   }
   puts("KTEST: DONE progs=");putd(total);puts(" fail=");putd(bad);puts("\n");
   if(argc>1&&strcmp(argv[1],"poweroff")==0){sync();reboot_off();}
+  {char cl[256];int fdc=open("/proc/cmdline",O_RDONLY,0),k,m=0;
+   if(fdc>=0){m=read(fdc,cl,sizeof cl-1);close(fdc);}
+   if(m>0){cl[m]=0;for(k=0;k+8<=m;k++)if(memcmp_(cl+k,"k32power",8)==0){sync();reboot_off();}}}
   puts("Interpreteur de commandes (halt pour arreter) :\n");
   for(;;){
     puts("# ");

@@ -1,0 +1,19 @@
+1 two words single $a
+1two words $a $a $a
+1x dflt dflt2 set
+[empty] []
+9 words two words two
+file.tar.gz /usr/lib/file.tar /usr/lib/file usr/lib/file.tar.gz
+7 9 3 1 1 16 -3
+49 1 1
+a  b a  b
+3 1 2 3 1 2 3
+<1><2><3>
+a b c
+3
+1
+t01_basic.sh
+home
+ end
+  a
+rc=0
