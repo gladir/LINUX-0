@@ -24,7 +24,8 @@
 #              LPC (compilateur deja construit), TESTKERNEL=1, MB (taille du
 #              disque en Mo, defaut 64), BS (blocs ext2, defaut 1024), INODE
 #              (taille d'inode, defaut 128), CMDLINE (ligne de commande du
-#              noyau, defaut celle du chargeur : root=/dev/hda1 ro).
+#              noyau, defaut : root=/dev/hda1 rw console=ttyS0), NOCMDS=1 (sans les 178
+#              commandes du depot : systeme minimal).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=${W:-/tmp/linux32-build}
@@ -78,29 +79,57 @@ else
 fi
 
 echo "== Programmes (LPC -3X)"
-rm -rf "$W/root"; mkdir -p "$W/root/sbin" "$W/root/bin" "$W/root/etc" \
-  "$W/root/dev" "$W/root/tmp" "$W/root/proc" "$W/root/boot"
+rm -rf "$W/root"
+mkdir -p "$W/root/sbin" "$W/root/bin" "$W/root/etc" "$W/root/dev" \
+  "$W/root/tmp" "$W/root/proc" "$W/root/sys" "$W/root/boot" "$W/root/home" \
+  "$W/root/root" "$W/root/usr/bin" "$W/root/usr/sbin" "$W/root/var/log" \
+  "$W/root/var/tmp" "$W/root/mnt" "$W/root/lib"
+mkdir -p "$W/usr"
 N=0
-for f in "$HERE"/USR/*.PAS; do
-  [ -f "$f" ] || continue
+# compile : $1 = source, $2 = destination dans la racine
+build_one() {
+  local f=$1 dst=$2 n
   n=$(basename "$f" .PAS)
-  mkdir -p "$W/usr"; cp "$f" "$W/usr/"
+  cp "$f" "$W/usr/"
   if ( cd "$W/usr" && "$LPC" -3X -q "$n.PAS" ) > "$W/log/$n.log" 2>&1; then
-    case $n in
-      INIT) install -m 755 "$W/usr/$n" "$W/root/sbin/init" ;;
-      *) install -m 755 "$W/usr/$n" "$W/root/bin/$(echo $n | tr A-Z a-z)" ;;
-    esac
+    install -m 755 "$W/usr/$n" "$W/root/$dst"
     N=$((N + 1))
   else
     echo "   avertissement : $n ignore ($(tail -1 "$W/log/$n.log"))"
   fi
+}
+# programmes systeme (USR/*.PAS) : sbin pour init, getty, halt, reboot...
+for f in "$HERE"/USR/*.PAS; do
+  [ -f "$f" ] || continue
+  n=$(basename "$f" .PAS); l=$(echo "$n" | tr A-Z a-z)
+  case $n in
+    INIT) build_one "$f" sbin/init ;;
+    GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKFS_EXT2|MKPASSWD)
+      build_one "$f" sbin/$l ;;
+    *) build_one "$f" bin/$l ;;
+  esac
 done
+# commandes du depot (racine) : /bin, sans ecraser les versions de USR/
+if [ -z "$NOCMDS" ]; then
+  for f in "$HERE"/../*.PAS; do
+    [ -f "$f" ] || continue
+    n=$(basename "$f" .PAS); l=$(echo "$n" | tr A-Z a-z)
+    case $n in HALT|REBOOT|HSWD) continue ;; esac
+    [ -f "$W/root/bin/$l" ] || [ -f "$W/root/sbin/$l" ] && continue
+    build_one "$f" bin/$l
+  done
+fi
+ln -sf sh "$W/root/bin/ash" 2>/dev/null || true
 echo "   $N programme(s)"
-[ -f "$HERE/USR/INIT.PAS" ] || true
+# fichiers de configuration
+cp -a "$HERE/USR/ROOTFS"/. "$W/root"/
+chmod 600 "$W/root/etc/shadow"; chmod 700 "$W/root/root"
+mkdir -p "$W/root/home/linux"; chown 1000:1000 "$W/root/home/linux" 2>/dev/null || true
+chmod 1777 "$W/root/tmp" "$W/root/var/tmp"
 
 echo "== Image disque"
 mkdir -p "$HERE/IMAGE"
 "$HERE/TOOLS/MKIMAGE.SH" -o "$HERE/IMAGE/LINUX32-HD.IMG" -k "$KERNEL" \
-  -r "$W/root" -s "$MB" -b "$BS" -i "$INODE" ${CMDLINE:+-c "$CMDLINE"}
+  -r "$W/root" -s "$MB" -b "$BS" -i "$INODE" -c "${CMDLINE:-root=/dev/hda1 rw console=ttyS0}"
 echo "Essai : qemu-system-i386 -m 64" \
   "-drive file=IMAGE/LINUX32-HD.IMG,format=raw,if=ide"

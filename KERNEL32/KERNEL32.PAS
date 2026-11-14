@@ -38,7 +38,10 @@ Program KERNEL32;
     Partie 14 - Terminaux : N_TTY, consoles virtuelles, clavier, ttyS0
     Partie 15 - Chargeur ELF (execve), pile utilisateur (argc/argv/auxv)
     Partie 16 - Appels systeme (INT 80h, table Linux i386)
-    Partie 17 - Programmes embarques, init, programme principal
+    Partie 17 - Programmes embarques, init, racine reelle, programme principal
+    Partie 18 - ext2 (lecture/ecriture ; placee dans le fichier avant la
+                partie 14) ; s'y ajoutent dans les parties existantes : bind,
+                move, pivot_root (12), sysfs, pty, FPU/SSE (9, 14, 17)
 
   UNAME : sysname LINUX-0, nodename linux0, release KERNEL32, version 0.1,
   machine i386.
@@ -7077,6 +7080,7 @@ Begin
   RegisterFs('tmpfs', LongInt(@TmpMountFn));
   RegisterFs('ramfs', LongInt(@TmpMountFn));
   RegisterFs('devtmpfs', LongInt(@TmpMountFn));
+  RegisterFs('sysfs', LongInt(@TmpMountFn));
   MemFill(LongInt(@TmpIOps[0]), 0, SizeOf(TmpIOps));
   TmpIOps[IoLookup] := LongInt(@TmpLookup);
   TmpIOps[IoCreate] := LongInt(@TmpCreate);
@@ -10121,7 +10125,10 @@ End;
 { ==================================================================== }
 
 Const
-  NTtys    = 5;                  { tty1..tty4 (consoles) et ttyS0 }
+  MaxPty   = 16;
+  PtyBase  = 5;                  { indices de terminal des esclaves de pty }
+  PtyBufSz = 4096;
+  NTtys    = 5 + MaxPty;         { tty1..tty4 (consoles), ttyS0, pty }
   TtyBuf   = 4096;
   { drapeaux termios }
   IGNCR = $80; ICRNL = $100; INLCR = $40; IXON = $400; IXANY = $800; ISTRIP
@@ -10144,13 +10151,25 @@ Type
     Cc                   : Array[0..31] Of Byte;
     Rows, Cols           : LongInt;
     Head, Tail, Lines    : LongInt;       { tampon circulaire d'entree }
-    Stopped, Lnext       : LongInt;
+    Stopped, Lnext, Hup  : LongInt;
     Wchan                : LongInt;
     Rbuf                 : Array[0..4095] Of Word;      { TtyBuf }
   End;
 
+Type
+  { pseudo-terminal : l'esclave est Ttys[PtyBase + n] ; MBuf = octets ecrits
+    par l'esclave, a lire sur le maitre }
+  TPty = Record
+    Used, Locked, MasterOpen, EverOpened, MHead, MLen : LongInt;
+    MasterWrites : LongInt;
+    MBuf : Array[0..PtyBufSz - 1] Of Byte;
+  End;
+
 Var
   Ttys         : Array[0..NTtys - 1] Of TTty;
+  Ptys         : Array[0..MaxPty - 1] Of TPty;
+  PtsRoot      : PDentry;                   { racine du devpts monte }
+  PtmxFOps, PtsSOps : Array[0..15] Of LongInt;
   TtyFOps      : Array[0..15] Of LongInt;
   CtlFOps      : Array[0..15] Of LongInt;
   { clavier }
@@ -10187,9 +10206,22 @@ End;
 
 { ---- Sortie ---- }
 
+{ Octet de sortie de l'esclave du pty N : vers le tampon du maitre }
+Procedure PtyOutByte(N, C : LongInt);
+Var P : ^TPty;
+Begin
+  P := @Ptys[N];
+  If P^.MasterOpen = 0 Then Exit;
+  If P^.MLen >= PtyBufSz Then Exit;
+  P^.MBuf[(P^.MHead + P^.MLen) Mod PtyBufSz] := C And $FF;
+  Inc(P^.MLen);
+  WakeUp(LongInt(P));
+End;
+
 Procedure TtyPutRaw(T : PTty; C : LongInt);
 Begin
-  If T^.Index < NVc Then VcPutc(T^.Index, C)
+  If T^.Index >= PtyBase Then PtyOutByte(T^.Index - PtyBase, C)
+  Else If T^.Index < NVc Then VcPutc(T^.Index, C)
   Else
   Begin
     If C = 10 Then SerialPut(13);
@@ -10204,11 +10236,13 @@ Begin
   Begin
     If (C = 10) And ((T^.Oflag And ONLCR) <> 0) Then
     Begin
-      If T^.Index < NVc Then VcPutc(T^.Index, 13) Else SerialPut(13);
+      If T^.Index >= PtyBase Then PtyOutByte(T^.Index - PtyBase, 13)
+      Else If T^.Index < NVc Then VcPutc(T^.Index, 13) Else SerialPut(13);
     End
     Else If (C = 13) And ((T^.Oflag And OCRNL) <> 0) Then C := 10;
   End;
-  If T^.Index < NVc Then VcPutc(T^.Index, C)
+  If T^.Index >= PtyBase Then PtyOutByte(T^.Index - PtyBase, C)
+  Else If T^.Index < NVc Then VcPutc(T^.Index, C)
   Else SerialPut(C);
 End;
 
@@ -10399,6 +10433,12 @@ End;
 Function TtyOpenIdx(Maj, Min : LongInt) : LongInt;
 Begin
   TtyOpenIdx := -1;
+  If Maj = 136 Then
+  Begin
+    If (Min >= 0) And (Min < MaxPty) And (Ptys[Min].Used <> 0)
+        And (Ptys[Min].Locked = 0) Then TtyOpenIdx := PtyBase + Min;
+    Exit;
+  End;
   If Maj = 5 Then
   Begin
     If Min = 0 Then TtyOpenIdx := Cur^.Tty
@@ -10413,9 +10453,16 @@ Begin
   Else If Min = 64 Then TtyOpenIdx := 4;
 End;
 
+Function PtmxOpen(I : PInode; F : PFile) : LongInt; Forward;
+
 Function TtyOpen(I : PInode; F : PFile) : LongInt;
 Var Idx : LongInt; T : PTty;
 Begin
+  If (I^.Rdev And $FFFF) = $0502 Then
+  Begin
+    TtyOpen := PtmxOpen(I, F);
+    Exit;
+  End;
   Idx := TtyOpenIdx((I^.Rdev Shr 8) And $FF, I^.Rdev And $FF);
   If (Idx < 0) Or (Idx >= NTtys) Then
   Begin
@@ -10427,6 +10474,7 @@ Begin
   T := @Ttys[Idx];
   F^.Priv := Idx + 1;
   Inc(T^.Opens);
+  If Idx >= PtyBase Then Ptys[Idx - PtyBase].EverOpened := 1;
   { terminal de controle : chef de session sans terminal }
   If ((F^.Flags And O_NOCTTY) = 0) And (Cur^.Sid = Cur^.Pid)
       And (Cur^.Tty < 0) And
@@ -10439,11 +10487,21 @@ Begin
   TtyOpen := 0;
 End;
 
+Procedure PtyFree(N : LongInt); Forward;
+
 Procedure TtyRelease(F : PFile);
 Var T : PTty;
 Begin
   T := TtyOf(F);
-  If T <> Nil Then Dec(T^.Opens);
+  If T <> Nil Then
+  Begin
+    Dec(T^.Opens);
+    If T^.Index >= PtyBase Then
+    Begin
+      WakeUp(LongInt(@Ptys[T^.Index - PtyBase]));
+      PtyFree(T^.Index - PtyBase);
+    End;
+  End;
 End;
 
 { Controle de travaux pour la lecture/ecriture : 0 ou -errno }
@@ -10482,6 +10540,11 @@ Begin
     { attendre une ligne complete }
     While T^.Lines = 0 Do
     Begin
+      If T^.Hup <> 0 Then
+      Begin
+        TtyRead := 0;
+        Exit;
+      End;
       If (F^.Flags And O_NONBLOCK) <> 0 Then
       Begin
         TtyRead := -EAGAIN;
@@ -10537,6 +10600,7 @@ Begin
     If (N >= Vmn) And ((Vmn > 0) Or (N > 0) Or (Vtm = 0)) And (N > 0)
         Then Break;
     If (Vmn = 0) And (Vtm = 0) Then Break;
+    If (T^.Hup <> 0) And (TtyCount(T) = 0) Then Break;
     If (Vmn = 0) And (N = 0) And (Vtm > 0) Then
     Begin
       { attente bornee du premier octet }
@@ -10601,6 +10665,15 @@ Begin
         If I > 0 Then TtyWrite := I Else TtyWrite := -ERESTARTSYS;
         Exit;
       End;
+    If T^.Index >= PtyBase Then
+      While (Ptys[T^.Index - PtyBase].MLen >= PtyBufSz)
+          And (Ptys[T^.Index - PtyBase].MasterOpen <> 0) Do
+        If SleepOn(LongInt(@Ptys[T^.Index - PtyBase]), 0, True)
+            = WakeSignal Then
+        Begin
+          If I > 0 Then TtyWrite := I Else TtyWrite := -ERESTARTSYS;
+          Exit;
+        End;
     TtyOut(T, Mem[0:Buf + I]);
   End;
   TtyWrite := Cnt;
@@ -10761,6 +10834,7 @@ Begin
     If T^.Lines > 0 Then R := R Or POLLIN;
   End
   Else If TtyCount(T) > 0 Then R := R Or POLLIN;
+  If (T^.Hup <> 0) Then R := R Or POLLIN Or POLLHUP;
   TtyPoll := R;
 End;
 
@@ -10782,6 +10856,180 @@ Begin
         Tasks[I].Tty := -1;
   End;
   T^.Tty := -1;
+End;
+
+{ ---- Pseudo-terminaux : maitre /dev/ptmx, esclaves /dev/pts/N ---- }
+
+Procedure PtsName(N : LongInt; Var Nm : String);
+Begin
+  Nm := IntStr(N);
+End;
+
+{ Liberer le pty N quand le maitre et tous les esclaves sont fermes }
+Procedure PtyFree(N : LongInt);
+Var P : ^TPty; T : PTty; Nm : String; E : PTmpEnt; D : PDentry;
+Begin
+  P := @Ptys[N];
+  T := @Ttys[PtyBase + N];
+  If (P^.Used = 0) Or (P^.MasterOpen <> 0) Or (T^.Opens > 0) Then Exit;
+  If PtsRoot <> Nil Then
+  Begin
+    PtsName(N, Nm);
+    E := TmpEntFind(PtsRoot^.Inode, Nm);
+    If E <> Nil Then TmpUnlink(PtsRoot^.Inode, Nm, E^.Ino);
+    D := DentryFind(PtsRoot, Nm);
+    If D <> Nil Then DentryUnhash(D);
+  End;
+  TtyReset(T, PtyBase + N);
+  MemFill(LongInt(P), 0, SizeOf(TPty));
+End;
+
+Function PtmxOpen(I : PInode; F : PFile) : LongInt;
+Var N, K : LongInt; P : ^TPty; T : PTty; Nm : String; R : LongInt;
+    E2 : PTmpEnt;
+Begin
+  N := -1;
+  For K := 0 To MaxPty - 1 Do
+    If Ptys[K].Used = 0 Then
+    Begin
+      N := K;
+      Break;
+    End;
+  If N < 0 Then
+  Begin
+    PtmxOpen := -EAGAIN;
+    Exit;
+  End;
+  P := @Ptys[N];
+  T := @Ttys[PtyBase + N];
+  MemFill(LongInt(P), 0, SizeOf(TPty));
+  TtyReset(T, PtyBase + N);
+  P^.Used := 1; P^.Locked := 1; P^.MasterOpen := 1;
+  If PtsRoot <> Nil Then
+  Begin
+    PtsName(N, Nm);
+    R := TmpMknod(PtsRoot^.Inode, Nm, S_IFCHR Or $190, (136 Shl 8) Or N);
+    If R = 0 Then
+    Begin
+      E2 := TmpEntFind(PtsRoot^.Inode, Nm);
+      If E2 <> Nil Then
+      Begin
+        E2^.Ino^.Uid := Cur^.Fsuid;
+        E2^.Ino^.Gid := 5;
+      End;
+    End;
+  End;
+  F^.FOps := LongInt(@PtmxFOps[0]);
+  F^.Priv := PtyBase + N + 1;
+  PtmxOpen := 0;
+End;
+
+Function PtmxRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var N : LongInt; P : ^TPty; Done : LongInt;
+Begin
+  N := F^.Priv - 1 - PtyBase;
+  P := @Ptys[N];
+  While P^.MLen = 0 Do
+  Begin
+    If (P^.EverOpened <> 0) And (Ttys[PtyBase + N].Opens = 0) Then
+    Begin
+      PtmxRead := -EIO;
+      Exit;
+    End;
+    If (F^.Flags And O_NONBLOCK) <> 0 Then
+    Begin
+      PtmxRead := -EAGAIN;
+      Exit;
+    End;
+    If SleepOn(LongInt(P), 0, True) = WakeSignal Then
+    Begin
+      PtmxRead := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+  Done := 0;
+  While (Done < Cnt) And (P^.MLen > 0) Do
+  Begin
+    Mem[0:Buf + Done] := P^.MBuf[P^.MHead];
+    P^.MHead := (P^.MHead + 1) Mod PtyBufSz;
+    Dec(P^.MLen);
+    Inc(Done);
+  End;
+  WakeUp(LongInt(P));
+  PtmxRead := Done;
+End;
+
+Function PtmxWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var N, I : LongInt;
+Begin
+  N := F^.Priv - 1 - PtyBase;
+  For I := 0 To Cnt - 1 Do TtyInput(@Ttys[PtyBase + N], Mem[0:Buf + I]);
+  PtmxWrite := Cnt;
+End;
+
+Function PtmxIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt;
+Var N : LongInt; P : ^TPty; V, R : LongInt;
+Begin
+  N := F^.Priv - 1 - PtyBase;
+  P := @Ptys[N];
+  Case Cmd Of
+    $80045430 : PtmxIoctl := PutUserL(Arg, N);          { TIOCGPTN }
+    $40045431 :                                         { TIOCSPTLCK }
+      Begin
+        R := GetUserL(Arg, V);
+        If R < 0 Then PtmxIoctl := R
+        Else
+        Begin
+          If V <> 0 Then P^.Locked := 1 Else P^.Locked := 0;
+          PtmxIoctl := 0;
+        End;
+      End;
+    $80045439 : PtmxIoctl := PutUserL(Arg, P^.Locked);  { TIOCGPTLCK }
+    $541B : PtmxIoctl := PutUserL(Arg, P^.MLen);        { FIONREAD }
+    $5420 : PtmxIoctl := 0;                             { TIOCPKT : ignore }
+  Else
+    PtmxIoctl := TtyIoctl(F, Cmd, Arg);
+  End;
+End;
+
+Function PtmxPoll(F : PFile; Ev : LongInt) : LongInt;
+Var N, R : LongInt; P : ^TPty;
+Begin
+  N := F^.Priv - 1 - PtyBase;
+  P := @Ptys[N];
+  R := POLLOUT;
+  If P^.MLen > 0 Then R := R Or POLLIN;
+  If (P^.EverOpened <> 0) And (Ttys[PtyBase + N].Opens = 0) Then
+    R := R Or POLLHUP;
+  PtmxPoll := R;
+End;
+
+Procedure PtmxRelease(F : PFile);
+Var N : LongInt; P : ^TPty; T : PTty;
+Begin
+  N := F^.Priv - 1 - PtyBase;
+  P := @Ptys[N];
+  T := @Ttys[PtyBase + N];
+  P^.MasterOpen := 0;
+  { le maitre disparait : hangup de l'esclave }
+  T^.Hup := 1;
+  If T^.Pgrp <> 0 Then
+  Begin
+    SendSigPgrp(T^.Pgrp, SIGHUP);
+    SendSigPgrp(T^.Pgrp, SIGCONT);
+  End;
+  WakeUp(T^.Wchan);
+  WakeUp(LongInt(P));
+  PtyFree(N);
+End;
+
+Function PtsMountFn(Sb : PSuper; Var DevName : String; Flags,
+    Data : LongInt) : LongInt;
+Var R : LongInt;
+Begin
+  R := TmpMountFn(Sb, DevName, Flags, Data);
+  If R = 0 Then PtsRoot := Sb^.Root;
+  PtsMountFn := R;
 End;
 
 { ---- Clavier PS/2 (IRQ 1) ---- }
@@ -11025,6 +11273,15 @@ Begin
   TtyFOps[FoRelease] := LongInt(@TtyRelease);
   ChrOps[4] := LongInt(@TtyFOps[0]);
   ChrOps[5] := LongInt(@TtyFOps[0]);
+  ChrOps[136] := LongInt(@TtyFOps[0]);
+  MemFill(LongInt(@PtmxFOps[0]), 0, SizeOf(PtmxFOps));
+  PtmxFOps[FoRead] := LongInt(@PtmxRead);
+  PtmxFOps[FoWrite] := LongInt(@PtmxWrite);
+  PtmxFOps[FoIoctl] := LongInt(@PtmxIoctl);
+  PtmxFOps[FoPoll] := LongInt(@PtmxPoll);
+  PtmxFOps[FoRelease] := LongInt(@PtmxRelease);
+  RegisterFs('devpts', LongInt(@PtsMountFn));
+  PtsRoot := Nil;
   KbdInitMaps;
   { clavier : IRQ 1 ; port serie : IRQ 4 (donnees recues) }
   While (Port[$64] And 1) <> 0 Do I := Port[$60];
@@ -11473,6 +11730,7 @@ Begin
       PVaddr := MemL[0:Ph + K * 32 + 8];
       PFilesz := MemL[0:Ph + K * 32 + 16];
       PMemsz := MemL[0:Ph + K * 32 + 20];
+      If Etype = 3 Then PVaddr := PVaddr + $08048000;
       If (PFilesz > PMemsz) Or ULt(UserTop - StackReserve, PVaddr + PMemsz)
           Or ULt(PVaddr + PMemsz, PVaddr) Or
          (PVaddr < 4096) Then
@@ -15764,6 +16022,7 @@ Begin
   KMknod('/dev/urandom', S_IFCHR Or $1B6, MkDev(1, 9));
   KMknod('/dev/console', S_IFCHR Or $1B6, MkDev(5, 1));
   KMknod('/dev/tty', S_IFCHR Or $1B6, MkDev(5, 0));
+  KMknod('/dev/ptmx', S_IFCHR Or $1B6, MkDev(5, 2));
   KMknod('/dev/tty0', S_IFCHR Or $1B6, MkDev(4, 0));
   For I := 1 To NVc Do KMknod('/dev/tty' + IntStr(I), S_IFCHR Or $1B6, MkDev(4,
       I));
@@ -15786,6 +16045,74 @@ Begin
     End;
 End;
 
+{ /sys : arbre statique decrivant les peripheriques detectes (sysfs
+  minimal : block, class/{block,tty,mem,net}, kernel, devices/system/cpu) }
+Procedure SysDevFile(Const Dir : String; Maj, Min : LongInt);
+Begin
+  KMkdir(Dir, $1ED);
+  KWriteStr(Dir + '/dev', $124, IntStr(Maj) + ':' + IntStr(Min) + #10);
+End;
+
+Procedure PopulateSys;
+Var D, P, Maj, Mn : LongInt; Nm, Pn : String;
+Begin
+  KMkdir('/sys/block', $1ED); KMkdir('/sys/class', $1ED);
+  KMkdir('/sys/class/block', $1ED); KMkdir('/sys/class/tty', $1ED);
+  KMkdir('/sys/class/mem', $1ED); KMkdir('/sys/class/net', $1ED);
+  KMkdir('/sys/kernel', $1ED); KMkdir('/sys/devices', $1ED);
+  KMkdir('/sys/devices/system', $1ED); KMkdir('/sys/devices/system/cpu', $1ED);
+  KMkdir('/sys/fs', $1ED); KMkdir('/sys/power', $1ED);
+  KWriteStr('/sys/kernel/ostype', $124, 'Linux' + #10);
+  KWriteStr('/sys/kernel/osrelease', $124, UnameRel + #10);
+  KWriteStr('/sys/kernel/hostname', $124, HostName + #10);
+  KWriteStr('/sys/kernel/version', $124, '#1 ' + KVersion + #10);
+  KWriteStr('/sys/devices/system/cpu/online', $124, '0' + #10);
+  KWriteStr('/sys/devices/system/cpu/possible', $124, '0' + #10);
+  KWriteStr('/sys/devices/system/cpu/present', $124, '0' + #10);
+  KWriteStr('/sys/power/state', $124, 'mem' + #10);
+  For D := 0 To 3 Do
+    If DiskPresent[D] Then
+    Begin
+      Nm := 'hd' + Chr(97 + D);
+      If D < 2 Then Begin Maj := MajIde0; Mn := D * 64; End
+      Else Begin Maj := MajIde1; Mn := (D - 2) * 64; End;
+      KMkdir('/sys/block/' + Nm, $1ED);
+      KWriteStr('/sys/block/' + Nm + '/dev', $124,
+          IntStr(Maj) + ':' + IntStr(Mn) + #10);
+      KWriteStr('/sys/block/' + Nm + '/size', $124,
+          IntStr(PartSize[D * 16]) + #10);
+      KWriteStr('/sys/block/' + Nm + '/removable', $124, '0' + #10);
+      KWriteStr('/sys/block/' + Nm + '/ro', $124, '0' + #10);
+      VfsSymlink('../../block/' + Nm, '/sys/class/block/' + Nm);
+      For P := 1 To 15 Do
+        If PartSize[D * 16 + P] > 0 Then
+        Begin
+          Pn := Nm + IntStr(P);
+          KMkdir('/sys/block/' + Nm + '/' + Pn, $1ED);
+          KWriteStr('/sys/block/' + Nm + '/' + Pn + '/dev', $124,
+              IntStr(Maj) + ':' + IntStr(Mn + P) + #10);
+          KWriteStr('/sys/block/' + Nm + '/' + Pn + '/size', $124,
+              IntStr(PartSize[D * 16 + P]) + #10);
+          KWriteStr('/sys/block/' + Nm + '/' + Pn + '/start', $124,
+              IntStr(PartStart[D * 16 + P]) + #10);
+          KWriteStr('/sys/block/' + Nm + '/' + Pn + '/partition', $124,
+              IntStr(P) + #10);
+          VfsSymlink('../../block/' + Nm + '/' + Pn,
+              '/sys/class/block/' + Pn);
+        End;
+    End;
+  SysDevFile('/sys/class/mem/null', 1, 3);
+  SysDevFile('/sys/class/mem/zero', 1, 5);
+  SysDevFile('/sys/class/mem/full', 1, 7);
+  SysDevFile('/sys/class/mem/random', 1, 8);
+  SysDevFile('/sys/class/mem/urandom', 1, 9);
+  SysDevFile('/sys/class/tty/tty0', 4, 0);
+  SysDevFile('/sys/class/tty/console', 5, 1);
+  SysDevFile('/sys/class/tty/tty', 5, 0);
+  SysDevFile('/sys/class/tty/ttyS0', 4, 64);
+  For D := 1 To NVc Do SysDevFile('/sys/class/tty/tty' + IntStr(D), 4, D);
+End;
+
 Procedure MakeTree;
 Begin
   KMkdir('/dev', $1ED); KMkdir('/proc', $1ED); KMkdir('/sys', $1ED);
@@ -15797,6 +16124,10 @@ Begin
   VfsMount('devfs', '/dev', 'devtmpfs', 0, 0);
   VfsMount('proc', '/proc', 'proc', 0, 0);
   MakeDevNodes;
+  VfsMount('sysfs', '/sys', 'sysfs', 0, 0);
+  PopulateSys;
+  KMkdir('/dev/pts', $1ED);
+  VfsMount('devpts', '/dev/pts', 'devpts', 0, 0);
 End;
 
 { Programmes embarques : decodage base64 d'un tableau de chaines }
@@ -15815,8 +16146,8 @@ End;
   encodes en base64, ecrits dans le tmpfs racine au demarrage. }
 
 Const
-  EmbCount = 15;
-  EmbPath : Array[0..14] Of String[20] = (
+  EmbCount = 16;
+  EmbPath : Array[0..15] Of String[20] = (
     '/sbin/init',
     '/bin/hello',
     '/bin/forkwait',
@@ -15831,16 +16162,17 @@ Const
     '/bin/proctest',
     '/bin/stress',
     '/bin/kbdtest',
-    '/bin/ext2test');
-  EmbSize : Array[0..14] Of LongInt = (
-    3160, 1632, 1900, 2204, 2196, 2200, 3884, 1644, 1588, 2232, 4380, 2660,
-    2256, 1040, 11872);
-  EmbStart : Array[0..15] Of LongInt = (
+    '/bin/ext2test',
+    '/bin/ptytest');
+  EmbSize : Array[0..15] Of LongInt = (
+    3164, 1632, 1900, 2204, 2196, 2200, 3884, 1644, 1588, 2232, 4380, 2660,
+    2256, 1040, 11872, 2416);
+  EmbStart : Array[0..16] Of LongInt = (
     0, 71, 108, 151, 200, 249, 298, 385, 422, 458, 508, 606, 666, 717, 741,
-    1005);
-  EmbData : Array[0..1004] Of String[60] = (
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAa4UECDQAAABACwAAAAAAADQAIAAC',
-    'ACgABwAGAAEAAAAAAAAAAIAECACABAiYCQAAmAkAAAUAAAAAEAAAUeV0ZAAA',
+    1005, 1059);
+  EmbData : Array[0..1058] Of String[60] = (
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAa4UECDQAAABECwAAAAAAADQAIAAC',
+    'ACgABwAGAAEAAAAAAAAAAIAECACABAicCQAAnAkAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuBQAAACJ5VdWU4Pk8IHskAUA',
     'AM2ASHQUuDiHBAjoHgUAALgBAAAA6bsEAAC4QgAAAM2AuFiHBAgx/zHb6P8E',
     'AACLDJ1giQQIhcl0XzHSiYwkkAEAAInIQ4mUJJQBAACNlCSQAQAAiUwkDOja',
@@ -15891,25 +16223,25 @@ Const
     'L2Jpbi9waXBldGVzdAAvYmluL3NpZ3Rlc3QAL2Jpbi9tbWFwdGVzdAAvYmlu',
     'L2RpcnRlc3QAL2Jpbi90dHl0ZXN0AC9iaW4vc2NoZWR0ZXN0AC9iaW4vYmxr',
     'dGVzdAAvYmluL21pc2N0ZXN0AC9iaW4vcHJvY3Rlc3QAL2Jpbi9zdHJlc3MA',
-    'L2Jpbi9leHQydGVzdAAAAAAAAAAAAAAAAAAAAPOGBAgMhwQIF4cECAAAAAAA',
+    'L2Jpbi9leHQydGVzdAAvYmluL3B0eXRlc3QAAPOGBAgMhwQIF4cECAAAAAAA',
     'AAAAAAAAAAAAAAAAAAAAhIgECI+IBAidiAQIq4gECLiIBAjGiAQI04gECOCI',
-    'BAjviAQI/IgECAqJBAgYiQQIJIkECAAAAABHQ0M6IChVYnVudHUgMTMuMy4w',
-    'LTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AQAAAAAAAAAAAAAABADx/wgAAAB4hQQIIAAAAAIAAQAPAAAAmIUECB0AAAAC',
-    'AAEAFwAAALWFBAgJAAAAAgABABwAAAC+hQQIkgAAAAIAAQAgAAAAUIYECF0A',
-    'AAACAAEAJQAAAGCJBAg4AAAAAQACACsAAACthgQIKQAAABIAAQAxAAAAZIUE',
-    'CAAAAAAQAAEAQwAAAGuFBAgAAAAAEAABAD4AAACYmQQIAAAAABAAAgAsAAAA',
-    'dIAECPAEAAASAAEASgAAAJiZBAgAAAAAEAACAFEAAACYmQQIAAAAABAAAgAA',
-    'aW5pdC5jAHN0cmNtcABwdXRzX2ZkAHB1dHMAcnVuAHB1dGQAdGVzdHMAY21h',
-    'aW4AX19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3lt',
-    'dGFiAC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmNvbW1lbnQA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAAB',
-    'AAAABgAAAHSABAh0AAAAYgYAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAAAIA',
-    'AADghgQI4AYAALgCAAAAAAAAAAAAACAAAAAAAAAAKQAAAAEAAAAwAAAAAAAA',
-    'AJgJAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAADICQAA',
-    '8AAAAAUAAAAIAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAAuAoAAFYAAAAA',
-    'AAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAAA4LAAAyAAAAAAAAAAAA',
-    'AAABAAAAAAAAAA==',
+    'BAjviAQI/IgECAqJBAgYiQQIJIkECDKJBAgAAAAAR0NDOiAoVWJ1bnR1IDEz',
+    'LjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAEAAAAAAAAAAAAAAAQA8f8IAAAAeIUECCAAAAACAAEADwAAAJiFBAgd',
+    'AAAAAgABABcAAAC1hQQICQAAAAIAAQAcAAAAvoUECJIAAAACAAEAIAAAAFCG',
+    'BAhdAAAAAgABACUAAABgiQQIPAAAAAEAAgArAAAArYYECCkAAAASAAEAMQAA',
+    'AGSFBAgAAAAAEAABAEMAAABrhQQIAAAAABAAAQA+AAAAnJkECAAAAAAQAAIA',
+    'LAAAAHSABAjwBAAAEgABAEoAAACcmQQIAAAAABAAAgBRAAAAnJkECAAAAAAQ',
+    'AAIAAGluaXQuYwBzdHJjbXAAcHV0c19mZABwdXRzAHJ1bgBwdXRkAHRlc3Rz',
+    'AGNtYWluAF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAA',
+    'LnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5jb21t',
+    'ZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAb',
+    'AAAAAQAAAAYAAAB0gAQIdAAAAGIGAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEA',
+    'AAACAAAA4IYECOAGAAC8AgAAAAAAAAAAAAAgAAAAAAAAACkAAAABAAAAMAAA',
+    'AAAAAACcCQAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAA',
+    'zAkAAPAAAAAFAAAACAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAALwKAABW',
+    'AAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAASCwAAMgAAAAAA',
+    'AAAAAAAAAQAAAAAAAAA=',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAEoIECDQAAAAgBQAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAiAAwAAgAMAAAUAAAAAEAAAAQAAAIAD',
     'AACAkwQIgJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -16843,7 +17175,61 @@ Const
     'AAAAACAAAAAAAAAALgAAAAEAAAAwAAAAAAAAAGwqAAAtAAAAAAAAAAAAAAAB',
     'AAAAAQAAAAEAAAACAAAAAAAAAAAAAACcKgAAgAEAAAYAAAARAAAABAAAABAA',
     'AAAJAAAAAwAAAAAAAAAAAAAAHCwAAMsAAAAAAAAAAAAAAAEAAAAAAAAAEQAA',
-    'AAMAAAAAAAAAAAAAAOcsAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==');
+    'AAMAAAAAAAAAAAAAAOcsAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAuYQECDQAAAAwCAAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAiQBgAAkAYAAAUAAAAAEAAAAQAAAJAG',
+    'AACQlgQIkJYECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFUx0rkCAAAAuAUAAACJ5VdWU7uRhQQIg+TwgeygAAAA',
+    'iVQkGDHSx0QkFP/////NgIlEJAyFwHkRuJuFBAjoEAQAADHA6c0DAAC6AQAA',
+    'ALixhQQI6BoEAACLXCQMjVQkFLg2AAAAuTBUBIDNgDHShcB1CYtUJBT30sHq',
+    'H7jBhQQI6O0DAAC6h4UECI1EJByKCkJAiEj/hMl19YpEJBS/BQAAAMZEJCYA',
+    'MdKNXCQcuQIAAACDwDCIRCQlifjNgMHoH742AAAAicK4yYUECOihAwAAi1wk',
+    'DI1UJBiJ8LkxVARAzYAx0oXAjVwkHLjUhQQID5TC6HsDAACJ+LkCAAAAMdLN',
+    'gInCice434UECPfSweof6F0DAAAxwItcJAyNVCQ8iUQkQLkUVAAAiUQkYIlE',
+    'JGSJ8MdEJDwYAFAAzYC5E1QAAI1UJGCJ8In7zYAx0maDfCRgGHULMdJmg3wk',
+    'YlAPlMK47oUECOgIAwAAi1wkDLgEAAAAufqFBAi6BgAAAM2AuAMAAAC6PwAA',
+    'AI1MJGCJ+82AMdKFwIlEJBAPSdDGRBRgADHSg/gGdRO6+oUECInI6H4CAAAx',
+    '0oXAD5TCuAGGBAjorQIAAItcJAy4AwAAALo/AAAAjUwkYM2AMdKFwIlEJBAP',
+    'SdDGRBRgADHSg/gHdRO6FYYECInI6DYCAAAx0oXAD5TCuB2GBAiJ++hjAgAA',
+    'uAQAAAC5JoYECInCzYC4AwAAAItcJAy6PwAAAI1MJGDNgDHShcCJRCQQD0nQ',
+    'xkQUYAAx0oP4BXUTuiuGBAiJyOjeAQAAMdKFwA+UwrgxhgQIvjYAAACJ++gG',
+    'AgAAjVQkPInwuQFUAADNgLkCVAAAg2QkSPWJ8M2AugEAAACLXCQMuAQAAAC5',
+    'mYUECM2AuAMAAACJ+41MJGDNgDHSiUQkEEh1CjHSgHwkYHgPlMK4RYYECI1c',
+    'JDzoqAEAAItEJAy5AQAAADHSx0QkQAEAAACJRCQ8uKgAAADNgIXAfgUPv0Qk',
+    'QjHShcC+AQAAALhNhgQID5TCifvoaQEAALgEAAAAuVyGBAiJ8s2Ai0QkDI1c',
+    'JDy6ZAAAAInxx0QkQAEAAACJRCQ8uKgAAADNgIXAfgUPv0QkQoPgAb4DAAAA',
+    'icK4XoYECOgcAQAAi1wkDInwugEAAACNTCRgzYC4BgAAAItcJAzNgLoKAAAA',
+    'ifCJ+82AMdKFwLhqhgQID5TC6OQAAAC4BgAAAM2AvgUAAAAx/41cJBy5AgAA',
+    'AInwifrNgMHoH7uRhQQIicK4doYECOizAAAAifCJ+rkCAAAAzYCJxoXAeQQx',
+    '0usjjVQkELg2AAAAuTBUBICJ882AhcB15jHSi0QkFDlEJBAPlMK4hYYECInz',
+    '6G8AAAC4BgAAAM2AMcCDPZCWBAgAD5XAjWX0W15fXcO4rQAAAM2AMe2J4IPk',
+    '8FDohAAAAFWJ5VaJxlMx2w+2BB4PtgwahMB0BUM4yHTvWynIXl3DVYnBMdKJ',
+    '5VOAPBEAdANC6/e4BAAAALsBAAAAzYBbXcNVieVWica4f4UECFOJ0+jN////',
+    'ifDoxv///4XbuHiFBAi6c4UECA9Fwuiy////hdt0CP8FlJYECOsG/wWQlgQI',
+    'W15dw1WJ5VOD7AiLRQiLEI1IBI1EkAhQUVLoL/v//4nDuAEAAADNgIPEEOv+',
+    'IE9LCgAgRkFJTAoAS1RFU1Q6IAAvZGV2L3B0cy8AL2Rldi9wdG14ACAgKHBh',
+    'cyBkZSAvZGV2L3B0bXgpCgBwdHkub3Blbl9tYXN0ZXIAcHR5LnB0bgBwdHku',
+    'bG9ja2VkAHB0eS51bmxvY2sAcHR5Lm9wZW5fc2xhdmUAcHR5LndpbnNpemUA',
+    'aGVsbG8KAHB0eS5tYXN0ZXJfdG9fc2xhdmUAaGVsbG8NCgBwdHkuZWNobwBv',
+    'dXQKAG91dA0KAHB0eS5zbGF2ZV90b19tYXN0ZXIAcHR5LnJhdwBwdHkucG9s',
+    'bF9lbXB0eQB6AHB0eS5wb2xsX2luAHB0eS5odXBfZW9mAHB0eS5zbGF2ZV9n',
+    'b25lAHB0eS5yZW9wZW4AR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4y',
+    'NC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAA',
+    'AAQA8f8LAAAAxoQECCAAAAACAAEAEgAAAOaEBAggAAAAAgABABcAAAAGhQQI',
+    'RAAAAAIAAQAdAAAAlJYECAQAAAABAAMAJQAAAJCWBAgEAAAAAQADAC0AAABK',
+    'hQQIKQAAABIAAQAzAAAAsoQECAAAAAAQAAEARQAAALmEBAgAAAAAEAABAEAA',
+    'AACQlgQIAAAAABAAAwAuAAAAlIAECB4EAAASAAEATAAAAJCWBAgAAAAAEAAD',
+    'AFMAAACYlgQIAAAAABAAAwAAcHR5dGVzdC5jAHN0cmNtcABwdXRzAGt0ZXN0',
+    'AGt1X3Bhc3MAa3VfZmFpbABjbWFpbgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3Rh',
+    'cnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRl',
+    'eHQALnJvZGF0YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAECJQAAADfBAAA',
+    'AAAAAAAAAAABAAAAAAAAACEAAAABAAAAMgAAAHOFBAhzBQAAHQEAAAAAAAAA',
+    'AAAAAQAAAAEAAAApAAAACAAAAAMAAACQlgQIkAYAAAgAAAAAAAAAAAAAAAQA',
+    'AAAAAAAALgAAAAEAAAAwAAAAAAAAAJAGAAAtAAAAAAAAAAAAAAABAAAAAQAA',
+    'AAEAAAACAAAAAAAAAAAAAADABgAA4AAAAAYAAAAHAAAABAAAABAAAAAJAAAA',
+    'AwAAAAAAAAAAAAAAoAcAAFgAAAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAA',
+    'AAAAAAAAAPgHAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==');
 
 { END-EMBED }
 { Installer les programmes embarques dans le tmpfs racine }
@@ -16989,8 +17375,11 @@ Begin
   End;
   { oublier l'ancienne racine en memoire (et ses montages /dev, /proc) }
   OldSb := PDentry(OldRoot)^.Sb;
+  If WalkFrom(PDentry(OldRoot), 'dev/pts', True, D) = 0 Then VfsUmountD(D, 0);
+  PtsRoot := Nil;
   If WalkFrom(PDentry(OldRoot), 'dev', True, D) = 0 Then VfsUmountD(D, 0);
   If WalkFrom(PDentry(OldRoot), 'proc', True, D) = 0 Then VfsUmountD(D, 0);
+  If WalkFrom(PDentry(OldRoot), 'sys', True, D) = 0 Then VfsUmountD(D, 0);
   DentryPut(OldRoot);
   DentryPut(OldPwd);
   DentryPut(LongInt(RootDentry));
@@ -17002,6 +17391,10 @@ Begin
   VfsMount('devfs', '/dev', 'devtmpfs', 0, 0);
   VfsMount('proc', '/proc', 'proc', 0, 0);
   MakeDevNodes;
+  VfsMount('sysfs', '/sys', 'sysfs', 0, 0);
+  PopulateSys;
+  KMkdir('/dev/pts', $1ED);
+  VfsMount('devpts', '/dev/pts', 'devpts', 0, 0);
   If (Sb^.Flags And MS_RDONLY) <> 0 Then
     KLog('racine : ' + RootDev + ' montee en lecture seule')
   Else KLog('racine : ' + RootDev + ' montee en lecture-ecriture');
