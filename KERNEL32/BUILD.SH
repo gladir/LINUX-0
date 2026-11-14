@@ -38,7 +38,7 @@ mkdir -p "$W/bin" "$W/log" "$W/root"
 echo "== Outils (Free Pascal)"
 if [ -z "$LPC" ]; then
   mkdir -p "$W/tools"
-  cp "$HERE"/TOOLS/LPC*.PAS "$W/tools/"
+  cp "$HERE"/TOOLS/LPC*.PAS "$HERE"/TOOLS/L32*.PAS "$W/tools/"
   ( cd "$W/tools" && $FPC -Mtp -O1 -FE"$W/bin" -o"$W/bin/lpc" LPC.PAS ) \
     > "$W/log/lpc.log" 2>&1 || { tail -20 "$W/log/lpc.log"; exit 1; }
   rm -f "$W/bin"/*.o "$W/bin"/*.ppu "$W/tools"/*.o "$W/tools"/*.ppu

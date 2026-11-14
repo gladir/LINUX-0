@@ -156,6 +156,7 @@ static inline long brk(void*a){return sc1(SYS_brk,(long)a);}
 static inline int nice(int n){return sc1(SYS_nice,n);}
 static inline void sync(void){sc0(SYS_sync);}
 static inline int mount(const char*s,const char*t,const char*f,long fl,const void*d){return sc5(SYS_mount,(long)s,(long)t,(long)f,fl,(long)d);}
+static inline int chroot(const char*p){return sc1(61,(long)p);}
 static inline int umount(const char*t){return sc1(SYS_umount,(long)t);}
 static inline int sched_yield(void){return sc0(SYS_sched_yield);}
 static inline void *mmap2(void*a,size_t l,int p,int f,int fd,long off){return (void*)sc6(SYS_mmap2,(long)a,l,p,f,fd,off);}
@@ -172,7 +173,7 @@ struct ksigaction { void (*handler)(int); unsigned long flags; void (*restorer)(
 void __restore_rt(void);
 __asm__(".text\n.global __restore_rt\n__restore_rt:\n\tmov $173,%eax\n\tint $0x80\n");
 static inline int signal_set(int sig,void(*h)(int),unsigned long flags){
-  struct ksigaction a; a.handler=h; a.flags=flags|SA_RESTORER; a.restorer=__restore_rt; a.mask[0]=a.mask[1]=0;
+  struct ksigaction a; a.handler=h; a.flags=flags|SA_RESTORER|SA_SIGINFO; a.restorer=__restore_rt; a.mask[0]=a.mask[1]=0;
   return sc4(SYS_rt_sigaction,sig,(long)&a,0,8);}
 static inline int sigblock(unsigned long m){unsigned long s[2]={m,0};return sc4(SYS_rt_sigprocmask,0,(long)s,0,8);}
 static inline int sigunblock(unsigned long m){unsigned long s[2]={m,0};return sc4(SYS_rt_sigprocmask,1,(long)s,0,8);}
@@ -182,6 +183,8 @@ static inline int strcmp(const char*a,const char*b){while(*a&&*a==*b){a++;b++;}r
 static inline void *memset(void*d,int c,size_t n){volatile unsigned char*p=d;while(n--)*p++=c;return d;}
 static inline void *memcpy(void*d,const void*s,size_t n){unsigned char*p=d;const unsigned char*q=s;while(n--)*p++=*q++;return d;}
 
+static inline char *strcpy_(char*d,const char*s){char*r=d;while((*d++=*s++));return r;}
+static inline int memcmp_(const void*a,const void*b,size_t n){const unsigned char*p=a,*q=b;while(n--){if(*p!=*q)return *p-*q;p++;q++;}return 0;}
 static inline void puts_fd(int fd,const char*s){write(fd,s,strlen(s));}
 static inline void puts(const char*s){puts_fd(1,s);}
 static inline void putnum(long v,int base){
