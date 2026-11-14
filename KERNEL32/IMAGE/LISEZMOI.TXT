@@ -1,0 +1,15 @@
+KERNEL32/IMAGE : images produites par KERNEL32/BUILD.SH
+
+  LINUX32-HD.IMG   disque dur de 64 Mo (par defaut) : MBR, chargeur dans les
+                   secteurs 1 a N, partition 1 (type 83h, active, secteur 2048)
+                   formatee en ext2 (blocs de 1 Ko, inodes de 128 octets)
+                   avec /boot/linux0 (noyau ELF32) et la racine du systeme.
+
+Essai :
+  qemu-system-i386 -m 64 -drive file=IMAGE/LINUX32-HD.IMG,format=raw,if=ide
+  KERNEL32/TESTS/RUNQEMU.SH IMAGE/LINUX32-HD.IMG   (console serie sur stdout)
+
+Verification : KERNEL32/TESTS/E2CHECK.SH IMAGE/LINUX32-HD.IMG
+L'image n'est pas conservee dans le depot (fichier creux de 64 Mo) : la
+regenerer par BUILD.SH (TESTKERNEL=1 tant que le noyau KERNEL32.PAS n'existe
+pas : noyau de test TESTS/B/TESTK.ASM).

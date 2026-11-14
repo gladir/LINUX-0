@@ -1,0 +1,5 @@
+GDT OK
+INT80 compteur=00000009
+CR3 aligne=oui
+PF code=00000002 cr2=C1000000 valeur=12345678 phys=12345678
+FIN

@@ -1,0 +1,124 @@
+LPC de KERNEL32 : Linux Pascal Compiler, cibles 32 bits
+=======================================================
+
+LPC.PAS est une copie de KERNEL16UNIX/TOOLS/LPC.PAS (cibles 16 bits : -K,
+-X, inchangees et testees par TESTS/C/RUN16.SH) a laquelle s'ajoute le
+moteur 32 bits LPC32.PAS (unite Free Pascal, derivee de OS2PC.PAS du depot
+OS2-0, lui-meme derive de TPCW32.PAS de DEV-COOLS). LPC.PAS reste l'unique
+point d'entree : toute ligne de commande contenant -3K ou -3X est confiee a
+LPC32.
+
+Construction (dans KERNEL32/TOOLS) :   fpc -Mtp -O1 LPC.PAS
+Fichiers : LPC.PAS (point d'entree, cibles 16 bits), LPC32.PAS (moteur 32
+bits), L32SYS.PAS (chmod de l'hote), L32API.PAS (source Pascal de la couche
+systeme -3X, integre dans LPC32.PAS par MKAPI.PAS : fpc -Mtp MKAPI.PAS ;
+./MKAPI apres toute modification de L32API.PAS).
+
+Options
+-------
+ -3K        noyau Linux 32 bits : ELF32 ET_EXEC i386, mode protege ring 0,
+            sans runtime ni DOS. Sortie : fichier sans extension a cote de
+            la source (KERNEL32.PAS -> KERNEL32).
+ -3X        programme utilisateur Linux i386 : ELF32 statique lie a
+            08048000h, appels systeme INT 80h, runtime Pascal lie dans le
+            programme (WriteLn, ReadLn, fichiers, unites Dos et Crt...).
+ -3B<hexa> adresse de liaison (defaut -3K : C0100000h ; -3X : 08048000h).
+ -asm       ecrit aussi le listing assembleur (fichier .asm)
+ -v, -q     bavard / silencieux (par defaut : une ligne de resume)
+Les symboles conditionnels LPC, LINUX0, KERNEL32, VER70, CPU386 sont
+definis (pas FPC, WINDOWS ni WIN32 : les sources suivent la branche TP7),
+ainsi que LINUX0KERNEL (-3K) ou LINUX0USER (-3X).
+
+Cible -3K
+---------
+- Disposition : 2 PT_LOAD, p_vaddr = C0100000h, p_paddr = vaddr - C0000000h
+  (le noyau est charge a 1 Mo). Premier segment (R+X) : en-tetes ELF, en-tete
+  MULTIBOOT 1 (flags 3, a l'offset 80h, ecrit par le compilateur) et code
+  a partir de +1000h. Deuxieme segment (R+W) : table des thunks d'API puis
+  donnees ; les zeros de queue (variables non initialisees) ne sont pas dans
+  le fichier (p_memsz > p_filesz : le chargeur met a zero). Sections et table
+  des symboles presentes (objdump -d, gdb).
+- Point d'entree : adresse PHYSIQUE de la procedure marquee Boot ou nommee
+  KStart ; il n'y a aucun code avant elle. Ecrire ce code en asm (position
+  independante : construire les tables de pages, activer la pagination,
+  sauter en haute memoire, puis CALL Main = programme principal).
+- Directives de procedure (apres l'en-tete, avant le corps) :
+    Boot;           entree physique, sans prologue ni epilogue (Naked)
+    Naked;          sans prologue, epilogue, ni valeur de retour
+    Assembler;      identique a Naked en -3K/-3X
+    Interrupt;      PUSHAD, CLD ... POPAD, IRETD
+    InterruptErr;   idem, avec ADD ESP,4 (code d'erreur du CPU)
+  Trame d'une procedure Interrupt : [EBP+4..EBP+32] = EDI ESI EBP ESP EBX
+  EDX ECX EAX ; [EBP+36] = code d'erreur (InterruptErr) puis EIP, CS, EFLAGS.
+- Les procedures sont emises dans l'ordre de premiere declaration, avant le
+  programme principal et le runtime. Pas de runtime execute au demarrage.
+- Acces : Mem, MemW, MemL [0:adresse] (lecture et ecriture, adresses 32 bits
+  modulo 2^32), Port, PortW, PortL. Ptr(seg,ofs) = seg*16+ofs.
+- Le runtime Pascal (chaines, Str, Copy...) est emis mais n'appelle l'API
+  qu'a l'usage : GetMem/New appellent HeapAlloc, WriteLn appelle WriteFile...
+  Chaque API (noms de style Win32, voir OS2PC) est la procedure Pascal du
+  meme nom ecrite dans le noyau (parametres LongInt) ; sinon ApiMissing.
+
+Assembleur natif (blocs asm...end, -3K/-3X)
+-------------------------------------------
+Syntaxe Intel, tout le jeu entier et systeme du 80386 : MOV (registres,
+CRn, DRn, segments), LGDT/LIDT/LLDT/LTR, SGDT/SIDT, INVLPG, IN/OUT/INS/OUTS,
+INT, IRETD, PUSHAD/POPAD, XCHG, CMPXCHG, XADD, BSWAP, BT*, BSF/BSR,
+SHLD/SHRD, SETcc, CMOVcc, MOVZX/MOVSX, IMUL 1/2/3 operandes, CPUID, RDTSC,
+RDMSR/WRMSR, LOCK/REP/REPE/REPNE, ENTER/LEAVE, FXSAVE, FNINIT..., sauts
+courts/longs (JMP 08h:@suite pour un saut lointain), LOOP, JECXZ, DB/DW/DD,
+ALIGN. Operandes : [base+index*echelle+deplacement], BYTE/WORD/DWORD PTR,
+fs:[..], OFFSET nom, expressions (+ - * div mod shl shr and or xor not),
+variables Pascal (locales, parametres, globales, constantes), noms de
+procedures, Main (programme principal), labels @nom locaux au bloc et
+nom: globaux. Un nom de variable Pascal egal a un nom de registre (Cr2...)
+designe le registre. Verifie contre GNU as (312 instructions).
+
+Types et langage
+----------------
+Turbo Pascal 7 sans objets. Integer = 16 bits (comme TP, SizeOf = 2), Word
+16 bits non signe, LongInt 32 bits, Byte 8 bits : utiliser LongInt pour les
+adresses. Controle des bornes desactive par defaut (comme TP, {$R+} l'active).
+Ajouts : champs de record jusqu'a 512, transtypage de type utilisateur
+(PType(x), PType(x)^.champ), appel par un champ ou une variable de type
+procedure (parametres VAR respectes), Set Of (a,b,c), constantes dans les
+bornes de types, procedures imbriquees avec acces aux variables englobantes
+(affichage : recursivite et appels entre soeurs corrects), PChar compare
+comme un pointeur. Un identificateur non declare est une erreur
+"fichier(ligne) : erreur : identificateur non declare : NOM" ; un symbole
+non defini l'est a l'edition de liens. Limite : String[n] occupe 256 octets.
+
+Cible -3X
+---------
+- Entree : _start (L32API.PAS) lit argc/argv/envp sur la pile, appelle le
+  programme principal ; Halt/fin -> exit_group (252). Pas de bibliotheque C.
+- Chemins : \ est converti en / par la couche systeme. Fin de ligne : LF.
+- Appels systeme utilises (numeros i386 de Linux ; stat = 106/107/108 de
+  struct stat de 64 octets, getdents = 141) : exit 1, fork 2, read 3, write 4,
+  open 5, close 6, execve 11, chdir 12, time 13, chmod 15, lseek 19, getpid
+  20, getuid 24, kill 37, rename 38, mkdir 39, rmdir 40, dup 41, pipe 42,
+  brk 45, ioctl 54, dup2 63, getppid 64, sigaction 67, gettimeofday 78,
+  settimeofday 79, unlink 10, stat 106, lstat 107, fstat 108, wait4 114,
+  fsync 118, uname 122, getdents 141, nanosleep 162, getcwd 183, statfs 99,
+  ftruncate 93, utimensat 320, exit_group 252, reboot 88, signal 48, sync 36.
+  Ioctl : TCGETS/TCSETS (mode brut du clavier), TIOCGWINSZ, FIONREAD.
+- Couche Win32 -> Linux : fichiers, repertoires (FindFirstFile par getdents,
+  filtre ? et *), temps (SYSTEMTIME en UTC, FILETIME = date/heure DOS),
+  processus (CreateProcessA = fork + execve avec recherche dans PATH,
+  WaitForSingleObject, GetExitCodeProcess), environnement, ligne de
+  commande, tas (brk, blocs avec liste libre), console (Crt) par sequences
+  ANSI : curseur, couleurs DOS, effacement, defilement, clavier en mode
+  brut (fleches et touches de fonction). Non fournies (ApiMissing : message
+  et arret) : graphique (user32, gdi32), LoadLibrary.
+- Acces direct au systeme : Sys*(SysFork, SysWaitPid, SysPipe, SysDup2,
+  SysKill, SysExecve, SysRead, SysWrite, SysOpen, SysUname...) et
+  SysCall(n,a,b,c,d,e) (L32API.PAS) pour les programmes de type init, sh.
+- PrefixSeg/Ptr(PrefixSeg,80h) : queue de la ligne de commande (style PSP) ;
+  Lst (unite Printer) : variable Text declaree, non ouverte.
+- Commandes du depot (racine, Uses Dos/Crt) : 178 sur 180 compilent et leur
+  aide s'execute ; HALT et REBOOT (BIOS, Seg0040) ne sont pas portables.
+
+Tests : TESTS/C/RUN.SH (TK1-TK3 noyaux sous QEMU, UX1-UX3 programmes sur
+l'hote) et TESTS/C/RUN16.SH (non-regression des cibles 16 bits).
+Exemption de style : LPC32.PAS garde le formatage d'OS2PC (lignes de plus
+de 80 colonnes) ; seules les parties ajoutees sont marquees "LPC32 :".
