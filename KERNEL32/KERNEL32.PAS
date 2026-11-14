@@ -42,6 +42,9 @@ Program KERNEL32;
     Partie 18 - ext2 (lecture/ecriture ; placee dans le fichier avant la
                 partie 14) ; s'y ajoutent dans les parties existantes : bind,
                 move, pivot_root (12), sysfs, pty, FPU/SSE (9, 14, 17)
+    Partie 24 - FAT12/16/32 et vfat (noms longs), lecture/ecriture
+    Partie 26 - swap (pages anonymes sur un peripherique mkswap)
+    Partie 25 - framebuffer Bochs/QEMU VGA (/dev/fb0), disquette (partie 11)
 
   UNAME : sysname LINUX-0, nodename linux0, release KERNEL32, version 0.1,
   machine i386.
@@ -190,7 +193,8 @@ Const
   EISDIR = 21; EINVAL = 22;  ENFILE = 23;  EMFILE = 24;  ENOTTY = 25;
   ETXTBSY = 26; EFBIG = 27;  ENOSPC = 28;  ESPIPE = 29;  EROFS = 30;
   EMLINK = 31; EPIPE = 32;   EDOM = 33;    ERANGE = 34;  EDEADLK = 35;
-  ENAMETOOLONG = 36; ENOLCK = 37; ELIBBAD = 80; ENOSYS = 38; ENOTEMPTY = 39; ELOOP = 40;
+  ENAMETOOLONG = 36; ENOLCK = 37; ENOSYS = 38; ENOTEMPTY = 39; ELOOP = 40;
+  ELIBBAD = 80;
   ENOTSOCK = 88; EAFNOSUPPORT = 97; ERESTARTSYS = 512;
 
 Type
@@ -227,6 +231,12 @@ End;
 Function Min(A, B : LongInt) : LongInt;
 Begin
   If A < B Then Min := A Else Min := B;
+End;
+
+Function Bswap32(V : LongInt) : LongInt;
+Begin
+  Bswap32 := ((V And $FF) Shl 24) Or ((V And $FF00) Shl 8)
+      Or ((V Shr 8) And $FF00) Or ((V Shr 24) And $FF);
 End;
 
 Function Max(A, B : LongInt) : LongInt;
@@ -594,6 +604,7 @@ Var
   LogBuf      : Array[0..LogSize - 1] Of Byte;
   LogHead     : LongInt;        { prochain octet ecrit (modulo LogSize) }
   LogCount    : LongInt;        { octets valides (<= LogSize) }
+  LogTotal    : LongInt;        { octets ecrits depuis le demarrage }
   LogToVc     : Boolean;        { copie des messages sur la console 0 }
   SerialOk    : Boolean;
 
@@ -919,6 +930,7 @@ Begin
   LogBuf[LogHead] := C;
   LogHead := (LogHead + 1) Mod LogSize;
   If LogCount < LogSize Then Inc(LogCount);
+  Inc(LogTotal);
   If C = 10 Then SerialPut(13);
   SerialPut(C);
   If LogToVc Then
@@ -1514,6 +1526,10 @@ Var
   KernelEndPhys : LongInt;
   MasterPd    : LongInt;        { repertoire de pages du noyau (virtuel) }
   MasterPdPhys : LongInt;
+  SwapOn      : Boolean;        { swap actif (partie 26) }
+  SwapBusy    : Boolean;
+  SwapDev, SwapSlots, SwapUsed, SwapMapA, SwapHint, SwapHook : LongInt;
+  SwapLow, SwapHigh, SwapHold, SwapSkip, SwapHand : LongInt;
   ClassFree   : Array[0..NClasses - 1] Of LongInt;
   KHeapBytes  : LongInt;        { statistiques }
   SlabPages   : LongInt;
@@ -1572,14 +1588,14 @@ Begin
 End;
 
 { Allouer 2^Order pages contigues : adresse virtuelle du noyau, ou 0 }
-Function AllocPages(Order : LongInt) : LongInt;
+Function AllocPagesRaw(Order : LongInt) : LongInt;
 Var O, A : LongInt;
 Begin
   O := Order;
   While (O <= MaxOrder) And (FreeHead[O] = 0) Do Inc(O);
   If O > MaxOrder Then
   Begin
-    AllocPages := 0;
+    AllocPagesRaw := 0;
     Exit;
   End;
   A := FreeHead[O];
@@ -1591,6 +1607,21 @@ Begin
   End;
   SetPageRef(A, 1);
   FreePagesCnt := FreePagesCnt - (1 Shl Order);
+  AllocPagesRaw := A;
+End;
+
+{ Allocation avec recuperation de pages par le swap quand la memoire baisse }
+Function AllocPages(Order : LongInt) : LongInt;
+Var A : LongInt;
+Begin
+  If (SwapHook <> 0) And (FreePagesCnt < SwapLow) Then Call0(SwapHook);
+  A := AllocPagesRaw(Order);
+  If (A = 0) And (SwapHook <> 0) Then
+  Begin
+    SwapSkip := 0;
+    Call0(SwapHook);
+    A := AllocPagesRaw(Order);
+  End;
   AllocPages := A;
 End;
 
@@ -1787,6 +1818,9 @@ Const
   MAP_GROWSDOWN = $100;
   VmStack          = $10000;        { VMA de pile (croit vers le bas) }
   VmHeap           = $20000;
+  VmPhys           = $40000;        { VMA sur memoire physique (fb0) }
+  PgDevBit         = $200;          { PTE : page hors du comptage }
+  PgSwapBit        = $200;          { PTE non present : case de swap }
   TaskUnmappedBase = $40000000;
   DefStackLimit    = 8 * 1024 * 1024;
   StackReserve     = 16 * 1024 * 1024;   { zone laissee a la pile }
@@ -1972,6 +2006,10 @@ Begin
   UserPage := AllocZeroPage;
 End;
 
+Procedure SwapFreeSlot(S : LongInt); Forward;
+Procedure SwapDup(S : LongInt); Forward;
+Function SwapRead(Pte, Page : LongInt) : LongInt; Forward;
+
 { Defaire les mappages [A, B) (pages presentes) }
 Procedure MmUnmapPages(Mm : PMm; A, B : LongInt);
 Var Va, P, Pte : LongInt;
@@ -1987,9 +2025,14 @@ Begin
       Pte := MemL[0:P];
       If (Pte And 1) <> 0 Then
       Begin
-        PagePut(P2V(Pte And LongInt($FFFFF000)));
+        If (Pte And PgDevBit) = 0 Then PagePut(P2V(Pte And LongInt($FFFFF000)));
         MemL[0:P] := 0;
         Dec(Mm^.Rss);
+      End
+      Else If (Pte And PgSwapBit) <> 0 Then
+      Begin
+        SwapFreeSlot((Pte Shr 12) And $FFFFF);
+        MemL[0:P] := 0;
       End;
       Va := Va + PageSize;
     End;
@@ -2020,6 +2063,9 @@ Begin
 End;
 
 { Liberer un espace d'adressage (dernier utilisateur) }
+Function ShmGetPage(Ino, Idx : LongInt; Writable : Boolean) : LongInt; Forward;
+Procedure ShmDropVma(V : PVma); Forward;
+
 Procedure MmRelease(Mm : PMm);
 Var V, N : PVma;
 Begin
@@ -2030,6 +2076,7 @@ Begin
   Begin
     N := V^.Next;
     MmUnmapPages(Mm, V^.Start, V^.Fin);
+    If ((V^.Flags And MAP_SHARED) <> 0) And (V^.Ino <> 0) Then ShmDropVma(V);
     VmaFree(V);
     V := N;
   End;
@@ -2114,6 +2161,49 @@ Begin
     Exit;
   End;
   { page absente : la creer }
+  If (Pte And PgSwapBit) <> 0 Then
+  Begin
+    New := AllocPages(0);
+    If New = 0 Then
+    Begin
+      MmFault := 3;
+      Exit;
+    End;
+    If SwapRead(Pte, New) <> 0 Then
+    Begin
+      FreePages(New, 0);
+      MmFault := 3;
+      Exit;
+    End;
+    MemL[0:P] := V2P(New) Or PteFlags(V^.Prot, True);
+    Inc(Mm^.Rss);
+    FlushTlb;
+    MmFault := 0;
+    Exit;
+  End;
+  If (V^.Flags And VmPhys) <> 0 Then
+  Begin
+    MemL[0:P] := ((V^.Off + (Page - V^.Start)) And LongInt($FFFFF000))
+        Or PteFlags(V^.Prot, True) Or PgDevBit Or $18;
+    Inc(Mm^.Rss);
+    FlushTlb;
+    MmFault := 0;
+    Exit;
+  End;
+  If (V^.Ino <> 0) And ((V^.Flags And MAP_SHARED) <> 0) Then
+  Begin
+    Pg := ShmGetPage(V^.Ino, (V^.Off + (Page - V^.Start)) Div PageSize,
+        (V^.Prot And PROT_WRITE) <> 0);
+    If Pg <> 0 Then
+    Begin
+      PageGet(Pg);
+      MemL[0:P] := V2P(Pg) Or PteFlags(V^.Prot, True);
+      Inc(Mm^.Rss);
+      FlushTlb;
+      MmFault := 0;
+      Exit;
+    End;
+  End;
   New := AllocZeroPage;
   If New = 0 Then
   Begin
@@ -2245,7 +2335,9 @@ Begin
     W^.FLen := V^.FLen - (At - V^.Start);
     If W^.FLen < 0 Then W^.FLen := 0;
     If V^.FLen > At - V^.Start Then V^.FLen := At - V^.Start;
-  End;
+  End
+  Else If (V^.Flags And VmPhys) <> 0 Then
+    W^.Off := V^.Off + (At - V^.Start);
   V^.Fin := At;
   W^.Next := V^.Next;
   V^.Next := W;
@@ -2294,6 +2386,7 @@ Begin
     End;
     { V est entierement dans [A, B) }
     MmUnmapPages(Mm, V^.Start, V^.Fin);
+    If ((V^.Flags And MAP_SHARED) <> 0) And (V^.Ino <> 0) Then ShmDropVma(V);
     Mm^.TotalVm := Mm^.TotalVm - ((V^.Fin - V^.Start) Shr 12);
     If Q = Nil Then Mm^.Vma := N Else Q^.Next := N;
     VmaFree(V);
@@ -2383,6 +2476,12 @@ Begin
     Exit;
   End;
   Len := PageUp(Len);
+  If (Cur^.RlimCur[RLIM_AS] <> RLIM_INFINITY)
+     And ((Mm^.TotalVm + (Len Shr 12)) > (Cur^.RlimCur[RLIM_AS] Shr 12)) Then
+  Begin
+    MmMap := -ENOMEM;
+    Exit;
+  End;
   If (Flags And MAP_FIXED) <> 0 Then
   Begin
     If ((Addr And $FFF) <> 0) Or Not ULt(Addr, UserTop) Or ULt(UserTop, Addr
@@ -2459,6 +2558,9 @@ Begin
     { agrandir : ne pas heurter une autre VMA }
     V := FindVmaAfter(Mm, OldEnd);
     If (V <> Nil) And ULt(V^.Start, NewEnd) Then Exit;
+    If (Cur^.RlimCur[RLIM_AS] <> RLIM_INFINITY)
+       And ((Mm^.TotalVm + ((NewEnd - OldEnd) Shr 12))
+            > (Cur^.RlimCur[RLIM_AS] Shr 12)) Then Exit;
     If (V <> Nil) And (V^.Start = OldEnd) And (V^.Flags = (MAP_PRIVATE
         Or MAP_ANONYMOUS Or VmHeap)) Then
     Begin
@@ -2504,7 +2606,8 @@ Begin
       W^.Ino := InodeRef(V^.Ino);
       W^.Off := V^.Off;
       W^.FLen := V^.FLen;
-    End;
+    End
+    Else If (V^.Flags And VmPhys) <> 0 Then W^.Off := V^.Off;
     If Last = Nil Then New^.Vma := W Else Last^.Next := W;
     Last := W;
     New^.TotalVm := New^.TotalVm + ((W^.Fin - W^.Start) Shr 12);
@@ -2533,8 +2636,19 @@ Begin
             MemL[0:P] := Pte;
           End;
           MemL[0:Q] := Pte;
-          PageGet(Pg);
+          If (Pte And PgDevBit) = 0 Then PageGet(Pg);
           Inc(New^.Rss);
+        End
+        Else If (Pte And PgSwapBit) <> 0 Then
+        Begin
+          Q := PtePtr(New, Va, True);
+          If Q = 0 Then
+          Begin
+            MmRelease(New);
+            Exit;
+          End;
+          MemL[0:Q] := Pte;
+          SwapDup((Pte Shr 12) And $FFFFF);
         End;
         Va := Va + PageSize;
       End;
@@ -2650,7 +2764,9 @@ Type
     SigSender          : Array[0..64] Of LongInt;   { pid de l'emetteur }
     SigStk             : Array[0..2] Of LongInt;    { sigaltstack }
     ReapPending        : LongInt;
-    Fpu                : Array[0..131] Of LongInt;  { FXSAVE (512, aligne 16) ou FNSAVE }
+    ExeLen             : LongInt;
+    ExeBuf             : Array[0..127] Of Byte;     { chemin de l'executable }
+    Fpu                : Array[0..131] Of LongInt;  { FXSAVE ou FNSAVE }
   End;
 
 Var
@@ -2674,6 +2790,7 @@ Procedure SendSig(T : PTask; Sig : LongInt); Forward;
 Procedure SendSigPgrp(Pgrp, Sig : LongInt); Forward;
 Procedure TtyDisassociate(T : PTask); Forward;
 Procedure TimerSignals; Forward;
+Procedure NetTick; Forward;
 Function SigPendingUnblocked(T : PTask) : Boolean; Forward;
 Procedure HandleSignals(F : PFrame); Forward;
 Procedure SignalsExitCleanup(T : PTask); Forward;
@@ -2969,9 +3086,18 @@ Begin
        (Tasks[I].WakeAt <> 0) And (Jiffies - Tasks[I].WakeAt >= 0) Then
       WakeTask(@Tasks[I], WakeTimeout);
   TimerSignals;
+  NetTick;
   If Cur <> IdleTask Then
   Begin
     If FromUser Then Inc(Cur^.Utime) Else Inc(Cur^.Stime);
+    If (Cur^.RlimCur[RLIM_CPU] <> RLIM_INFINITY)
+       And (((Cur^.Utime + Cur^.Stime) Mod HZ) = 0) Then
+    Begin
+      If ((Cur^.Utime + Cur^.Stime) Div HZ) >= Cur^.RlimMax[RLIM_CPU] Then
+        SendSig(Cur, 9)
+      Else If ((Cur^.Utime + Cur^.Stime) Div HZ) >= Cur^.RlimCur[RLIM_CPU] Then
+        SendSig(Cur, 24);
+    End;
     Dec(Cur^.Counter);
     If Cur^.Counter <= 0 Then NeedResched := True;
   End;
@@ -3219,7 +3345,9 @@ Begin
   End
   Else
   Begin
+    Inc(SwapHold);
     T^.Mm := MmDup(Cur^.Mm);
+    Dec(SwapHold);
     If T^.Mm = Nil Then
     Begin
       FreePages(T^.KStack, KStackOrder);
@@ -3916,6 +4044,9 @@ Var
   RamSectors  : LongInt;
   RamSizeKb   : LongInt;
   DiskPresent : Array[0..3] Of Boolean;
+  DiskAtapi   : Array[0..3] Of Boolean;      { lecteur de CD-ROM ATAPI }
+  CdCache     : Array[0..3] Of LongInt;  { bloc de 2 Ko en cache (-1 : aucun) }
+  CdBuf       : LongInt;                     { tampon de 2 Ko }
   DiskSectors : Array[0..3] Of LongInt;
   DiskModel   : Array[0..159] Of Byte;
   PartStart   : Array[0..63] Of LongInt;
@@ -4051,11 +4182,95 @@ Begin
   IdeWriteSectors := 0;
 End;
 
+{ ---- ATAPI (CD-ROM) : commandes par paquets en E/S programmees ---- }
+
+{ Envoyer le paquet Cdb (12 octets) au lecteur D ; lire au plus MaxLen octets
+  dans Buf. Retourne le nombre d'octets lus ou -EIO }
+Function AtapiCmd(D, Cdb, Buf, MaxLen : LongInt) : LongInt;
+Var B, S, Got : LongInt;
+Begin
+  B := IdeBase(D);
+  AtapiCmd := -EIO;
+  If IdeWait(B, $88, 0) < 0 Then Exit;
+  Port[B + 6] := $A0 Or ((D And 1) Shl 4);
+  If IdeWait(B, $88, 0) < 0 Then Exit;
+  Port[B + 1] := 0;
+  Port[B + 4] := MaxLen And $FF;
+  Port[B + 5] := (MaxLen Shr 8) And $FF;
+  Port[B + 7] := $A0;
+  S := IdeWait(B, $88, $08);
+  If S < 0 Then Exit;
+  OutWords(B, Cdb, 6);
+  If IdeWait(B, $80, 0) < 0 Then Exit;
+  S := Port[B + 7];
+  If (S And 1) <> 0 Then Exit;
+  Got := 0;
+  If (S And 8) <> 0 Then
+  Begin
+    Got := Port[B + 4] Or (Port[B + 5] Shl 8);
+    If Got > MaxLen Then Got := MaxLen;
+    InWords(B, Buf, (Got + 1) Div 2);
+    IdeWait(B, $80, 0);
+  End;
+  AtapiCmd := Got;
+End;
+
+{ Lire le bloc de 2048 octets Lba du lecteur D dans CdBuf (avec cache) }
+Function AtapiReadBlock(D, Lba : LongInt) : LongInt;
+Var Cdb : Array[0..11] Of Byte; R, Try_ : LongInt;
+Begin
+  If CdCache[D] = Lba Then
+  Begin
+    AtapiReadBlock := 0;
+    Exit;
+  End;
+  For Try_ := 1 To 3 Do
+  Begin
+    MemFill(LongInt(@Cdb[0]), 0, 12);
+    Cdb[0] := $28;
+    Cdb[2] := (Lba Shr 24) And $FF; Cdb[3] := (Lba Shr 16) And $FF;
+    Cdb[4] := (Lba Shr 8) And $FF; Cdb[5] := Lba And $FF;
+    Cdb[8] := 1;
+    R := AtapiCmd(D, LongInt(@Cdb[0]), CdBuf, 2048);
+    If R = 2048 Then
+    Begin
+      CdCache[D] := Lba;
+      AtapiReadBlock := 0;
+      Exit;
+    End;
+  End;
+  CdCache[D] := -1;
+  AtapiReadBlock := -EIO;
+End;
+
+{ Capacite en blocs de 2048 octets ; 0 si pas de disque }
+Function AtapiCapacity(D : LongInt) : LongInt;
+Var Cdb : Array[0..11] Of Byte; Tmp : Array[0..7] Of Byte;
+    R, Try_, Dly : LongInt;
+Begin
+  AtapiCapacity := 0;
+  For Try_ := 1 To 4 Do
+  Begin
+    MemFill(LongInt(@Cdb[0]), 0, 12);
+    Cdb[0] := $25;
+    R := AtapiCmd(D, LongInt(@Cdb[0]), LongInt(@Tmp[0]), 8);
+    If R = 8 Then
+    Begin
+      AtapiCapacity := ((Tmp[0] Shl 24) Or (Tmp[1] Shl 16) Or (Tmp[2] Shl 8)
+          Or Tmp[3]) + 1;
+      Exit;
+    End;
+    { attente et nouvel essai (attention d'unite) }
+    For R := 1 To 300000 Do Dly := Port[$80];
+  End;
+End;
+
 { Identifier le lecteur D (0 hda, 1 hdb, 2 hdc, 3 hdd) }
 Procedure IdeProbe(D : LongInt);
 Var B, S, I, W : LongInt;
 Begin
   DiskPresent[D] := False;
+  DiskAtapi[D] := False;
   B := IdeBase(D);
   Port[IdeCtl(D)] := $02;                 { pas d'interruption }
   Port[B + 6] := $A0 Or ((D And 1) Shl 4);
@@ -4067,7 +4282,23 @@ Begin
   S := Port[B + 7];
   If S = 0 Then Exit;
   If IdeWait(B, $80, 0) < 0 Then Exit;
-  If (Port[B + 4] <> 0) Or (Port[B + 5] <> 0) Then Exit;   { ATAPI/autre }
+  If (Port[B + 4] = $14) And (Port[B + 5] = $EB) Then
+  Begin
+    { lecteur ATAPI : CD-ROM }
+    CdCache[D] := -1;
+    If CdBuf = 0 Then CdBuf := AllocPages(0);
+    If CdBuf = 0 Then Exit;
+    I := AtapiCapacity(D);
+    If I <= 0 Then Exit;
+    DiskAtapi[D] := True;
+    DiskSectors[D] := I * 4;
+    For W := 0 To 39 Do DiskModel[D * 40 + W] := 32;
+    DiskPresent[D] := True;
+    PartStart[D * 16] := 0;
+    PartSize[D * 16] := DiskSectors[D];
+    Exit;
+  End;
+  If (Port[B + 4] <> 0) Or (Port[B + 5] <> 0) Then Exit;   { autre }
   S := IdeWait(B, $09, $08);
   If (S < 0) Or ((S And 1) <> 0) Then Exit;
   InWords(B, LongInt(@IdeIdBuf[0]), 256);
@@ -4151,7 +4382,223 @@ Begin
   End;
   For D := 0 To 3 Do IdeProbe(D);
   For D := 0 To 3 Do
-    If DiskPresent[D] Then ReadPartitions(D);
+    If DiskPresent[D] And Not DiskAtapi[D] Then ReadPartitions(D);
+End;
+
+{ ---- Disquette (controleur FDC 82077, DMA ISA canal 2, lecteur 0) ---- }
+
+Const
+  MajFlp = 2;                      { /dev/fd0 }
+  FlpMsr = $3F4; FlpData = $3F5; FlpDor = $3F2; FlpCcr = $3F7;
+
+Var
+  FlpPresent : Boolean;
+  FlpHeads, FlpSpt, FlpTotal, FlpCyls : LongInt;
+  FlpMotor : Boolean;
+  FlpBuf : Array[0..1023] Of Byte;
+
+Function FlpWait(Mask, Val : LongInt) : Boolean;
+Var N : LongInt;
+Begin
+  FlpWait := True;
+  For N := 1 To 400000 Do
+    If (Port[FlpMsr] And Mask) = Val Then Exit;
+  FlpWait := False;
+End;
+
+Function FlpPut(B : LongInt) : Boolean;
+Begin
+  FlpPut := False;
+  If Not FlpWait($C0, $80) Then Exit;
+  Port[FlpData] := B;
+  FlpPut := True;
+End;
+
+Function FlpGet : LongInt;
+Begin
+  FlpGet := -1;
+  If Not FlpWait($C0, $C0) Then Exit;
+  FlpGet := Port[FlpData];
+End;
+
+{ Attente d'une fin de recherche (Sense Interrupt) ; 0 ou -1 }
+Function FlpSenseDone : LongInt;
+Var N, St0, Pcn : LongInt;
+Begin
+  FlpSenseDone := -1;
+  For N := 1 To 2000 Do
+  Begin
+    If Not FlpPut($08) Then Exit;
+    St0 := FlpGet;
+    If St0 < 0 Then Exit;
+    If St0 = $80 Then Continue;                 { pas d'interruption }
+    Pcn := FlpGet;
+    If (St0 And $20) <> 0 Then
+    Begin
+      If (St0 And $C0) = 0 Then FlpSenseDone := 0;
+      Exit;
+    End;
+  End;
+End;
+
+Procedure FlpDelay(N : LongInt);
+Var I, X : LongInt;
+Begin
+  For I := 1 To N Do X := Port[$80];
+End;
+
+Function FlpReset : Boolean;
+Var I, B : LongInt;
+Begin
+  FlpReset := False;
+  Port[FlpDor] := 0;
+  FlpDelay(200);
+  Port[FlpDor] := $0C;
+  FlpDelay(200);
+  FlpMotor := False;
+  For I := 1 To 4 Do
+  Begin
+    If Not FlpWait($C0, $80) Then Break;
+    If Not FlpPut($08) Then Break;
+    B := FlpGet;
+    If B < 0 Then Break;
+    If B <> $80 Then B := FlpGet;
+  End;
+  Port[FlpCcr] := 0;
+  If Not FlpPut($03) Then Exit;
+  If Not FlpPut($DF) Then Exit;
+  If Not FlpPut($02) Then Exit;
+  FlpReset := True;
+End;
+
+Procedure FlpMotorOn;
+Begin
+  If FlpMotor Then Exit;
+  Port[FlpDor] := $1C;
+  FlpDelay(100000);
+  FlpMotor := True;
+End;
+
+Function FlpRecal : Boolean;
+Begin
+  FlpRecal := False;
+  If Not FlpPut($07) Then Exit;
+  If Not FlpPut(0) Then Exit;
+  FlpRecal := FlpSenseDone = 0;
+End;
+
+Function FlpSeek(Cyl : LongInt) : Boolean;
+Begin
+  FlpSeek := False;
+  If Not FlpPut($0F) Then Exit;
+  If Not FlpPut(0) Then Exit;
+  If Not FlpPut(Cyl) Then Exit;
+  FlpSeek := FlpSenseDone = 0;
+End;
+
+{ Un secteur de 512 octets (LBA) : lecture (Write = False) ou ecriture }
+Function FlpSector(Lba, Buf : LongInt; Write : Boolean) : LongInt;
+Var Cyl, Hd, Sc, A, Phys, Try_, K, St0, St1, St2, Ok : LongInt;
+Begin
+  FlpSector := -EIO;
+  A := (LongInt(@FlpBuf[0]) + 511) And Not 511;
+  Phys := A - KBase;
+  Cyl := Lba Div (FlpHeads * FlpSpt);
+  Hd := (Lba Div FlpSpt) Mod FlpHeads;
+  Sc := Lba Mod FlpSpt + 1;
+  If Write Then MemCopy(A, Buf, 512);
+  For Try_ := 1 To 3 Do
+  Begin
+    FlpMotorOn;
+    If Not FlpSeek(Cyl) Then
+    Begin
+      FlpReset;
+      FlpMotorOn;
+      FlpRecal;
+      Continue;
+    End;
+    Port[$0A] := 6;
+    Port[$0C] := 0;
+    If Write Then Port[$0B] := $4A Else Port[$0B] := $46;
+    Port[$04] := Phys And $FF;
+    Port[$04] := (Phys Shr 8) And $FF;
+    Port[$81] := (Phys Shr 16) And $FF;
+    Port[$0C] := 0;
+    Port[$05] := 511 And $FF;
+    Port[$05] := 511 Shr 8;
+    Port[$0A] := 2;
+    Ok := 1;
+    If Write Then
+    Begin
+      If Not FlpPut($C5) Then Ok := 0;
+    End
+    Else If Not FlpPut($E6) Then Ok := 0;
+    If Ok = 1 Then
+    Begin
+      FlpPut(Hd Shl 2);
+      FlpPut(Cyl);
+      FlpPut(Hd);
+      FlpPut(Sc);
+      FlpPut(2);
+      FlpPut(FlpSpt);
+      FlpPut($1B);
+      FlpPut($FF);
+      If Not FlpWait($D0, $D0) Then Ok := 0;
+    End;
+    If Ok = 1 Then
+    Begin
+      St0 := FlpGet; St1 := FlpGet; St2 := FlpGet;
+      For K := 1 To 4 Do FlpGet;
+      If ((St0 And $C0) = 0) And ((St1 And $B7) = 0) And ((St2 And $73) = 0)
+      Then
+      Begin
+        If Not Write Then MemCopy(Buf, A, 512);
+        FlpSector := 0;
+        Exit;
+      End;
+    End;
+    FlpReset;
+    FlpMotorOn;
+    FlpRecal;
+  End;
+End;
+
+Function FlpRW(Sector, Count, Buf : LongInt; Write : Boolean) : LongInt;
+Var I, R : LongInt;
+Begin
+  FlpRW := 0;
+  For I := 0 To Count - 1 Do
+  Begin
+    R := FlpSector(Sector + I, Buf + I * 512, Write);
+    If R <> 0 Then
+    Begin
+      FlpRW := R;
+      Exit;
+    End;
+  End;
+End;
+
+{ Detection : type du lecteur A dans la CMOS, puis reinitialisation et
+  recalibrage (un lecteur sans disquette reste declare present) }
+Procedure FlpInit;
+Var T : LongInt;
+Begin
+  FlpPresent := False;
+  FlpMotor := False;
+  T := (CmosRead($10) Shr 4) And $F;
+  Case T Of
+    1 : Begin FlpCyls := 40; FlpSpt := 9; End;
+    2 : Begin FlpCyls := 80; FlpSpt := 15; End;
+    3 : Begin FlpCyls := 80; FlpSpt := 9; End;
+    4 : Begin FlpCyls := 80; FlpSpt := 18; End;
+    5 : Begin FlpCyls := 80; FlpSpt := 36; End;
+  Else
+    Exit;
+  End;
+  FlpHeads := 2;
+  FlpTotal := FlpCyls * FlpHeads * FlpSpt;
+  If Not FlpReset Then Exit;
+  FlpPresent := True;
 End;
 
 { ---- Interface des peripheriques blocs (par numero majeur) ---- }
@@ -4185,6 +4632,11 @@ Begin
     If Min = 0 Then BlkSectors := RamSectors;
     Exit;
   End;
+  If Maj = MajFlp Then
+  Begin
+    If (Min = 0) And FlpPresent Then BlkSectors := FlpTotal;
+    Exit;
+  End;
   D := IdeDevice(Maj, Min, P);
   If D >= 0 Then BlkSectors := PartSize[D * 16 + P];
 End;
@@ -4209,8 +4661,34 @@ Begin
     BlkRW := 0;
     Exit;
   End;
+  If Maj = MajFlp Then
+  Begin
+    Inc(BlkReads);
+    BlkRW := FlpRW(Sector, Count, Buf, Write);
+    Exit;
+  End;
   D := IdeDevice(Maj, Min, P);
   If D < 0 Then Exit;
+  If DiskAtapi[D] Then
+  Begin
+    If Write Then
+    Begin
+      BlkRW := -EROFS;
+      Exit;
+    End;
+    For Total := 0 To Count - 1 Do
+    Begin
+      If AtapiReadBlock(D, (Sector + Total) Div 4) <> 0 Then
+      Begin
+        BlkRW := -EIO;
+        Exit;
+      End;
+      MemCopy(Buf + Total * 512, CdBuf + ((Sector + Total) Mod 4) * 512, 512);
+    End;
+    Inc(BlkReads);
+    BlkRW := 0;
+    Exit;
+  End;
   Sector := Sector + PartStart[D * 16 + P];
   If Write Then
   Begin
@@ -4435,6 +4913,7 @@ Begin
   BufCount := 0;
   RamInit;
   IdeInit;
+  FlpInit;
 End;
 
 { ==================================================================== }
@@ -4465,7 +4944,7 @@ Const
   SoSync = 4; SoUmount = 5; SoClearInode = 6; SoRemount = 7;
 
   MaxSupers   = 16;
-  MaxFsTypes  = 8;
+  MaxFsTypes  = 16;
   DentHash    = 512;
   MaxSymlinks = 8;
   InoHash     = 256;
@@ -4514,7 +4993,7 @@ Type
     Count, NChild   : LongInt;
     Mounted         : PSuper;
     Bind            : PDentry;     { point de montage : racine du bind mount }
-    BindMp          : PDentry;     { racine d'un bind mount : son point de montage }
+    BindMp          : PDentry;     { racine d'un bind : son montage }
     Hashed          : LongInt;
     AllNext         : PDentry;
   End;
@@ -4746,15 +5225,22 @@ Begin
   End;
 End;
 
-{ Lecture d'un fichier par le noyau (exec, mappages) : octets lus ou -errno }
-Function InodeReadAt(I, Buf, Pos, Cnt : LongInt) : LongInt;
+Var
+  ShmCount : LongInt;           { pages des mappages partages en cache }
+
+Procedure ShmSyncInode(Ino : LongInt); Forward;
+Procedure ShmSyncAll; Forward;
+Procedure ShmUpdate(Ino, Pos, Buf, Cnt : LongInt); Forward;
+
+{ Lecture d'un fichier par le noyau sans synchroniser les mappages }
+Function InodeReadAtRaw(I, Buf, Pos, Cnt : LongInt) : LongInt;
 Var F : TFile; Ino : PInode; Fn : LongInt;
 Begin
   Ino := Pointer(I);
   Fn := GetOp(Ino^.FOps, FoRead);
   If Fn = 0 Then
   Begin
-    InodeReadAt := -EINVAL;
+    InodeReadAtRaw := -EINVAL;
     Exit;
   End;
   MemFill(LongInt(@F), 0, SizeOf(TFile));
@@ -4762,7 +5248,34 @@ Begin
   F.Pos := Pos;
   F.FOps := Ino^.FOps;
   F.Count := 1;
-  InodeReadAt := Call3(Fn, LongInt(@F), Buf, Cnt);
+  InodeReadAtRaw := Call3(Fn, LongInt(@F), Buf, Cnt);
+End;
+
+{ Lecture d'un fichier par le noyau (exec, mappages) : octets lus ou -errno }
+Function InodeReadAt(I, Buf, Pos, Cnt : LongInt) : LongInt;
+Begin
+  If ShmCount > 0 Then ShmSyncInode(I);
+  InodeReadAt := InodeReadAtRaw(I, Buf, Pos, Cnt);
+End;
+
+{ Ecriture d'un fichier par le noyau (pages des mappages partages) }
+Function InodeWriteAt(I, Buf, Pos, Cnt : LongInt) : LongInt;
+Var F : TFile; Ino : PInode; Fn : LongInt;
+Begin
+  Ino := Pointer(I);
+  Fn := GetOp(Ino^.FOps, FoWrite);
+  If Fn = 0 Then
+  Begin
+    InodeWriteAt := -EINVAL;
+    Exit;
+  End;
+  MemFill(LongInt(@F), 0, SizeOf(TFile));
+  F.Inode := Ino;
+  F.Pos := Pos;
+  F.Flags := O_WRONLY;
+  F.FOps := Ino^.FOps;
+  F.Count := 1;
+  InodeWriteAt := Call3(Fn, LongInt(@F), Buf, Cnt);
 End;
 
 { ---- Dentries ---- }
@@ -5250,6 +5763,83 @@ End;
 
 { ---- Fichiers ouverts ---- }
 
+{ ---- inotify : noyau des evenements (partie 21 pour les appels) ---- }
+
+Const
+  MaxInoInst  = 8;
+  MaxWatch    = 32;
+  InoQSize    = 16384;
+
+Type
+  PInoInst = ^TInoInst;
+  TInoInst = Record
+    Used, NWatch, NextWd, QHead, QLen, Q : LongInt;
+    WIno   : Array[0..MaxWatch - 1] Of PInode;
+    WMask, WWd : Array[0..MaxWatch - 1] Of LongInt;
+  End;
+
+Var
+  InoInst     : Array[0..MaxInoInst - 1] Of PInoInst;
+  InoWatches  : LongInt;        { nombre total de surveillances }
+
+{ Ajouter un evenement dans la file de X (perdu si la file est pleine) }
+Procedure InoQueue(X : PInoInst; Wd, Mask, Cookie : LongInt; Const Nm : String);
+Var L, Tot, Pos, I, B : LongInt;
+Begin
+  L := 0;
+  If Nm <> '' Then L := (Length(Nm) + 1 + 3) And Not 3;
+  Tot := 16 + L;
+  If X^.QLen + Tot > InoQSize Then Exit;
+  Pos := (X^.QHead + X^.QLen) Mod InoQSize;
+  For I := 0 To Tot - 1 Do
+  Begin
+    If I < 4 Then B := (Wd Shr (I * 8)) And $FF
+    Else If I < 8 Then B := (Mask Shr ((I - 4) * 8)) And $FF
+    Else If I < 12 Then B := (Cookie Shr ((I - 8) * 8)) And $FF
+    Else If I < 16 Then B := (L Shr ((I - 12) * 8)) And $FF
+    Else If I - 16 < Length(Nm) Then B := Ord(Nm[I - 15])
+    Else B := 0;
+    Mem[0:X^.Q + ((Pos + I) Mod InoQSize)] := B;
+  End;
+  Inc(X^.QLen, Tot);
+  WakeUp(LongInt(X));
+End;
+
+{ Evenement Mask sur l'inode Self, et sur son repertoire Dir sous le nom Nm }
+Procedure InoEvent(Dir, Self : PInode; Mask, Cookie : LongInt;
+    Const Nm : String);
+Var K, J : LongInt; X : PInoInst; Mk : LongInt;
+Begin
+  If InoWatches = 0 Then Exit;
+  Mk := Mask And $FFF;
+  For K := 0 To MaxInoInst - 1 Do
+  Begin
+    X := InoInst[K];
+    If X <> Nil Then
+      For J := 0 To X^.NWatch - 1 Do
+      Begin
+        If (Dir <> Nil) And (X^.WIno[J] = Dir) And ((X^.WMask[J] And Mk) <> 0)
+           And (Nm <> '') Then
+          InoQueue(X, X^.WWd[J], Mask, Cookie, Nm);
+        If (Self <> Nil) And (X^.WIno[J] = Self) And ((X^.WMask[J] And Mk) <> 0)
+           And (Self <> Dir) Then
+          InoQueue(X, X^.WWd[J], Mask, Cookie, '');
+      End;
+  End;
+End;
+
+{ Evenement sur un fichier ouvert (et sur son repertoire, sous son nom) }
+Procedure InoFileEvent(F : PFile; Mask : LongInt);
+Var Par : PInode;
+Begin
+  If InoWatches = 0 Then Exit;
+  Par := Nil;
+  If (F^.Dentry <> Nil) And (F^.Dentry^.Parent <> Nil) Then
+    Par := F^.Dentry^.Parent^.Inode;
+  If F^.Dentry <> Nil Then InoEvent(Par, F^.Inode, Mask, 0, DName(F^.Dentry))
+  Else InoEvent(Nil, F^.Inode, Mask, 0, '');
+End;
+
 Function FileNew(D : PDentry; Flags : LongInt) : PFile;
 Var F : PFile;
 Begin
@@ -5280,6 +5870,9 @@ Begin
   If P^.Count > 0 Then Exit;
   Fn := GetOp(P^.FOps, FoRelease);
   If Fn <> 0 Then Call1(Fn, F);
+  If (InoWatches > 0) And (P^.Dentry <> Nil) Then
+    If (P^.Flags And O_ACCMODE) = O_RDONLY Then InoFileEvent(P, $10)
+    Else InoFileEvent(P, $8);
   If P^.Dentry <> Nil Then DentryPut(LongInt(P^.Dentry));
   Dec(FileCount);
   KFree(F);
@@ -5350,11 +5943,13 @@ Begin
     VfsRead := 0;
     Exit;
   End;
+  If ShmCount > 0 Then ShmSyncInode(LongInt(F^.Inode));
   VfsRead := Call3(Fn, LongInt(F), Buf, Cnt);
+  If InoWatches > 0 Then InoFileEvent(F, 1);
 End;
 
 Function VfsWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
-Var Fn : LongInt;
+Var Fn, P0, R : LongInt;
 Begin
   If (F^.Flags And O_ACCMODE) = O_RDONLY Then
   Begin
@@ -5375,7 +5970,23 @@ Begin
   If ((F^.Flags And O_APPEND) <> 0) And ((F^.Inode^.Mode And S_IFMT)
       = S_IFREG) Then
     F^.Pos := F^.Inode^.Size;
-  VfsWrite := Call3(Fn, LongInt(F), Buf, Cnt);
+  If (Cur^.RlimCur[RLIM_FSIZE] <> RLIM_INFINITY)
+     And ((F^.Inode^.Mode And S_IFMT) = S_IFREG) Then
+  Begin
+    If F^.Pos >= Cur^.RlimCur[RLIM_FSIZE] Then
+    Begin
+      SendSig(Cur, 25);
+      VfsWrite := -EFBIG;
+      Exit;
+    End;
+    If Cnt > Cur^.RlimCur[RLIM_FSIZE] - F^.Pos Then
+      Cnt := Cur^.RlimCur[RLIM_FSIZE] - F^.Pos;
+  End;
+  P0 := F^.Pos;
+  R := Call3(Fn, LongInt(F), Buf, Cnt);
+  If (R > 0) And (ShmCount > 0) Then ShmUpdate(LongInt(F^.Inode), P0, Buf, R);
+  If (R > 0) And (InoWatches > 0) Then InoFileEvent(F, 2);
+  VfsWrite := R;
 End;
 
 { Ouvrir : verifications des droits, creation, troncature }
@@ -5432,7 +6043,11 @@ Begin
             InodePut(LongInt(I));
             R := -ENOMEM;
           End
-          Else Created := True;
+          Else
+          Begin
+            Created := True;
+            If InoWatches > 0 Then InoEvent(Par^.Inode, Nil, $100, 0, Nm);
+          End;
         End;
       End;
     End;
@@ -5520,6 +6135,7 @@ Begin
     End;
   End;
   Res := F;
+  If InoWatches > 0 Then InoFileEvent(F, $20);
   VfsOpen := 0;
 End;
 
@@ -5608,6 +6224,11 @@ Begin
       If Fn = 0 Then R := -EPERM Else R := Call4(Fn, LongInt(Par^.Inode),
           LongInt(@Nm), M, Rdev);
     End;
+  End;
+  If (R = 0) And (InoWatches > 0) Then
+  Begin
+    If IsMkdir Then InoEvent(Par^.Inode, Nil, $40000100, 0, Nm)
+    Else InoEvent(Par^.Inode, Nil, $100, 0, Nm);
   End;
   DentryPut(LongInt(Par));
   VfsCreateNode := R;
@@ -5698,6 +6319,12 @@ Begin
     Begin
       DentryUnhash(D);
       If BindCount > 0 Then DentryDropAliases(Par^.Inode, Nm, D);
+      If InoWatches > 0 Then
+      Begin
+        If Rmdir Then InoEvent(Par^.Inode, Nil, $40000200, 0, Nm)
+        Else InoEvent(Par^.Inode, Nil, $200, 0, Nm);
+        InoEvent(Nil, I, $400, 0, '');
+      End;
     End;
     DentryPut(LongInt(D));
   End;
@@ -5814,6 +6441,11 @@ Begin
       DentryDropAliases(OP^.Inode, ON, Nil);
       DentryDropAliases(NP^.Inode, NN, Src);
     End;
+    If InoWatches > 0 Then
+    Begin
+      InoEvent(OP^.Inode, Nil, $40, Jiffies Or 1, ON);
+      InoEvent(NP^.Inode, Nil, $80, Jiffies Or 1, NN);
+    End;
   End;
   If Dst <> Nil Then DentryPut(LongInt(Dst));
   DentryPut(LongInt(Src));
@@ -5861,6 +6493,7 @@ Begin
           LongInt(NP^.Inode), LongInt(@NN));
     End;
   End;
+  If (R = 0) And (InoWatches > 0) Then InoEvent(NP^.Inode, Nil, $100, 0, NN);
   DentryPut(LongInt(Src));
   DentryPut(LongInt(NP));
   VfsLink := R;
@@ -5893,6 +6526,7 @@ Begin
           LongInt(@Nm), LongInt(@T));
     End;
   End;
+  If (R = 0) And (InoWatches > 0) Then InoEvent(Par^.Inode, Nil, $100, 0, Nm);
   DentryPut(LongInt(Par));
   VfsSymlink := R;
 End;
@@ -5972,6 +6606,7 @@ Begin
         Or S_ISGID);
   End;
   I^.Ctime := NowSec;
+  If InoWatches > 0 Then InoEvent(Nil, I, 4, 0, '');
   Fn := GetOp(I^.IOps, IoSetattr);
   If Fn <> 0 Then Call1(Fn, LongInt(I));
 End;
@@ -6436,6 +7071,7 @@ End;
 Procedure VfsSyncAll;
 Var I, Fn : LongInt;
 Begin
+  ShmSyncAll;
   For I := 0 To MaxSupers - 1 Do
     If Supers[I] <> Nil Then
     Begin
@@ -7347,11 +7983,62 @@ End;
 { ---- Peripheriques memoire : /dev/null, zero, full, random, urandom ---- }
 
 Function MemDevRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
-Var Minor, I, V : LongInt;
+Var Minor, I, V, N, Avail : LongInt;
 Begin
   Minor := F^.Inode^.Rdev And $FF;
   Case Minor Of
+    1, 2 :                                    { /dev/mem, /dev/kmem }
+      Begin
+        If Cur^.Euid <> 0 Then
+        Begin
+          MemDevRead := -EPERM;
+          Exit;
+        End;
+        If F^.Pos < 0 Then
+        Begin
+          MemDevRead := -EIO;
+          Exit;
+        End;
+        If Minor = 1 Then
+        Begin
+          If F^.Pos >= RamTopPhys Then
+          Begin
+            MemDevRead := 0;
+            Exit;
+          End;
+          N := Cnt;
+          If F^.Pos + N > RamTopPhys Then N := RamTopPhys - F^.Pos;
+          MemCopy(Buf, P2V(F^.Pos), N);
+        End
+        Else
+        Begin
+          N := Cnt;
+          MemCopy(Buf, F^.Pos, N);
+        End;
+        F^.Pos := F^.Pos + N;
+        MemDevRead := N;
+      End;
     3 : MemDevRead := 0;
+    4 :                                       { /dev/port }
+      Begin
+        If Cur^.Euid <> 0 Then
+        Begin
+          MemDevRead := -EPERM;
+          Exit;
+        End;
+        For I := 0 To Cnt - 1 Do
+        Begin
+          If F^.Pos + I > $FFFF Then
+          Begin
+            MemDevRead := I;
+            F^.Pos := F^.Pos + I;
+            Exit;
+          End;
+          Mem[0:Buf + I] := Port[F^.Pos + I];
+        End;
+        F^.Pos := F^.Pos + Cnt;
+        MemDevRead := Cnt;
+      End;
     5, 7 :
       Begin
         MemFill(Buf, 0, Cnt);
@@ -7368,26 +8055,105 @@ Begin
         End;
         MemDevRead := Cnt;
       End;
+    11 :                                      { /dev/kmsg : texte du journal }
+      Begin
+        If F^.Pos < LogTotal - LogCount Then F^.Pos := LogTotal - LogCount;
+        While F^.Pos >= LogTotal Do
+        Begin
+          If (F^.Flags And O_NONBLOCK) <> 0 Then
+          Begin
+            MemDevRead := -EAGAIN;
+            Exit;
+          End;
+          If SleepTicks(5) = WakeSignal Then
+          Begin
+            MemDevRead := -ERESTARTSYS;
+            Exit;
+          End;
+          If F^.Pos < LogTotal - LogCount Then F^.Pos := LogTotal - LogCount;
+        End;
+        Avail := LogTotal - F^.Pos;
+        N := Cnt;
+        If N > Avail Then N := Avail;
+        For I := 0 To N - 1 Do
+          Mem[0:Buf + I] := LogByte(F^.Pos - (LogTotal - LogCount) + I);
+        F^.Pos := F^.Pos + N;
+        MemDevRead := N;
+      End;
   Else
     MemDevRead := -ENXIO;
   End;
 End;
 
 Function MemDevWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
-Var Minor : LongInt;
+Var Minor, I, K : LongInt; S : String;
 Begin
   Minor := F^.Inode^.Rdev And $FF;
   Case Minor Of
+    1, 2 :
+      Begin
+        If Cur^.Euid <> 0 Then
+        Begin
+          MemDevWrite := -EPERM;
+          Exit;
+        End;
+        If (Minor = 1) And (F^.Pos + Cnt > RamTopPhys) Then
+        Begin
+          MemDevWrite := -EIO;
+          Exit;
+        End;
+        If Minor = 1 Then MemCopy(P2V(F^.Pos), Buf, Cnt)
+        Else MemCopy(F^.Pos, Buf, Cnt);
+        F^.Pos := F^.Pos + Cnt;
+        MemDevWrite := Cnt;
+      End;
     3, 5 : MemDevWrite := Cnt;
+    4 :
+      Begin
+        If Cur^.Euid <> 0 Then
+        Begin
+          MemDevWrite := -EPERM;
+          Exit;
+        End;
+        For I := 0 To Cnt - 1 Do
+          If F^.Pos + I <= $FFFF Then Port[F^.Pos + I] := Mem[0:Buf + I];
+        F^.Pos := F^.Pos + Cnt;
+        MemDevWrite := Cnt;
+      End;
     7 : MemDevWrite := -ENOSPC;
     8, 9 : MemDevWrite := Cnt;
+    11 :                                      { ecrire dans le journal }
+      Begin
+        S := '';
+        For K := 0 To Cnt - 1 Do
+        Begin
+          If Mem[0:Buf + K] = 10 Then
+          Begin
+            KLog(S);
+            S := '';
+          End
+          Else If Length(S) < 200 Then S := S + Chr(Mem[0:Buf + K]);
+        End;
+        If S <> '' Then KLog(S);
+        MemDevWrite := Cnt;
+      End;
   Else
     MemDevWrite := -ENXIO;
   End;
 End;
 
 Function MemDevLseek(F : PFile; Off, Whence : LongInt) : LongInt;
+Var Minor : LongInt;
 Begin
+  Minor := F^.Inode^.Rdev And $FF;
+  If (Minor = 1) Or (Minor = 2) Or (Minor = 4) Or (Minor = 11) Then
+  Begin
+    If Whence = 0 Then F^.Pos := Off
+    Else If Whence = 1 Then F^.Pos := F^.Pos + Off
+    Else F^.Pos := Off;
+    MemDevLseek := F^.Pos;
+    Exit;
+  End;
   MemDevLseek := 0;
 End;
 
@@ -7502,8 +8268,92 @@ Begin
   BdevLseek := P;
 End;
 
+{ ---- /dev/rtc : lecture et reglage de l'heure (RTC_RD_TIME) ---- }
+
+Var
+  RtcFOps : Array[0..15] Of LongInt;
+
+Procedure CivilFromDays(Z : LongInt; Var Y, M, D : LongInt);
+Var Era, Doe, Yoe, Doy, Mp : LongInt;
+Begin
+  Z := Z + 719468;
+  Era := Z Div 146097;
+  Doe := Z - Era * 146097;
+  Yoe := (Doe - Doe Div 1460 + Doe Div 36524 - Doe Div 146096) Div 365;
+  Y := Yoe + Era * 400;
+  Doy := Doe - (365 * Yoe + Yoe Div 4 - Yoe Div 100);
+  Mp := (5 * Doy + 2) Div 153;
+  D := Doy - (153 * Mp + 2) Div 5 + 1;
+  If Mp < 10 Then M := Mp + 3 Else M := Mp - 9;
+  If M <= 2 Then Inc(Y);
+End;
+
+Function MiscMouseOps : LongInt; Forward;
+
+Function RtcOpen(I : PInode; F : PFile) : LongInt;
+Begin
+  If (I^.Rdev And $FF) = 135 Then RtcOpen := 0
+  Else If (I^.Rdev And $FF) = 1 Then
+  Begin
+    F^.FOps := MiscMouseOps;
+    RtcOpen := 0;
+  End
+  Else RtcOpen := -ENXIO;
+End;
+
+Function RtcIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt;
+Var T, Days, Y, M, D, Sec, Ys, Uni : LongInt;
+Begin
+  RtcIoctl := -ENOTTY;
+  If Cmd = LongInt($80247009) Then              { RTC_RD_TIME }
+  Begin
+    If Not EnsureUser(Arg, 36, True) Then
+    Begin
+      RtcIoctl := -EFAULT;
+      Exit;
+    End;
+    T := XTime;
+    Days := T Div 86400;
+    Sec := T Mod 86400;
+    CivilFromDays(Days, Y, M, D);
+    Ys := DaysFromCivil(Y, 1, 1);
+    MemL[0:Arg] := Sec Mod 60;
+    MemL[0:Arg + 4] := (Sec Div 60) Mod 60;
+    MemL[0:Arg + 8] := Sec Div 3600;
+    MemL[0:Arg + 12] := D;
+    MemL[0:Arg + 16] := M - 1;
+    MemL[0:Arg + 20] := Y - 1900;
+    MemL[0:Arg + 24] := (Days + 4) Mod 7;
+    MemL[0:Arg + 28] := Days - Ys;
+    MemL[0:Arg + 32] := 0;
+    RtcIoctl := 0;
+  End
+  Else If Cmd = $4024700A Then                  { RTC_SET_TIME }
+  Begin
+    If Cur^.Euid <> 0 Then
+    Begin
+      RtcIoctl := -EPERM;
+      Exit;
+    End;
+    If Not EnsureUser(Arg, 36, False) Then
+    Begin
+      RtcIoctl := -EFAULT;
+      Exit;
+    End;
+    Uni := DaysFromCivil(MemL[0:Arg + 20] + 1900, MemL[0:Arg + 16] + 1,
+        MemL[0:Arg + 12]) * 86400 + MemL[0:Arg + 8] * 3600
+        + MemL[0:Arg + 4] * 60 + MemL[0:Arg];
+    TimeOffset := Uni - (BootTime + Jiffies Div HZ);
+    RtcIoctl := 0;
+  End;
+End;
+
 Procedure InitDevices;
 Begin
+  MemFill(LongInt(@RtcFOps[0]), 0, SizeOf(RtcFOps));
+  RtcFOps[FoIoctl] := LongInt(@RtcIoctl);
+  RtcFOps[FoOpen] := LongInt(@RtcOpen);
+  ChrOps[10] := LongInt(@RtcFOps[0]);
   PipeSb := SuperNew(0);
   PipeSb^.Dev := NextAnonDev;
   PipeSb^.SOps := LongInt(@TmpSOps[0]);
@@ -7542,6 +8392,8 @@ Const
   PrFirstPid  = 12;             { premiere entree "numerique" dans readdir }
 
 Var
+  NetPresent  : Boolean;        { carte reseau detectee (partie 22) }
+  NetRxPkts, NetTxPkts, NetRxBytes, NetTxBytes, NetRxErr : LongInt;
   ProcOps, ProcFOps, ProcDirFOps, ProcLnkOps : Array[0..15] Of LongInt;
   ProcBuf     : Array[0..ProcBufSize - 1] Of Byte;
   ProcLen     : LongInt;
@@ -7664,6 +8516,7 @@ End;
 { Contenu d'un fichier de /proc : place dans ProcBuf }
 Procedure ProcGenerate(Ino : LongInt);
 Var Pid, Idx, I, N, Ticks, Rss, Vsz : LongInt; T : PTask; S : String;
+    T9 : String;
     Tot : LongInt;
 Begin
   ProcLen := 0;
@@ -7672,14 +8525,58 @@ Begin
   If Pid = 0 Then
   Begin
     Case Idx Of
-      2 : PAddLn('Linux version ' + UnameRel + ' (LINUX-0 KERNEL32 ' + KVersion + ') #1 i386');
+      14 :
+        Begin
+          T9 := Chr(9);
+          PAddLn('Iface' + T9 + 'Destination' + T9 + 'Gateway ' + T9 + 'Flags'
+              + T9 + 'RefCnt' + T9 + 'Use' + T9 + 'Metric' + T9 + 'Mask' + T9
+              + T9 + 'MTU' + T9 + 'Window' + T9 + 'IRTT');
+          If NetPresent And NicUp Then
+          Begin
+            If NicGw <> 0 Then
+              PAddLn('eth0' + T9 + '00000000' + T9 + HexStr(Bswap32(NicGw), 8)
+                  + T9 + '0003' + T9 + '0' + T9 + '0' + T9 + '0' + T9
+                  + '00000000' + T9 + '0' + T9 + '0' + T9 + '0');
+            PAddLn('eth0' + T9 + HexStr(Bswap32(NicIp And NicMask), 8) + T9
+                + '00000000' + T9 + '0001' + T9 + '0' + T9 + '0' + T9 + '0'
+                + T9 + HexStr(Bswap32(NicMask), 8) + T9 + '0' + T9 + '0' + T9
+                + '0');
+          End;
+        End;
+      13 :
+        Begin
+          PAddLn('Inter-|   Receive                                    '
+              + '            |  Transmit');
+          PAddLn(' face |bytes    packets errs drop fifo frame compressed '
+              + 'multicast|bytes    packets errs drop fifo colls carrier '
+              + 'compressed');
+          PAddLn('    lo:       0       0    0    0    0     0          0 '
+              + '        0        0       0    0    0    0     0       0 '
+              + '        0');
+          If NetPresent Then
+            PAddLn('  eth0: ' + IntStr(NetRxBytes) + ' ' + IntStr(NetRxPkts)
+                + '    ' + IntStr(NetRxErr) + '    0    0     0          0 '
+                + '        0 ' + IntStr(NetTxBytes) + ' ' + IntStr(NetTxPkts)
+                + '    0    0    0     0       0          0');
+        End;
+      2 : PAddLn('Linux version ' + UnameRel + ' (LINUX-0 KERNEL32 '
+          + KVersion + ') #1 i386');
       3 : Begin
             PAddLn('MemTotal:     ' + IntStr(TotalFreePages * 4) + ' kB');
             PAddLn('MemFree:      ' + IntStr(FreePagesCnt * 4) + ' kB');
             PAddLn('Buffers:      ' + IntStr(BufCount) + ' kB');
             PAddLn('Cached:       0 kB');
-            PAddLn('SwapTotal:    0 kB');
-            PAddLn('SwapFree:     0 kB');
+            If SwapOn Then
+            Begin
+              PAddLn('SwapTotal:    ' + IntStr((SwapSlots - 1) * 4) + ' kB');
+              PAddLn('SwapFree:     ' + IntStr((SwapSlots - 1 - SwapUsed) * 4)
+                  + ' kB');
+            End
+            Else
+            Begin
+              PAddLn('SwapTotal:    0 kB');
+              PAddLn('SwapFree:     0 kB');
+            End;
           End;
       4 : PAddLn(IntStr(Jiffies Div HZ) + '.' + IntStr((Jiffies Mod HZ)
           Div 10) +
@@ -7792,7 +8689,7 @@ Begin
 End;
 
 Function ProcLookup(Dir : PInode; Var Nm : String; Var Res : PInode) : LongInt;
-Var I, Pid, Idx : LongInt; T : PTask; Names4 : String;
+Var I, Pid, Idx, Fd : LongInt; T : PTask; Names4 : String;
 Begin
   ProcLookup := -ENOENT;
   If Dir^.Ino = 1 Then
@@ -7807,6 +8704,12 @@ Begin
     If Nm = 'self' Then
     Begin
       Res := ProcMkInode(Dir^.Sb, PrSelf, S_IFLNK Or $1FF);
+      ProcLookup := 0;
+      Exit;
+    End;
+    If Nm = 'net' Then
+    Begin
+      Res := ProcMkInode(Dir^.Sb, 12, S_IFDIR Or $16D);
       ProcLookup := 0;
       Exit;
     End;
@@ -7826,8 +8729,50 @@ Begin
     End;
     Exit;
   End;
+  If Dir^.Ino = 12 Then
+  Begin
+    If Nm = 'dev' Then
+    Begin
+      Res := ProcMkInode(Dir^.Sb, 13, S_IFREG Or $124);
+      ProcLookup := 0;
+    End
+    Else If Nm = 'route' Then
+    Begin
+      Res := ProcMkInode(Dir^.Sb, 14, S_IFREG Or $124);
+      ProcLookup := 0;
+    End;
+    Exit;
+  End;
   Pid := Dir^.Ino Shr 8;
-  If PidTask(Pid) = Nil Then Exit;
+  T := PidTask(Pid);
+  If T = Nil Then Exit;
+  If (Dir^.Ino And 255) = 5 Then
+  Begin
+    { /proc/N/fd : un lien symbolique par descripteur ouvert }
+    Fd := StrVal(Nm);
+    If (IntStr(Fd) = Nm) And (T^.Files <> Nil) And (Fd >= 0) And (Fd < MaxFd)
+       Then
+      If T^.Files^.Fd[Fd] <> 0 Then
+      Begin
+        Res := ProcMkInode(Dir^.Sb, $10000000 + Pid * 1024 + Fd,
+            S_IFLNK Or $1C0);
+        ProcLookup := 0;
+      End;
+    Exit;
+  End;
+  If Nm = 'fd' Then
+  Begin
+    Res := ProcMkInode(Dir^.Sb, Pid * 256 + 5, S_IFDIR Or $140);
+    ProcLookup := 0;
+    Exit;
+  End;
+  If (Nm = 'exe') Or (Nm = 'cwd') Or (Nm = 'root') Then
+  Begin
+    If Nm = 'exe' Then Idx := 6 Else If Nm = 'cwd' Then Idx := 7 Else Idx := 8;
+    Res := ProcMkInode(Dir^.Sb, Pid * 256 + Idx, S_IFLNK Or $1FF);
+    ProcLookup := 0;
+    Exit;
+  End;
   Idx := 0;
   If Nm = 'stat' Then Idx := 1
   Else If Nm = 'status' Then Idx := 2
@@ -7842,9 +8787,45 @@ Begin
 End;
 
 Function ProcReadlink(I : PInode; Buf, Size : LongInt) : LongInt;
-Var S : String; N : LongInt;
+Var S : String; N, Pid, Fd, K : LongInt; T : PTask; F : PFile;
 Begin
   S := IntStr(Cur^.Tgid);
+  If I^.Ino >= $10000000 Then
+  Begin
+    Pid := (I^.Ino - $10000000) Shr 10;
+    Fd := (I^.Ino - $10000000) And 1023;
+    T := PidTask(Pid);
+    ProcReadlink := -ENOENT;
+    If (T = Nil) Or (T^.Files = Nil) Then Exit;
+    F := Pointer(T^.Files^.Fd[Fd]);
+    If F = Nil Then Exit;
+    If (F^.Dentry <> Nil) And (F^.Dentry^.Sb <> PipeSb) Then
+      S := DentryPath(F^.Dentry)
+    Else If (F^.Inode^.Mode And S_IFMT) = S_IFSOCK Then
+      S := 'socket:[' + IntStr(F^.Inode^.Ino) + ']'
+    Else If (F^.Inode^.Mode And S_IFMT) = S_IFIFO Then
+      S := 'pipe:[' + IntStr(F^.Inode^.Ino) + ']'
+    Else S := 'anon_inode:[file]';
+  End
+  Else If (I^.Ino >= 256) And ((I^.Ino And 255) >= 6) Then
+  Begin
+    Pid := I^.Ino Shr 8;
+    T := PidTask(Pid);
+    ProcReadlink := -ENOENT;
+    If T = Nil Then Exit;
+    Case I^.Ino And 255 Of
+      6 :
+        Begin
+          S := '';
+          For K := 0 To T^.ExeLen - 1 Do S := S + Chr(T^.ExeBuf[K]);
+          If S = '' Then Exit;
+        End;
+      7 : If T^.Fs <> Nil Then S := DentryPath(PDentry(T^.Fs^.Pwd))
+          Else S := '/';
+    Else
+      S := '/';
+    End;
+  End;
   N := Length(S);
   If N > Size Then N := Size;
   MemCopy(Buf, LongInt(@S) + 1, N);
@@ -7870,6 +8851,7 @@ End;
 Function ProcReaddir(F : PFile; Var Ino : LongInt; Var Nm : String;
     Var DType : LongInt) : LongInt;
 Var D : PInode; K, I, C : LongInt; Names : Array[0..3] Of String[8];
+    T : PTask;
 Begin
   D := F^.Inode;
   ProcReaddir := 1;
@@ -7886,6 +8868,23 @@ Begin
     Exit;
   End;
   K := F^.Pos - 2;
+  If D^.Ino = 12 Then
+  Begin
+    If K = 0 Then
+    Begin
+      Nm := 'dev'; Ino := 13; DType := DT_REG;
+      Inc(F^.Pos);
+      Exit;
+    End;
+    If K = 1 Then
+    Begin
+      Nm := 'route'; Ino := 14; DType := DT_REG;
+      Inc(F^.Pos);
+      Exit;
+    End;
+    ProcReaddir := 0;
+    Exit;
+  End;
   If D^.Ino = 1 Then
   Begin
     If K < PrSelf - 2 Then
@@ -7900,7 +8899,13 @@ Begin
       Inc(F^.Pos);
       Exit;
     End;
-    C := K - (PrSelf - 1);
+    If K = PrSelf - 1 Then
+    Begin
+      Nm := 'net'; Ino := 12; DType := DT_DIR;
+      Inc(F^.Pos);
+      Exit;
+    End;
+    C := K - PrSelf;
     For I := 1 To MaxTasks - 1 Do
       If Tasks[I].State <> TsFree Then
       Begin
@@ -7916,16 +8921,46 @@ Begin
     ProcReaddir := 0;
     Exit;
   End;
-  If K < 4 Then
+  If (D^.Ino And 255) = 5 Then
+  Begin
+    { /proc/N/fd }
+    T := PidTask(D^.Ino Shr 8);
+    If (T <> Nil) And (T^.Files <> Nil) Then
+      For C := 0 To MaxFd - 1 Do
+        If T^.Files^.Fd[C] <> 0 Then
+        Begin
+          If K = 0 Then
+          Begin
+            Nm := IntStr(C);
+            Ino := $10000000 + (D^.Ino Shr 8) * 1024 + C;
+            DType := DT_LNK;
+            Inc(F^.Pos);
+            Exit;
+          End;
+          Dec(K);
+        End;
+    ProcReaddir := 0;
+    Exit;
+  End;
+  If K < 8 Then
   Begin
     Case K Of
       0 : Nm := 'stat';
       1 : Nm := 'status';
       2 : Nm := 'cmdline';
+      3 : Nm := 'maps';
+      4 : Nm := 'fd';
+      5 : Nm := 'exe';
+      6 : Nm := 'cwd';
     Else
-      Nm := 'maps';
+      Nm := 'root';
     End;
-    Ino := (D^.Ino And Not 255) + K + 1; DType := DT_REG;
+    If K = 3 Then Ino := (D^.Ino And Not 255) + 4
+    Else If K < 3 Then Ino := (D^.Ino And Not 255) + K + 1
+    Else Ino := (D^.Ino And Not 255) + K + 1;
+    If K = 4 Then DType := DT_DIR
+    Else If K >= 5 Then DType := DT_LNK
+    Else DType := DT_REG;
     Inc(F^.Pos);
     Exit;
   End;
@@ -9722,6 +10757,11 @@ Begin
     ExResolveDev := (MajRam Shl 8);
     Exit;
   End;
+  If S = 'fd0' Then
+  Begin
+    ExResolveDev := (MajFlp Shl 8);
+    Exit;
+  End;
   If (Length(S) >= 3) And (Copy(S, 1, 2) = 'hd') Then
   Begin
     C := Ord(S[3]) - 97;
@@ -11032,6 +12072,130 @@ Begin
   PtsMountFn := R;
 End;
 
+{ ---- Souris PS/2 (IRQ 12) : /dev/input/mice et /dev/psaux ---- }
+
+Const
+  MouseBufSz = 1536;             { 512 paquets de 3 octets }
+
+Var
+  MouseBuf    : Array[0..MouseBufSz - 1] Of Byte;
+  MHead, MLen, MPos : LongInt;
+  MPkt        : Array[0..2] Of Byte;
+  MouseOk     : Boolean;
+  MouseFOps   : Array[0..15] Of LongInt;
+  MouseWchan  : LongInt;
+
+Procedure KbcWait;
+Var N : LongInt;
+Begin
+  N := 0;
+  While ((Port[$64] And 2) <> 0) And (N < 100000) Do Inc(N);
+End;
+
+Procedure KbcMouse(C : LongInt);
+Begin
+  KbcWait;
+  Port[$64] := $D4;
+  KbcWait;
+  Port[$60] := C;
+End;
+
+{ Un octet venu de la souris : assemble des paquets de 3 octets }
+Procedure MouseByte(B : LongInt);
+Var I : LongInt;
+Begin
+  If (MPos = 0) And ((B = $FA) Or (B = $AA) Or (B = 0) Or ((B And 8) = 0)) Then
+    Exit;
+  MPkt[MPos] := B;
+  Inc(MPos);
+  If MPos < 3 Then Exit;
+  MPos := 0;
+  If MLen + 3 > MouseBufSz Then Exit;
+  For I := 0 To 2 Do
+    MouseBuf[(MHead + MLen + I) Mod MouseBufSz] := MPkt[I];
+  Inc(MLen, 3);
+  WakeUp(LongInt(@MouseWchan));
+End;
+
+Procedure MouseIrq;
+Begin
+  If (Port[$64] And $21) = $21 Then MouseByte(Port[$60]);
+End;
+
+Procedure MouseInit;
+Var Cfg, N : LongInt;
+Begin
+  MHead := 0; MLen := 0; MPos := 0;
+  KbcWait;
+  Port[$64] := $A8;                     { activer le port auxiliaire }
+  KbcWait;
+  Port[$64] := $20;
+  N := 0;
+  While ((Port[$64] And 1) = 0) And (N < 100000) Do Inc(N);
+  Cfg := Port[$60];
+  Cfg := (Cfg Or 2) And Not $20;
+  KbcWait;
+  Port[$64] := $60;
+  KbcWait;
+  Port[$60] := Cfg;
+  KbcMouse($F6);                        { valeurs par defaut }
+  KbcMouse($F4);                        { activer les rapports }
+  MouseOk := True;
+  IrqEnable(12);
+End;
+
+Function MouseOpen(I : PInode; F : PFile) : LongInt;
+Begin
+  MouseOpen := 0;
+End;
+
+Function MouseRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var N, I : LongInt;
+Begin
+  Cnt := (Cnt Div 3) * 3;
+  If Cnt = 0 Then
+  Begin
+    MouseRead := -EINVAL;
+    Exit;
+  End;
+  While MLen = 0 Do
+  Begin
+    If (F^.Flags And O_NONBLOCK) <> 0 Then
+    Begin
+      MouseRead := -EAGAIN;
+      Exit;
+    End;
+    If SleepOn(LongInt(@MouseWchan), 0, True) = WakeSignal Then
+    Begin
+      MouseRead := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+  N := Cnt;
+  If N > MLen Then N := MLen;
+  For I := 0 To N - 1 Do Mem[0:Buf + I] := MouseBuf[(MHead + I) Mod MouseBufSz];
+  MHead := (MHead + N) Mod MouseBufSz;
+  Dec(MLen, N);
+  MouseRead := N;
+End;
+
+Function MouseWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var I : LongInt;
+Begin
+  For I := 0 To Cnt - 1 Do KbcMouse(Mem[0:Buf + I]);
+  MouseWrite := Cnt;
+End;
+
+Function MousePoll(F : PFile; Ev : LongInt) : LongInt;
+Begin
+  If MLen > 0 Then MousePoll := POLLIN Or POLLOUT Else MousePoll := POLLOUT;
+End;
+
+Function MiscMouseOps : LongInt;
+Begin
+  MiscMouseOps := LongInt(@MouseFOps[0]);
+End;
+
 { ---- Clavier PS/2 (IRQ 1) ---- }
 
 Procedure KbdRow(Tbl : Integer; Start : LongInt; Const S : String);
@@ -11127,6 +12291,11 @@ End;
 Procedure KbdIrq;
 Var Sc, Code, C : LongInt; Rel : Boolean;
 Begin
+  If (Port[$64] And $20) <> 0 Then
+  Begin
+    MouseByte(Port[$60]);
+    Exit;
+  End;
   Sc := Port[$60];
   If Sc = $E0 Then
   Begin
@@ -11259,6 +12428,12 @@ Begin
   End;
 End;
 
+Procedure InitPts;
+Begin
+  RegisterFs('devpts', LongInt(@PtsMountFn));
+  PtsRoot := Nil;
+End;
+
 Procedure InitTty;
 Var I : LongInt;
 Begin
@@ -11280,12 +12455,18 @@ Begin
   PtmxFOps[FoIoctl] := LongInt(@PtmxIoctl);
   PtmxFOps[FoPoll] := LongInt(@PtmxPoll);
   PtmxFOps[FoRelease] := LongInt(@PtmxRelease);
-  RegisterFs('devpts', LongInt(@PtsMountFn));
-  PtsRoot := Nil;
+
+  MemFill(LongInt(@MouseFOps[0]), 0, SizeOf(MouseFOps));
+  MouseFOps[FoRead] := LongInt(@MouseRead);
+  MouseFOps[FoWrite] := LongInt(@MouseWrite);
+  MouseFOps[FoPoll] := LongInt(@MousePoll);
+  MouseFOps[FoOpen] := LongInt(@MouseOpen);
+  ChrOps[13] := LongInt(@MouseFOps[0]);
   KbdInitMaps;
   { clavier : IRQ 1 ; port serie : IRQ 4 (donnees recues) }
   While (Port[$64] And 1) <> 0 Do I := Port[$60];
   IrqEnable(1);
+  MouseInit;
   If SerialOk Then
   Begin
     Port[Com1 + 1] := 1;
@@ -11639,7 +12820,8 @@ Var D : PDentry; I : PInode; R, N, K, Phoff, Phnum, Phent, Entry, Etype,
     EndCode, StartCode, StartData, EndData : LongInt; Perm : LongInt;
     Bias, IBias, IBrk, IHdr, ISc, IEc, ISd, IEd, MainEntry, IPh, IPhnum,
     ISpan, IMin, IMax, IEntry : LongInt;
-    IntpPath : String; IDent : PDentry; IIno : PInode; IHdrB : Array[0..63] Of Byte;
+    IntpPath : String; IDent : PDentry; IIno : PInode;
+    IHdrB : Array[0..63] Of Byte;
 Begin
   If Depth > 4 Then
   Begin
@@ -11875,6 +13057,10 @@ Begin
   Nm := Copy(Nm, K + 1, 15);
   For K := 0 To 15 Do Cur^.Comm[K] := 0;
   For K := 1 To Length(Nm) Do Cur^.Comm[K - 1] := Ord(Nm[K]);
+  Intp := DentryPath(D);
+  Cur^.ExeLen := Length(Intp);
+  If Cur^.ExeLen > 127 Then Cur^.ExeLen := 127;
+  For K := 1 To Cur^.ExeLen Do Cur^.ExeBuf[K - 1] := Ord(Intp[K]);
   DentryPut(LongInt(D));
   Sp := ExecSetupStack(NewMm, MainEntry, HdrAddr, Phnum, Phent,
       Secure);
@@ -11954,6 +13140,7360 @@ Begin
   KFree(ExArgs);
   ExArgs := 0;
   KernelExecve := R;
+End;
+
+{ ==================================================================== }
+{ Partie 19 - Sockets : AF_UNIX, AF_INET en bouclage, ICMP echo       }
+{ ==================================================================== }
+{ (placee avant la partie 16 : les appels systeme de sockets y sont) }
+
+{ Couche de sockets du noyau. AF_UNIX : flux (SOCK_STREAM) et datagrammes
+  (SOCK_DGRAM), socketpair, bind sur un chemin (noeud S_IFSOCK du systeme de
+  fichiers) ou nom abstrait, listen/accept/connect, SCM_RIGHTS, SO_PEERCRED.
+  AF_INET : bouclage seulement (127.0.0.0/8) : UDP, TCP simplifie (le flux
+  passe par les memes tampons que AF_UNIX : pas de segments, de fenetre ni de
+  retransmission), sockets ICMP (echo repondu par le noyau : ping local).
+  Les attentes passent par SleepOn/WakeUp sur l'adresse de la socket. }
+
+Const
+  AF_UNIX = 1; AF_INET = 2;
+  SOCK_STREAM = 1; SOCK_DGRAM = 2; SOCK_RAW = 3;
+  SOCK_NONBLOCK = $800; SOCK_CLOEXEC = $80000;
+  EADDRINUSE = 98; ECONNREFUSED = 111; ENOTCONN = 107; EISCONN = 106;
+  EPROTONOSUPPORT = 93; EOPNOTSUPP = 95; ENETUNREACH = 101;
+  ECONNRESET = 104; EINPROGRESS = 115; EDESTADDRREQ = 89; EMSGSIZE = 90;
+  EPROTOTYPE = 91; ENOPROTOOPT = 92; EADDRNOTAVAIL = 99; ENOBUFS = 105;
+  ESOCKTNOSUPPORT_ = 94; ETIMEDOUT = 110; EHOSTUNREACH_ = 113; EALREADY_ = 114;
+  TcpClosed = 0; TcpListen = 1; TcpSynSent = 2; TcpSynRcvd = 3; TcpEstab = 4;
+  TcpFinWait1 = 5; TcpFinWait2 = 6; TcpCloseWait = 7; TcpLastAck = 8;
+  TcpClosing = 9; TcpTimeWait = 10;
+  TF_FIN = 1; TF_SYN = 2; TF_RST = 4; TF_PSH = 8; TF_ACK = 16;
+  MaxSocks    = 128;
+  SockBufSz   = 16384;
+  SockQMax    = 64;            { datagrammes en attente au plus }
+  SsFree = 0; SsUnconn = 1; SsListen = 2; SsConn = 3;
+  MSG_PEEK = 2; MSG_DONTWAIT = $40; MSG_TRUNC = $20; MSG_NOSIGNAL = $4000;
+  IPPROTO_ICMP = 1; IPPROTO_TCP = 6; IPPROTO_UDP = 17;
+
+Type
+  PMsg = ^TMsg;
+  TMsg = Record
+    Next        : PMsg;
+    Len, Data   : LongInt;
+    SrcAddr, SrcPort : LongInt;      { source AF_INET }
+    SrcKeyLen   : LongInt;
+    SrcKey      : Array[0..107] Of Byte;  { source AF_UNIX }
+    NFds        : LongInt;
+    Fds         : Array[0..7] Of LongInt; { PFile (SCM_RIGHTS) }
+    CredPid     : LongInt;
+  End;
+
+  PSock = ^TSock;
+  TSock = Record
+    State, Family, Typ, Proto, Flags : LongInt;
+    Peer        : PSock;            { flux et socketpair : l'autre bout }
+    Closed, PeerGone, ShutRd, ShutWr, PeerWrDone : LongInt;
+    Buf, BHead, BLen : LongInt;     { anneau d'octets (flux) }
+    QHead, QTail : PMsg;            { datagrammes en attente }
+    QCount      : LongInt;
+    FdHead      : PMsg;             { SCM_RIGHTS en attente (flux) }
+    Backlog     : Array[0..15] Of PSock;
+    NBacklog, MaxBacklog : LongInt;
+    KeyLen      : LongInt;          { nom AF_UNIX lie }
+    Key         : Array[0..107] Of Byte;
+    UIno        : PInode;           { inode du noeud lie (chemin) }
+    LAddr, LPort, RAddr, RPort : LongInt;   { AF_INET (ordre hote) }
+    HasDest     : LongInt;
+    DestKeyLen  : LongInt;
+    DestKey     : Array[0..107] Of Byte;
+    Err, Reuse  : LongInt;
+    CPid, CUid, CGid : LongInt;
+    Bound       : LongInt;
+    IcmpId      : LongInt;
+    { TCP reseau (connexions hors bouclage) }
+    Net, TState, SndUna, SndNxt, RcvNxt, SndWnd, Iss : LongInt;
+    SBuf, SHead, SLen, RtoAt, Retries : LongInt;
+    FinQueued, FinSent, FinAcked : LongInt;
+    Parent      : PSock;
+  End;
+
+Var
+  Socks       : Array[0..MaxSocks - 1] Of TSock;
+  NicIp, NicMask, NicGw : LongInt;   { interface eth0 (ordre hote) }
+  SockFOps    : Array[0..15] Of LongInt;
+  NextPort    : LongInt;
+
+{ ---- Gestion des sockets ---- }
+
+{ Fonctions de la pile reseau (partie 22) }
+Procedure TcpOutput(S : PSock); Forward;
+Procedure TcpAckNow(S : PSock); Forward;
+Function UdpOutput(Sp, Dst, Dp, Buf, Len : LongInt) : LongInt; Forward;
+Function TcpConnectStart(S : PSock) : LongInt; Forward;
+Function NetIcmpSend(S : PSock; Buf, Cnt, Dst : LongInt) : LongInt; Forward;
+Procedure TcpClose(S : PSock); Forward;
+Procedure TcpShutWr(S : PSock); Forward;
+Function NetStreamWrite(S : PSock; Buf, Cnt, Flags : LongInt) : LongInt;
+    Forward;
+Function NetIoctl(Cmd, Arg : LongInt) : LongInt; Forward;
+
+Function SockNew(Fam, Typ, Proto : LongInt) : PSock;
+Var I : LongInt; S : PSock;
+Begin
+  SockNew := Nil;
+  For I := 0 To MaxSocks - 1 Do
+    If Socks[I].State = SsFree Then
+    Begin
+      S := @Socks[I];
+      MemFill(LongInt(S), 0, SizeOf(TSock));
+      S^.State := SsUnconn;
+      S^.Family := Fam; S^.Typ := Typ; S^.Proto := Proto;
+      S^.CPid := Cur^.Tgid; S^.CUid := Cur^.Euid; S^.CGid := Cur^.Egid;
+      SockNew := S;
+      Exit;
+    End;
+End;
+
+Function SockAllocBuf(S : PSock) : Boolean;
+Begin
+  If S^.Buf = 0 Then S^.Buf := AllocPages(OrderFor(SockBufSz));
+  SockAllocBuf := S^.Buf <> 0;
+End;
+
+Procedure MsgFree(M : PMsg);
+Var I : LongInt;
+Begin
+  If M^.Data <> 0 Then KFree(M^.Data);
+  For I := 0 To M^.NFds - 1 Do FilePut(M^.Fds[I]);
+  KFree(LongInt(M));
+End;
+
+Procedure SockRelease(S : PSock);
+Var M, N : PMsg;
+Begin
+  If S^.Buf <> 0 Then FreePages(S^.Buf, OrderFor(SockBufSz));
+  M := S^.QHead;
+  While M <> Nil Do
+  Begin
+    N := M^.Next;
+    MsgFree(M);
+    M := N;
+  End;
+  M := S^.FdHead;
+  While M <> Nil Do
+  Begin
+    N := M^.Next;
+    MsgFree(M);
+    M := N;
+  End;
+  If S^.UIno <> Nil Then InodePut(LongInt(S^.UIno));
+  S^.State := SsFree;
+End;
+
+{ Fermeture par le dernier descripteur : une socket dont le pair est encore
+  ouvert reste "fermee" en memoire jusqu'a la fermeture du pair }
+Procedure SockClose(S : PSock);
+Var P : PSock; I, N : LongInt; Bl : Array[0..15] Of PSock;
+Begin
+  If (S^.Net <> 0) Or ((S^.Family = AF_INET) And (S^.Typ = SOCK_STREAM)
+      And (S^.State = SsListen)) Then
+  Begin
+    N := S^.NBacklog;
+    For I := 0 To N - 1 Do Bl[I] := S^.Backlog[I];
+    S^.NBacklog := 0;
+    For I := 0 To N - 1 Do SockClose(Bl[I]);
+    TcpClose(S);
+    If (S^.State = SsListen) Then
+    Begin
+      If S^.Buf <> 0 Then FreePages(S^.Buf, OrderFor(SockBufSz));
+      S^.Buf := 0;
+      SockRelease(S);
+    End;
+    Exit;
+  End;
+  S^.Closed := 1;
+  N := S^.NBacklog;
+  For I := 0 To N - 1 Do Bl[I] := S^.Backlog[I];
+  S^.NBacklog := 0;
+  For I := 0 To N - 1 Do SockClose(Bl[I]);
+  P := S^.Peer;
+  If P = Nil Then SockRelease(S)
+  Else
+  Begin
+    P^.PeerGone := 1;
+    WakeUp(LongInt(P));
+    If P^.Closed <> 0 Then
+    Begin
+      SockRelease(P);
+      SockRelease(S);
+    End;
+  End;
+End;
+
+{ ---- Fichier d'une socket ---- }
+
+Function SockFile(S : PSock; Fl : LongInt) : PFile;
+Var I : PInode; D : PDentry; F : PFile;
+Begin
+  SockFile := Nil;
+  I := NewInode(PipeSb, S_IFSOCK Or $1FF);
+  If I = Nil Then Exit;
+  I^.Nlink := 0;
+  D := DentryNew(Nil, '', I, PipeSb);
+  If D = Nil Then
+  Begin
+    InodePut(LongInt(I));
+    Exit;
+  End;
+  F := FileNew(D, O_RDWR Or (Fl And O_NONBLOCK));
+  If F = Nil Then
+  Begin
+    DentryPut(LongInt(D));
+    Exit;
+  End;
+  F^.FOps := LongInt(@SockFOps[0]);
+  F^.Priv := LongInt(S);
+  SockFile := F;
+End;
+
+Function SockOf(F : PFile) : PSock;
+Begin
+  If (F = Nil) Or (F^.FOps <> LongInt(@SockFOps[0])) Then SockOf := Nil
+  Else SockOf := Pointer(F^.Priv);
+End;
+
+{ ---- Adresses ---- }
+
+Function Ntohs(V : LongInt) : LongInt;
+Begin
+  Ntohs := ((V And $FF) Shl 8) Or ((V Shr 8) And $FF);
+End;
+
+Function Ntohl(V : LongInt) : LongInt;
+Begin
+  Ntohl := ((V And $FF) Shl 24) Or ((V And $FF00) Shl 8)
+      Or ((V Shr 8) And $FF00) Or ((V Shr 24) And $FF);
+End;
+
+{ L'adresse (ordre hote) est-elle locale ? 0.0.0.0 et 127.x.x.x }
+Function IsLocalAddr(A : LongInt) : Boolean;
+Begin
+  IsLocalAddr := (A = 0) Or (((A Shr 24) And $FF) = 127)
+      Or ((A = NicIp) And (NicIp <> 0));
+End;
+
+{ sockaddr_un : cle (chemin ou #0 + nom abstrait) ; faux si invalide }
+Function GetUnKey(Addr, Len, Key : LongInt; Var KLen : LongInt) : LongInt;
+Var I, N : LongInt;
+Begin
+  GetUnKey := -EINVAL;
+  KLen := 0;
+  If (Len < 3) Or (Len > 110) Then Exit;
+  If Not EnsureUser(Addr, Len, False) Then
+  Begin
+    GetUnKey := -EFAULT;
+    Exit;
+  End;
+  If MemW[0:Addr] <> AF_UNIX Then Exit;
+  N := Len - 2;
+  If Mem[0:Addr + 2] <> 0 Then
+  Begin
+    { chemin : jusqu'au premier zero }
+    I := 0;
+    While (I < N) And (Mem[0:Addr + 2 + I] <> 0) Do Inc(I);
+    N := I;
+  End;
+  If N > 107 Then N := 107;
+  For I := 0 To N - 1 Do Mem[0:Key + I] := Mem[0:Addr + 2 + I];
+  KLen := N;
+  GetUnKey := 0;
+End;
+
+Function KeyEq(A, LA, B, LB : LongInt) : Boolean;
+Begin
+  KeyEq := (LA = LB) And (MemCmp(A, B, LA) = 0);
+End;
+
+{ Ecrire une adresse de socket : Fam, cle ou (addr, port) ; Lp = pointeur
+  sur la longueur (entree : taille du tampon, sortie : taille reelle) }
+Procedure PutSockAddr(Fam, Key, KLen, Addr, Port, Buf, Lp : LongInt);
+Var Max, N, I : LongInt; Tmp : Array[0..127] Of Byte;
+Begin
+  If (Buf = 0) Or (Lp = 0) Then Exit;
+  If Not EnsureUser(Lp, 4, True) Then Exit;
+  Max := MemL[0:Lp];
+  MemFill(LongInt(@Tmp[0]), 0, 128);
+  Tmp[0] := Fam And $FF; Tmp[1] := 0;
+  If Fam = AF_UNIX Then
+  Begin
+    For I := 0 To KLen - 1 Do Tmp[2 + I] := Mem[0:Key + I];
+    N := 2 + KLen;
+    If (KLen > 0) And (Mem[0:Key] <> 0) Then Inc(N);
+  End
+  Else
+  Begin
+    Tmp[2] := (Port Shr 8) And $FF; Tmp[3] := Port And $FF;
+    Tmp[4] := (Addr Shr 24) And $FF; Tmp[5] := (Addr Shr 16) And $FF;
+    Tmp[6] := (Addr Shr 8) And $FF; Tmp[7] := Addr And $FF;
+    N := 16;
+  End;
+  If Max < 0 Then Max := 0;
+  If Max > N Then I := N Else I := Max;
+  If Not EnsureUser(Buf, I, True) Then Exit;
+  MemCopy(Buf, LongInt(@Tmp[0]), I);
+  MemL[0:Lp] := N;
+End;
+
+{ ---- Recherche de sockets ---- }
+
+Function UnFind(Key, KLen, Typ : LongInt; Const Path : String;
+    Var Err : LongInt) : PSock;
+Var I : LongInt; D : PDentry; Ino : PInode; R : LongInt;
+Begin
+  UnFind := Nil;
+  Err := -ECONNREFUSED;
+  If (KLen > 0) And (Mem[0:Key] = 0) Then
+  Begin
+    For I := 0 To MaxSocks - 1 Do
+      If (Socks[I].State <> SsFree) And (Socks[I].Family = AF_UNIX)
+         And (Socks[I].Typ = Typ) And (Socks[I].Bound <> 0)
+         And (Socks[I].UIno = Nil) And (Socks[I].Closed = 0)
+         And KeyEq(LongInt(@Socks[I].Key[0]), Socks[I].KeyLen, Key, KLen) Then
+      Begin
+        UnFind := @Socks[I];
+        Exit;
+      End;
+    Exit;
+  End;
+  R := PathWalk(Path, True, D);
+  If R <> 0 Then
+  Begin
+    Err := R;
+    Exit;
+  End;
+  Ino := D^.Inode;
+  DentryPut(LongInt(D));
+  If (Ino^.Mode And S_IFMT) <> S_IFSOCK Then Exit;
+  For I := 0 To MaxSocks - 1 Do
+    If (Socks[I].State <> SsFree) And (Socks[I].Family = AF_UNIX)
+       And (Socks[I].Typ = Typ) And (Socks[I].UIno = Ino)
+       And (Socks[I].Closed = 0) Then
+    Begin
+      UnFind := @Socks[I];
+      Exit;
+    End;
+End;
+
+Function InFind(Typ, Port, Listening : LongInt) : PSock;
+Var I : LongInt;
+Begin
+  InFind := Nil;
+  For I := 0 To MaxSocks - 1 Do
+    If (Socks[I].State <> SsFree) And (Socks[I].Family = AF_INET)
+       And (Socks[I].Typ = Typ) And (Socks[I].LPort = Port)
+       And (Socks[I].Bound <> 0) And (Socks[I].Closed = 0) Then
+      If (Listening = 0) Or (Socks[I].State = SsListen) Then
+      Begin
+        InFind := @Socks[I];
+        Exit;
+      End;
+End;
+
+Function PortFree(Typ, Port : LongInt) : Boolean;
+Begin
+  PortFree := InFind(Typ, Port, 0) = Nil;
+End;
+
+Function AutoPort(Typ : LongInt) : LongInt;
+Var N : LongInt;
+Begin
+  AutoPort := 0;
+  For N := 0 To 28000 Do
+  Begin
+    Inc(NextPort);
+    If NextPort > 60999 Then NextPort := 32768;
+    If PortFree(Typ, NextPort) Then
+    Begin
+      AutoPort := NextPort;
+      Exit;
+    End;
+  End;
+End;
+
+{ ---- Envoi et reception d'octets (flux) ---- }
+
+Function StreamWrite(S : PSock; Buf, Cnt : LongInt; Flags : LongInt) : LongInt;
+Var P : PSock; Done, N, Tail, Chunk : LongInt;
+Begin
+  If S^.Net <> 0 Then
+  Begin
+    StreamWrite := NetStreamWrite(S, Buf, Cnt, Flags);
+    Exit;
+  End;
+  P := S^.Peer;
+  If (S^.State <> SsConn) Or (P = Nil) Then
+  Begin
+    StreamWrite := -ENOTCONN;
+    Exit;
+  End;
+  Done := 0;
+  While Done < Cnt Do
+  Begin
+    If (S^.ShutWr <> 0) Or (S^.PeerGone <> 0) Or (P^.ShutRd <> 0) Then
+    Begin
+      If (Flags And MSG_NOSIGNAL) = 0 Then SendSig(Cur, SIGPIPE);
+      If Done > 0 Then StreamWrite := Done Else StreamWrite := -EPIPE;
+      Exit;
+    End;
+    N := SockBufSz - P^.BLen;
+    If N > Cnt - Done Then N := Cnt - Done;
+    If N <= 0 Then
+    Begin
+      If ((S^.Flags Or Flags) And (O_NONBLOCK Or MSG_DONTWAIT)) <> 0 Then
+      Begin
+        If Done > 0 Then StreamWrite := Done Else StreamWrite := -EAGAIN;
+        Exit;
+      End;
+      If SleepOn(LongInt(P), 0, True) = WakeSignal Then
+      Begin
+        If Done > 0 Then StreamWrite := Done Else StreamWrite := -ERESTARTSYS;
+        Exit;
+      End;
+    End
+    Else
+    Begin
+      Tail := (P^.BHead + P^.BLen) Mod SockBufSz;
+      Chunk := N;
+      If Chunk > SockBufSz - Tail Then Chunk := SockBufSz - Tail;
+      MemCopy(P^.Buf + Tail, Buf + Done, Chunk);
+      If N > Chunk Then MemCopy(P^.Buf, Buf + Done + Chunk, N - Chunk);
+      Inc(P^.BLen, N);
+      Done := Done + N;
+      WakeUp(LongInt(P));
+    End;
+  End;
+  StreamWrite := Done;
+End;
+
+Function StreamRead(S : PSock; Buf, Cnt : LongInt; Flags : LongInt) : LongInt;
+Var N, First, Chunk, Before : LongInt;
+Begin
+  If (S^.Net <> 0) And (S^.Err <> 0) And (S^.BLen = 0) Then
+  Begin
+    StreamRead := -S^.Err;
+    S^.Err := 0;
+    Exit;
+  End;
+  If S^.State <> SsConn Then
+  Begin
+    StreamRead := -ENOTCONN;
+    Exit;
+  End;
+  While S^.BLen = 0 Do
+  Begin
+    If (S^.PeerGone <> 0) Or (S^.PeerWrDone <> 0) Or (S^.ShutRd <> 0)
+        Or ((S^.Peer = Nil) And (S^.Net = 0)) Then
+    Begin
+      StreamRead := 0;
+      Exit;
+    End;
+    If ((S^.Flags Or Flags) And (O_NONBLOCK Or MSG_DONTWAIT)) <> 0 Then
+    Begin
+      StreamRead := -EAGAIN;
+      Exit;
+    End;
+    If SleepOn(LongInt(S), 0, True) = WakeSignal Then
+    Begin
+      StreamRead := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+  N := Cnt;
+  If N > S^.BLen Then N := S^.BLen;
+  First := SockBufSz - S^.BHead;
+  Chunk := N;
+  If Chunk > First Then Chunk := First;
+  MemCopy(Buf, S^.Buf + S^.BHead, Chunk);
+  If N > Chunk Then MemCopy(Buf + Chunk, S^.Buf, N - Chunk);
+  If (Flags And MSG_PEEK) = 0 Then
+  Begin
+    Before := S^.BLen;
+    S^.BHead := (S^.BHead + N) Mod SockBufSz;
+    Dec(S^.BLen, N);
+    WakeUp(LongInt(S));
+    If (S^.Net <> 0) And (Before * 2 > SockBufSz) And (S^.TState <> TcpClosed)
+       Then TcpAckNow(S);
+  End;
+  StreamRead := N;
+End;
+
+{ ---- Datagrammes ---- }
+
+Function MsgAdd(D : PSock; Buf, Cnt : LongInt) : PMsg;
+Var M : PMsg;
+Begin
+  MsgAdd := Nil;
+  If D^.QCount >= SockQMax Then Exit;
+  M := Pointer(KMallocZ(SizeOf(TMsg)));
+  If M = Nil Then Exit;
+  If Cnt > 0 Then
+  Begin
+    M^.Data := KMalloc(Cnt);
+    If M^.Data = 0 Then
+    Begin
+      KFree(LongInt(M));
+      Exit;
+    End;
+    MemCopy(M^.Data, Buf, Cnt);
+  End;
+  M^.Len := Cnt;
+  M^.CredPid := Cur^.Tgid;
+  If D^.QTail = Nil Then D^.QHead := M Else D^.QTail^.Next := M;
+  D^.QTail := M;
+  Inc(D^.QCount);
+  WakeUp(LongInt(D));
+  MsgAdd := M;
+End;
+
+{ Retirer le premier datagramme ; Peek : le laisser }
+Function DgramRecv(S : PSock; Buf, Cnt, Flags : LongInt;
+    Var Src : PMsg) : LongInt;
+Var M : PMsg; N : LongInt;
+Begin
+  Src := Nil;
+  While S^.QHead = Nil Do
+  Begin
+    If S^.PeerGone <> 0 Then
+    Begin
+      DgramRecv := 0;
+      Exit;
+    End;
+    If ((S^.Flags Or Flags) And (O_NONBLOCK Or MSG_DONTWAIT)) <> 0 Then
+    Begin
+      DgramRecv := -EAGAIN;
+      Exit;
+    End;
+    If SleepOn(LongInt(S), 0, True) = WakeSignal Then
+    Begin
+      DgramRecv := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+  M := S^.QHead;
+  N := M^.Len;
+  If N > Cnt Then N := Cnt;
+  If N > 0 Then MemCopy(Buf, M^.Data, N);
+  Src := M;
+  If (Flags And MSG_PEEK) = 0 Then
+  Begin
+    S^.QHead := M^.Next;
+    If S^.QHead = Nil Then S^.QTail := Nil;
+    Dec(S^.QCount);
+  End
+  Else Src := Nil;
+  DgramRecv := N;
+End;
+
+{ ---- Operations : creation, adresses, connexion ---- }
+
+Function SockKeyStr(Key, KLen : LongInt) : String;
+Var S : String; I : LongInt;
+Begin
+  S := '';
+  For I := 0 To KLen - 1 Do S := S + Chr(Mem[0:Key + I]);
+  SockKeyStr := S;
+End;
+
+Function SockNewFd(S : PSock; Typ : LongInt) : LongInt;
+Var F : PFile; R : LongInt;
+Begin
+  F := SockFile(S, Typ);
+  If F = Nil Then
+  Begin
+    SockClose(S);
+    SockNewFd := -ENFILE;
+    Exit;
+  End;
+  R := FdInstall(F, 0, (Typ And SOCK_CLOEXEC) <> 0);
+  If R < 0 Then
+  Begin
+    FilePut(LongInt(F));
+    SockClose(S);
+    SockNewFd := R;
+    Exit;
+  End;
+  SockNewFd := R;
+End;
+
+Function SysSocket(Fam, Typ, Proto : LongInt) : LongInt;
+Var S : PSock; T : LongInt;
+Begin
+  T := Typ And $F;
+  If (Fam <> AF_UNIX) And (Fam <> AF_INET) Then
+  Begin
+    SysSocket := -EAFNOSUPPORT;
+    Exit;
+  End;
+  If Fam = AF_UNIX Then
+  Begin
+    If (T <> SOCK_STREAM) And (T <> SOCK_DGRAM) Then
+    Begin
+      SysSocket := -ESOCKTNOSUPPORT_;
+      Exit;
+    End;
+    If Proto <> 0 Then
+    Begin
+      SysSocket := -EPROTONOSUPPORT;
+      Exit;
+    End;
+  End
+  Else
+  Begin
+    If T = SOCK_STREAM Then
+    Begin
+      If (Proto <> 0) And (Proto <> IPPROTO_TCP) Then
+      Begin
+        SysSocket := -EPROTONOSUPPORT;
+        Exit;
+      End;
+      Proto := IPPROTO_TCP;
+    End
+    Else If T = SOCK_DGRAM Then
+    Begin
+      If (Proto <> 0) And (Proto <> IPPROTO_UDP)
+         And (Proto <> IPPROTO_ICMP) Then
+      Begin
+        SysSocket := -EPROTONOSUPPORT;
+        Exit;
+      End;
+      If Proto = 0 Then Proto := IPPROTO_UDP;
+    End
+    Else If T = SOCK_RAW Then
+    Begin
+      If Proto <> IPPROTO_ICMP Then
+      Begin
+        SysSocket := -EPROTONOSUPPORT;
+        Exit;
+      End;
+      If Cur^.Euid <> 0 Then
+      Begin
+        SysSocket := -EPERM;
+        Exit;
+      End;
+    End
+    Else
+    Begin
+      SysSocket := -ESOCKTNOSUPPORT_;
+      Exit;
+    End;
+  End;
+  S := SockNew(Fam, T, Proto);
+  If S = Nil Then
+  Begin
+    SysSocket := -ENOBUFS;
+    Exit;
+  End;
+  S^.Flags := Typ And O_NONBLOCK;
+  If (T = SOCK_STREAM) And (Fam = AF_UNIX) Then S^.Flags := S^.Flags;
+  SysSocket := SockNewFd(S, Typ);
+End;
+
+Function SysSocketpair(Fam, Typ, Proto, Sv : LongInt) : LongInt;
+Var A, B : PSock; T, Fa, Fb : LongInt;
+Begin
+  T := Typ And $F;
+  If Fam <> AF_UNIX Then
+  Begin
+    SysSocketpair := -EOPNOTSUPP;
+    Exit;
+  End;
+  If (T <> SOCK_STREAM) And (T <> SOCK_DGRAM) Then
+  Begin
+    SysSocketpair := -ESOCKTNOSUPPORT_;
+    Exit;
+  End;
+  If Not EnsureUser(Sv, 8, True) Then
+  Begin
+    SysSocketpair := -EFAULT;
+    Exit;
+  End;
+  A := SockNew(AF_UNIX, T, 0);
+  If A = Nil Then
+  Begin
+    SysSocketpair := -ENOBUFS;
+    Exit;
+  End;
+  B := SockNew(AF_UNIX, T, 0);
+  If B = Nil Then
+  Begin
+    A^.State := SsFree;
+    SysSocketpair := -ENOBUFS;
+    Exit;
+  End;
+  A^.Flags := Typ And O_NONBLOCK; B^.Flags := A^.Flags;
+  If T = SOCK_STREAM Then
+  Begin
+    If (Not SockAllocBuf(A)) Or (Not SockAllocBuf(B)) Then
+    Begin
+      SockRelease(A); SockRelease(B);
+      SysSocketpair := -ENOMEM;
+      Exit;
+    End;
+  End;
+  A^.Peer := B; B^.Peer := A;
+  A^.State := SsConn; B^.State := SsConn;
+  Fa := SockNewFd(A, Typ);
+  If Fa < 0 Then
+  Begin
+    SockClose(B);
+    SysSocketpair := Fa;
+    Exit;
+  End;
+  Fb := SockNewFd(B, Typ);
+  If Fb < 0 Then
+  Begin
+    FdClose(Fa);
+    SysSocketpair := Fb;
+    Exit;
+  End;
+  MemL[0:Sv] := Fa;
+  MemL[0:Sv + 4] := Fb;
+  SysSocketpair := 0;
+End;
+
+Function SockGet(Fd : LongInt; Var Err : LongInt) : PSock;
+Var F : PFile; S : PSock;
+Begin
+  F := FdGet(Fd);
+  If F = Nil Then
+  Begin
+    Err := -EBADF;
+    SockGet := Nil;
+    Exit;
+  End;
+  S := SockOf(F);
+  If S = Nil Then Err := -ENOTSOCK Else Err := 0;
+  SockGet := S;
+End;
+
+Function SysBind(Fd, Addr, Len : LongInt) : LongInt;
+Var S : PSock; E, KLen, Port, A, R : LongInt; Path : String; D : PDentry;
+    Key : Array[0..107] Of Byte;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysBind := E;
+    Exit;
+  End;
+  If S^.Bound <> 0 Then
+  Begin
+    SysBind := -EINVAL;
+    Exit;
+  End;
+  If S^.Family = AF_UNIX Then
+  Begin
+    R := GetUnKey(Addr, Len, LongInt(@Key[0]), KLen);
+    If R <> 0 Then
+    Begin
+      SysBind := R;
+      Exit;
+    End;
+    If KLen = 0 Then
+    Begin
+      SysBind := -EINVAL;
+      Exit;
+    End;
+    If Key[0] <> 0 Then
+    Begin
+      Path := SockKeyStr(LongInt(@Key[0]), KLen);
+      R := VfsCreateNode(Path, S_IFSOCK Or $1FF, 0, False);
+      If R = -EEXIST Then R := -EADDRINUSE;
+      If R <> 0 Then
+      Begin
+        SysBind := R;
+        Exit;
+      End;
+      If PathWalk(Path, False, D) <> 0 Then
+      Begin
+        SysBind := -ENOENT;
+        Exit;
+      End;
+      S^.UIno := D^.Inode;
+      InodeRef(LongInt(D^.Inode));
+      DentryPut(LongInt(D));
+    End
+    Else If UnFind(LongInt(@Key[0]), KLen, S^.Typ, '', R) <> Nil Then
+    Begin
+      SysBind := -EADDRINUSE;
+      Exit;
+    End;
+    MemCopy(LongInt(@S^.Key[0]), LongInt(@Key[0]), KLen);
+    S^.KeyLen := KLen;
+    S^.Bound := 1;
+    SysBind := 0;
+    Exit;
+  End;
+  { AF_INET }
+  If (Len < 8) Or (Not EnsureUser(Addr, 8, False)) Then
+  Begin
+    SysBind := -EINVAL;
+    Exit;
+  End;
+  If MemW[0:Addr] <> AF_INET Then
+  Begin
+    SysBind := -EAFNOSUPPORT;
+    Exit;
+  End;
+  Port := Ntohs(MemW[0:Addr + 2]);
+  A := Ntohl(MemL[0:Addr + 4]);
+  If Not IsLocalAddr(A) Then
+  Begin
+    SysBind := -EADDRNOTAVAIL;
+    Exit;
+  End;
+  If S^.Proto = IPPROTO_ICMP Then
+  Begin
+    S^.LAddr := A;
+    S^.Bound := 1;
+    SysBind := 0;
+    Exit;
+  End;
+  If Port = 0 Then Port := AutoPort(S^.Typ)
+  Else
+  Begin
+    If (Port < 1024) And (Cur^.Euid <> 0) Then
+    Begin
+      SysBind := -EACCES;
+      Exit;
+    End;
+    If Not PortFree(S^.Typ, Port) Then
+    Begin
+      SysBind := -EADDRINUSE;
+      Exit;
+    End;
+  End;
+  S^.LAddr := A;
+  S^.LPort := Port;
+  S^.Bound := 1;
+  SysBind := 0;
+End;
+
+Function SysListen(Fd, Backlog : LongInt) : LongInt;
+Var S : PSock; E : LongInt;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysListen := E;
+    Exit;
+  End;
+  If S^.Typ <> SOCK_STREAM Then
+  Begin
+    SysListen := -EOPNOTSUPP;
+    Exit;
+  End;
+  If (S^.State <> SsUnconn) And (S^.State <> SsListen) Then
+  Begin
+    SysListen := -EINVAL;
+    Exit;
+  End;
+  If S^.Bound = 0 Then
+  Begin
+    If S^.Family = AF_UNIX Then
+    Begin
+      SysListen := -EINVAL;
+      Exit;
+    End;
+    S^.LPort := AutoPort(SOCK_STREAM);
+    S^.Bound := 1;
+  End;
+  If Backlog < 1 Then Backlog := 1;
+  If Backlog > 16 Then Backlog := 16;
+  S^.MaxBacklog := Backlog;
+  S^.State := SsListen;
+  SysListen := 0;
+End;
+
+{ Connexion d'un flux : cree la socket serveur et la met en attente }
+Function StreamConnect(S, L : PSock) : LongInt;
+Var X : PSock;
+Begin
+  If L^.NBacklog >= L^.MaxBacklog Then
+  Begin
+    StreamConnect := -ECONNREFUSED;
+    Exit;
+  End;
+  X := SockNew(L^.Family, SOCK_STREAM, L^.Proto);
+  If X = Nil Then
+  Begin
+    StreamConnect := -ENOBUFS;
+    Exit;
+  End;
+  If (Not SockAllocBuf(S)) Or (Not SockAllocBuf(X)) Then
+  Begin
+    SockRelease(X);
+    StreamConnect := -ENOMEM;
+    Exit;
+  End;
+  X^.Bound := L^.Bound; X^.KeyLen := L^.KeyLen;
+  MemCopy(LongInt(@X^.Key[0]), LongInt(@L^.Key[0]), L^.KeyLen);
+  X^.LAddr := L^.LAddr; X^.LPort := L^.LPort;
+  X^.RAddr := S^.LAddr; X^.RPort := S^.LPort;
+  S^.RAddr := X^.LAddr; S^.RPort := X^.LPort;
+  X^.CPid := L^.CPid; X^.CUid := L^.CUid; X^.CGid := L^.CGid;
+  X^.Peer := S; S^.Peer := X;
+  X^.State := SsConn; S^.State := SsConn;
+  L^.Backlog[L^.NBacklog] := X;
+  Inc(L^.NBacklog);
+  WakeUp(LongInt(L));
+  StreamConnect := 0;
+End;
+
+Function SysConnect(Fd, Addr, Len : LongInt) : LongInt;
+Var S, L : PSock; E, KLen, Port, A, R : LongInt; Path : String;
+    Key : Array[0..107] Of Byte;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysConnect := E;
+    Exit;
+  End;
+  If S^.Family = AF_UNIX Then
+  Begin
+    R := GetUnKey(Addr, Len, LongInt(@Key[0]), KLen);
+    If R <> 0 Then
+    Begin
+      SysConnect := R;
+      Exit;
+    End;
+    If KLen = 0 Then
+    Begin
+      SysConnect := -EINVAL;
+      Exit;
+    End;
+    If Key[0] = 0 Then Path := ''
+    Else Path := SockKeyStr(LongInt(@Key[0]), KLen);
+    If S^.Typ = SOCK_STREAM Then
+    Begin
+      If S^.State = SsConn Then
+      Begin
+        SysConnect := -EISCONN;
+        Exit;
+      End;
+      If S^.State = SsListen Then
+      Begin
+        SysConnect := -EINVAL;
+        Exit;
+      End;
+      L := UnFind(LongInt(@Key[0]), KLen, SOCK_STREAM, Path, R);
+      If (L = Nil) Or (L^.State <> SsListen) Then
+      Begin
+        If (L = Nil) And (R <> -ECONNREFUSED) Then SysConnect := R
+        Else SysConnect := -ECONNREFUSED;
+        Exit;
+      End;
+      SysConnect := StreamConnect(S, L);
+      Exit;
+    End;
+    { datagrammes : destination par defaut }
+    L := UnFind(LongInt(@Key[0]), KLen, SOCK_DGRAM, Path, R);
+    If L = Nil Then
+    Begin
+      SysConnect := R;
+      Exit;
+    End;
+    S^.HasDest := 1;
+    S^.DestKeyLen := KLen;
+    MemCopy(LongInt(@S^.DestKey[0]), LongInt(@Key[0]), KLen);
+    SysConnect := 0;
+    Exit;
+  End;
+  { AF_INET }
+  If (Len < 8) Or (Not EnsureUser(Addr, 8, False)) Then
+  Begin
+    SysConnect := -EINVAL;
+    Exit;
+  End;
+  If MemW[0:Addr] <> AF_INET Then
+  Begin
+    SysConnect := -EAFNOSUPPORT;
+    Exit;
+  End;
+  Port := Ntohs(MemW[0:Addr + 2]);
+  A := Ntohl(MemL[0:Addr + 4]);
+  If A = 0 Then A := $7F000001;
+  If (Not IsLocalAddr(A)) And (S^.Typ = SOCK_STREAM) Then
+  Begin
+    If S^.State = SsConn Then
+    Begin
+      SysConnect := -EISCONN;
+      Exit;
+    End;
+    If S^.TState = TcpSynSent Then
+    Begin
+      SysConnect := -EALREADY_;
+      Exit;
+    End;
+    S^.RAddr := A; S^.RPort := Port;
+    R := TcpConnectStart(S);
+    If R <> 0 Then
+    Begin
+      SysConnect := R;
+      Exit;
+    End;
+    If (S^.Flags And O_NONBLOCK) <> 0 Then
+    Begin
+      SysConnect := -EINPROGRESS;
+      Exit;
+    End;
+    While S^.TState = TcpSynSent Do
+      If SleepOn(LongInt(S), 0, True) = WakeSignal Then
+      Begin
+        SysConnect := -ERESTARTSYS;
+        Exit;
+      End;
+    If S^.TState = TcpEstab Then SysConnect := 0
+    Else
+    Begin
+      R := S^.Err;
+      S^.Err := 0;
+      If R = 0 Then R := ECONNREFUSED;
+      SysConnect := -R;
+    End;
+    Exit;
+  End;
+  If (Not IsLocalAddr(A)) And (S^.Typ = SOCK_DGRAM) Then
+  Begin
+    S^.RAddr := A; S^.RPort := Port; S^.HasDest := 1;
+    If (S^.Bound = 0) And (S^.Proto <> IPPROTO_ICMP) Then
+    Begin
+      S^.LPort := AutoPort(SOCK_DGRAM);
+      S^.Bound := 1;
+    End;
+    SysConnect := 0;
+    Exit;
+  End;
+  If Not IsLocalAddr(A) Then
+  Begin
+    SysConnect := -ENETUNREACH;
+    Exit;
+  End;
+  If S^.Proto = IPPROTO_ICMP Then
+  Begin
+    S^.RAddr := A;
+    S^.HasDest := 1;
+    SysConnect := 0;
+    Exit;
+  End;
+  If S^.Bound = 0 Then
+  Begin
+    S^.LPort := AutoPort(S^.Typ);
+    S^.Bound := 1;
+  End;
+  If S^.Typ = SOCK_DGRAM Then
+  Begin
+    S^.RAddr := A; S^.RPort := Port; S^.HasDest := 1;
+    SysConnect := 0;
+    Exit;
+  End;
+  If S^.State = SsConn Then
+  Begin
+    SysConnect := -EISCONN;
+    Exit;
+  End;
+  L := InFind(SOCK_STREAM, Port, 1);
+  If L = Nil Then
+  Begin
+    SysConnect := -ECONNREFUSED;
+    Exit;
+  End;
+  S^.LAddr := $7F000001;
+  R := StreamConnect(S, L);
+  If R = 0 Then S^.RAddr := A;
+  SysConnect := R;
+End;
+
+Function SysAccept4(Fd, Addr, Lp, Flags : LongInt) : LongInt;
+Var S, X : PSock; E, I : LongInt;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysAccept4 := E;
+    Exit;
+  End;
+  If S^.State <> SsListen Then
+  Begin
+    SysAccept4 := -EINVAL;
+    Exit;
+  End;
+  While S^.NBacklog = 0 Do
+  Begin
+    If (FdGet(Fd)^.Flags And O_NONBLOCK) <> 0 Then
+    Begin
+      SysAccept4 := -EAGAIN;
+      Exit;
+    End;
+    If SleepOn(LongInt(S), 0, True) = WakeSignal Then
+    Begin
+      SysAccept4 := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+  X := S^.Backlog[0];
+  For I := 1 To S^.NBacklog - 1 Do S^.Backlog[I - 1] := S^.Backlog[I];
+  Dec(S^.NBacklog);
+  X^.Flags := Flags And O_NONBLOCK;
+  If X^.Peer <> Nil Then
+    PutSockAddr(X^.Family, LongInt(@X^.Peer^.Key[0]), X^.Peer^.KeyLen,
+        X^.RAddr, X^.RPort, Addr, Lp)
+  Else PutSockAddr(X^.Family, LongInt(@X^.Key[0]), 0, X^.RAddr, X^.RPort,
+      Addr, Lp);
+  SysAccept4 := SockNewFd(X, Flags);
+End;
+
+Function SysAccept(Fd, Addr, Lp : LongInt) : LongInt;
+Begin
+  SysAccept := SysAccept4(Fd, Addr, Lp, 0);
+End;
+
+Function SysGetsockname(Fd, Addr, Lp : LongInt) : LongInt;
+Var S : PSock; E, A : LongInt;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysGetsockname := E;
+    Exit;
+  End;
+  A := S^.LAddr;
+  If (A = 0) And (S^.State = SsConn) Then A := $7F000001;
+  PutSockAddr(S^.Family, LongInt(@S^.Key[0]), S^.KeyLen, A, S^.LPort, Addr,
+      Lp);
+  SysGetsockname := 0;
+End;
+
+Function SysGetpeername(Fd, Addr, Lp : LongInt) : LongInt;
+Var S : PSock; E : LongInt;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysGetpeername := E;
+    Exit;
+  End;
+  If (S^.State <> SsConn) And (S^.HasDest = 0) Then
+  Begin
+    SysGetpeername := -ENOTCONN;
+    Exit;
+  End;
+  If (S^.Family = AF_UNIX) And (S^.Peer <> Nil) Then
+    PutSockAddr(AF_UNIX, LongInt(@S^.Peer^.Key[0]), S^.Peer^.KeyLen, 0, 0,
+        Addr, Lp)
+  Else If S^.Family = AF_UNIX Then
+    PutSockAddr(AF_UNIX, LongInt(@S^.DestKey[0]), S^.DestKeyLen, 0, 0, Addr,
+        Lp)
+  Else PutSockAddr(AF_INET, LongInt(@S^.Key[0]), 0, S^.RAddr, S^.RPort, Addr,
+      Lp);
+  SysGetpeername := 0;
+End;
+
+Function SysShutdown(Fd, How : LongInt) : LongInt;
+Var S : PSock; E : LongInt;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysShutdown := E;
+    Exit;
+  End;
+  If (How < 0) Or (How > 2) Then
+  Begin
+    SysShutdown := -EINVAL;
+    Exit;
+  End;
+  If (S^.State <> SsConn) And (S^.Typ = SOCK_STREAM) Then
+  Begin
+    SysShutdown := -ENOTCONN;
+    Exit;
+  End;
+  If (How = 0) Or (How = 2) Then S^.ShutRd := 1;
+  If (How = 1) Or (How = 2) Then
+  Begin
+    S^.ShutWr := 1;
+    If S^.Net <> 0 Then TcpShutWr(S);
+    If S^.Peer <> Nil Then
+    Begin
+      S^.Peer^.PeerWrDone := 1;
+      WakeUp(LongInt(S^.Peer));
+    End;
+  End;
+  WakeUp(LongInt(S));
+  SysShutdown := 0;
+End;
+
+{ ---- Envoi et reception ---- }
+
+Function IcmpCsum(Buf, Len : LongInt) : LongInt;
+Var Sum, I : LongInt;
+Begin
+  Sum := 0;
+  I := 0;
+  While I + 1 < Len Do
+  Begin
+    Sum := Sum + (Mem[0:Buf + I] Shl 8) + Mem[0:Buf + I + 1];
+    I := I + 2;
+  End;
+  If I < Len Then Sum := Sum + (Mem[0:Buf + I] Shl 8);
+  While (Sum Shr 16) <> 0 Do Sum := (Sum And $FFFF) + (Sum Shr 16);
+  IcmpCsum := (Not Sum) And $FFFF;
+End;
+
+{ Echo ICMP (type 8) emis par S : le noyau repond (type 0) dans la file de S }
+Function IcmpSend(S : PSock; Buf, Cnt, DstAddr : LongInt) : LongInt;
+Var M : PMsg; Tmp, Hdr, Tot : LongInt;
+Begin
+  IcmpSend := Cnt;
+  If Cnt < 8 Then
+  Begin
+    IcmpSend := -EINVAL;
+    Exit;
+  End;
+  If Mem[0:Buf] <> 8 Then Exit;               { seul l'echo recoit une reponse }
+  If DstAddr = 0 Then DstAddr := $7F000001;
+  If S^.Typ = SOCK_RAW Then Hdr := 20 Else Hdr := 0;
+  Tot := Hdr + Cnt;
+  Tmp := KMalloc(Tot);
+  If Tmp = 0 Then
+  Begin
+    IcmpSend := -ENOMEM;
+    Exit;
+  End;
+  If Hdr > 0 Then
+  Begin
+    MemFill(Tmp, 0, 20);
+    Mem[0:Tmp] := $45;
+    Mem[0:Tmp + 2] := (Tot Shr 8) And $FF; Mem[0:Tmp + 3] := Tot And $FF;
+    Mem[0:Tmp + 8] := 64; Mem[0:Tmp + 9] := 1;
+    Mem[0:Tmp + 12] := (DstAddr Shr 24) And $FF;
+    Mem[0:Tmp + 13] := (DstAddr Shr 16) And $FF;
+    Mem[0:Tmp + 14] := (DstAddr Shr 8) And $FF;
+    Mem[0:Tmp + 15] := DstAddr And $FF;
+    Mem[0:Tmp + 16] := 127; Mem[0:Tmp + 17] := 0; Mem[0:Tmp + 18] := 0;
+    Mem[0:Tmp + 19] := 1;
+    MemW[0:Tmp + 10] := Ntohs(IcmpCsum(Tmp, 20));
+  End;
+  MemCopy(Tmp + Hdr, Buf, Cnt);
+  Mem[0:Tmp + Hdr] := 0;                      { echo reply }
+  MemW[0:Tmp + Hdr + 2] := 0;
+  MemW[0:Tmp + Hdr + 2] := Ntohs(IcmpCsum(Tmp + Hdr, Cnt));
+  M := MsgAdd(S, Tmp, Tot);
+  KFree(Tmp);
+  If M <> Nil Then
+  Begin
+    M^.SrcAddr := DstAddr;
+    M^.SrcPort := 0;
+  End;
+End;
+
+{ Datagramme AF_UNIX vers la socket D }
+Function UnDgramPut(S, D : PSock; Buf, Cnt : LongInt; Fds : PMsg) : LongInt;
+Var M : PMsg; I : LongInt;
+Begin
+  While D^.QCount >= SockQMax Do
+  Begin
+    If (S^.Flags And O_NONBLOCK) <> 0 Then
+    Begin
+      UnDgramPut := -EAGAIN;
+      Exit;
+    End;
+    If SleepOn(LongInt(D), 0, True) = WakeSignal Then
+    Begin
+      UnDgramPut := -ERESTARTSYS;
+      Exit;
+    End;
+    If D^.State = SsFree Then
+    Begin
+      UnDgramPut := -ECONNREFUSED;
+      Exit;
+    End;
+  End;
+  M := MsgAdd(D, Buf, Cnt);
+  If M = Nil Then
+  Begin
+    UnDgramPut := -ENOBUFS;
+    Exit;
+  End;
+  If S^.Bound <> 0 Then
+  Begin
+    M^.SrcKeyLen := S^.KeyLen;
+    MemCopy(LongInt(@M^.SrcKey[0]), LongInt(@S^.Key[0]), S^.KeyLen);
+  End;
+  If Fds <> Nil Then
+  Begin
+    M^.NFds := Fds^.NFds;
+    For I := 0 To Fds^.NFds - 1 Do M^.Fds[I] := Fds^.Fds[I];
+    Fds^.NFds := 0;
+  End;
+  UnDgramPut := Cnt;
+End;
+
+{ Envoi general : Dest/DestLen = adresse (0 : destination par defaut) }
+Function SockSend(S : PSock; Buf, Cnt, Flags, Dest, DestLen : LongInt;
+    Fds : PMsg) : LongInt;
+Var D : PSock; R, KLen, Port, A, I : LongInt; Path : String; M : PMsg;
+    Key : Array[0..107] Of Byte;
+Begin
+  If S^.Typ = SOCK_STREAM Then
+  Begin
+    If S^.State <> SsConn Then
+    Begin
+      SockSend := -ENOTCONN;
+      Exit;
+    End;
+    If (Fds <> Nil) And (Fds^.NFds > 0) And (S^.Peer <> Nil) Then
+    Begin
+      M := Pointer(KMallocZ(SizeOf(TMsg)));
+      If M <> Nil Then
+      Begin
+        M^.NFds := Fds^.NFds;
+        For I := 0 To M^.NFds - 1 Do M^.Fds[I] := Fds^.Fds[I];
+        Fds^.NFds := 0;
+        If S^.Peer^.FdHead = Nil Then S^.Peer^.FdHead := M
+        Else
+        Begin
+          D := S^.Peer;
+          M^.Next := D^.FdHead;
+          D^.FdHead := M;
+        End;
+      End;
+    End;
+    SockSend := StreamWrite(S, Buf, Cnt, Flags);
+    Exit;
+  End;
+  If S^.Family = AF_UNIX Then
+  Begin
+    If Cnt > 65536 Then
+    Begin
+      SockSend := -EMSGSIZE;
+      Exit;
+    End;
+    If S^.Peer <> Nil Then
+    Begin
+      SockSend := UnDgramPut(S, S^.Peer, Buf, Cnt, Fds);
+      Exit;
+    End;
+    If Dest <> 0 Then
+    Begin
+      R := GetUnKey(Dest, DestLen, LongInt(@Key[0]), KLen);
+      If R <> 0 Then
+      Begin
+        SockSend := R;
+        Exit;
+      End;
+    End
+    Else If S^.HasDest <> 0 Then
+    Begin
+      KLen := S^.DestKeyLen;
+      MemCopy(LongInt(@Key[0]), LongInt(@S^.DestKey[0]), KLen);
+    End
+    Else
+    Begin
+      SockSend := -EDESTADDRREQ;
+      Exit;
+    End;
+    If (KLen > 0) And (Key[0] <> 0) Then
+      Path := SockKeyStr(LongInt(@Key[0]), KLen)
+    Else Path := '';
+    D := UnFind(LongInt(@Key[0]), KLen, SOCK_DGRAM, Path, R);
+    If D = Nil Then
+    Begin
+      If R = -ECONNREFUSED Then SockSend := -ECONNREFUSED Else SockSend := R;
+      Exit;
+    End;
+    SockSend := UnDgramPut(S, D, Buf, Cnt, Fds);
+    Exit;
+  End;
+  { AF_INET : adresse de destination }
+  A := S^.RAddr; Port := S^.RPort;
+  If Dest <> 0 Then
+  Begin
+    If (DestLen < 8) Or (Not EnsureUser(Dest, 8, False)) Then
+    Begin
+      SockSend := -EINVAL;
+      Exit;
+    End;
+    If MemW[0:Dest] <> AF_INET Then
+    Begin
+      SockSend := -EAFNOSUPPORT;
+      Exit;
+    End;
+    Port := Ntohs(MemW[0:Dest + 2]);
+    A := Ntohl(MemL[0:Dest + 4]);
+  End
+  Else If S^.HasDest = 0 Then
+  Begin
+    SockSend := -EDESTADDRREQ;
+    Exit;
+  End;
+  If A = 0 Then A := $7F000001;
+  If Not IsLocalAddr(A) Then
+  Begin
+    If S^.Proto = IPPROTO_ICMP Then
+    Begin
+      SockSend := NetIcmpSend(S, Buf, Cnt, A);
+      Exit;
+    End;
+    If S^.Bound = 0 Then
+    Begin
+      S^.LPort := AutoPort(SOCK_DGRAM);
+      S^.Bound := 1;
+    End;
+    R := UdpOutput(S^.LPort, A, Port, Buf, Cnt);
+    If R = 0 Then SockSend := Cnt Else SockSend := R;
+    Exit;
+  End;
+  If S^.Proto = IPPROTO_ICMP Then
+  Begin
+    SockSend := IcmpSend(S, Buf, Cnt, A);
+    Exit;
+  End;
+  If Cnt > 65507 Then
+  Begin
+    SockSend := -EMSGSIZE;
+    Exit;
+  End;
+  If S^.Bound = 0 Then
+  Begin
+    S^.LPort := AutoPort(SOCK_DGRAM);
+    S^.Bound := 1;
+  End;
+  D := InFind(SOCK_DGRAM, Port, 0);
+  If D = Nil Then
+  Begin
+    If Dest = 0 Then S^.Err := ECONNREFUSED;
+    SockSend := Cnt;
+    Exit;
+  End;
+  M := MsgAdd(D, Buf, Cnt);
+  If M = Nil Then
+  Begin
+    SockSend := Cnt;                  { file pleine : paquet perdu }
+    Exit;
+  End;
+  M^.SrcAddr := $7F000001;
+  M^.SrcPort := S^.LPort;
+  SockSend := Cnt;
+End;
+
+{ Reception generale ; Src recoit le datagramme source (a liberer) }
+Function SockRecv(S : PSock; Buf, Cnt, Flags : LongInt;
+    Var Src : PMsg) : LongInt;
+Var R : LongInt;
+Begin
+  Src := Nil;
+  If S^.Typ = SOCK_STREAM Then
+  Begin
+    If S^.State = SsListen Then
+    Begin
+      SockRecv := -EINVAL;
+      Exit;
+    End;
+    SockRecv := StreamRead(S, Buf, Cnt, Flags);
+    Exit;
+  End;
+  R := DgramRecv(S, Buf, Cnt, Flags, Src);
+  If R >= 0 Then WakeUp(LongInt(S));
+  SockRecv := R;
+End;
+
+Procedure PutMsgSource(S : PSock; M : PMsg; Addr, Lp : LongInt);
+Begin
+  If M = Nil Then
+  Begin
+    If S^.Typ = SOCK_STREAM Then
+    Begin
+      If S^.Peer <> Nil Then
+        PutSockAddr(S^.Family, LongInt(@S^.Peer^.Key[0]), S^.Peer^.KeyLen,
+            S^.RAddr, S^.RPort, Addr, Lp)
+      Else PutSockAddr(S^.Family, LongInt(@S^.Key[0]), 0, S^.RAddr, S^.RPort,
+          Addr, Lp);
+    End
+    Else If Lp <> 0 Then
+      If EnsureUser(Lp, 4, True) Then MemL[0:Lp] := 0;
+    Exit;
+  End;
+  If S^.Family = AF_UNIX Then
+    PutSockAddr(AF_UNIX, LongInt(@M^.SrcKey[0]), M^.SrcKeyLen, 0, 0, Addr, Lp)
+  Else PutSockAddr(AF_INET, LongInt(@M^.SrcKey[0]), 0, M^.SrcAddr, M^.SrcPort,
+      Addr, Lp);
+End;
+
+Function SysSendto(Fd, Buf, Cnt, Flags, Dest, DestLen : LongInt) : LongInt;
+Var S : PSock; E, R, Tmp : LongInt;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysSendto := E;
+    Exit;
+  End;
+  If Cnt < 0 Then
+  Begin
+    SysSendto := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(Buf, Cnt, False) Then
+  Begin
+    SysSendto := -EFAULT;
+    Exit;
+  End;
+  If (Cnt > 0) And (S^.Typ <> SOCK_STREAM) Then
+  Begin
+    Tmp := KMalloc(Cnt);
+    If Tmp = 0 Then
+    Begin
+      SysSendto := -ENOMEM;
+      Exit;
+    End;
+    MemCopy(Tmp, Buf, Cnt);
+    R := SockSend(S, Tmp, Cnt, Flags, Dest, DestLen, Nil);
+    KFree(Tmp);
+    SysSendto := R;
+    Exit;
+  End;
+  SysSendto := SockSend(S, Buf, Cnt, Flags, Dest, DestLen, Nil);
+End;
+
+Function SysSend(Fd, Buf, Cnt, Flags : LongInt) : LongInt;
+Begin
+  SysSend := SysSendto(Fd, Buf, Cnt, Flags, 0, 0);
+End;
+
+Function SysRecvfrom(Fd, Buf, Cnt, Flags, Addr, Lp : LongInt) : LongInt;
+Var S : PSock; E, R : LongInt; M : PMsg;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysRecvfrom := E;
+    Exit;
+  End;
+  If (Cnt < 0) Or (Not EnsureUser(Buf, Cnt, True)) Then
+  Begin
+    SysRecvfrom := -EFAULT;
+    Exit;
+  End;
+  R := SockRecv(S, Buf, Cnt, Flags, M);
+  If R >= 0 Then
+  Begin
+    PutMsgSource(S, M, Addr, Lp);
+    If M <> Nil Then MsgFree(M);
+  End;
+  SysRecvfrom := R;
+End;
+
+Function SysRecv(Fd, Buf, Cnt, Flags : LongInt) : LongInt;
+Begin
+  SysRecv := SysRecvfrom(Fd, Buf, Cnt, Flags, 0, 0);
+End;
+
+{ sendmsg : nom, iov, SCM_RIGHTS }
+Function SysSendmsg(Fd, Msgh, Flags : LongInt) : LongInt;
+Var S : PSock; E, R, Name, NameLen, Iov, IovLen, Ctl, CtlLen, I, Tot, Tmp,
+    P, N, Cl, Lv, Ty, K, Fdn : LongInt; Fds : PMsg; F : PFile;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysSendmsg := E;
+    Exit;
+  End;
+  If Not EnsureUser(Msgh, 28, False) Then
+  Begin
+    SysSendmsg := -EFAULT;
+    Exit;
+  End;
+  Name := MemL[0:Msgh]; NameLen := MemL[0:Msgh + 4];
+  Iov := MemL[0:Msgh + 8]; IovLen := MemL[0:Msgh + 12];
+  Ctl := MemL[0:Msgh + 16]; CtlLen := MemL[0:Msgh + 20];
+  If (IovLen < 0) Or (IovLen > 64)
+     Or (Not EnsureUser(Iov, IovLen * 8, False)) Then
+  Begin
+    SysSendmsg := -EINVAL;
+    Exit;
+  End;
+  Tot := 0;
+  For I := 0 To IovLen - 1 Do Tot := Tot + MemL[0:Iov + I * 8 + 4];
+  If (Tot < 0) Or (Tot > 262144) Then
+  Begin
+    SysSendmsg := -EMSGSIZE;
+    Exit;
+  End;
+  Tmp := KMalloc(Tot + 1);
+  If Tmp = 0 Then
+  Begin
+    SysSendmsg := -ENOMEM;
+    Exit;
+  End;
+  P := 0;
+  For I := 0 To IovLen - 1 Do
+  Begin
+    N := MemL[0:Iov + I * 8 + 4];
+    If N > 0 Then
+    Begin
+      If Not EnsureUser(MemL[0:Iov + I * 8], N, False) Then
+      Begin
+        KFree(Tmp);
+        SysSendmsg := -EFAULT;
+        Exit;
+      End;
+      MemCopy(Tmp + P, MemL[0:Iov + I * 8], N);
+      P := P + N;
+    End;
+  End;
+  Fds := Nil;
+  If (Ctl <> 0) And (CtlLen >= 12) And EnsureUser(Ctl, CtlLen, False) Then
+  Begin
+    Fds := Pointer(KMallocZ(SizeOf(TMsg)));
+    P := 0;
+    While (Fds <> Nil) And (P + 12 <= CtlLen) Do
+    Begin
+      Cl := MemL[0:Ctl + P]; Lv := MemL[0:Ctl + P + 4];
+      Ty := MemL[0:Ctl + P + 8];
+      If (Cl < 12) Or (P + Cl > CtlLen) Then Break;
+      If (Lv = 1) And (Ty = 1) Then
+      Begin
+        K := (Cl - 12) Div 4;
+        For I := 0 To K - 1 Do
+        Begin
+          Fdn := MemL[0:Ctl + P + 12 + I * 4];
+          F := FdGet(Fdn);
+          If (F = Nil) Or (Fds^.NFds >= 8) Then
+          Begin
+            For R := 0 To Fds^.NFds - 1 Do FilePut(Fds^.Fds[R]);
+            KFree(LongInt(Fds));
+            KFree(Tmp);
+            If F = Nil Then SysSendmsg := -EBADF Else SysSendmsg := -EINVAL;
+            Exit;
+          End;
+          FileGet(LongInt(F));
+          Fds^.Fds[Fds^.NFds] := LongInt(F);
+          Inc(Fds^.NFds);
+        End;
+      End;
+      P := P + ((Cl + 3) And Not 3);
+    End;
+  End;
+  R := SockSend(S, Tmp, Tot, Flags, Name, NameLen, Fds);
+  KFree(Tmp);
+  If Fds <> Nil Then
+  Begin
+    For I := 0 To Fds^.NFds - 1 Do FilePut(Fds^.Fds[I]);
+    KFree(LongInt(Fds));
+  End;
+  SysSendmsg := R;
+End;
+
+Function SysRecvmsg(Fd, Msgh, Flags : LongInt) : LongInt;
+Var S : PSock; E, R, Name, NameLen, Iov, IovLen, Ctl, CtlLen, I, Tot, Tmp,
+    P, N, K, Nf, Cl, Fdn : LongInt; M : PMsg; Fl : LongInt; F : PFile;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysRecvmsg := E;
+    Exit;
+  End;
+  If Not EnsureUser(Msgh, 28, True) Then
+  Begin
+    SysRecvmsg := -EFAULT;
+    Exit;
+  End;
+  Name := MemL[0:Msgh]; Iov := MemL[0:Msgh + 8]; IovLen := MemL[0:Msgh + 12];
+  Ctl := MemL[0:Msgh + 16]; CtlLen := MemL[0:Msgh + 20];
+  If (IovLen < 0) Or (IovLen > 64)
+     Or (Not EnsureUser(Iov, IovLen * 8, False)) Then
+  Begin
+    SysRecvmsg := -EINVAL;
+    Exit;
+  End;
+  Tot := 0;
+  For I := 0 To IovLen - 1 Do Tot := Tot + MemL[0:Iov + I * 8 + 4];
+  If (Tot < 0) Or (Tot > 262144) Then Tot := 262144;
+  Tmp := KMalloc(Tot + 1);
+  If Tmp = 0 Then
+  Begin
+    SysRecvmsg := -ENOMEM;
+    Exit;
+  End;
+  R := SockRecv(S, Tmp, Tot, Flags, M);
+  If R < 0 Then
+  Begin
+    KFree(Tmp);
+    SysRecvmsg := R;
+    Exit;
+  End;
+  P := 0;
+  For I := 0 To IovLen - 1 Do
+  Begin
+    N := MemL[0:Iov + I * 8 + 4];
+    If N > R - P Then N := R - P;
+    If N > 0 Then
+    Begin
+      If Not EnsureUser(MemL[0:Iov + I * 8], N, True) Then Break;
+      MemCopy(MemL[0:Iov + I * 8], Tmp + P, N);
+      P := P + N;
+    End;
+  End;
+  KFree(Tmp);
+  Fl := 0;
+  If (S^.Typ <> SOCK_STREAM) And (M <> Nil) And (M^.Len > R) Then
+    Fl := Fl Or MSG_TRUNC;
+  If Name <> 0 Then
+  Begin
+    MemL[0:Msgh + 4] := NameLen;
+    PutMsgSource(S, M, Name, Msgh + 4);
+  End;
+  { descripteurs recus (SCM_RIGHTS) }
+  If S^.Typ = SOCK_STREAM Then
+  Begin
+    M := S^.FdHead;
+    If M <> Nil Then S^.FdHead := M^.Next;
+  End;
+  Nf := 0;
+  If (M <> Nil) And (M^.NFds > 0) Then
+  Begin
+    Cl := 12 + 4 * M^.NFds;
+    If (Ctl <> 0) And (CtlLen >= Cl) And EnsureUser(Ctl, Cl, True) Then
+    Begin
+      MemL[0:Ctl] := Cl; MemL[0:Ctl + 4] := 1; MemL[0:Ctl + 8] := 1;
+      For K := 0 To M^.NFds - 1 Do
+      Begin
+        F := Pointer(M^.Fds[K]);
+        Fdn := FdInstall(F, 0, (Flags And $40000000) <> 0);
+        If Fdn >= 0 Then
+        Begin
+          MemL[0:Ctl + 12 + Nf * 4] := Fdn;
+          Inc(Nf);
+        End
+        Else FilePut(M^.Fds[K]);
+      End;
+      M^.NFds := 0;
+      Cl := 12 + 4 * Nf;
+      MemL[0:Ctl] := Cl;
+      MemL[0:Msgh + 20] := (Cl + 3) And Not 3;
+    End
+    Else
+    Begin
+      Fl := Fl Or $8;                  { MSG_CTRUNC }
+      MemL[0:Msgh + 20] := 0;
+    End;
+  End
+  Else If Ctl <> 0 Then MemL[0:Msgh + 20] := 0;
+  If M <> Nil Then MsgFree(M);
+  MemL[0:Msgh + 24] := Fl;
+  SysRecvmsg := R;
+End;
+
+{ ---- Options ---- }
+
+Function SysSetsockopt(Fd, Level, Opt, Val, Len : LongInt) : LongInt;
+Var S : PSock; E : LongInt;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysSetsockopt := E;
+    Exit;
+  End;
+  If (Level = 1) And (Opt = 2) And (Len >= 4) And EnsureUser(Val, 4, False) Then
+    S^.Reuse := MemL[0:Val];
+  SysSetsockopt := 0;
+End;
+
+Function SysGetsockopt(Fd, Level, Opt, Val, Lp : LongInt) : LongInt;
+Var S : PSock; E, V, N : LongInt;
+Begin
+  S := SockGet(Fd, E);
+  If S = Nil Then
+  Begin
+    SysGetsockopt := E;
+    Exit;
+  End;
+  If (Val = 0) Or (Lp = 0) Or (Not EnsureUser(Lp, 4, True)) Then
+  Begin
+    SysGetsockopt := -EFAULT;
+    Exit;
+  End;
+  N := MemL[0:Lp];
+  V := 0;
+  If Level = 1 Then
+  Begin
+    Case Opt Of
+      2 : V := S^.Reuse;
+      3 : V := S^.Typ;
+      4 :
+        Begin
+          V := S^.Err;
+          S^.Err := 0;
+        End;
+      7, 8 : V := 65536;
+      30 : If S^.State = SsListen Then V := 1;
+      38 : V := S^.Proto;
+      39 : V := S^.Family;
+      17 :
+        Begin
+          If (S^.Peer <> Nil) Then
+          Begin
+            If Not EnsureUser(Val, 12, True) Then
+            Begin
+              SysGetsockopt := -EFAULT;
+              Exit;
+            End;
+            MemL[0:Val] := S^.Peer^.CPid; MemL[0:Val + 4] := S^.Peer^.CUid;
+            MemL[0:Val + 8] := S^.Peer^.CGid;
+            MemL[0:Lp] := 12;
+            SysGetsockopt := 0;
+            Exit;
+          End;
+          If Not EnsureUser(Val, 12, True) Then
+          Begin
+            SysGetsockopt := -EFAULT;
+            Exit;
+          End;
+          MemL[0:Val] := S^.CPid; MemL[0:Val + 4] := S^.CUid;
+          MemL[0:Val + 8] := S^.CGid;
+          MemL[0:Lp] := 12;
+          SysGetsockopt := 0;
+          Exit;
+        End;
+    End;
+  End;
+  If N >= 4 Then
+  Begin
+    If Not EnsureUser(Val, 4, True) Then
+    Begin
+      SysGetsockopt := -EFAULT;
+      Exit;
+    End;
+    MemL[0:Val] := V;
+    MemL[0:Lp] := 4;
+  End;
+  SysGetsockopt := 0;
+End;
+
+{ socketcall : Args = tableau de 32 bits }
+Function SysSocketcall(Cn, Args : LongInt) : LongInt;
+Var A : Array[0..5] Of LongInt; I : LongInt;
+Begin
+  If (Cn < 1) Or (Cn > 18) Then
+  Begin
+    SysSocketcall := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(Args, 24, False) Then
+  Begin
+    SysSocketcall := -EFAULT;
+    Exit;
+  End;
+  For I := 0 To 5 Do A[I] := MemL[0:Args + I * 4];
+  Case Cn Of
+    1 : SysSocketcall := SysSocket(A[0], A[1], A[2]);
+    2 : SysSocketcall := SysBind(A[0], A[1], A[2]);
+    3 : SysSocketcall := SysConnect(A[0], A[1], A[2]);
+    4 : SysSocketcall := SysListen(A[0], A[1]);
+    5 : SysSocketcall := SysAccept(A[0], A[1], A[2]);
+    6 : SysSocketcall := SysGetsockname(A[0], A[1], A[2]);
+    7 : SysSocketcall := SysGetpeername(A[0], A[1], A[2]);
+    8 : SysSocketcall := SysSocketpair(A[0], A[1], A[2], A[3]);
+    9 : SysSocketcall := SysSend(A[0], A[1], A[2], A[3]);
+    10 : SysSocketcall := SysRecv(A[0], A[1], A[2], A[3]);
+    11 : SysSocketcall := SysSendto(A[0], A[1], A[2], A[3], A[4], A[5]);
+    12 : SysSocketcall := SysRecvfrom(A[0], A[1], A[2], A[3], A[4], A[5]);
+    13 : SysSocketcall := SysShutdown(A[0], A[1]);
+    14 : SysSocketcall := SysSetsockopt(A[0], A[1], A[2], A[3], A[4]);
+    15 : SysSocketcall := SysGetsockopt(A[0], A[1], A[2], A[3], A[4]);
+    16 : SysSocketcall := SysSendmsg(A[0], A[1], A[2]);
+    17 : SysSocketcall := SysRecvmsg(A[0], A[1], A[2]);
+    18 : SysSocketcall := SysAccept4(A[0], A[1], A[2], A[3]);
+  Else
+    SysSocketcall := -EINVAL;
+  End;
+End;
+
+{ ---- Operations de fichier ---- }
+
+Function SockFRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var S : PSock; M : PMsg; R : LongInt;
+Begin
+  S := SockOf(F);
+  If (F^.Flags And O_NONBLOCK) <> 0 Then S^.Flags := S^.Flags Or O_NONBLOCK
+  Else S^.Flags := S^.Flags And Not O_NONBLOCK;
+  R := SockRecv(S, Buf, Cnt, 0, M);
+  If M <> Nil Then MsgFree(M);
+  SockFRead := R;
+End;
+
+Function SockFWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var S : PSock;
+Begin
+  S := SockOf(F);
+  If (F^.Flags And O_NONBLOCK) <> 0 Then S^.Flags := S^.Flags Or O_NONBLOCK
+  Else S^.Flags := S^.Flags And Not O_NONBLOCK;
+  SockFWrite := SockSend(S, Buf, Cnt, 0, 0, 0, Nil);
+End;
+
+Function SockFPoll(F : PFile; Ev : LongInt) : LongInt;
+Var S : PSock; R : LongInt;
+Begin
+  S := SockOf(F);
+  R := 0;
+  If S^.State = SsListen Then
+  Begin
+    If S^.NBacklog > 0 Then R := POLLIN;
+    SockFPoll := R;
+    Exit;
+  End;
+  If (S^.Net <> 0) And (S^.Typ = SOCK_STREAM) Then
+  Begin
+    If S^.BLen > 0 Then R := R Or POLLIN;
+    If (S^.PeerWrDone <> 0) Or (S^.PeerGone <> 0) Then R := R Or POLLIN;
+    If (S^.PeerGone <> 0) Or (S^.TState = TcpClosed) Then R := R Or POLLHUP;
+    If (S^.State = SsConn) And (S^.SLen < SockBufSz) Then R := R Or POLLOUT;
+    If S^.Err <> 0 Then R := R Or POLLERR;
+    SockFPoll := R;
+    Exit;
+  End;
+  If S^.Typ = SOCK_STREAM Then
+  Begin
+    If S^.State = SsConn Then
+    Begin
+      If (S^.BLen > 0) Or (S^.PeerGone <> 0) Or (S^.PeerWrDone <> 0) Then
+        R := R Or POLLIN;
+      If (S^.PeerGone <> 0) And (S^.BLen = 0) Then R := R Or POLLHUP;
+      If (S^.Peer <> Nil) And (S^.Peer^.BLen < SockBufSz) Then
+        R := R Or POLLOUT;
+      If (S^.PeerGone <> 0) Then R := R Or POLLOUT;
+    End
+    Else R := POLLOUT Or POLLHUP;
+  End
+  Else
+  Begin
+    If S^.QHead <> Nil Then R := R Or POLLIN;
+    R := R Or POLLOUT;
+  End;
+  If S^.Err <> 0 Then R := R Or POLLERR;
+  SockFPoll := R;
+End;
+
+Function SockFIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt;
+Var S : PSock;
+Begin
+  S := SockOf(F);
+  Case Cmd Of
+    $541B :                                      { FIONREAD }
+      Begin
+        If S^.Typ = SOCK_STREAM Then SockFIoctl := PutUserL(Arg, S^.BLen)
+        Else If S^.QHead <> Nil Then SockFIoctl := PutUserL(Arg, S^.QHead^.Len)
+        Else SockFIoctl := PutUserL(Arg, 0);
+      End;
+  Else
+    SockFIoctl := NetIoctl(Cmd, Arg);
+  End;
+End;
+
+Procedure SockFRelease(F : PFile);
+Var S : PSock;
+Begin
+  S := SockOf(F);
+  If S <> Nil Then SockClose(S);
+End;
+
+Procedure InitSockets;
+Var I : LongInt;
+Begin
+  For I := 0 To MaxSocks - 1 Do Socks[I].State := SsFree;
+  NextPort := 32767;
+  MemFill(LongInt(@SockFOps[0]), 0, SizeOf(SockFOps));
+  SockFOps[FoRead] := LongInt(@SockFRead);
+  SockFOps[FoWrite] := LongInt(@SockFWrite);
+  SockFOps[FoPoll] := LongInt(@SockFPoll);
+  SockFOps[FoIoctl] := LongInt(@SockFIoctl);
+  SockFOps[FoRelease] := LongInt(@SockFRelease);
+End;
+
+{ ==================================================================== }
+{ Partie 22 - Reseau : PCI, RTL8139, Ethernet, ARP, IPv4, ICMP, UDP    }
+{ ==================================================================== }
+{ (placee avant la partie 16, apres les sockets) }
+
+{ Pilote RTL8139 (QEMU : -nic user,model=rtl8139 ou -device rtl8139),
+  pile minimale : trames Ethernet, ARP (cache de 8 entrees), IPv4 sans
+  fragmentation, ICMP (reponse a l'echo, echo pour les sockets ICMP), UDP.
+  Les trames recues sont traitees dans le gestionnaire d'interruption ou
+  par NetPoll (jamais d'attente dans le noyau pendant le traitement). }
+
+Const
+  RtlRxSize   = 8192;
+  NetMtu      = 1500;
+  EtherIp     = $0800;
+  EtherArp    = $0806;
+  MaxArp      = 8;
+
+Var
+  NicIo       : LongInt;           { base des ports du RTL8139 }
+  NicIrq      : LongInt;
+  NicMac      : Array[0..5] Of Byte;
+  NicRx       : LongInt;           { tampon de reception (adresse noyau) }
+  NicTx       : LongInt;           { 4 tampons d'emission de 2 Ko }
+  NicRxOfs    : LongInt;
+  NicTxCur    : LongInt;
+  NicUp       : Boolean;
+  ArpIp       : Array[0..MaxArp - 1] Of LongInt;
+  ArpMac      : Array[0..MaxArp * 6 - 1] Of Byte;
+  ArpAge      : Array[0..MaxArp - 1] Of LongInt;
+  IpId        : LongInt;
+
+{ ---- PCI ---- }
+
+Procedure OutL(P, V : LongInt);
+Begin
+  asm
+    mov edx,P
+    mov eax,V
+    out dx,eax
+  end;
+End;
+
+Function InL(P : LongInt) : LongInt;
+Var R : LongInt;
+Begin
+  asm
+    mov edx,P
+    in eax,dx
+    mov R,eax
+  end;
+  InL := R;
+End;
+
+Function PciRead(Bus, Dev, Fn, Reg : LongInt) : LongInt;
+Begin
+  OutL($CF8, LongInt($80000000) Or (Bus Shl 16) Or (Dev Shl 11)
+      Or (Fn Shl 8) Or (Reg And $FC));
+  PciRead := InL($CFC);
+End;
+
+Procedure PciWrite(Bus, Dev, Fn, Reg, V : LongInt);
+Begin
+  OutL($CF8, LongInt($80000000) Or (Bus Shl 16) Or (Dev Shl 11)
+      Or (Fn Shl 8) Or (Reg And $FC));
+  OutL($CFC, V);
+End;
+
+{ ---- Octets reseau ---- }
+
+Function Be16(A : LongInt) : LongInt;
+Begin
+  Be16 := (Mem[0:A] Shl 8) Or Mem[0:A + 1];
+End;
+
+Function Be32(A : LongInt) : LongInt;
+Begin
+  Be32 := (Mem[0:A] Shl 24) Or (Mem[0:A + 1] Shl 16) Or (Mem[0:A + 2] Shl 8)
+      Or Mem[0:A + 3];
+End;
+
+Procedure PutBe16(A, V : LongInt);
+Begin
+  Mem[0:A] := (V Shr 8) And $FF;
+  Mem[0:A + 1] := V And $FF;
+End;
+
+Procedure PutBe32(A, V : LongInt);
+Begin
+  Mem[0:A] := (V Shr 24) And $FF;
+  Mem[0:A + 1] := (V Shr 16) And $FF;
+  Mem[0:A + 2] := (V Shr 8) And $FF;
+  Mem[0:A + 3] := V And $FF;
+End;
+
+{ Somme de controle Internet (complement a un) sur Len octets, avec une
+  valeur initiale Init (pseudo-en-tete) ; resultat final non complemente
+  si Fold = False }
+Function NetSum(A, Len, Init : LongInt) : LongInt;
+Var Sum, I : LongInt;
+Begin
+  Sum := Init;
+  I := 0;
+  While I + 1 < Len Do
+  Begin
+    Sum := Sum + (Mem[0:A + I] Shl 8) + Mem[0:A + I + 1];
+    I := I + 2;
+  End;
+  If I < Len Then Sum := Sum + (Mem[0:A + I] Shl 8);
+  While (Sum Shr 16) <> 0 Do Sum := (Sum And $FFFF) + (Sum Shr 16);
+  NetSum := Sum;
+End;
+
+Function NetCsum(A, Len : LongInt) : LongInt;
+Begin
+  NetCsum := (Not NetSum(A, Len, 0)) And $FFFF;
+End;
+
+{ ---- Pilote RTL8139 ---- }
+
+{ Emettre une trame de Len octets (deja complete) ; 0 ou -errno }
+Function NicSend(Frame, Len : LongInt) : LongInt;
+Var Cur_, N : LongInt;
+Begin
+  NicSend := -ENODEV;
+  If Not NetPresent Then Exit;
+  If Len > 1514 Then
+  Begin
+    NicSend := -EMSGSIZE;
+    Exit;
+  End;
+  Cur_ := NicTxCur;
+  N := 0;
+  While ((InL(NicIo + $10 + Cur_ * 4) And $2000) = 0)
+      And ((InL(NicIo + $10 + Cur_ * 4) And $1FFF) <> 0) And (N < 100000) Do
+    Inc(N);
+  If Len < 60 Then
+  Begin
+    MemFill(NicTx + Cur_ * 2048, 0, 60);
+    MemCopy(NicTx + Cur_ * 2048, Frame, Len);
+    Len := 60;
+  End
+  Else MemCopy(NicTx + Cur_ * 2048, Frame, Len);
+  OutL(NicIo + $20 + Cur_ * 4, V2P(NicTx + Cur_ * 2048));
+  OutL(NicIo + $10 + Cur_ * 4, Len);
+  NicTxCur := (Cur_ + 1) And 3;
+  Inc(NetTxPkts);
+  NetTxBytes := NetTxBytes + Len;
+  NicSend := 0;
+End;
+
+Procedure NetInput(Frame, Len : LongInt); Forward;
+
+{ Traiter les trames recues (interruption ou tick) }
+Procedure NicPoll;
+Var Hdr, Status, Len, Ofs, Frame : LongInt;
+Begin
+  If Not NetPresent Then Exit;
+  While (Port[NicIo + $37] And 1) = 0 Do
+  Begin
+    Ofs := NicRxOfs;
+    Hdr := NicRx + Ofs;
+    Status := MemW[0:Hdr];
+    Len := MemW[0:Hdr + 2];
+    If ((Status And 1) = 0) Or (Len < 18) Or (Len > 1600) Then
+    Begin
+      { tampon incoherent : tout reinitialiser }
+      Inc(NetRxErr);
+      Port[NicIo + $37] := $04;           { RE=0 }
+      Port[NicIo + $37] := $0C;
+      NicRxOfs := 0;
+      OutL(NicIo + $30, V2P(NicRx));
+      PortW[NicIo + $38] := $FFF0;
+      Exit;
+    End;
+    Frame := Hdr + 4;
+    Inc(NetRxPkts);
+    NetRxBytes := NetRxBytes + Len - 4;
+    NetInput(Frame, Len - 4);
+    NicRxOfs := (Ofs + Len + 4 + 3) And Not 3;
+    NicRxOfs := NicRxOfs Mod RtlRxSize;
+    PortW[NicIo + $38] := (NicRxOfs - 16) And $FFFF;
+  End;
+End;
+
+Procedure NicIrqHandler;
+Var Isr : LongInt;
+Begin
+  If Not NetPresent Then Exit;
+  Isr := PortW[NicIo + $3E];
+  PortW[NicIo + $3E] := Isr;            { acquitter }
+  If (Isr And $FFFF) <> 0 Then NicPoll;
+End;
+
+Procedure NicInit;
+Var Dev, V, Bar, Cmd, I, N : LongInt;
+Begin
+  NetPresent := False;
+  For Dev := 0 To 31 Do
+  Begin
+    V := PciRead(0, Dev, 0, 0);
+    If V = LongInt($813910EC) Then
+    Begin
+      Bar := PciRead(0, Dev, 0, $10);
+      If (Bar And 1) = 0 Then Continue;
+      NicIo := Bar And $FFFC;
+      Cmd := PciRead(0, Dev, 0, 4);
+      PciWrite(0, Dev, 0, 4, Cmd Or 5);       { E/S + maitre du bus }
+      NicIrq := PciRead(0, Dev, 0, $3C) And $FF;
+      NicRx := AllocPages(2);                 { 16 Ko contigus }
+      NicTx := AllocPages(1);                 { 8 Ko }
+      If (NicRx = 0) Or (NicTx = 0) Then Exit;
+      MemFill(NicRx, 0, 16384);
+      MemFill(NicTx, 0, 8192);
+      Port[NicIo + $52] := 0;                 { alimentation }
+      Port[NicIo + $37] := $10;               { reinitialisation }
+      N := 0;
+      While ((Port[NicIo + $37] And $10) <> 0) And (N < 1000000) Do Inc(N);
+      For I := 0 To 5 Do NicMac[I] := Port[NicIo + I];
+      OutL(NicIo + $30, V2P(NicRx));
+      NicRxOfs := 0;
+      NicTxCur := 0;
+      PortW[NicIo + $3C] := $0005;            { ROK + TOK }
+      OutL(NicIo + $44, $0000008F);        { tout recu + WRAP }
+      OutL(NicIo + $40, $03000700);        { TCR : DMA 2048, IFG normal }
+      Port[NicIo + $37] := $0C;               { RE + TE }
+      PortW[NicIo + $38] := $FFF0;
+      NetPresent := True;
+      NicUp := True;
+      Exit;
+    End;
+  End;
+End;
+
+{ ---- ARP ---- }
+
+Function ArpFind(Ip : LongInt) : LongInt;
+Var I : LongInt;
+Begin
+  ArpFind := -1;
+  For I := 0 To MaxArp - 1 Do
+    If (ArpIp[I] = Ip) And (ArpAge[I] <> 0) Then
+    Begin
+      ArpFind := I;
+      Exit;
+    End;
+End;
+
+Procedure ArpLearn(Ip, MacAddr : LongInt);
+Var I, K : LongInt;
+Begin
+  If Ip = 0 Then Exit;
+  K := ArpFind(Ip);
+  If K < 0 Then
+  Begin
+    K := 0;
+    For I := 0 To MaxArp - 1 Do
+      If (ArpAge[I] = 0) Then
+      Begin
+        K := I;
+        Break;
+      End
+      Else If ArpAge[I] - ArpAge[K] < 0 Then K := I;
+    ArpIp[K] := Ip;
+  End;
+  MemCopy(LongInt(@ArpMac[K * 6]), MacAddr, 6);
+  ArpAge[K] := Jiffies Or 1;
+End;
+
+Procedure ArpSendRequest(Ip : LongInt);
+Var F : Array[0..59] Of Byte; A : LongInt;
+Begin
+  MemFill(LongInt(@F[0]), 0, 60);
+  A := LongInt(@F[0]);
+  MemFill(A, $FF, 6);
+  MemCopy(A + 6, LongInt(@NicMac[0]), 6);
+  PutBe16(A + 12, EtherArp);
+  PutBe16(A + 14, 1); PutBe16(A + 16, EtherIp);
+  Mem[0:A + 18] := 6; Mem[0:A + 19] := 4;
+  PutBe16(A + 20, 1);                       { requete }
+  MemCopy(A + 22, LongInt(@NicMac[0]), 6);
+  PutBe32(A + 28, NicIp);
+  PutBe32(A + 38, Ip);
+  NicSend(A, 60);
+End;
+
+Procedure ArpInput(A, Len : LongInt);
+Var Op, SpaIp : LongInt; F : Array[0..59] Of Byte; R : LongInt;
+Begin
+  If Len < 42 Then Exit;
+  Op := Be16(A + 20);
+  SpaIp := Be32(A + 28);
+  ArpLearn(SpaIp, A + 22);
+  If (Op = 1) And (Be32(A + 38) = NicIp) And (NicIp <> 0) Then
+  Begin
+    R := LongInt(@F[0]);
+    MemFill(R, 0, 60);
+    MemCopy(R, A + 6, 6);
+    MemCopy(R + 6, LongInt(@NicMac[0]), 6);
+    PutBe16(R + 12, EtherArp);
+    PutBe16(R + 14, 1); PutBe16(R + 16, EtherIp);
+    Mem[0:R + 18] := 6; Mem[0:R + 19] := 4;
+    PutBe16(R + 20, 2);                     { reponse }
+    MemCopy(R + 22, LongInt(@NicMac[0]), 6);
+    PutBe32(R + 28, NicIp);
+    MemCopy(R + 32, A + 22, 6);
+    PutBe32(R + 38, SpaIp);
+    NicSend(R, 60);
+  End;
+End;
+
+{ Adresse materielle du prochain saut vers Dst ; resolution ARP avec
+  attente si Wait (contexte d'appel systeme) ; 0 ou -errno }
+Function NetResolve(Dst : LongInt; Wait : Boolean; Mac : LongInt) : LongInt;
+Var Hop, K, T : LongInt;
+Begin
+  If ((Dst Or Not NicMask) = -1) Or (Dst = -1) Then
+  Begin
+    MemFill(Mac, $FF, 6);
+    NetResolve := 0;
+    Exit;
+  End;
+  If ((Dst Xor NicIp) And NicMask) = 0 Then Hop := Dst
+  Else If NicGw <> 0 Then Hop := NicGw
+  Else
+  Begin
+    NetResolve := -ENETUNREACH;
+    Exit;
+  End;
+  K := ArpFind(Hop);
+  If K >= 0 Then
+  Begin
+    MemCopy(Mac, LongInt(@ArpMac[K * 6]), 6);
+    NetResolve := 0;
+    Exit;
+  End;
+  ArpSendRequest(Hop);
+  If Not Wait Then
+  Begin
+    NetResolve := -EAGAIN;
+    Exit;
+  End;
+  For T := 1 To 300 Do
+  Begin
+    SleepTicks(1);
+    NicPoll;
+    K := ArpFind(Hop);
+    If K >= 0 Then
+    Begin
+      MemCopy(Mac, LongInt(@ArpMac[K * 6]), 6);
+      NetResolve := 0;
+      Exit;
+    End;
+    If (T Mod 100) = 0 Then ArpSendRequest(Hop);
+  End;
+  NetResolve := -EHOSTUNREACH_;
+End;
+
+{ ---- IPv4 ---- }
+
+{ Emettre un paquet IP (charge utile deja en Pay, Plen octets) vers Dst ;
+  Wait : attente ARP autorisee }
+Function IpOutput(Dst, Proto, Pay, Plen : LongInt; Wait : Boolean) : LongInt;
+Var F, R : LongInt; Mac : Array[0..5] Of Byte;
+Begin
+  If Not NicUp Then
+  Begin
+    IpOutput := -ENETUNREACH;
+    Exit;
+  End;
+  If Plen + 20 > NetMtu Then
+  Begin
+    IpOutput := -EMSGSIZE;
+    Exit;
+  End;
+  R := NetResolve(Dst, Wait, LongInt(@Mac[0]));
+  If R <> 0 Then
+  Begin
+    IpOutput := R;
+    Exit;
+  End;
+  F := KMalloc(14 + 20 + Plen);
+  If F = 0 Then
+  Begin
+    IpOutput := -ENOMEM;
+    Exit;
+  End;
+  MemCopy(F, LongInt(@Mac[0]), 6);
+  MemCopy(F + 6, LongInt(@NicMac[0]), 6);
+  PutBe16(F + 12, EtherIp);
+  Mem[0:F + 14] := $45; Mem[0:F + 15] := 0;
+  PutBe16(F + 16, 20 + Plen);
+  Inc(IpId);
+  PutBe16(F + 18, IpId And $FFFF);
+  PutBe16(F + 20, $4000);                   { DF }
+  Mem[0:F + 22] := 64; Mem[0:F + 23] := Proto;
+  PutBe16(F + 24, 0);
+  PutBe32(F + 26, NicIp);
+  PutBe32(F + 30, Dst);
+  PutBe16(F + 24, NetCsum(F + 14, 20));
+  MemCopy(F + 34, Pay, Plen);
+  IpOutput := NicSend(F, 34 + Plen);
+  KFree(F);
+End;
+
+{ ---- ICMP ---- }
+
+Procedure IcmpInput(Src, A, Len : LongInt; IpHdr : LongInt);
+Var R, I : LongInt; S : PSock; M : PMsg; Tot : LongInt;
+Begin
+  If Len < 8 Then Exit;
+  If NetCsum(A, Len) <> 0 Then Exit;
+  If Mem[0:A] = 8 Then
+  Begin
+    { echo : repondre }
+    R := KMalloc(Len);
+    If R = 0 Then Exit;
+    MemCopy(R, A, Len);
+    Mem[0:R] := 0;
+    PutBe16(R + 2, 0);
+    PutBe16(R + 2, NetCsum(R, Len));
+    IpOutput(Src, 1, R, Len, False);
+    KFree(R);
+    Exit;
+  End;
+  { les autres messages vont aux sockets ICMP }
+  For I := 0 To MaxSocks - 1 Do
+  Begin
+    S := @Socks[I];
+    If (S^.State <> SsFree) And (S^.Family = AF_INET)
+       And (S^.Proto = IPPROTO_ICMP) And (S^.Closed = 0) Then
+    Begin
+      If S^.Typ = SOCK_RAW Then
+      Begin
+        Tot := 20 + Len;
+        R := KMalloc(Tot);
+        If R <> 0 Then
+        Begin
+          MemCopy(R, IpHdr, 20);
+          MemCopy(R + 20, A, Len);
+          M := MsgAdd(S, R, Tot);
+          If M <> Nil Then
+          Begin
+            M^.SrcAddr := Src;
+            M^.SrcPort := 0;
+          End;
+          KFree(R);
+        End;
+      End
+      Else If (Mem[0:A] = 0) And (S^.IcmpId = Be16(A + 4)) Then
+      Begin
+        M := MsgAdd(S, A, Len);
+        If M <> Nil Then
+        Begin
+          M^.SrcAddr := Src;
+          M^.SrcPort := 0;
+        End;
+      End;
+    End;
+  End;
+End;
+
+{ ---- UDP ---- }
+
+Procedure UdpInput(Src, Dst, A, Len : LongInt);
+Var Sp, Dp, UL, Sum : LongInt; S : PSock; M : PMsg; Pse : Array[0..11] Of Byte;
+Begin
+  If Len < 8 Then Exit;
+  Sp := Be16(A); Dp := Be16(A + 2); UL := Be16(A + 4);
+  If (UL < 8) Or (UL > Len) Then Exit;
+  If Be16(A + 6) <> 0 Then
+  Begin
+    PutBe32(LongInt(@Pse[0]), Src); PutBe32(LongInt(@Pse[4]), Dst);
+    Mem[0:LongInt(@Pse[8])] := 0; Mem[0:LongInt(@Pse[9])] := 17;
+    PutBe16(LongInt(@Pse[10]), UL);
+    Sum := NetSum(A, UL, NetSum(LongInt(@Pse[0]), 12, 0));
+    If Sum <> $FFFF Then Exit;
+  End;
+  S := InFind(SOCK_DGRAM, Dp, 0);
+  If (S = Nil) Or (S^.Proto <> IPPROTO_UDP) Then Exit;
+  M := MsgAdd(S, A + 8, UL - 8);
+  If M <> Nil Then
+  Begin
+    M^.SrcAddr := Src;
+    M^.SrcPort := Sp;
+  End;
+End;
+
+{ Envoyer un datagramme UDP vers un hote distant ; Wait : contexte appel }
+Function UdpOutput(Sp, Dst, Dp, Buf, Len : LongInt) : LongInt;
+Var P, Sum, R : LongInt; Pse : Array[0..11] Of Byte;
+Begin
+  If Len > NetMtu - 28 Then
+  Begin
+    UdpOutput := -EMSGSIZE;
+    Exit;
+  End;
+  P := KMalloc(8 + Len);
+  If P = 0 Then
+  Begin
+    UdpOutput := -ENOMEM;
+    Exit;
+  End;
+  PutBe16(P, Sp); PutBe16(P + 2, Dp); PutBe16(P + 4, 8 + Len);
+  PutBe16(P + 6, 0);
+  MemCopy(P + 8, Buf, Len);
+  PutBe32(LongInt(@Pse[0]), NicIp); PutBe32(LongInt(@Pse[4]), Dst);
+  Pse[8] := 0; Pse[9] := 17;
+  PutBe16(LongInt(@Pse[10]), 8 + Len);
+  Sum := (Not NetSum(P, 8 + Len, NetSum(LongInt(@Pse[0]), 12, 0))) And $FFFF;
+  If Sum = 0 Then Sum := $FFFF;
+  PutBe16(P + 6, Sum);
+  R := IpOutput(Dst, 17, P, 8 + Len, True);
+  KFree(P);
+  UdpOutput := R;
+End;
+
+Procedure TcpInput(Src, Dst, A, Len : LongInt); Forward;
+
+{ ---- Entree des trames ---- }
+
+Procedure NetInput(Frame, Len : LongInt);
+Var Et, Ihl, Tot, Proto, Src, Dst, Pay, Plen : LongInt;
+Begin
+  If Len < 14 Then Exit;
+  Et := Be16(Frame + 12);
+  If Et = EtherArp Then
+  Begin
+    ArpInput(Frame, Len);
+    Exit;
+  End;
+  If Et <> EtherIp Then Exit;
+  If Len < 34 Then Exit;
+  If (Mem[0:Frame + 14] Shr 4) <> 4 Then Exit;
+  Ihl := (Mem[0:Frame + 14] And 15) * 4;
+  Tot := Be16(Frame + 16);
+  If (Ihl < 20) Or (Tot < Ihl) Or (Tot > Len - 14) Then Exit;
+  If NetCsum(Frame + 14, Ihl) <> 0 Then Exit;
+  If (Be16(Frame + 20) And $3FFF) <> 0 Then Exit;       { fragments : non }
+  Proto := Mem[0:Frame + 23];
+  Src := Be32(Frame + 26);
+  Dst := Be32(Frame + 30);
+  If (Dst <> NicIp) And (Dst <> -1) And ((Dst Or Not NicMask) <> -1)
+     And (NicIp <> 0) Then Exit;
+  ArpLearn(Src, Frame + 6);
+  Pay := Frame + 14 + Ihl;
+  Plen := Tot - Ihl;
+  Case Proto Of
+    1 : IcmpInput(Src, Pay, Plen, Frame + 14);
+    6 : TcpInput(Src, Dst, Pay, Plen);
+    17 : UdpInput(Src, Dst, Pay, Plen);
+  End;
+End;
+
+{ ---- TCP (connexions reelles vers le reseau) ---- }
+
+Const
+  TcpMss = 1400;
+  TcpRto = 100;                  { 1 s en ticks }
+
+{ Envoyer un segment TCP de S : Flags, numero de sequence, donnees }
+Function TcpSeg(S : PSock; Flags, Seq, Data, Len : LongInt;
+    Wait : Boolean) : LongInt;
+Var P, Hl, Sum, Win : LongInt; Pse : Array[0..11] Of Byte; R : LongInt;
+Begin
+  Hl := 20;
+  If (Flags And TF_SYN) <> 0 Then Hl := 24;
+  P := KMalloc(Hl + Len);
+  If P = 0 Then
+  Begin
+    TcpSeg := -ENOMEM;
+    Exit;
+  End;
+  MemFill(P, 0, Hl);
+  PutBe16(P, S^.LPort); PutBe16(P + 2, S^.RPort);
+  PutBe32(P + 4, Seq);
+  If (Flags And TF_ACK) <> 0 Then PutBe32(P + 8, S^.RcvNxt);
+  Mem[0:P + 12] := (Hl Div 4) Shl 4;
+  Mem[0:P + 13] := Flags;
+  Win := SockBufSz - S^.BLen;
+  If Win < 0 Then Win := 0;
+  PutBe16(P + 14, Win);
+  If Hl = 24 Then
+  Begin
+    Mem[0:P + 20] := 2; Mem[0:P + 21] := 4;
+    PutBe16(P + 22, TcpMss);
+  End;
+  If Len > 0 Then MemCopy(P + Hl, Data, Len);
+  PutBe32(LongInt(@Pse[0]), NicIp); PutBe32(LongInt(@Pse[4]), S^.RAddr);
+  Pse[8] := 0; Pse[9] := 6;
+  PutBe16(LongInt(@Pse[10]), Hl + Len);
+  Sum := (Not NetSum(P, Hl + Len, NetSum(LongInt(@Pse[0]), 12, 0))) And $FFFF;
+  PutBe16(P + 16, Sum);
+  R := IpOutput(S^.RAddr, 6, P, Hl + Len, Wait);
+  KFree(P);
+  TcpSeg := R;
+End;
+
+Procedure TcpWake(S : PSock);
+Begin
+  WakeUp(LongInt(S));
+End;
+
+{ Reponse RST a un segment sans connexion }
+Procedure TcpReset(Src, Dst, A, Len : LongInt);
+Var P, Sum, Fl, Seq, Ack : LongInt; Pse : Array[0..11] Of Byte;
+Begin
+  Fl := Mem[0:A + 13];
+  If (Fl And TF_RST) <> 0 Then Exit;
+  P := KMalloc(20);
+  If P = 0 Then Exit;
+  MemFill(P, 0, 20);
+  PutBe16(P, Be16(A + 2)); PutBe16(P + 2, Be16(A));
+  If (Fl And TF_ACK) <> 0 Then
+  Begin
+    Seq := Be32(A + 8);
+    PutBe32(P + 4, Seq);
+    Mem[0:P + 13] := TF_RST;
+  End
+  Else
+  Begin
+    Ack := Be32(A + 4) + (Len - ((Mem[0:A + 12] Shr 4) * 4));
+    If (Fl And TF_SYN) <> 0 Then Inc(Ack);
+    PutBe32(P + 8, Ack);
+    Mem[0:P + 13] := TF_RST Or TF_ACK;
+  End;
+  Mem[0:P + 12] := $50;
+  PutBe32(LongInt(@Pse[0]), Dst); PutBe32(LongInt(@Pse[4]), Src);
+  Pse[8] := 0; Pse[9] := 6; PutBe16(LongInt(@Pse[10]), 20);
+  Sum := (Not NetSum(P, 20, NetSum(LongInt(@Pse[0]), 12, 0))) And $FFFF;
+  PutBe16(P + 16, Sum);
+  IpOutput(Src, 6, P, 20, False);
+  KFree(P);
+End;
+
+Function TcpFind(Src, Dst, Sp, Dp : LongInt) : PSock;
+Var I : LongInt; S : PSock;
+Begin
+  TcpFind := Nil;
+  For I := 0 To MaxSocks - 1 Do
+  Begin
+    S := @Socks[I];
+    If (S^.State <> SsFree) And (S^.Net <> 0) And (S^.TState <> TcpClosed)
+       And (S^.LPort = Dp) And (S^.RPort = Sp) And (S^.RAddr = Src) Then
+    Begin
+      TcpFind := S;
+      Exit;
+    End;
+  End;
+End;
+
+{ Envoyer les donnees (et le FIN) que la fenetre permet }
+Procedure TcpOutput(S : PSock);
+Var Out, Unsent, Win, N, Ofs, Tail, First, Fl : LongInt; Tmp : LongInt;
+Begin
+  If (S^.TState <> TcpEstab) And (S^.TState <> TcpCloseWait)
+     And (S^.TState <> TcpFinWait1) And (S^.TState <> TcpLastAck)
+     And (S^.TState <> TcpClosing) Then Exit;
+  While True Do
+  Begin
+    Out := S^.SndNxt - S^.SndUna;
+    If S^.FinSent <> 0 Then Dec(Out);
+    Unsent := S^.SLen - Out;
+    If S^.FinSent <> 0 Then Exit;
+    Win := S^.SndWnd - Out;
+    If Win < 0 Then Win := 0;
+    If (Unsent > 0) And (Win = 0) And (Out = 0) Then Win := 1;   { sonde }
+    If (Unsent <= 0) Or (Win <= 0) Then Break;
+    N := Unsent;
+    If N > Win Then N := Win;
+    If N > TcpMss Then N := TcpMss;
+    Ofs := (S^.SHead + Out) Mod SockBufSz;
+    First := SockBufSz - Ofs;
+    If N <= First Then
+      TcpSeg(S, TF_ACK Or TF_PSH, S^.SndNxt, S^.SBuf + Ofs, N, False)
+    Else
+    Begin
+      Tmp := KMalloc(N);
+      If Tmp = 0 Then Break;
+      MemCopy(Tmp, S^.SBuf + Ofs, First);
+      MemCopy(Tmp + First, S^.SBuf, N - First);
+      TcpSeg(S, TF_ACK Or TF_PSH, S^.SndNxt, Tmp, N, False);
+      KFree(Tmp);
+    End;
+    S^.SndNxt := S^.SndNxt + N;
+    If S^.RtoAt = 0 Then S^.RtoAt := Jiffies + (TcpRto Shl S^.Retries);
+  End;
+  Out := S^.SndNxt - S^.SndUna;
+  If (S^.FinQueued <> 0) And (S^.FinSent = 0) And (S^.SLen = Out) Then
+  Begin
+    TcpSeg(S, TF_FIN Or TF_ACK, S^.SndNxt, 0, 0, False);
+    S^.FinSent := 1;
+    Inc(S^.SndNxt);
+    If S^.RtoAt = 0 Then S^.RtoAt := Jiffies + (TcpRto Shl S^.Retries);
+    If S^.TState = TcpEstab Then S^.TState := TcpFinWait1
+    Else If S^.TState = TcpCloseWait Then S^.TState := TcpLastAck;
+  End;
+  Fl := 0;
+End;
+
+Procedure TcpAckNow(S : PSock);
+Begin
+  TcpSeg(S, TF_ACK, S^.SndNxt, 0, 0, False);
+End;
+
+{ Libere une socket TCP reseau terminee (fermee par l'application) }
+Procedure TcpFreeIfDone(S : PSock);
+Begin
+  If (S^.Closed <> 0) And (S^.TState = TcpClosed) And (S^.Net <> 0) Then
+  Begin
+    If S^.SBuf <> 0 Then FreePages(S^.SBuf, OrderFor(SockBufSz));
+    S^.SBuf := 0;
+    SockRelease(S);
+  End;
+End;
+
+Procedure TcpInput(Src, Dst, A, Len : LongInt);
+Var Sp, Dp, Seq, Ack, Fl, Win, Hl, Dl, Data, I, N, Free, Acked, Tail : LongInt;
+    S, L, X : PSock; Pse : Array[0..11] Of Byte; Sum : LongInt;
+Begin
+  If Len < 20 Then Exit;
+  PutBe32(LongInt(@Pse[0]), Src); PutBe32(LongInt(@Pse[4]), Dst);
+  Pse[8] := 0; Pse[9] := 6; PutBe16(LongInt(@Pse[10]), Len);
+  If NetSum(A, Len, NetSum(LongInt(@Pse[0]), 12, 0)) <> $FFFF Then Exit;
+  Sp := Be16(A); Dp := Be16(A + 2);
+  Seq := Be32(A + 4); Ack := Be32(A + 8);
+  Hl := (Mem[0:A + 12] Shr 4) * 4;
+  Fl := Mem[0:A + 13];
+  Win := Be16(A + 14);
+  If (Hl < 20) Or (Hl > Len) Then Exit;
+  Dl := Len - Hl;
+  Data := A + Hl;
+  S := TcpFind(Src, Dst, Sp, Dp);
+  If S = Nil Then
+  Begin
+    { nouvelle connexion vers un port en ecoute ? }
+    If ((Fl And TF_SYN) <> 0) And ((Fl And (TF_ACK Or TF_RST)) = 0) Then
+    Begin
+      L := InFind(SOCK_STREAM, Dp, 1);
+      If (L <> Nil) And (L^.NBacklog < L^.MaxBacklog) Then
+      Begin
+        X := SockNew(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        If X <> Nil Then
+        Begin
+          If SockAllocBuf(X) Then X^.SBuf := AllocPages(OrderFor(SockBufSz));
+          If X^.SBuf = 0 Then
+          Begin
+            SockRelease(X);
+            Exit;
+          End;
+          X^.Net := 1; X^.Bound := 1;
+          X^.LAddr := Dst; X^.LPort := Dp; X^.RAddr := Src; X^.RPort := Sp;
+          X^.Parent := L;
+          X^.TState := TcpSynRcvd;
+          X^.RcvNxt := Seq + 1;
+          X^.Iss := RandNext And $7FFFFFFF;
+          X^.SndUna := X^.Iss; X^.SndNxt := X^.Iss + 1;
+          X^.SndWnd := Win;
+          X^.CPid := L^.CPid; X^.CUid := L^.CUid; X^.CGid := L^.CGid;
+          TcpSeg(X, TF_SYN Or TF_ACK, X^.Iss, 0, 0, False);
+          X^.RtoAt := Jiffies + TcpRto;
+        End;
+        Exit;
+      End;
+    End;
+    TcpReset(Src, Dst, A, Len);
+    Exit;
+  End;
+  If (Fl And TF_RST) <> 0 Then
+  Begin
+    If S^.TState = TcpSynSent Then S^.Err := ECONNREFUSED
+    Else If S^.TState <> TcpTimeWait Then S^.Err := ECONNRESET;
+    S^.TState := TcpClosed;
+    S^.PeerGone := 1;
+    TcpWake(S);
+    TcpFreeIfDone(S);
+    Exit;
+  End;
+  If S^.TState = TcpSynSent Then
+  Begin
+    If ((Fl And (TF_SYN Or TF_ACK)) = (TF_SYN Or TF_ACK)) And (Ack = S^.Iss + 1)
+       Then
+    Begin
+      S^.RcvNxt := Seq + 1;
+      S^.SndUna := Ack;
+      S^.SndWnd := Win;
+      S^.TState := TcpEstab;
+      S^.State := SsConn;
+      S^.RtoAt := 0; S^.Retries := 0;
+      TcpAckNow(S);
+      TcpWake(S);
+    End;
+    Exit;
+  End;
+  If S^.TState = TcpSynRcvd Then
+  Begin
+    If ((Fl And TF_ACK) <> 0) And (Ack = S^.Iss + 1) Then
+    Begin
+      S^.TState := TcpEstab;
+      S^.State := SsConn;
+      S^.SndUna := Ack;
+      S^.SndWnd := Win;
+      S^.RtoAt := 0; S^.Retries := 0;
+      L := S^.Parent;
+      If (L <> Nil) And (L^.State = SsListen) And (L^.Closed = 0)
+         And (L^.NBacklog < 16) Then
+      Begin
+        L^.Backlog[L^.NBacklog] := S;
+        Inc(L^.NBacklog);
+        WakeUp(LongInt(L));
+      End
+      Else
+      Begin
+        TcpSeg(S, TF_RST, S^.SndNxt, 0, 0, False);
+        S^.TState := TcpClosed; S^.Closed := 1;
+        TcpFreeIfDone(S);
+        Exit;
+      End;
+    End
+    Else If (Fl And TF_SYN) <> 0 Then
+      TcpSeg(S, TF_SYN Or TF_ACK, S^.Iss, 0, 0, False);
+    If S^.TState <> TcpEstab Then Exit;
+  End;
+  { ACK : faire avancer SndUna }
+  If ((Fl And TF_ACK) <> 0) And (Ack - S^.SndUna > 0) And (S^.SndNxt - Ack >= 0)
+     Then
+  Begin
+    Acked := Ack - S^.SndUna;
+    If (S^.FinSent <> 0) And (Ack = S^.SndNxt) Then
+    Begin
+      Dec(Acked);
+      S^.FinAcked := 1;
+    End;
+    If Acked > S^.SLen Then Acked := S^.SLen;
+    S^.SHead := (S^.SHead + Acked) Mod SockBufSz;
+    Dec(S^.SLen, Acked);
+    S^.SndUna := Ack;
+    S^.Retries := 0;
+    If S^.SndNxt = S^.SndUna Then S^.RtoAt := 0
+    Else S^.RtoAt := Jiffies + TcpRto;
+    TcpWake(S);
+  End;
+  If (Fl And TF_ACK) <> 0 Then S^.SndWnd := Win;
+  { etats de fermeture }
+  If S^.FinAcked <> 0 Then
+  Begin
+    If S^.TState = TcpFinWait1 Then S^.TState := TcpFinWait2
+    Else If S^.TState = TcpClosing Then
+    Begin
+      S^.TState := TcpTimeWait; S^.RtoAt := Jiffies + 200;
+    End
+    Else If S^.TState = TcpLastAck Then
+    Begin
+      S^.TState := TcpClosed;
+      S^.PeerGone := 1;
+      TcpWake(S);
+      TcpFreeIfDone(S);
+      Exit;
+    End;
+  End;
+  { donnees recues dans l'ordre }
+  If (Dl > 0) And (Seq = S^.RcvNxt) Then
+  Begin
+    If S^.Closed <> 0 Then
+    Begin
+      S^.RcvNxt := S^.RcvNxt + Dl;       { socket fermee : tout jeter }
+      TcpAckNow(S);
+    End
+    Else
+    Begin
+      Free := SockBufSz - S^.BLen;
+      N := Dl;
+      If N > Free Then N := Free;
+      If N > 0 Then
+      Begin
+        Tail := (S^.BHead + S^.BLen) Mod SockBufSz;
+        I := SockBufSz - Tail;
+        If I > N Then I := N;
+        MemCopy(S^.Buf + Tail, Data, I);
+        If N > I Then MemCopy(S^.Buf, Data + I, N - I);
+        Inc(S^.BLen, N);
+        S^.RcvNxt := S^.RcvNxt + N;
+        TcpWake(S);
+      End;
+      TcpAckNow(S);
+    End;
+  End
+  Else If (Dl > 0) Then TcpAckNow(S);       { hors sequence : ACK en double }
+  If ((Fl And TF_FIN) <> 0) And (Seq + Dl = S^.RcvNxt) Then
+  Begin
+    Inc(S^.RcvNxt);
+    S^.PeerWrDone := 1;
+    TcpAckNow(S);
+    If S^.TState = TcpEstab Then S^.TState := TcpCloseWait
+    Else If S^.TState = TcpFinWait1 Then S^.TState := TcpClosing
+    Else If S^.TState = TcpFinWait2 Then
+    Begin
+      S^.TState := TcpTimeWait; S^.RtoAt := Jiffies + 200;
+    End;
+    TcpWake(S);
+  End;
+  TcpOutput(S);
+End;
+
+{ Temporisations TCP : retransmission, TIME_WAIT (appele a chaque tick) }
+Procedure TcpTimer;
+Var I : LongInt; S : PSock;
+Begin
+  For I := 0 To MaxSocks - 1 Do
+  Begin
+    S := @Socks[I];
+    If (S^.State <> SsFree) And (S^.Net <> 0) And (S^.RtoAt <> 0)
+       And (Jiffies - S^.RtoAt >= 0) Then
+    Begin
+      Inc(S^.Retries);
+      If S^.TState = TcpTimeWait Then
+      Begin
+        S^.TState := TcpClosed;
+        S^.RtoAt := 0;
+        TcpFreeIfDone(S);
+      End
+      Else If S^.Retries > 6 Then
+      Begin
+        S^.Err := ETIMEDOUT;
+        S^.TState := TcpClosed;
+        S^.PeerGone := 1;
+        S^.RtoAt := 0;
+        TcpWake(S);
+        TcpFreeIfDone(S);
+      End
+      Else
+      Begin
+        S^.RtoAt := Jiffies + (TcpRto Shl S^.Retries);
+        If S^.TState = TcpSynSent Then
+          TcpSeg(S, TF_SYN, S^.Iss, 0, 0, False)
+        Else If S^.TState = TcpSynRcvd Then
+          TcpSeg(S, TF_SYN Or TF_ACK, S^.Iss, 0, 0, False)
+        Else
+        Begin
+          { go-back-N : tout renvoyer depuis SndUna }
+          S^.SndNxt := S^.SndUna;
+          If S^.FinSent <> 0 Then S^.FinSent := 0;
+          TcpOutput(S);
+        End;
+      End;
+    End;
+  End;
+End;
+
+{ ---- Fonctions appelees par la couche des sockets ---- }
+
+{ Demarrer une connexion TCP vers S^.RAddr:S^.RPort (appel systeme) }
+Function TcpConnectStart(S : PSock) : LongInt;
+Var R : LongInt;
+Begin
+  TcpConnectStart := -ENETUNREACH;
+  If (Not NicUp) Or (NicIp = 0) Then Exit;
+  S^.LAddr := NicIp;
+  If S^.Bound = 0 Then
+  Begin
+    S^.LPort := AutoPort(SOCK_STREAM);
+    S^.Bound := 1;
+  End;
+  If Not SockAllocBuf(S) Then
+  Begin
+    TcpConnectStart := -ENOMEM;
+    Exit;
+  End;
+  S^.SBuf := AllocPages(OrderFor(SockBufSz));
+  If S^.SBuf = 0 Then
+  Begin
+    TcpConnectStart := -ENOMEM;
+    Exit;
+  End;
+  S^.Net := 1;
+  S^.Iss := RandNext And $7FFFFFFF;
+  S^.SndUna := S^.Iss; S^.SndNxt := S^.Iss + 1;
+  S^.TState := TcpSynSent;
+  S^.SndWnd := 1024;
+  S^.RtoAt := Jiffies + TcpRto;
+  S^.Err := 0;
+  R := TcpSeg(S, TF_SYN, S^.Iss, 0, 0, True);
+  If R <> 0 Then
+  Begin
+    S^.TState := TcpClosed;
+    S^.RtoAt := 0;
+    TcpConnectStart := R;
+    Exit;
+  End;
+  TcpConnectStart := 0;
+End;
+
+{ Fermeture d'une socket TCP reseau par l'application }
+Procedure TcpClose(S : PSock);
+Var I, N : LongInt; X : PSock;
+Begin
+  S^.Closed := 1;
+  If S^.State = SsListen Then
+  Begin
+    { connexions en cours d'etablissement : abandonnees }
+    For I := 0 To MaxSocks - 1 Do
+    Begin
+      X := @Socks[I];
+      If (X^.State <> SsFree) And (X^.Parent = S) And (X^.TState = TcpSynRcvd)
+         Then
+      Begin
+        X^.TState := TcpClosed; X^.Closed := 1;
+        TcpFreeIfDone(X);
+      End;
+    End;
+    Exit;
+  End;
+  Case S^.TState Of
+    TcpEstab, TcpCloseWait :
+      Begin
+        S^.FinQueued := 1;
+        TcpOutput(S);
+      End;
+    TcpSynSent, TcpSynRcvd, TcpListen :
+      Begin
+        S^.TState := TcpClosed;
+        S^.RtoAt := 0;
+      End;
+  End;
+  N := 0;
+  TcpFreeIfDone(S);
+End;
+
+Procedure TcpShutWr(S : PSock);
+Begin
+  S^.FinQueued := 1;
+  TcpOutput(S);
+End;
+
+{ Ecriture dans le tampon d'emission d'une socket TCP reseau }
+Function NetStreamWrite(S : PSock; Buf, Cnt, Flags : LongInt) : LongInt;
+Var Done, N, Tail, First : LongInt;
+Begin
+  If (S^.TState <> TcpEstab) And (S^.TState <> TcpCloseWait) Then
+  Begin
+    If S^.Err <> 0 Then
+    Begin
+      NetStreamWrite := -S^.Err;
+      S^.Err := 0;
+    End
+    Else If S^.TState = TcpSynSent Then NetStreamWrite := -ENOTCONN
+    Else
+    Begin
+      If (Flags And MSG_NOSIGNAL) = 0 Then SendSig(Cur, SIGPIPE);
+      NetStreamWrite := -EPIPE;
+    End;
+    Exit;
+  End;
+  Done := 0;
+  While Done < Cnt Do
+  Begin
+    If (S^.PeerGone <> 0) Or (S^.ShutWr <> 0) Or (S^.FinQueued <> 0) Then
+    Begin
+      If (Flags And MSG_NOSIGNAL) = 0 Then SendSig(Cur, SIGPIPE);
+      If Done > 0 Then NetStreamWrite := Done Else NetStreamWrite := -EPIPE;
+      Exit;
+    End;
+    N := SockBufSz - S^.SLen;
+    If N > Cnt - Done Then N := Cnt - Done;
+    If N <= 0 Then
+    Begin
+      If ((S^.Flags Or Flags) And (O_NONBLOCK Or MSG_DONTWAIT)) <> 0 Then
+      Begin
+        If Done > 0 Then NetStreamWrite := Done Else NetStreamWrite := -EAGAIN;
+        Exit;
+      End;
+      If SleepOn(LongInt(S), 0, True) = WakeSignal Then
+      Begin
+        If Done > 0 Then NetStreamWrite := Done
+        Else NetStreamWrite := -ERESTARTSYS;
+        Exit;
+      End;
+    End
+    Else
+    Begin
+      Tail := (S^.SHead + S^.SLen) Mod SockBufSz;
+      First := SockBufSz - Tail;
+      If First > N Then First := N;
+      MemCopy(S^.SBuf + Tail, Buf + Done, First);
+      If N > First Then MemCopy(S^.SBuf, Buf + Done + First, N - First);
+      Inc(S^.SLen, N);
+      Done := Done + N;
+      TcpOutput(S);
+    End;
+  End;
+  NetStreamWrite := Done;
+End;
+
+{ Echo ICMP vers un hote distant (sockets ICMP) }
+Function NetIcmpSend(S : PSock; Buf, Cnt, Dst : LongInt) : LongInt;
+Var P : LongInt; R : LongInt;
+Begin
+  If Cnt < 8 Then
+  Begin
+    NetIcmpSend := -EINVAL;
+    Exit;
+  End;
+  P := KMalloc(Cnt);
+  If P = 0 Then
+  Begin
+    NetIcmpSend := -ENOMEM;
+    Exit;
+  End;
+  MemCopy(P, Buf, Cnt);
+  S^.IcmpId := Be16(P + 4);
+  PutBe16(P + 2, 0);
+  PutBe16(P + 2, NetCsum(P, Cnt));
+  R := IpOutput(Dst, 1, P, Cnt, True);
+  KFree(P);
+  If R = 0 Then NetIcmpSend := Cnt Else NetIcmpSend := R;
+End;
+
+{ ioctl d'interfaces (SIOCGIFxxx, SIOCSIFxxx, routes) des sockets }
+
+{ Numero d'interface d'apres le nom dans ifreq : 1 lo, 2 eth0, 0 inconnue }
+Function IfIndex(Req : LongInt) : LongInt;
+Begin
+  IfIndex := 0;
+  If (Mem[0:Req] = 108) And (Mem[0:Req + 1] = 111) And (Mem[0:Req + 2] = 0)
+      Then IfIndex := 1
+  Else If NetPresent And (Mem[0:Req] = 101) And (Mem[0:Req + 1] = 116)
+      And (Mem[0:Req + 2] = 104) And (Mem[0:Req + 3] = 48)
+      And (Mem[0:Req + 4] = 0) Then IfIndex := 2;
+End;
+
+Procedure PutIfAddr(Req, Addr : LongInt);
+Begin
+  MemFill(Req + 16, 0, 24);
+  MemW[0:Req + 16] := AF_INET;
+  PutBe32(Req + 20, Addr);
+End;
+
+Function NetIoctl(Cmd, Arg : LongInt) : LongInt;
+Var Ix, N, Buf, I, Len : LongInt;
+Begin
+  NetIoctl := -ENOTTY;
+  Case Cmd Of
+    $8912 :                                      { SIOCGIFCONF }
+      Begin
+        If Not EnsureUser(Arg, 8, True) Then
+        Begin
+          NetIoctl := -EFAULT;
+          Exit;
+        End;
+        Buf := MemL[0:Arg + 4];
+        Len := MemL[0:Arg];
+        N := 0;
+        If Not EnsureUser(Buf, Len, True) Then
+        Begin
+          NetIoctl := -EFAULT;
+          Exit;
+        End;
+        If Len >= 40 Then
+        Begin
+          MemFill(Buf, 0, 40);
+          Mem[0:Buf] := 108; Mem[0:Buf + 1] := 111;
+          PutIfAddr(Buf, $7F000001);
+          N := 1;
+        End;
+        If NetPresent And (Len >= 80) Then
+        Begin
+          MemFill(Buf + 40, 0, 40);
+          Mem[0:Buf + 40] := 101; Mem[0:Buf + 41] := 116;
+          Mem[0:Buf + 42] := 104; Mem[0:Buf + 43] := 48;
+          PutIfAddr(Buf + 40, NicIp);
+          N := 2;
+        End;
+        MemL[0:Arg] := N * 40;
+        NetIoctl := 0;
+      End;
+    $890B, $890C :                               { SIOCADDRT, SIOCDELRT }
+      Begin
+        If Cur^.Euid <> 0 Then
+        Begin
+          NetIoctl := -EPERM;
+          Exit;
+        End;
+        If Not EnsureUser(Arg, 56, False) Then
+        Begin
+          NetIoctl := -EFAULT;
+          Exit;
+        End;
+        If Cmd = $890C Then
+        Begin
+          NicGw := 0;
+          NetIoctl := 0;
+        End
+        Else If (Be32(Arg + 8) = 0) And ((MemW[0:Arg + 52] And 2) <> 0) Then
+        Begin
+          NicGw := Be32(Arg + 24);
+          NetIoctl := 0;
+        End
+        Else NetIoctl := 0;
+      End;
+    $8910, $8913, $8914, $8915, $8916, $8919, $891B, $891C, $8921, $8922,
+    $8927, $8933, $891D, $8942, $8918, $8917, $8970, $8971 :
+      Begin
+        If Not EnsureUser(Arg, 40, True) Then
+        Begin
+          NetIoctl := -EFAULT;
+          Exit;
+        End;
+        If Cmd = $8910 Then                      { SIOCGIFNAME }
+        Begin
+          Ix := MemL[0:Arg + 16];
+          If Ix = 1 Then
+          Begin
+            MemFill(Arg, 0, 16);
+            Mem[0:Arg] := 108; Mem[0:Arg + 1] := 111;
+            NetIoctl := 0;
+          End
+          Else If (Ix = 2) And NetPresent Then
+          Begin
+            MemFill(Arg, 0, 16);
+            Mem[0:Arg] := 101; Mem[0:Arg + 1] := 116;
+            Mem[0:Arg + 2] := 104; Mem[0:Arg + 3] := 48;
+            NetIoctl := 0;
+          End
+          Else NetIoctl := -ENODEV;
+          Exit;
+        End;
+        Ix := IfIndex(Arg);
+        If Ix = 0 Then
+        Begin
+          NetIoctl := -ENODEV;
+          Exit;
+        End;
+        NetIoctl := 0;
+        Case Cmd Of
+          $8913 :
+            Begin
+              If Ix = 1 Then MemW[0:Arg + 16] := $49
+              Else If NicUp Then MemW[0:Arg + 16] := $1043
+              Else MemW[0:Arg + 16] := $1002;
+            End;
+          $8914 :
+            Begin
+              If Cur^.Euid <> 0 Then NetIoctl := -EPERM
+              Else If Ix = 2 Then NicUp := (MemW[0:Arg + 16] And 1) <> 0;
+            End;
+          $8915 : If Ix = 1 Then PutIfAddr(Arg, $7F000001)
+                  Else PutIfAddr(Arg, NicIp);
+          $8916 :
+            Begin
+              If Cur^.Euid <> 0 Then NetIoctl := -EPERM
+              Else If Ix = 2 Then NicIp := Be32(Arg + 20);
+            End;
+          $8919 : If Ix = 1 Then PutIfAddr(Arg, 0)
+                  Else PutIfAddr(Arg, NicIp Or Not NicMask);
+          $891B : If Ix = 1 Then PutIfAddr(Arg, LongInt($FF000000))
+                  Else PutIfAddr(Arg, NicMask);
+          $891C :
+            Begin
+              If Cur^.Euid <> 0 Then NetIoctl := -EPERM
+              Else If Ix = 2 Then NicMask := Be32(Arg + 20);
+            End;
+          $8921 : If Ix = 1 Then MemL[0:Arg + 16] := 65536
+                  Else MemL[0:Arg + 16] := NetMtu;
+          $8922, $8917, $8971 : ;
+          $891D : MemL[0:Arg + 16] := 0;
+          $8942 : MemL[0:Arg + 16] := 1000;
+          $8918 : PutIfAddr(Arg, 0);
+          $8970 : MemFill(Arg + 16, 0, 24);
+          $8927 :
+            Begin
+              MemFill(Arg + 16, 0, 24);
+              If Ix = 2 Then
+              Begin
+                MemW[0:Arg + 16] := 1;
+                For I := 0 To 5 Do Mem[0:Arg + 18 + I] := NicMac[I];
+              End
+              Else MemW[0:Arg + 16] := 772;
+            End;
+          $8933 : MemL[0:Arg + 16] := Ix;
+        End;
+      End;
+  End;
+End;
+
+{ Appele a chaque tick : reception de secours et temporisations }
+Procedure NetTick;
+Begin
+  If Not NetPresent Then Exit;
+  NicPoll;
+  TcpTimer;
+End;
+
+Procedure NetInit;
+Var S : String; I, V, K : LongInt;
+Begin
+  NicInit;
+  If Not NetPresent Then Exit;
+  NicIp := $0A00020F;                 { 10.0.2.15 }
+  NicMask := LongInt($FFFFFF00);
+  NicGw := $0A000202;                 { 10.0.2.2 }
+  S := CmdGet('ip');
+  If S <> '' Then
+  Begin
+    { ip=a.b.c.d[:passerelle[:masque]] }
+    V := 0; K := 0;
+    For I := 1 To Length(S) + 1 Do
+      If (I > Length(S)) Or (S[I] = '.') Or (S[I] = ':') Then
+      Begin
+        If K < 4 Then NicIp := (NicIp And Not ($FF Shl ((3 - K) * 8)))
+            Or (V Shl ((3 - K) * 8));
+        Inc(K); V := 0;
+        If (I <= Length(S)) And (S[I] = ':') Then Break;
+      End
+      Else If (S[I] >= '0') And (S[I] <= '9') Then V := V * 10 + Ord(S[I]) - 48;
+  End;
+  IrqEnable(NicIrq);
+  KLog('reseau : RTL8139 e/s ' + HexStr(NicIo, 4) + ' irq ' + IntStr(NicIrq)
+      + ' mac ' + HexStr(NicMac[0], 2) + ':' + HexStr(NicMac[1], 2) + ':'
+      + HexStr(NicMac[2], 2) + ':' + HexStr(NicMac[3], 2) + ':'
+      + HexStr(NicMac[4], 2) + ':' + HexStr(NicMac[5], 2));
+End;
+
+{ ==================================================================== }
+{ Partie 25 - Framebuffer (carte Bochs/QEMU "std VGA", /dev/fb0)       }
+{ ==================================================================== }
+{ (placee avant la partie 23) }
+
+{ Active avec fb=LxH sur la ligne de commande (ex. fb=1024x768) : le mode
+  graphique 32 bits est programme par les registres VBE de la carte Bochs
+  (ports 1CEh/1CFh), la memoire video (BAR 0 du peripherique PCI 1234:1111)
+  est mappee dans le noyau en F8000000h. /dev/fb0 (29:0) : read, write,
+  lseek et ioctl FBIOGET_FSCREENINFO/VSCREENINFO ; pas de mmap. La console
+  texte VGA n'est plus visible (la console serie reste utilisable). }
+
+Const
+  FbVirt = $F8000000;
+
+Var
+  FbOn : Boolean;
+  FbW, FbH, FbLine, FbSize, FbPhys : LongInt;
+  FbFOps : Array[0..15] Of LongInt;
+
+Procedure BgaWrite(Idx, V : LongInt);
+Begin
+  PortW[$1CE] := Idx;
+  PortW[$1CF] := V;
+End;
+
+Function BgaRead(Idx : LongInt) : LongInt;
+Begin
+  PortW[$1CE] := Idx;
+  BgaRead := PortW[$1CF];
+End;
+
+Function FbRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var N : LongInt;
+Begin
+  If F^.Pos >= FbSize Then
+  Begin
+    FbRead := 0;
+    Exit;
+  End;
+  N := FbSize - F^.Pos;
+  If N > Cnt Then N := Cnt;
+  MemCopy(Buf, FbVirt + F^.Pos, N);
+  F^.Pos := F^.Pos + N;
+  FbRead := N;
+End;
+
+Function FbWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var N : LongInt;
+Begin
+  If F^.Pos >= FbSize Then
+  Begin
+    FbWrite := -ENOSPC;
+    Exit;
+  End;
+  N := FbSize - F^.Pos;
+  If N > Cnt Then N := Cnt;
+  MemCopy(FbVirt + F^.Pos, Buf, N);
+  F^.Pos := F^.Pos + N;
+  FbWrite := N;
+End;
+
+Function FbLseek(F : PFile; Off, Whence : LongInt) : LongInt;
+Var P : LongInt;
+Begin
+  Case Whence Of
+    0 : P := Off;
+    1 : P := F^.Pos + Off;
+    2 : P := FbSize + Off;
+  Else
+    Begin
+      FbLseek := -EINVAL;
+      Exit;
+    End;
+  End;
+  If (P < 0) Or (P > FbSize) Then
+  Begin
+    FbLseek := -EINVAL;
+    Exit;
+  End;
+  F^.Pos := P;
+  FbLseek := P;
+End;
+
+Function FbIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt;
+Var Id : String;
+Begin
+  FbIoctl := -ENOTTY;
+  Case Cmd Of
+    $4600 :                                  { FBIOGET_VSCREENINFO }
+      Begin
+        If Not EnsureUser(Arg, 160, True) Then
+        Begin
+          FbIoctl := -EFAULT;
+          Exit;
+        End;
+        MemFill(Arg, 0, 160);
+        MemL[0:Arg] := FbW;                  { xres, yres }
+        MemL[0:Arg + 4] := FbH;
+        MemL[0:Arg + 8] := FbW;              { virtuelle }
+        MemL[0:Arg + 12] := FbH;
+        MemL[0:Arg + 24] := 32;              { bits_per_pixel }
+        MemL[0:Arg + 32] := 16;              { rouge : decalage, longueur }
+        MemL[0:Arg + 36] := 8;
+        MemL[0:Arg + 44] := 8;               { vert }
+        MemL[0:Arg + 48] := 8;
+        MemL[0:Arg + 56] := 0;               { bleu }
+        MemL[0:Arg + 60] := 8;
+        MemL[0:Arg + 68] := 24;              { transparence }
+        MemL[0:Arg + 72] := 0;
+        MemL[0:Arg + 84] := LongInt($FFFFFFFF);   { hauteur, largeur (mm) }
+        MemL[0:Arg + 88] := LongInt($FFFFFFFF);
+        FbIoctl := 0;
+      End;
+    $4601, $4606, $4611 :
+      { FBIOPUT_VSCREENINFO, FBIOPAN_DISPLAY, FBIOBLANK : sans effet }
+      FbIoctl := 0;
+    $4602 :                                  { FBIOGET_FSCREENINFO }
+      Begin
+        If Not EnsureUser(Arg, 68, True) Then
+        Begin
+          FbIoctl := -EFAULT;
+          Exit;
+        End;
+        MemFill(Arg, 0, 68);
+        Id := 'BOCHS VBE';
+        MemCopy(Arg, LongInt(@Id) + 1, Length(Id));
+        MemL[0:Arg + 16] := FbPhys;          { smem_start }
+        MemL[0:Arg + 20] := FbSize;          { smem_len }
+        MemL[0:Arg + 24] := 0;               { FB_TYPE_PACKED_PIXELS }
+        MemL[0:Arg + 32] := 2;               { FB_VISUAL_TRUECOLOR }
+        MemL[0:Arg + 48] := FbLine;          { line_length }
+        FbIoctl := 0;
+      End;
+  End;
+End;
+
+Procedure FbInit;
+Var S : String; P, D, Id, Bar, Pt, I, Pages, Nt, T : LongInt;
+Begin
+  FbOn := False;
+  S := CmdGet('fb');
+  If S = '' Then Exit;
+  P := Pos('x', S);
+  If P = 0 Then Exit;
+  FbW := StrVal(Copy(S, 1, P - 1));
+  FbH := StrVal(Copy(S, P + 1, 10));
+  If (FbW < 320) Or (FbW > 2560) Or (FbH < 200) Or (FbH > 1600) Then
+  Begin
+    KLog('framebuffer : mode ' + S + ' refuse');
+    Exit;
+  End;
+  D := -1;
+  For I := 0 To 31 Do
+    If PciRead(0, I, 0, 0) = LongInt($11111234) Then D := I;
+  If (D < 0) Or (BgaRead(0) < $B0C0) Then
+  Begin
+    KLog('framebuffer : carte Bochs/QEMU VGA absente');
+    Exit;
+  End;
+  Bar := PciRead(0, D, 0, $10) And LongInt($FFFFFFF0);
+  If Bar = 0 Then Exit;
+  PciWrite(0, D, 0, 4, (PciRead(0, D, 0, 4) And $FFFF) Or 2);
+  FbLine := FbW * 4;
+  FbSize := FbLine * FbH;
+  FbPhys := Bar;
+  Pages := (FbSize + 4095) Shr 12;
+  Nt := (Pages + 1023) Shr 10;
+  For T := 0 To Nt - 1 Do
+  Begin
+    Pt := AllocZeroPage;
+    If Pt = 0 Then
+    Begin
+      KLog('framebuffer : memoire insuffisante');
+      Exit;
+    End;
+    MemL[0:MasterPd + (992 + T) * 4] := V2P(Pt) Or $13;
+    For I := 0 To 1023 Do
+      If T * 1024 + I < Pages Then
+        MemL[0:Pt + I * 4] := (Bar + (T * 1024 + I) * 4096) Or $13;
+  End;
+  FlushTlb;
+  BgaWrite(4, 0);
+  BgaWrite(1, FbW);
+  BgaWrite(2, FbH);
+  BgaWrite(3, 32);
+  BgaWrite(4, $41);
+  MemFill(FbVirt, 0, FbSize);
+  MemFill(LongInt(@FbFOps[0]), 0, SizeOf(FbFOps));
+  FbFOps[FoRead] := LongInt(@FbRead);
+  FbFOps[FoWrite] := LongInt(@FbWrite);
+  FbFOps[FoLlseek] := LongInt(@FbLseek);
+  FbFOps[FoIoctl] := LongInt(@FbIoctl);
+  ChrOps[29] := LongInt(@FbFOps[0]);
+  FbOn := True;
+  KLog('framebuffer : ' + IntStr(FbW) + 'x' + IntStr(FbH) + 'x32 en '
+      + HexStr(FbPhys, 8));
+End;
+
+{ ==================================================================== }
+{ Partie 23 - iso9660 (CD-ROM, lecture seule, Rock Ridge simplifie)    }
+{ ==================================================================== }
+{ (placee avant la partie 16) }
+
+{ Systeme de fichiers iso9660 sur un peripherique bloc (disque ATAPI
+  /dev/hdc ou fichier image sur une partition). Numero d'inode = adresse
+  de l'enregistrement de repertoire (bloc * 2048 + decalage), ce qui permet
+  de relire un inode sans table. Extensions Rock Ridge reconnues : NM (nom
+  long), PX (mode, liens, uid, gid), SL (lien symbolique). Pas de Joliet,
+  de fichiers entrelaces ni de multi-sessions. }
+
+Const
+  IsoBs = 2048;
+  IsoMagic = $9660;
+
+Type
+  PIsoSb = ^TIsoSb;
+  TIsoSb = Record
+    Dev, VolBlocks, RootIno : LongInt;
+  End;
+
+Var
+  IsoIOps, IsoDirFOps, IsoFileFOps, IsoLnkIOps, IsoSOps :
+      Array[0..15] Of LongInt;
+
+Function IsoLe32(A : LongInt) : LongInt;
+Begin
+  IsoLe32 := MemL[0:A];
+End;
+
+{ Copier l'enregistrement d'inode Ino dans Rec (256 octets) ; 0 ou -errno }
+Function IsoGetRec(Sb : PSuper; Ino, Rec : LongInt) : LongInt;
+Var B : PBuf; X : PIsoSb; Len : LongInt;
+Begin
+  X := Pointer(Sb^.Priv);
+  B := BRead(X^.Dev, Ino Div IsoBs, IsoBs);
+  If B = Nil Then
+  Begin
+    IsoGetRec := -EIO;
+    Exit;
+  End;
+  Len := Mem[0:B^.Data + (Ino Mod IsoBs)];
+  If (Len < 34) Or ((Ino Mod IsoBs) + Len > IsoBs) Then
+  Begin
+    BRelease(B);
+    IsoGetRec := -EIO;
+    Exit;
+  End;
+  MemFill(Rec, 0, 256);
+  MemCopy(Rec, B^.Data + (Ino Mod IsoBs), Len);
+  BRelease(B);
+  IsoGetRec := 0;
+End;
+
+{ Debut de la zone "utilisation systeme" (Rock Ridge) d'un enregistrement }
+Function IsoSuStart(Rec : LongInt) : LongInt;
+Var Su : LongInt;
+Begin
+  Su := 33 + Mem[0:Rec + 32];
+  If (Su And 1) <> 0 Then Inc(Su);
+  IsoSuStart := Su;
+End;
+
+{ Chercher l'entree SUSP de signature (C1, C2) ; retourne son adresse ou 0 }
+Function IsoFindSu(Rec, C1, C2 : LongInt) : LongInt;
+Var Su, Len, Tot : LongInt;
+Begin
+  IsoFindSu := 0;
+  Tot := Mem[0:Rec];
+  Su := IsoSuStart(Rec);
+  While Su + 4 <= Tot Do
+  Begin
+    Len := Mem[0:Rec + Su + 2];
+    If Len < 4 Then Exit;
+    If (Mem[0:Rec + Su] = C1) And (Mem[0:Rec + Su + 1] = C2) Then
+    Begin
+      IsoFindSu := Rec + Su;
+      Exit;
+    End;
+    Su := Su + Len;
+  End;
+End;
+
+{ Nom de l'enregistrement : Rock Ridge NM sinon nom iso9660 en minuscules }
+Procedure IsoName(Rec : LongInt; Var Nm : String);
+Var Su, Len, Tot, I, N, C : LongInt;
+Begin
+  Nm := '';
+  N := Mem[0:Rec + 32];
+  If (N = 1) And (Mem[0:Rec + 33] = 0) Then
+  Begin
+    Nm := '.';
+    Exit;
+  End;
+  If (N = 1) And (Mem[0:Rec + 33] = 1) Then
+  Begin
+    Nm := '..';
+    Exit;
+  End;
+  Tot := Mem[0:Rec];
+  Su := IsoSuStart(Rec);
+  While Su + 4 <= Tot Do
+  Begin
+    Len := Mem[0:Rec + Su + 2];
+    If Len < 4 Then Break;
+    If (Mem[0:Rec + Su] = 78) And (Mem[0:Rec + Su + 1] = 77) Then
+      For I := 5 To Len - 1 Do Nm := Nm + Chr(Mem[0:Rec + Su + I]);
+    Su := Su + Len;
+  End;
+  If Nm <> '' Then Exit;
+  For I := 0 To N - 1 Do
+  Begin
+    C := Mem[0:Rec + 33 + I];
+    If C = 59 Then Break;                       { ";" : numero de version }
+    If (C >= 65) And (C <= 90) Then C := C + 32;
+    Nm := Nm + Chr(C);
+  End;
+  If (Length(Nm) > 0) And (Nm[Length(Nm)] = '.') Then
+    Delete(Nm, Length(Nm), 1);
+End;
+
+{ Date iso9660 (7 octets) en secondes Unix }
+Function IsoTime(A : LongInt) : LongInt;
+Begin
+  IsoTime := DaysFromCivil(Mem[0:A] + 1900, Mem[0:A + 1], Mem[0:A + 2]) * 86400
+      + Mem[0:A + 3] * 3600 + Mem[0:A + 4] * 60 + Mem[0:A + 5];
+End;
+
+Function IsoReadInode(I : PInode) : LongInt;
+Var Rec : Array[0..255] Of Byte; R, Fl, Px, Sl, T : LongInt; A : LongInt;
+Begin
+  A := LongInt(@Rec[0]);
+  R := IsoGetRec(I^.Sb, I^.Ino, A);
+  If R <> 0 Then
+  Begin
+    IsoReadInode := R;
+    Exit;
+  End;
+  Fl := Rec[25];
+  I^.Priv := IsoLe32(A + 2);
+  I^.Priv2 := I^.Ino;
+  I^.Size := IsoLe32(A + 10);
+  I^.Blocks := (I^.Size + 511) Div 512;
+  T := IsoTime(A + 18);
+  I^.Atime := T; I^.Mtime := T; I^.Ctime := T;
+  I^.Uid := 0; I^.Gid := 0;
+  I^.Nlink := 1;
+  If (Fl And 2) <> 0 Then
+  Begin
+    I^.Mode := S_IFDIR Or $16D;
+    I^.Nlink := 2;
+  End
+  Else I^.Mode := S_IFREG Or $124;
+  Px := IsoFindSu(A, 80, 88);                  { "PX" }
+  If Px <> 0 Then
+  Begin
+    I^.Mode := IsoLe32(Px + 4);
+    I^.Nlink := IsoLe32(Px + 12);
+    I^.Uid := IsoLe32(Px + 20);
+    I^.Gid := IsoLe32(Px + 28);
+  End;
+  Sl := IsoFindSu(A, 83, 76);                  { "SL" }
+  If (Sl <> 0) And ((I^.Mode And S_IFMT) <> S_IFLNK) Then
+    I^.Mode := S_IFLNK Or $1FF;
+  If (I^.Mode And S_IFMT) = S_IFDIR Then
+  Begin
+    I^.IOps := LongInt(@IsoIOps[0]);
+    I^.FOps := LongInt(@IsoDirFOps[0]);
+  End
+  Else If (I^.Mode And S_IFMT) = S_IFLNK Then I^.IOps := LongInt(@IsoLnkIOps[0])
+  Else
+  Begin
+    I^.IOps := 0;
+    I^.FOps := LongInt(@IsoFileFOps[0]);
+  End;
+  IsoReadInode := 0;
+End;
+
+{ Lien symbolique Rock Ridge : composants SL concatenes }
+Function IsoReadlink(I : PInode; Buf, Size : LongInt) : LongInt;
+Var Rec : Array[0..255] Of Byte; A, Su, Len, Tot, P, Cf, Cl, K, N : LongInt;
+    S : String; First : Boolean;
+Begin
+  A := LongInt(@Rec[0]);
+  If IsoGetRec(I^.Sb, I^.Priv2, A) <> 0 Then
+  Begin
+    IsoReadlink := -EIO;
+    Exit;
+  End;
+  S := '';
+  First := True;
+  Tot := Rec[0];
+  Su := IsoSuStart(A);
+  While Su + 4 <= Tot Do
+  Begin
+    Len := Rec[Su + 2];
+    If Len < 4 Then Break;
+    If (Rec[Su] = 83) And (Rec[Su + 1] = 76) Then
+    Begin
+      P := Su + 5;
+      While P + 2 <= Su + Len Do
+      Begin
+        Cf := Rec[P]; Cl := Rec[P + 1];
+        If (Cf And 8) <> 0 Then S := '/'
+        Else
+        Begin
+          If (Not First) And (Length(S) > 0) And (S[Length(S)] <> '/') Then
+            S := S + '/';
+          If (Cf And 2) <> 0 Then S := S + '.'
+          Else If (Cf And 4) <> 0 Then S := S + '..'
+          Else For K := 0 To Cl - 1 Do S := S + Chr(Rec[P + 2 + K]);
+        End;
+        First := False;
+        P := P + 2 + Cl;
+      End;
+    End;
+    Su := Su + Len;
+  End;
+  N := Length(S);
+  If N > Size Then N := Size;
+  MemCopy(Buf, LongInt(@S) + 1, N);
+  IsoReadlink := N;
+End;
+
+Function IsoLookup(Dir : PInode; Var Nm : String; Var Res : PInode) : LongInt;
+Var X : PIsoSb; Pos, Blk, Off, Len, R : LongInt; B : PBuf;
+    Rec : Array[0..255] Of Byte;
+    Cn, Want : String; I : PInode;
+Begin
+  X := Pointer(Dir^.Sb^.Priv);
+  Want := Nm;
+  For R := 1 To Length(Want) Do
+    If (Want[R] >= 'A') And (Want[R] <= 'Z') Then
+      Want[R] := Chr(Ord(Want[R]) + 32);
+  Pos := 0;
+  While Pos < Dir^.Size Do
+  Begin
+    Blk := Pos Div IsoBs;
+    Off := Pos Mod IsoBs;
+    B := BRead(X^.Dev, Dir^.Priv + Blk, IsoBs);
+    If B = Nil Then
+    Begin
+      IsoLookup := -EIO;
+      Exit;
+    End;
+    Len := Mem[0:B^.Data + Off];
+    If Len = 0 Then
+    Begin
+      BRelease(B);
+      Pos := (Blk + 1) * IsoBs;
+      Continue;
+    End;
+    If (Len < 34) Or (Off + Len > IsoBs) Then
+    Begin
+      BRelease(B);
+      IsoLookup := -EIO;
+      Exit;
+    End;
+    MemFill(LongInt(@Rec[0]), 0, 256);
+    MemCopy(LongInt(@Rec[0]), B^.Data + Off, Len);
+    BRelease(B);
+    IsoName(LongInt(@Rec[0]), Cn);
+    For R := 1 To Length(Cn) Do
+      If (Cn[R] >= 'A') And (Cn[R] <= 'Z') Then Cn[R] := Chr(Ord(Cn[R]) + 32);
+    If (Cn = Want) And (Cn <> '.') And (Cn <> '..') Then
+    Begin
+      I := IGet(Dir^.Sb, (Dir^.Priv + Blk) * IsoBs + Off);
+      If I = Nil Then
+      Begin
+        IsoLookup := -EIO;
+        Exit;
+      End;
+      Res := I;
+      IsoLookup := 0;
+      Exit;
+    End;
+    Pos := Pos + Len;
+  End;
+  IsoLookup := -ENOENT;
+End;
+
+Function IsoReaddir(F : PFile; Var Ino : LongInt; Var Nm : String;
+    Var DType : LongInt) : LongInt;
+Var D : PInode; X : PIsoSb; Blk, Off, Len, Mode : LongInt; B : PBuf;
+    Rec : Array[0..255] Of Byte; A, Px : LongInt;
+Begin
+  D := F^.Inode;
+  X := Pointer(D^.Sb^.Priv);
+  IsoReaddir := 0;
+  While F^.Pos < D^.Size Do
+  Begin
+    Blk := F^.Pos Div IsoBs;
+    Off := F^.Pos Mod IsoBs;
+    B := BRead(X^.Dev, D^.Priv + Blk, IsoBs);
+    If B = Nil Then
+    Begin
+      IsoReaddir := -EIO;
+      Exit;
+    End;
+    Len := Mem[0:B^.Data + Off];
+    If Len = 0 Then
+    Begin
+      BRelease(B);
+      F^.Pos := (Blk + 1) * IsoBs;
+      Continue;
+    End;
+    If (Len < 34) Or (Off + Len > IsoBs) Then
+    Begin
+      BRelease(B);
+      IsoReaddir := -EIO;
+      Exit;
+    End;
+    A := LongInt(@Rec[0]);
+    MemFill(A, 0, 256);
+    MemCopy(A, B^.Data + Off, Len);
+    BRelease(B);
+    F^.Pos := F^.Pos + Len;
+    IsoName(A, Nm);
+    Ino := (D^.Priv + Blk) * IsoBs + Off;
+    If Nm = '.' Then Ino := D^.Ino;
+    If (Rec[25] And 2) <> 0 Then DType := DT_DIR Else DType := DT_REG;
+    Px := IsoFindSu(A, 80, 88);
+    If Px <> 0 Then
+    Begin
+      Mode := IsoLe32(Px + 4) And S_IFMT;
+      If Mode = S_IFLNK Then DType := DT_LNK
+      Else If Mode = S_IFCHR Then DType := DT_CHR
+      Else If Mode = S_IFBLK Then DType := DT_BLK
+      Else If Mode = S_IFIFO Then DType := DT_FIFO;
+    End;
+    If IsoFindSu(A, 83, 76) <> 0 Then DType := DT_LNK;
+    IsoReaddir := 1;
+    Exit;
+  End;
+End;
+
+Function IsoRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var I : PInode; X : PIsoSb; N, Done, Blk, Off, Chunk : LongInt; B : PBuf;
+Begin
+  I := F^.Inode;
+  X := Pointer(I^.Sb^.Priv);
+  If F^.Pos >= I^.Size Then
+  Begin
+    IsoRead := 0;
+    Exit;
+  End;
+  N := I^.Size - F^.Pos;
+  If N > Cnt Then N := Cnt;
+  Done := 0;
+  While Done < N Do
+  Begin
+    Blk := F^.Pos Div IsoBs;
+    Off := F^.Pos Mod IsoBs;
+    Chunk := IsoBs - Off;
+    If Chunk > N - Done Then Chunk := N - Done;
+    B := BRead(X^.Dev, I^.Priv + Blk, IsoBs);
+    If B = Nil Then
+    Begin
+      If Done = 0 Then IsoRead := -EIO Else IsoRead := Done;
+      Exit;
+    End;
+    MemCopy(Buf + Done, B^.Data + Off, Chunk);
+    BRelease(B);
+    Done := Done + Chunk;
+    F^.Pos := F^.Pos + Chunk;
+  End;
+  IsoRead := Done;
+End;
+
+Procedure IsoStatfs(Sb : PSuper; Buf : LongInt);
+Var X : PIsoSb;
+Begin
+  X := Pointer(Sb^.Priv);
+  MemFill(Buf, 0, 32);
+  MemL[0:Buf] := IsoBs;
+  MemL[0:Buf + 4] := X^.VolBlocks;
+  MemL[0:Buf + 24] := 255;
+  MemL[0:Buf + 28] := IsoMagic;
+End;
+
+Procedure IsoClear(I : PInode);
+Begin
+End;
+
+Procedure IsoUmount(Sb : PSuper);
+Begin
+  If Sb^.Priv <> 0 Then KFree(Sb^.Priv);
+  Sb^.Priv := 0;
+End;
+
+Function IsoMount(Sb : PSuper; Var DevName : String; Flags,
+    Data : LongInt) : LongInt;
+Var Dev, K, Blk : LongInt; B : PBuf; X : PIsoSb; Ino : PInode; D : PDentry;
+    Found : Boolean;
+Begin
+  IsoMount := -EINVAL;
+  Dev := ExResolveDev(DevName);
+  If Dev = 0 Then
+  Begin
+    IsoMount := -ENOTBLK;
+    Exit;
+  End;
+  If BlkSectors(Dev) = 0 Then
+  Begin
+    IsoMount := -ENXIO;
+    Exit;
+  End;
+  For K := 0 To MaxSupers - 1 Do
+    If (Supers[K] <> Nil) And (Supers[K] <> Sb) And (Supers[K]^.Dev = Dev) Then
+    Begin
+      IsoMount := -EBUSY;
+      Exit;
+    End;
+  Found := False;
+  Blk := 16;
+  B := Nil;
+  While Blk < 32 Do
+  Begin
+    B := BRead(Dev, Blk, IsoBs);
+    If B = Nil Then
+    Begin
+      IsoMount := -EIO;
+      Exit;
+    End;
+    If (Mem[0:B^.Data + 1] = 67) And (Mem[0:B^.Data + 2] = 68)
+       And (Mem[0:B^.Data + 3] = 48) And (Mem[0:B^.Data + 4] = 48)
+       And (Mem[0:B^.Data + 5] = 49) Then
+    Begin
+      If Mem[0:B^.Data] = 1 Then
+      Begin
+        Found := True;
+        Break;
+      End;
+      If Mem[0:B^.Data] = 255 Then
+      Begin
+        BRelease(B);
+        Break;
+      End;
+    End
+    Else
+    Begin
+      BRelease(B);
+      Break;
+    End;
+    BRelease(B);
+    Inc(Blk);
+  End;
+  If Not Found Then Exit;
+  If MemW[0:B^.Data + 128] <> IsoBs Then
+  Begin
+    BRelease(B);
+    Exit;
+  End;
+  X := Pointer(KMallocZ(SizeOf(TIsoSb)));
+  If X = Nil Then
+  Begin
+    BRelease(B);
+    IsoMount := -ENOMEM;
+    Exit;
+  End;
+  X^.Dev := Dev;
+  X^.VolBlocks := MemL[0:B^.Data + 80];
+  X^.RootIno := Blk * IsoBs + 156;
+  BRelease(B);
+  Sb^.Priv := LongInt(X);
+  Sb^.Dev := Dev;
+  Sb^.BlockSize := IsoBs;
+  Sb^.Flags := Flags Or MS_RDONLY;
+  Sb^.SOps := LongInt(@IsoSOps[0]);
+  Ino := IGet(Sb, X^.RootIno);
+  If Ino = Nil Then
+  Begin
+    KFree(LongInt(X));
+    Sb^.Priv := 0;
+    IsoMount := -EIO;
+    Exit;
+  End;
+  Ino^.Mode := S_IFDIR Or $16D;
+  D := DentryNew(Nil, '', Ino, Sb);
+  If D = Nil Then
+  Begin
+    InodePut(LongInt(Ino));
+    InodePurgeSb(Sb);
+    KFree(LongInt(X));
+    Sb^.Priv := 0;
+    IsoMount := -ENOMEM;
+    Exit;
+  End;
+  Sb^.Root := D;
+  IsoMount := 0;
+End;
+
+Procedure InitIso;
+Begin
+  MemFill(LongInt(@IsoIOps[0]), 0, SizeOf(IsoIOps));
+  IsoIOps[IoLookup] := LongInt(@IsoLookup);
+  MemFill(LongInt(@IsoLnkIOps[0]), 0, SizeOf(IsoLnkIOps));
+  IsoLnkIOps[IoReadlink] := LongInt(@IsoReadlink);
+  MemFill(LongInt(@IsoDirFOps[0]), 0, SizeOf(IsoDirFOps));
+  IsoDirFOps[FoReaddir] := LongInt(@IsoReaddir);
+  MemFill(LongInt(@IsoFileFOps[0]), 0, SizeOf(IsoFileFOps));
+  IsoFileFOps[FoRead] := LongInt(@IsoRead);
+  MemFill(LongInt(@IsoSOps[0]), 0, SizeOf(IsoSOps));
+  IsoSOps[SoReadInode] := LongInt(@IsoReadInode);
+  IsoSOps[SoStatfs] := LongInt(@IsoStatfs);
+  IsoSOps[SoUmount] := LongInt(@IsoUmount);
+  IsoSOps[SoClearInode] := LongInt(@IsoClear);
+  RegisterFs('iso9660', LongInt(@IsoMount));
+End;
+
+{ ==================================================================== }
+{ Partie 20 - Cache de pages des mappages partages de fichiers        }
+{ ==================================================================== }
+{ (placee avant la partie 16) }
+
+{ MAP_SHARED d'un fichier : les pages sont partagees entre tous les
+  processus qui mappent le meme fichier (une page par couple inode/page de
+  fichier, tenue dans ce tableau tant qu'elle est mappee). Les ecritures
+  par mappage sont recopiees dans le fichier : avant tout read() et toute
+  lecture du noyau sur l'inode (ShmSyncCheck), par msync, sync, a la
+  fermeture du dernier mappage ; les write() sur le fichier mettent a jour
+  les pages en cache (ShmUpdate). Si le tableau est plein, le mappage
+  retombe sur une copie privee de la page. }
+
+Const
+  MaxShm = 1024;
+
+Type
+  TShmEnt = Record
+    Ino, Idx, Page, Dirty : LongInt;
+  End;
+
+Var
+  Shm      : Array[0..MaxShm - 1] Of TShmEnt;
+
+Function ShmFind(Ino, Idx : LongInt) : LongInt;
+Var I : LongInt;
+Begin
+  ShmFind := -1;
+  For I := 0 To MaxShm - 1 Do
+    If (Shm[I].Ino = Ino) And (Shm[I].Idx = Idx) And (Ino <> 0) Then
+    Begin
+      ShmFind := I;
+      Exit;
+    End;
+End;
+
+{ Ecrire le contenu d'une page dans le fichier (sans depasser sa taille) }
+Procedure ShmWriteBack(I : LongInt);
+Var Ino : PInode; N : LongInt;
+Begin
+  Ino := Pointer(Shm[I].Ino);
+  N := Ino^.Size - Shm[I].Idx * PageSize;
+  If N > PageSize Then N := PageSize;
+  If N > 0 Then InodeWriteAt(Shm[I].Ino, Shm[I].Page, Shm[I].Idx * PageSize, N);
+End;
+
+Function ShmGetPage(Ino, Idx : LongInt; Writable : Boolean) : LongInt;
+Var I, K, Pg, N : LongInt; In_ : PInode;
+Begin
+  ShmGetPage := 0;
+  I := ShmFind(Ino, Idx);
+  If I >= 0 Then
+  Begin
+    If Writable Then Shm[I].Dirty := 1;
+    ShmGetPage := Shm[I].Page;
+    Exit;
+  End;
+  K := -1;
+  For I := 0 To MaxShm - 1 Do
+    If Shm[I].Ino = 0 Then
+    Begin
+      K := I;
+      Break;
+    End;
+  If K < 0 Then Exit;
+  Pg := AllocZeroPage;
+  If Pg = 0 Then Exit;
+  In_ := Pointer(Ino);
+  N := In_^.Size - Idx * PageSize;
+  If N > PageSize Then N := PageSize;
+  If N > 0 Then InodeReadAtRaw(Ino, Pg, Idx * PageSize, N);
+  InodeRef(Ino);
+  Shm[K].Ino := Ino; Shm[K].Idx := Idx; Shm[K].Page := Pg;
+  If Writable Then Shm[K].Dirty := 1 Else Shm[K].Dirty := 0;
+  Inc(ShmCount);
+  ShmGetPage := Pg;
+End;
+
+Procedure ShmSyncInode(Ino : LongInt);
+Var I : LongInt;
+Begin
+  For I := 0 To MaxShm - 1 Do
+    If (Shm[I].Ino = Ino) And (Shm[I].Dirty <> 0) Then ShmWriteBack(I);
+End;
+
+Procedure ShmSyncAll;
+Var I : LongInt;
+Begin
+  If ShmCount = 0 Then Exit;
+  For I := 0 To MaxShm - 1 Do
+    If (Shm[I].Ino <> 0) And (Shm[I].Dirty <> 0) Then ShmWriteBack(I);
+End;
+
+{ Un mappage partage disparait : ecrire et liberer les pages que plus
+  personne ne mappe }
+Procedure ShmDropVma(V : PVma);
+Var I, First, Last : LongInt;
+Begin
+  If ShmCount = 0 Then Exit;
+  First := V^.Off Div PageSize;
+  Last := First + ((V^.Fin - V^.Start) Shr 12) - 1;
+  For I := 0 To MaxShm - 1 Do
+    If (Shm[I].Ino = V^.Ino) And (Shm[I].Idx >= First)
+        And (Shm[I].Idx <= Last) Then
+      If PageRef(Shm[I].Page) <= 1 Then
+      Begin
+        If Shm[I].Dirty <> 0 Then ShmWriteBack(I);
+        PagePut(Shm[I].Page);
+        InodePut(Shm[I].Ino);
+        Shm[I].Ino := 0;
+        Dec(ShmCount);
+      End;
+End;
+
+{ Un write() a modifie le fichier : mettre a jour les pages en cache }
+Procedure ShmUpdate(Ino, Pos, Buf, Cnt : LongInt);
+Var I, Lo, Hi, S, E : LongInt;
+Begin
+  For I := 0 To MaxShm - 1 Do
+    If Shm[I].Ino = Ino Then
+    Begin
+      Lo := Shm[I].Idx * PageSize;
+      Hi := Lo + PageSize;
+      S := Pos;
+      If S < Lo Then S := Lo;
+      E := Pos + Cnt;
+      If E > Hi Then E := Hi;
+      If E > S Then MemCopy(Shm[I].Page + (S - Lo), Buf + (S - Pos), E - S);
+    End;
+End;
+
+Function SysMsync(Addr, Len, Flags : LongInt) : LongInt;
+Begin
+  ShmSyncAll;
+  SysMsync := 0;
+End;
+
+{ ==================================================================== }
+{ Partie 21 - eventfd, timerfd, epoll, inotify                        }
+{ ==================================================================== }
+{ (placee avant la partie 16) }
+
+Function FdPollMask(Fd, Events : LongInt) : LongInt; Forward;
+
+Const
+  EFD_SEMAPHORE = 1;
+  EPOLLIN = 1; EPOLLOUT = 4; EPOLLERR = 8; EPOLLHUP = $10;
+  EPOLLONESHOT = $40000000; EPOLLET = -2147483647 - 1;
+  MaxEpollEnt = 64;
+
+Type
+  PEvfd = ^TEvfd;
+  TEvfd = Record
+    Cnt, Sem : LongInt;
+  End;
+
+  PTfd = ^TTfd;
+  TTfd = Record
+    Next, Interval, Expired : LongInt;      { en ticks (HZ) }
+  End;
+
+  PEpoll = ^TEpoll;
+  TEpoll = Record
+    N : LongInt;
+    Fd, Events, D0, D1, Last, Dis : Array[0..MaxEpollEnt - 1] Of LongInt;
+    Fl : Array[0..MaxEpollEnt - 1] Of LongInt;
+  End;
+
+Var
+  EvfdOps, TfdOps, EpollOps, InoOps : Array[0..15] Of LongInt;
+
+{ Fichier anonyme (inode a part, disparait a la fermeture) }
+Function AnonFile(Ops, Priv, Fl : LongInt) : PFile;
+Var I : PInode; D : PDentry; F : PFile;
+Begin
+  AnonFile := Nil;
+  I := NewInode(PipeSb, S_IFREG Or $180);
+  If I = Nil Then Exit;
+  I^.Nlink := 0;
+  D := DentryNew(Nil, '', I, PipeSb);
+  If D = Nil Then
+  Begin
+    InodePut(LongInt(I));
+    Exit;
+  End;
+  F := FileNew(D, O_RDWR Or (Fl And O_NONBLOCK));
+  If F = Nil Then
+  Begin
+    DentryPut(LongInt(D));
+    Exit;
+  End;
+  F^.FOps := Ops;
+  F^.Priv := Priv;
+  AnonFile := F;
+End;
+
+Function AnonFd(F : PFile; Fl : LongInt) : LongInt;
+Var R : LongInt;
+Begin
+  If F = Nil Then
+  Begin
+    AnonFd := -ENFILE;
+    Exit;
+  End;
+  R := FdInstall(F, 0, (Fl And O_CLOEXEC) <> 0);
+  If R < 0 Then FilePut(LongInt(F));
+  AnonFd := R;
+End;
+
+{ ---- eventfd ---- }
+
+Function SysEventfd2(Init, Fl : LongInt) : LongInt;
+Var E : PEvfd; F : PFile;
+Begin
+  E := Pointer(KMallocZ(SizeOf(TEvfd)));
+  If E = Nil Then
+  Begin
+    SysEventfd2 := -ENOMEM;
+    Exit;
+  End;
+  E^.Cnt := Init And $7FFFFFFF;
+  If (Fl And EFD_SEMAPHORE) <> 0 Then E^.Sem := 1;
+  F := AnonFile(LongInt(@EvfdOps[0]), LongInt(E), Fl);
+  If F = Nil Then KFree(LongInt(E));
+  SysEventfd2 := AnonFd(F, Fl);
+End;
+
+Function SysEventfd(Init : LongInt) : LongInt;
+Begin
+  SysEventfd := SysEventfd2(Init, 0);
+End;
+
+Function EvfdRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var E : PEvfd; V : LongInt;
+Begin
+  E := Pointer(F^.Priv);
+  If Cnt < 8 Then
+  Begin
+    EvfdRead := -EINVAL;
+    Exit;
+  End;
+  While E^.Cnt = 0 Do
+  Begin
+    If (F^.Flags And O_NONBLOCK) <> 0 Then
+    Begin
+      EvfdRead := -EAGAIN;
+      Exit;
+    End;
+    If SleepOn(LongInt(E), 0, True) = WakeSignal Then
+    Begin
+      EvfdRead := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+  If E^.Sem <> 0 Then V := 1 Else V := E^.Cnt;
+  Dec(E^.Cnt, V);
+  MemL[0:Buf] := V;
+  MemL[0:Buf + 4] := 0;
+  WakeUp(LongInt(E));
+  EvfdRead := 8;
+End;
+
+Function EvfdWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var E : PEvfd; V : LongInt;
+Begin
+  E := Pointer(F^.Priv);
+  If Cnt < 8 Then
+  Begin
+    EvfdWrite := -EINVAL;
+    Exit;
+  End;
+  V := MemL[0:Buf];
+  If (MemL[0:Buf + 4] <> 0) Or (V < 0) Or (V = $7FFFFFFF) Then
+  Begin
+    EvfdWrite := -EINVAL;
+    Exit;
+  End;
+  While E^.Cnt > $7FFFFFFE - V Do
+  Begin
+    If (F^.Flags And O_NONBLOCK) <> 0 Then
+    Begin
+      EvfdWrite := -EAGAIN;
+      Exit;
+    End;
+    If SleepOn(LongInt(E), 0, True) = WakeSignal Then
+    Begin
+      EvfdWrite := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+  Inc(E^.Cnt, V);
+  WakeUp(LongInt(E));
+  EvfdWrite := 8;
+End;
+
+Function EvfdPoll(F : PFile; Ev : LongInt) : LongInt;
+Var E : PEvfd; R : LongInt;
+Begin
+  E := Pointer(F^.Priv);
+  R := 0;
+  If E^.Cnt > 0 Then R := POLLIN;
+  If E^.Cnt < $7FFFFFFE Then R := R Or POLLOUT;
+  EvfdPoll := R;
+End;
+
+Procedure EvfdRelease(F : PFile);
+Begin
+  KFree(F^.Priv);
+End;
+
+{ ---- timerfd ---- }
+
+Function SysTimerfdCreate(Clk, Fl : LongInt) : LongInt;
+Var T : PTfd; F : PFile;
+Begin
+  If (Clk <> 0) And (Clk <> 1) And (Clk <> 7) And (Clk <> 8) Then
+  Begin
+    SysTimerfdCreate := -EINVAL;
+    Exit;
+  End;
+  T := Pointer(KMallocZ(SizeOf(TTfd)));
+  If T = Nil Then
+  Begin
+    SysTimerfdCreate := -ENOMEM;
+    Exit;
+  End;
+  F := AnonFile(LongInt(@TfdOps[0]), LongInt(T), Fl);
+  If F = Nil Then KFree(LongInt(T));
+  SysTimerfdCreate := AnonFd(F, Fl);
+End;
+
+{ Ticks de duree d'une struct timespec (secondes, nanosecondes) }
+Function TsTicks(P : LongInt) : LongInt;
+Begin
+  TsTicks := MemL[0:P] * HZ + (MemL[0:P + 4] + 10000000 - 1) Div 10000000;
+End;
+
+Procedure TfdUpdate(T : PTfd);
+Var N : LongInt;
+Begin
+  If (T^.Next = 0) Or (Jiffies - T^.Next < 0) Then Exit;
+  If T^.Interval > 0 Then
+  Begin
+    N := 1 + (Jiffies - T^.Next) Div T^.Interval;
+    Inc(T^.Expired, N);
+    T^.Next := T^.Next + N * T^.Interval;
+  End
+  Else
+  Begin
+    Inc(T^.Expired);
+    T^.Next := 0;
+  End;
+End;
+
+Function SysTimerfdSettime(Fd, Flags, NewP, OldP : LongInt) : LongInt;
+Var F : PFile; T : PTfd; V, Rem : LongInt;
+Begin
+  F := FdGet(Fd);
+  If (F = Nil) Or (F^.FOps <> LongInt(@TfdOps[0])) Then
+  Begin
+    If F = Nil Then SysTimerfdSettime := -EBADF
+    Else SysTimerfdSettime := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(NewP, 16, False) Then
+  Begin
+    SysTimerfdSettime := -EFAULT;
+    Exit;
+  End;
+  T := Pointer(F^.Priv);
+  TfdUpdate(T);
+  If OldP <> 0 Then
+    If EnsureUser(OldP, 16, True) Then
+    Begin
+      MemFill(OldP, 0, 16);
+      Rem := T^.Next - Jiffies;
+      If (T^.Next = 0) Or (Rem < 0) Then Rem := 0;
+      MemL[0:OldP] := T^.Interval Div HZ;
+      MemL[0:OldP + 4] := (T^.Interval Mod HZ) * 10000000;
+      MemL[0:OldP + 8] := Rem Div HZ;
+      MemL[0:OldP + 12] := (Rem Mod HZ) * 10000000;
+    End;
+  T^.Interval := TsTicks(NewP);
+  V := TsTicks(NewP + 8);
+  T^.Expired := 0;
+  If V = 0 Then T^.Next := 0
+  Else
+  Begin
+    If (Flags And 1) <> 0 Then
+    Begin
+      V := V - XTime * HZ;                 { instant absolu : relatif }
+      If V < 1 Then V := 1;
+    End;
+    T^.Next := Jiffies + V;
+  End;
+  WakeUp(LongInt(T));
+  SysTimerfdSettime := 0;
+End;
+
+Function SysTimerfdGettime(Fd, CurP : LongInt) : LongInt;
+Var F : PFile; T : PTfd; Rem : LongInt;
+Begin
+  F := FdGet(Fd);
+  If (F = Nil) Or (F^.FOps <> LongInt(@TfdOps[0])) Then
+  Begin
+    If F = Nil Then SysTimerfdGettime := -EBADF
+    Else SysTimerfdGettime := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(CurP, 16, True) Then
+  Begin
+    SysTimerfdGettime := -EFAULT;
+    Exit;
+  End;
+  T := Pointer(F^.Priv);
+  TfdUpdate(T);
+  Rem := T^.Next - Jiffies;
+  If (T^.Next = 0) Or (Rem < 0) Then Rem := 0;
+  MemFill(CurP, 0, 16);
+  MemL[0:CurP] := T^.Interval Div HZ;
+  MemL[0:CurP + 4] := (T^.Interval Mod HZ) * 10000000;
+  MemL[0:CurP + 8] := Rem Div HZ;
+  MemL[0:CurP + 12] := (Rem Mod HZ) * 10000000;
+  SysTimerfdGettime := 0;
+End;
+
+Function TfdRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var T : PTfd;
+Begin
+  T := Pointer(F^.Priv);
+  If Cnt < 8 Then
+  Begin
+    TfdRead := -EINVAL;
+    Exit;
+  End;
+  While True Do
+  Begin
+    TfdUpdate(T);
+    If T^.Expired > 0 Then Break;
+    If (F^.Flags And O_NONBLOCK) <> 0 Then
+    Begin
+      TfdRead := -EAGAIN;
+      Exit;
+    End;
+    If T^.Next = 0 Then
+    Begin
+      If SleepOn(LongInt(T), 0, True) = WakeSignal Then
+      Begin
+        TfdRead := -ERESTARTSYS;
+        Exit;
+      End;
+    End
+    Else If SleepTicks(1) = WakeSignal Then
+    Begin
+      TfdRead := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+  MemL[0:Buf] := T^.Expired;
+  MemL[0:Buf + 4] := 0;
+  T^.Expired := 0;
+  TfdRead := 8;
+End;
+
+Function TfdPoll(F : PFile; Ev : LongInt) : LongInt;
+Var T : PTfd;
+Begin
+  T := Pointer(F^.Priv);
+  TfdUpdate(T);
+  If T^.Expired > 0 Then TfdPoll := POLLIN Else TfdPoll := 0;
+End;
+
+{ ---- epoll ---- }
+
+Function SysEpollCreate1(Fl : LongInt) : LongInt;
+Var E : PEpoll; F : PFile;
+Begin
+  E := Pointer(KMallocZ(SizeOf(TEpoll)));
+  If E = Nil Then
+  Begin
+    SysEpollCreate1 := -ENOMEM;
+    Exit;
+  End;
+  F := AnonFile(LongInt(@EpollOps[0]), LongInt(E), 0);
+  If F = Nil Then KFree(LongInt(E));
+  SysEpollCreate1 := AnonFd(F, Fl);
+End;
+
+Function SysEpollCreate(Size : LongInt) : LongInt;
+Begin
+  If Size <= 0 Then SysEpollCreate := -EINVAL
+  Else SysEpollCreate := SysEpollCreate1(0);
+End;
+
+Function EpFind(E : PEpoll; Fd : LongInt) : LongInt;
+Var I : LongInt;
+Begin
+  EpFind := -1;
+  For I := 0 To E^.N - 1 Do
+    If E^.Fd[I] = Fd Then
+    Begin
+      EpFind := I;
+      Exit;
+    End;
+End;
+
+Procedure EpDel(E : PEpoll; I : LongInt);
+Var K : LongInt;
+Begin
+  For K := I To E^.N - 2 Do
+  Begin
+    E^.Fd[K] := E^.Fd[K + 1]; E^.Events[K] := E^.Events[K + 1];
+    E^.D0[K] := E^.D0[K + 1]; E^.D1[K] := E^.D1[K + 1];
+    E^.Last[K] := E^.Last[K + 1]; E^.Dis[K] := E^.Dis[K + 1];
+  End;
+  Dec(E^.N);
+End;
+
+Function SysEpollCtl(Epfd, Op, Fd, Ev : LongInt) : LongInt;
+Var F, Tf : PFile; E : PEpoll; I : LongInt;
+Begin
+  F := FdGet(Epfd);
+  Tf := FdGet(Fd);
+  If (F = Nil) Or (Tf = Nil) Then
+  Begin
+    SysEpollCtl := -EBADF;
+    Exit;
+  End;
+  If (F^.FOps <> LongInt(@EpollOps[0])) Or (Epfd = Fd) Then
+  Begin
+    SysEpollCtl := -EINVAL;
+    Exit;
+  End;
+  E := Pointer(F^.Priv);
+  I := EpFind(E, Fd);
+  Case Op Of
+    1 :                                          { EPOLL_CTL_ADD }
+      Begin
+        If I >= 0 Then
+        Begin
+          SysEpollCtl := -EEXIST;
+          Exit;
+        End;
+        If E^.N >= MaxEpollEnt Then
+        Begin
+          SysEpollCtl := -ENOMEM;
+          Exit;
+        End;
+        If Not EnsureUser(Ev, 12, False) Then
+        Begin
+          SysEpollCtl := -EFAULT;
+          Exit;
+        End;
+        I := E^.N;
+        Inc(E^.N);
+        E^.Fd[I] := Fd; E^.Events[I] := MemL[0:Ev];
+        E^.D0[I] := MemL[0:Ev + 4]; E^.D1[I] := MemL[0:Ev + 8];
+        E^.Last[I] := 0; E^.Dis[I] := 0; E^.Fl[I] := LongInt(Tf);
+        SysEpollCtl := 0;
+      End;
+    2 :                                          { EPOLL_CTL_DEL }
+      Begin
+        If I < 0 Then
+        Begin
+          SysEpollCtl := -ENOENT;
+          Exit;
+        End;
+        EpDel(E, I);
+        SysEpollCtl := 0;
+      End;
+    3 :                                          { EPOLL_CTL_MOD }
+      Begin
+        If I < 0 Then
+        Begin
+          SysEpollCtl := -ENOENT;
+          Exit;
+        End;
+        If Not EnsureUser(Ev, 12, False) Then
+        Begin
+          SysEpollCtl := -EFAULT;
+          Exit;
+        End;
+        E^.Events[I] := MemL[0:Ev];
+        E^.D0[I] := MemL[0:Ev + 4]; E^.D1[I] := MemL[0:Ev + 8];
+        E^.Dis[I] := 0; E^.Last[I] := 0;
+        SysEpollCtl := 0;
+      End;
+  Else
+    SysEpollCtl := -EINVAL;
+  End;
+End;
+
+Function SysEpollWait(Epfd, Evs, Max, Timeout : LongInt) : LongInt;
+Var F : PFile; E : PEpoll; I, N, Deadline, M, Ev, New : LongInt;
+Begin
+  F := FdGet(Epfd);
+  If F = Nil Then
+  Begin
+    SysEpollWait := -EBADF;
+    Exit;
+  End;
+  If (F^.FOps <> LongInt(@EpollOps[0])) Or (Max <= 0) Then
+  Begin
+    SysEpollWait := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(Evs, Max * 12, True) Then
+  Begin
+    SysEpollWait := -EFAULT;
+    Exit;
+  End;
+  E := Pointer(F^.Priv);
+  If Timeout < 0 Then Deadline := 0
+  Else Deadline := Jiffies + (Timeout * HZ + 999) Div 1000;
+  While True Do
+  Begin
+    N := 0;
+    I := 0;
+    While (I < E^.N) And (N < Max) Do
+    Begin
+      If LongInt(FdGet(E^.Fd[I])) <> E^.Fl[I] Then
+      Begin
+        EpDel(E, I);                      { descripteur ferme }
+        Continue;
+      End;
+      If E^.Dis[I] = 0 Then
+      Begin
+        Ev := E^.Events[I] Or POLLERR Or POLLHUP;
+        M := FdPollMask(E^.Fd[I], Ev) And Ev;
+        New := M;
+        If (E^.Events[I] And EPOLLET) <> 0 Then
+        Begin
+          New := M And Not E^.Last[I];
+          E^.Last[I] := M;
+        End;
+        If New <> 0 Then
+        Begin
+          MemL[0:Evs + N * 12] := New;
+          MemL[0:Evs + N * 12 + 4] := E^.D0[I];
+          MemL[0:Evs + N * 12 + 8] := E^.D1[I];
+          Inc(N);
+          If (E^.Events[I] And EPOLLONESHOT) <> 0 Then E^.Dis[I] := 1;
+        End;
+      End;
+      Inc(I);
+    End;
+    If (N > 0) Or (Timeout = 0) Then
+    Begin
+      SysEpollWait := N;
+      Exit;
+    End;
+    If (Timeout > 0) And (Jiffies - Deadline >= 0) Then
+    Begin
+      SysEpollWait := 0;
+      Exit;
+    End;
+    If SleepTicks(1) = WakeSignal Then
+    Begin
+      SysEpollWait := -EINTR;
+      Exit;
+    End;
+  End;
+End;
+
+Function SysEpollPwait(Epfd, Evs, Max, Timeout, Mask : LongInt) : LongInt;
+Begin
+  SysEpollPwait := SysEpollWait(Epfd, Evs, Max, Timeout);
+End;
+
+Function EpollPoll(F : PFile; Ev : LongInt) : LongInt;
+Var E : PEpoll; I, M, E2 : LongInt;
+Begin
+  E := Pointer(F^.Priv);
+  EpollPoll := 0;
+  For I := 0 To E^.N - 1 Do
+  Begin
+    E2 := E^.Events[I] Or POLLERR Or POLLHUP;
+    M := FdPollMask(E^.Fd[I], E2) And E2;
+    If M <> 0 Then
+    Begin
+      EpollPoll := POLLIN;
+      Exit;
+    End;
+  End;
+End;
+
+Procedure EpollRelease(F : PFile);
+Begin
+  KFree(F^.Priv);
+End;
+
+{ ---- inotify ---- }
+
+Function SysInotifyInit1(Fl : LongInt) : LongInt;
+Var X : PInoInst; K : LongInt; F : PFile;
+Begin
+  X := Nil;
+  For K := 0 To MaxInoInst - 1 Do
+    If InoInst[K] = Nil Then
+    Begin
+      X := Pointer(KMallocZ(SizeOf(TInoInst)));
+      If X = Nil Then
+      Begin
+        SysInotifyInit1 := -ENOMEM;
+        Exit;
+      End;
+      X^.Q := AllocPages(OrderFor(InoQSize));
+      If X^.Q = 0 Then
+      Begin
+        KFree(LongInt(X));
+        SysInotifyInit1 := -ENOMEM;
+        Exit;
+      End;
+      X^.NextWd := 1;
+      InoInst[K] := X;
+      Break;
+    End;
+  If X = Nil Then
+  Begin
+    SysInotifyInit1 := -EMFILE;
+    Exit;
+  End;
+  F := AnonFile(LongInt(@InoOps[0]), LongInt(X), Fl);
+  If F = Nil Then
+  Begin
+    For K := 0 To MaxInoInst - 1 Do
+      If InoInst[K] = X Then InoInst[K] := Nil;
+    FreePages(X^.Q, OrderFor(InoQSize));
+    KFree(LongInt(X));
+  End;
+  SysInotifyInit1 := AnonFd(F, Fl);
+End;
+
+Function SysInotifyInit : LongInt;
+Begin
+  SysInotifyInit := SysInotifyInit1(0);
+End;
+
+Function SysInotifyAddWatch(Fd, PathA, Mask : LongInt) : LongInt;
+Var F : PFile; X : PInoInst; P : String; D : PDentry; R, J, Wd : LongInt;
+    I : PInode;
+Begin
+  F := FdGet(Fd);
+  If (F = Nil) Or (F^.FOps <> LongInt(@InoOps[0])) Then
+  Begin
+    If F = Nil Then SysInotifyAddWatch := -EBADF
+    Else SysInotifyAddWatch := -EINVAL;
+    Exit;
+  End;
+  R := GetUserStr(PathA, P);
+  If R < 0 Then
+  Begin
+    SysInotifyAddWatch := R;
+    Exit;
+  End;
+  If (Mask And $FFF) = 0 Then
+  Begin
+    SysInotifyAddWatch := -EINVAL;
+    Exit;
+  End;
+  R := PathWalk(P, (Mask And $2000000) = 0, D);
+  If R <> 0 Then
+  Begin
+    SysInotifyAddWatch := R;
+    Exit;
+  End;
+  I := D^.Inode;
+  X := Pointer(F^.Priv);
+  For J := 0 To X^.NWatch - 1 Do
+    If X^.WIno[J] = I Then
+    Begin
+      If (Mask And $20000000) <> 0 Then X^.WMask[J] := X^.WMask[J] Or Mask
+      Else X^.WMask[J] := Mask;
+      SysInotifyAddWatch := X^.WWd[J];
+      DentryPut(LongInt(D));
+      Exit;
+    End;
+  If X^.NWatch >= MaxWatch Then
+  Begin
+    DentryPut(LongInt(D));
+    SysInotifyAddWatch := -ENOSPC;
+    Exit;
+  End;
+  Wd := X^.NextWd;
+  Inc(X^.NextWd);
+  J := X^.NWatch;
+  Inc(X^.NWatch);
+  Inc(I^.Count);
+  X^.WIno[J] := I; X^.WMask[J] := Mask And $FFF; X^.WWd[J] := Wd;
+  Inc(InoWatches);
+  DentryPut(LongInt(D));
+  SysInotifyAddWatch := Wd;
+End;
+
+Function SysInotifyRmWatch(Fd, Wd : LongInt) : LongInt;
+Var F : PFile; X : PInoInst; J, K : LongInt;
+Begin
+  F := FdGet(Fd);
+  If (F = Nil) Or (F^.FOps <> LongInt(@InoOps[0])) Then
+  Begin
+    If F = Nil Then SysInotifyRmWatch := -EBADF
+    Else SysInotifyRmWatch := -EINVAL;
+    Exit;
+  End;
+  X := Pointer(F^.Priv);
+  For J := 0 To X^.NWatch - 1 Do
+    If X^.WWd[J] = Wd Then
+    Begin
+      InodePut(LongInt(X^.WIno[J]));
+      For K := J To X^.NWatch - 2 Do
+      Begin
+        X^.WIno[K] := X^.WIno[K + 1]; X^.WMask[K] := X^.WMask[K + 1];
+        X^.WWd[K] := X^.WWd[K + 1];
+      End;
+      Dec(X^.NWatch);
+      Dec(InoWatches);
+      InoQueue(X, Wd, $8000, 0, '');
+      SysInotifyRmWatch := 0;
+      Exit;
+    End;
+  SysInotifyRmWatch := -EINVAL;
+End;
+
+Function InoRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var X : PInoInst; Done, L, I : LongInt;
+Begin
+  X := Pointer(F^.Priv);
+  While X^.QLen = 0 Do
+  Begin
+    If (F^.Flags And O_NONBLOCK) <> 0 Then
+    Begin
+      InoRead := -EAGAIN;
+      Exit;
+    End;
+    If SleepOn(LongInt(X), 0, True) = WakeSignal Then
+    Begin
+      InoRead := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+  Done := 0;
+  While X^.QLen > 0 Do
+  Begin
+    L := 16 + (Mem[0:X^.Q + ((X^.QHead + 12) Mod InoQSize)]
+        Or (Mem[0:X^.Q + ((X^.QHead + 13) Mod InoQSize)] Shl 8));
+    If Done + L > Cnt Then
+    Begin
+      If Done = 0 Then InoRead := -EINVAL Else InoRead := Done;
+      Exit;
+    End;
+    For I := 0 To L - 1 Do
+      Mem[0:Buf + Done + I] := Mem[0:X^.Q + ((X^.QHead + I) Mod InoQSize)];
+    Done := Done + L;
+    X^.QHead := (X^.QHead + L) Mod InoQSize;
+    Dec(X^.QLen, L);
+  End;
+  InoRead := Done;
+End;
+
+Function InoPoll(F : PFile; Ev : LongInt) : LongInt;
+Var X : PInoInst;
+Begin
+  X := Pointer(F^.Priv);
+  If X^.QLen > 0 Then InoPoll := POLLIN Else InoPoll := 0;
+End;
+
+Function InoIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt;
+Var X : PInoInst;
+Begin
+  X := Pointer(F^.Priv);
+  If Cmd = $541B Then InoIoctl := PutUserL(Arg, X^.QLen)
+  Else InoIoctl := -ENOTTY;
+End;
+
+Procedure InoRelease(F : PFile);
+Var X : PInoInst; J, K : LongInt;
+Begin
+  X := Pointer(F^.Priv);
+  For J := 0 To X^.NWatch - 1 Do
+  Begin
+    InodePut(LongInt(X^.WIno[J]));
+    Dec(InoWatches);
+  End;
+  For K := 0 To MaxInoInst - 1 Do
+    If InoInst[K] = X Then InoInst[K] := Nil;
+  FreePages(X^.Q, OrderFor(InoQSize));
+  KFree(LongInt(X));
+End;
+
+Procedure InitEvents;
+Var I : LongInt;
+Begin
+  For I := 0 To MaxInoInst - 1 Do InoInst[I] := Nil;
+  InoWatches := 0;
+  MemFill(LongInt(@EvfdOps[0]), 0, SizeOf(EvfdOps));
+  EvfdOps[FoRead] := LongInt(@EvfdRead);
+  EvfdOps[FoWrite] := LongInt(@EvfdWrite);
+  EvfdOps[FoPoll] := LongInt(@EvfdPoll);
+  EvfdOps[FoRelease] := LongInt(@EvfdRelease);
+  MemFill(LongInt(@TfdOps[0]), 0, SizeOf(TfdOps));
+  TfdOps[FoRead] := LongInt(@TfdRead);
+  TfdOps[FoPoll] := LongInt(@TfdPoll);
+  TfdOps[FoRelease] := LongInt(@EvfdRelease);
+  MemFill(LongInt(@EpollOps[0]), 0, SizeOf(EpollOps));
+  EpollOps[FoPoll] := LongInt(@EpollPoll);
+  EpollOps[FoRelease] := LongInt(@EpollRelease);
+  MemFill(LongInt(@InoOps[0]), 0, SizeOf(InoOps));
+  InoOps[FoRead] := LongInt(@InoRead);
+  InoOps[FoPoll] := LongInt(@InoPoll);
+  InoOps[FoIoctl] := LongInt(@InoIoctl);
+  InoOps[FoRelease] := LongInt(@InoRelease);
+End;
+
+{ ==================================================================== }
+{ Partie 24 - FAT12/16/32 et vfat (noms longs) en lecture/ecriture      }
+{ ==================================================================== }
+{ (placee avant la partie 16) }
+
+{ Systeme de fichiers FAT sur un peripherique bloc. Noms longs (LFN,
+  UTF-8 <-> UCS-2), noms courts avec indicateurs de casse NT, repertoires
+  qui grandissent (sauf la racine FAT12/16), chaines de clusters, allocation
+  a partir d'un repere, troncature, renommage entre repertoires, attributs
+  (lecture seule), horodatage. Pas de liens durs ni symboliques, ni de
+  mknod (EPERM). Les inodes ne sont pas relisibles a partir de leur numero :
+  ils restent en cache jusqu'au demontage (identifies par l'entree de
+  repertoire). Options : ro, rw, umask=NNN, uid=N, gid=N. }
+
+Const
+  FatEntSz  = 32;
+  FatAttrRo = 1; FatAttrHid = 2; FatAttrSys = 4; FatAttrVol = 8;
+  FatAttrDir = $10; FatAttrArc = $20; FatAttrLfn = $0F;
+  FatMagic  = $4D44;
+
+Type
+  PFatSb = ^TFatSb;
+  TFatSb = Record
+    Dev, Typ, Bps, Spc, ClusBytes, Rsvd, NFats, FatSz, RootEnts : LongInt;
+    FatStart, RootStart, DataStart, Clusters, RootClus, FsInfo : LongInt;
+    Free, Hint, Umask, Uid, Gid, NextSyn : LongInt;
+    DCDir, DCIdx, DCClus : LongInt;      { cache du dernier acces repertoire }
+  End;
+
+  PFatIno = ^TFatIno;
+  TFatIno = Record
+    First, Parent, Idx, NLfn, Attr, CurIdx, CurClus : LongInt;
+  End;
+
+Var
+  FatDirIOps, FatFileIOps, FatDirFOps, FatFileFOps, FatSOps :
+      Array[0..15] Of LongInt;
+  FatQ, FatU : Array[0..259] Of LongInt;   { tampons de noms (UCS) }
+
+Function FatOf(Sb : PSuper) : PFatSb;
+Begin
+  FatOf := Pointer(Sb^.Priv);
+End;
+
+Function FatInoOf(I : PInode) : PFatIno;
+Begin
+  FatInoOf := Pointer(I^.Priv);
+End;
+
+{ ---- Table d'allocation ---- }
+
+Function FatBuf(X : PFatSb; Sec : LongInt) : PBuf;
+Begin
+  FatBuf := BRead(X^.Dev, Sec, X^.Bps);
+End;
+
+{ Valeur de l'entree du cluster N (borne : >= fin de chaine -> $0FFFFFF8) }
+Function FatGet(X : PFatSb; N : LongInt) : LongInt;
+Var Off, Sec, V : LongInt; B, B2 : PBuf;
+Begin
+  FatGet := -1;
+  If (N < 2) Or (N >= X^.Clusters + 2) Then Exit;
+  If X^.Typ = 12 Then
+  Begin
+    Off := N + (N Shr 1);
+    Sec := X^.FatStart + Off Div X^.Bps;
+    B := FatBuf(X, Sec);
+    If B = Nil Then Exit;
+    V := Mem[0:B^.Data + (Off Mod X^.Bps)];
+    If (Off Mod X^.Bps) = X^.Bps - 1 Then
+    Begin
+      B2 := FatBuf(X, Sec + 1);
+      If B2 = Nil Then
+      Begin
+        BRelease(B);
+        Exit;
+      End;
+      V := V Or (Mem[0:B2^.Data] Shl 8);
+      BRelease(B2);
+    End
+    Else V := V Or (Mem[0:B^.Data + (Off Mod X^.Bps) + 1] Shl 8);
+    BRelease(B);
+    If (N And 1) <> 0 Then V := V Shr 4 Else V := V And $FFF;
+    If V >= $FF8 Then V := $0FFFFFF8;
+    FatGet := V;
+    Exit;
+  End;
+  If X^.Typ = 16 Then
+  Begin
+    Off := N * 2;
+    B := FatBuf(X, X^.FatStart + Off Div X^.Bps);
+    If B = Nil Then Exit;
+    V := MemW[0:B^.Data + (Off Mod X^.Bps)];
+    BRelease(B);
+    If V >= $FFF8 Then V := $0FFFFFF8;
+    FatGet := V;
+    Exit;
+  End;
+  Off := N * 4;
+  B := FatBuf(X, X^.FatStart + Off Div X^.Bps);
+  If B = Nil Then Exit;
+  V := MemL[0:B^.Data + (Off Mod X^.Bps)] And $0FFFFFFF;
+  BRelease(B);
+  If V >= $0FFFFFF8 Then V := $0FFFFFF8;
+  FatGet := V;
+End;
+
+{ Ecrire l'entree N dans toutes les copies de la FAT }
+Procedure FatSet(X : PFatSb; N, V : LongInt);
+Var Off, Sec, K, Old : LongInt; B, B2 : PBuf;
+Begin
+  For K := 0 To X^.NFats - 1 Do
+  Begin
+    If X^.Typ = 12 Then
+    Begin
+      Off := N + (N Shr 1);
+      Sec := X^.FatStart + K * X^.FatSz + Off Div X^.Bps;
+      B := FatBuf(X, Sec);
+      If B = Nil Then Continue;
+      If (Off Mod X^.Bps) = X^.Bps - 1 Then
+      Begin
+        B2 := FatBuf(X, Sec + 1);
+        If B2 = Nil Then
+        Begin
+          BRelease(B);
+          Continue;
+        End;
+        If (N And 1) <> 0 Then
+        Begin
+          Mem[0:B^.Data + X^.Bps - 1] := (Mem[0:B^.Data + X^.Bps - 1] And $0F)
+              Or ((V And $F) Shl 4);
+          Mem[0:B2^.Data] := (V Shr 4) And $FF;
+        End
+        Else
+        Begin
+          Mem[0:B^.Data + X^.Bps - 1] := V And $FF;
+          Mem[0:B2^.Data] := (Mem[0:B2^.Data] And $F0) Or ((V Shr 8) And $F);
+        End;
+        BDirty(B2);
+        BRelease(B2);
+      End
+      Else
+      Begin
+        Off := Off Mod X^.Bps;
+        If (N And 1) <> 0 Then
+        Begin
+          Mem[0:B^.Data + Off] := (Mem[0:B^.Data + Off] And $0F)
+              Or ((V And $F) Shl 4);
+          Mem[0:B^.Data + Off + 1] := (V Shr 4) And $FF;
+        End
+        Else
+        Begin
+          Mem[0:B^.Data + Off] := V And $FF;
+          Mem[0:B^.Data + Off + 1] := (Mem[0:B^.Data + Off + 1] And $F0)
+              Or ((V Shr 8) And $F);
+        End;
+      End;
+      BDirty(B);
+      BRelease(B);
+    End
+    Else If X^.Typ = 16 Then
+    Begin
+      Off := N * 2;
+      B := FatBuf(X, X^.FatStart + K * X^.FatSz + Off Div X^.Bps);
+      If B = Nil Then Continue;
+      If V >= $0FFFFFF8 Then V := $FFFF;
+      MemW[0:B^.Data + (Off Mod X^.Bps)] := V;
+      BDirty(B);
+      BRelease(B);
+    End
+    Else
+    Begin
+      Off := N * 4;
+      B := FatBuf(X, X^.FatStart + K * X^.FatSz + Off Div X^.Bps);
+      If B = Nil Then Continue;
+      Old := MemL[0:B^.Data + (Off Mod X^.Bps)] And Not $0FFFFFFF;
+      MemL[0:B^.Data + (Off Mod X^.Bps)] := Old Or (V And $0FFFFFFF);
+      BDirty(B);
+      BRelease(B);
+    End;
+  End;
+End;
+
+{ Valeur ecrite pour "fin de chaine" selon le type }
+Function FatEoc(X : PFatSb) : LongInt;
+Begin
+  If X^.Typ = 12 Then FatEoc := $FFF
+  Else If X^.Typ = 16 Then FatEoc := $FFFF
+  Else FatEoc := $0FFFFFFF;
+End;
+
+Function FatSecOfClus(X : PFatSb; C : LongInt) : LongInt;
+Begin
+  FatSecOfClus := X^.DataStart + (C - 2) * X^.Spc;
+End;
+
+{ Allouer un cluster libre (marque fin de chaine), cherche a partir du
+  repere ; remplit de zeros si Zero }
+Function FatAlloc(X : PFatSb; Zero : Boolean; Var Clus : LongInt) : LongInt;
+Var N, C, S, V, Sec : LongInt; B : PBuf;
+Begin
+  FatAlloc := -ENOSPC;
+  Clus := 0;
+  For N := 0 To X^.Clusters - 1 Do
+  Begin
+    C := X^.Hint + N;
+    If C >= X^.Clusters + 2 Then C := C - X^.Clusters;
+    If C < 2 Then C := 2;
+    V := FatGet(X, C);
+    If V = 0 Then
+    Begin
+      FatSet(X, C, FatEoc(X));
+      X^.Hint := C + 1;
+      If X^.Hint >= X^.Clusters + 2 Then X^.Hint := 2;
+      If X^.Free > 0 Then Dec(X^.Free);
+      If Zero Then
+        For S := 0 To X^.Spc - 1 Do
+        Begin
+          Sec := FatSecOfClus(X, C) + S;
+          B := BGetBlk(X^.Dev, Sec, X^.Bps);
+          If B <> Nil Then
+          Begin
+            MemFill(B^.Data, 0, X^.Bps);
+            BDirty(B);
+            BRelease(B);
+          End;
+        End;
+      Clus := C;
+      FatAlloc := 0;
+      Exit;
+    End;
+  End;
+End;
+
+{ Liberer toute la chaine commencant au cluster First }
+Procedure FatFreeChain(X : PFatSb; First : LongInt);
+Var C, Nx, N : LongInt;
+Begin
+  C := First;
+  N := 0;
+  X^.DCDir := -1;
+  While (C >= 2) And (C < X^.Clusters + 2) And (N < X^.Clusters + 2) Do
+  Begin
+    Nx := FatGet(X, C);
+    FatSet(X, C, 0);
+    If X^.Free >= 0 Then Inc(X^.Free);
+    If (Nx = $0FFFFFF8) Or (Nx <= 0) Then Break;
+    C := Nx;
+    Inc(N);
+  End;
+End;
+
+{ ---- Repertoires : acces aux entrees de 32 octets ---- }
+
+{ Secteur et decalage de l'entree Idx du repertoire de premier cluster Dk
+  (0 : racine fixe FAT12/16) ; 0 ou 1 (hors du repertoire) ou -errno }
+Function DirLoc(X : PFatSb; Dk, Idx : LongInt; Var Sec, Off : LongInt)
+    : LongInt;
+Var Pos, Ci, C, Start, K, Nx : LongInt;
+Begin
+  Pos := Idx * FatEntSz;
+  If (Dk = 0) And (X^.Typ <> 32) Then
+  Begin
+    If Idx >= X^.RootEnts Then
+    Begin
+      DirLoc := 1;
+      Exit;
+    End;
+    Sec := X^.RootStart + Pos Div X^.Bps;
+    Off := Pos Mod X^.Bps;
+    DirLoc := 0;
+    Exit;
+  End;
+  Ci := Pos Div X^.ClusBytes;
+  If (X^.DCDir = Dk) And (X^.DCIdx <= Ci) And (X^.DCClus >= 2) Then
+  Begin
+    C := X^.DCClus;
+    Start := X^.DCIdx;
+  End
+  Else
+  Begin
+    C := Dk;
+    Start := 0;
+  End;
+  For K := Start + 1 To Ci Do
+  Begin
+    Nx := FatGet(X, C);
+    If Nx < 0 Then
+    Begin
+      DirLoc := -EIO;
+      Exit;
+    End;
+    If Nx = $0FFFFFF8 Then
+    Begin
+      DirLoc := 1;
+      Exit;
+    End;
+    C := Nx;
+  End;
+  X^.DCDir := Dk; X^.DCIdx := Ci; X^.DCClus := C;
+  Sec := FatSecOfClus(X, C) + (Pos Mod X^.ClusBytes) Div X^.Bps;
+  Off := Pos Mod X^.Bps;
+  DirLoc := 0;
+End;
+
+Function DirRead(X : PFatSb; Dk, Idx, Dst : LongInt) : LongInt;
+Var R, Sec, Off : LongInt; B : PBuf;
+Begin
+  R := DirLoc(X, Dk, Idx, Sec, Off);
+  If R <> 0 Then
+  Begin
+    DirRead := R;
+    Exit;
+  End;
+  B := FatBuf(X, Sec);
+  If B = Nil Then
+  Begin
+    DirRead := -EIO;
+    Exit;
+  End;
+  MemCopy(Dst, B^.Data + Off, FatEntSz);
+  BRelease(B);
+  DirRead := 0;
+End;
+
+Function DirWrite(X : PFatSb; Dk, Idx, Src : LongInt) : LongInt;
+Var R, Sec, Off : LongInt; B : PBuf;
+Begin
+  R := DirLoc(X, Dk, Idx, Sec, Off);
+  If R <> 0 Then
+  Begin
+    DirWrite := R;
+    Exit;
+  End;
+  B := FatBuf(X, Sec);
+  If B = Nil Then
+  Begin
+    DirWrite := -EIO;
+    Exit;
+  End;
+  MemCopy(B^.Data + Off, Src, FatEntSz);
+  BDirty(B);
+  BRelease(B);
+  DirWrite := 0;
+End;
+
+{ Ajouter un cluster (nul) a la fin du repertoire Dk ; 0 ou -errno }
+Function DirGrow(X : PFatSb; Dk : LongInt) : LongInt;
+Var C, Nx, N, R : LongInt;
+Begin
+  If (Dk = 0) And (X^.Typ <> 32) Then
+  Begin
+    DirGrow := -ENOSPC;
+    Exit;
+  End;
+  C := Dk;
+  N := 0;
+  While N < X^.Clusters + 2 Do
+  Begin
+    Nx := FatGet(X, C);
+    If Nx < 0 Then
+    Begin
+      DirGrow := -EIO;
+      Exit;
+    End;
+    If Nx = $0FFFFFF8 Then Break;
+    C := Nx;
+    Inc(N);
+  End;
+  R := FatAlloc(X, True, Nx);
+  If R <> 0 Then
+  Begin
+    DirGrow := R;
+    Exit;
+  End;
+  FatSet(X, C, Nx);
+  DirGrow := 0;
+End;
+
+{ ---- Noms ---- }
+
+Function FatUpper(C : LongInt) : LongInt;
+Begin
+  If (C >= 97) And (C <= 122) Then FatUpper := C - 32 Else FatUpper := C;
+End;
+
+Function FatLower(C : LongInt) : LongInt;
+Begin
+  If (C >= 65) And (C <= 90) Then FatLower := C + 32 Else FatLower := C;
+End;
+
+{ Somme de controle d'un nom court (11 octets a l'adresse A) }
+Function FatSum(A : LongInt) : LongInt;
+Var I, S : LongInt;
+Begin
+  S := 0;
+  For I := 0 To 10 Do
+    S := (((S And 1) Shl 7) Or ((S And $FE) Shr 1)) + Mem[0:A + I];
+  FatSum := S And $FF;
+End;
+
+{ Octets UTF-8 -> mots UCS-2 (Dst : tableau de LongInt) ; retourne le nombre }
+Function Utf8ToUcs(Const S : String; Dst : LongInt) : LongInt;
+Var I, N, C, L : LongInt;
+Begin
+  I := 1;
+  N := 0;
+  While I <= Length(S) Do
+  Begin
+    C := Ord(S[I]);
+    If C < $80 Then L := 1
+    Else If (C And $E0) = $C0 Then
+    Begin
+      If I + 1 > Length(S) Then Break;
+      C := ((C And $1F) Shl 6) Or (Ord(S[I + 1]) And $3F);
+      L := 2;
+    End
+    Else
+    Begin
+      If I + 2 > Length(S) Then Break;
+      C := ((C And $0F) Shl 12) Or ((Ord(S[I + 1]) And $3F) Shl 6)
+          Or (Ord(S[I + 2]) And $3F);
+      L := 3;
+    End;
+    MemL[0:Dst + N * 4] := C;
+    Inc(N);
+    I := I + L;
+    If N >= 255 Then Break;
+  End;
+  Utf8ToUcs := N;
+End;
+
+Procedure UcsToUtf8(Src, N : LongInt; Var S : String);
+Var I, C : LongInt;
+Begin
+  S := '';
+  For I := 0 To N - 1 Do
+  Begin
+    C := MemL[0:Src + I * 4];
+    If C < $80 Then S := S + Chr(C)
+    Else If C < $800 Then
+      S := S + Chr($C0 Or (C Shr 6)) + Chr($80 Or (C And $3F))
+    Else S := S + Chr($E0 Or (C Shr 12)) + Chr($80 Or ((C Shr 6) And $3F))
+        + Chr($80 Or (C And $3F));
+  End;
+End;
+
+{ Comparaison insensible a la casse de deux suites UCS (ASCII seulement) }
+Function UcsEq(A, Na, B, Nb : LongInt) : Boolean;
+Var I, X, Y : LongInt;
+Begin
+  UcsEq := False;
+  If Na <> Nb Then Exit;
+  For I := 0 To Na - 1 Do
+  Begin
+    X := MemL[0:A + I * 4]; Y := MemL[0:B + I * 4];
+    If (X < 128) And (Y < 128) Then
+    Begin
+      If FatUpper(X) <> FatUpper(Y) Then Exit;
+    End
+    Else If X <> Y Then Exit;
+  End;
+  UcsEq := True;
+End;
+
+{ Nom court d'une entree (8.3 avec indicateurs de casse NT) }
+Procedure FatShortStr(Ent : LongInt; Var S : String);
+Var I, C : LongInt;
+Begin
+  S := '';
+  For I := 0 To 7 Do
+  Begin
+    C := Mem[0:Ent + I];
+    If C = 32 Then Break;
+    If (Mem[0:Ent + 12] And 8) <> 0 Then C := FatLower(C);
+    If (I = 0) And (C = 5) Then C := $E5;
+    S := S + Chr(C);
+  End;
+  If Mem[0:Ent + 8] <> 32 Then
+  Begin
+    S := S + '.';
+    For I := 8 To 10 Do
+    Begin
+      C := Mem[0:Ent + I];
+      If C = 32 Then Break;
+      If (Mem[0:Ent + 12] And 16) <> 0 Then C := FatLower(C);
+      S := S + Chr(C);
+    End;
+  End;
+End;
+
+{ Lecture sequentielle des entrees d'un repertoire avec assemblage des noms
+  longs. Idx : prochain indice a lire (avance). Retourne 0 si une entree
+  utile a ete lue (Ent : 32 octets de l'entree courte ; Name : son nom ;
+  Start : indice de la premiere entree du groupe ; EntIdx : indice de
+  l'entree courte), 1 en fin de repertoire, <0 en cas d'erreur }
+Function DirNext(X : PFatSb; Dk : LongInt; Var Idx : LongInt; Ent : LongInt;
+    Var Name : String; Var Start, EntIdx : LongInt;
+    Ucs : LongInt; Var Nucs : LongInt) : LongInt;
+Var R, Ord_, I, Sum, K, Seq, At, C, Lfn : LongInt; Have : Boolean;
+Begin
+  Have := False;
+  Lfn := 0;
+  Sum := 0;
+  Nucs := 0;
+  While True Do
+  Begin
+    R := DirRead(X, Dk, Idx, Ent);
+    If R <> 0 Then
+    Begin
+      DirNext := R;
+      Exit;
+    End;
+    C := Mem[0:Ent];
+    If C = 0 Then
+    Begin
+      DirNext := 1;
+      Exit;
+    End;
+    If C = $E5 Then
+    Begin
+      Have := False;
+      Inc(Idx);
+      Continue;
+    End;
+    If (Mem[0:Ent + 11] And $3F) = FatAttrLfn Then
+    Begin
+      Ord_ := C;
+      Seq := Ord_ And $1F;
+      If (Ord_ And $40) <> 0 Then
+      Begin
+        Have := True;
+        Start := Idx;
+        Lfn := Seq;
+        Sum := Mem[0:Ent + 13];
+        Nucs := 0;
+        For I := 0 To 259 Do MemL[0:Ucs + I * 4] := 0;
+      End;
+      If Have And (Seq >= 1) And (Seq <= 20) And (Mem[0:Ent + 13] = Sum) Then
+      Begin
+        At := (Seq - 1) * 13;
+        For K := 0 To 4 Do
+          MemL[0:Ucs + (At + K) * 4] := MemW[0:Ent + 1 + K * 2];
+        For K := 0 To 5 Do
+          MemL[0:Ucs + (At + 5 + K) * 4] := MemW[0:Ent + 14 + K * 2];
+        For K := 0 To 1 Do
+          MemL[0:Ucs + (At + 11 + K) * 4] := MemW[0:Ent + 28 + K * 2];
+      End
+      Else Have := False;
+      Inc(Idx);
+      Continue;
+    End;
+    { entree courte }
+    If (Mem[0:Ent + 11] And FatAttrVol) <> 0 Then
+    Begin
+      Have := False;
+      Inc(Idx);
+      Continue;
+    End;
+    If (C = 46) And ((Mem[0:Ent + 1] = 32) Or ((Mem[0:Ent + 1] = 46)
+        And (Mem[0:Ent + 2] = 32))) Then
+    Begin
+      Have := False;
+      Inc(Idx);
+      Continue;
+    End;
+    EntIdx := Idx;
+    If Have And (FatSum(Ent) = Sum) And (Idx - Start = Lfn) Then
+    Begin
+      Nucs := 0;
+      While (Nucs < Lfn * 13) And (MemL[0:Ucs + Nucs * 4] <> 0)
+          And (MemL[0:Ucs + Nucs * 4] <> $FFFF) Do Inc(Nucs);
+      UcsToUtf8(Ucs, Nucs, Name);
+    End
+    Else
+    Begin
+      Start := Idx;
+      FatShortStr(Ent, Name);
+      Nucs := Utf8ToUcs(Name, Ucs);
+    End;
+    Inc(Idx);
+    DirNext := 0;
+    Exit;
+  End;
+End;
+
+{ Nom courte pour Nm ; Lossy : le nom ne tient pas tel quel (noms longs
+  necessaires) ; Sh recoit 11 octets, Nt les indicateurs de casse }
+Procedure FatShortName(Const Nm : String; Sh : LongInt; Var Lossy : Boolean;
+    Var Nt : LongInt);
+Var Dot, I, C, Nb, Ne, LowB, UpB, LowE, UpE : LongInt; Base, Ext : String;
+Begin
+  Lossy := False;
+  Nt := 0;
+  MemFill(Sh, 32, 11);
+  Dot := 0;
+  For I := Length(Nm) DownTo 1 Do
+    If Nm[I] = '.' Then
+    Begin
+      Dot := I;
+      Break;
+    End;
+  If (Dot = 1) Or (Dot = Length(Nm)) Then Dot := 0;
+  If Dot > 0 Then
+  Begin
+    Base := Copy(Nm, 1, Dot - 1);
+    Ext := Copy(Nm, Dot + 1, 255);
+  End
+  Else
+  Begin
+    Base := Nm;
+    Ext := '';
+  End;
+  Nb := 0; Ne := 0; LowB := 0; UpB := 0; LowE := 0; UpE := 0;
+  For I := 1 To Length(Base) Do
+  Begin
+    C := Ord(Base[I]);
+    If (C = 32) Or (C = 46) Then
+    Begin
+      Lossy := True;
+      Continue;
+    End;
+    If (C >= 97) And (C <= 122) Then Inc(LowB)
+    Else If (C >= 65) And (C <= 90) Then Inc(UpB);
+    If C >= 128 Then
+    Begin
+      Lossy := True;
+      C := 95;
+    End
+    Else If (C < 32) Or (Pos(Chr(C), '"*+,/:;<=>?[\]|') > 0) Then
+    Begin
+      Lossy := True;
+      C := 95;
+    End;
+    If Nb < 8 Then
+    Begin
+      Mem[0:Sh + Nb] := FatUpper(C);
+      Inc(Nb);
+    End
+    Else Lossy := True;
+  End;
+  For I := 1 To Length(Ext) Do
+  Begin
+    C := Ord(Ext[I]);
+    If (C >= 97) And (C <= 122) Then Inc(LowE)
+    Else If (C >= 65) And (C <= 90) Then Inc(UpE);
+    If (C >= 128) Or (C = 32) Or (C < 32)
+       Or (Pos(Chr(C), '"*+,/:;<=>?[\]|.') > 0)
+    Then
+    Begin
+      Lossy := True;
+      C := 95;
+    End;
+    If Ne < 3 Then
+    Begin
+      Mem[0:Sh + 8 + Ne] := FatUpper(C);
+      Inc(Ne);
+    End
+    Else Lossy := True;
+  End;
+  If Nb = 0 Then
+  Begin
+    Lossy := True;
+    Mem[0:Sh] := 95;
+  End;
+  If (LowB > 0) And (UpB > 0) Then Lossy := True;
+  If (LowE > 0) And (UpE > 0) Then Lossy := True;
+  If Not Lossy Then
+  Begin
+    If (LowB > 0) And (UpB = 0) Then Nt := Nt Or 8;
+    If (LowE > 0) And (UpE = 0) Then Nt := Nt Or 16;
+  End;
+  If Mem[0:Sh] = $E5 Then Mem[0:Sh] := 5;
+End;
+
+{ ---- Heure : FAT (heure locale, vue ici comme UTC) <-> secondes Unix ---- }
+
+Function FatDays(Y, M, D : LongInt) : LongInt;
+Var Yy, Era, Yoe, Doy, Doe, Mp : LongInt;
+Begin
+  If M <= 2 Then Yy := Y - 1 Else Yy := Y;
+  Era := Yy Div 400;
+  Yoe := Yy - Era * 400;
+  If M > 2 Then Mp := M - 3 Else Mp := M + 9;
+  Doy := (153 * Mp + 2) Div 5 + D - 1;
+  Doe := Yoe * 365 + Yoe Div 4 - Yoe Div 100 + Doy;
+  FatDays := Era * 146097 + Doe - 719468;
+End;
+
+Function FatToUnix(Dt, Tm : LongInt) : LongInt;
+Var Y, M, D : LongInt;
+Begin
+  Y := 1980 + ((Dt Shr 9) And 127);
+  M := (Dt Shr 5) And 15;
+  D := Dt And 31;
+  If M < 1 Then M := 1;
+  If M > 12 Then M := 12;
+  If D < 1 Then D := 1;
+  FatToUnix := FatDays(Y, M, D) * 86400 + ((Tm Shr 11) And 31) * 3600
+      + ((Tm Shr 5) And 63) * 60 + (Tm And 31) * 2;
+End;
+
+Procedure UnixToFat(T : LongInt; Var Dt, Tm : LongInt);
+Var Y, M, D, Dd, Rm : LongInt;
+Begin
+  If T < 315532800 Then T := 315532800;
+  Dd := T Div 86400;
+  Rm := T Mod 86400;
+  CivilFromDays(Dd, Y, M, D);
+  If Y > 2107 Then
+  Begin
+    Y := 2107; M := 12; D := 31;
+  End;
+  Dt := ((Y - 1980) Shl 9) Or (M Shl 5) Or D;
+  Tm := ((Rm Div 3600) Shl 11) Or (((Rm Mod 3600) Div 60) Shl 5)
+      Or ((Rm Mod 60) Div 2);
+End;
+
+{ ---- Inodes ---- }
+
+Function FatModeOf(X : PFatSb; Attr : LongInt) : LongInt;
+Var M : LongInt;
+Begin
+  M := $1FF And Not X^.Umask;
+  If (Attr And FatAttrRo) <> 0 Then M := M And Not $92;
+  If (Attr And FatAttrDir) <> 0 Then FatModeOf := S_IFDIR Or M
+  Else FatModeOf := S_IFREG Or M;
+End;
+
+Procedure FatSetOps(I : PInode);
+Begin
+  If (I^.Mode And S_IFMT) = S_IFDIR Then
+  Begin
+    I^.IOps := LongInt(@FatDirIOps[0]);
+    I^.FOps := LongInt(@FatDirFOps[0]);
+  End
+  Else
+  Begin
+    I^.IOps := LongInt(@FatFileIOps[0]);
+    I^.FOps := LongInt(@FatFileFOps[0]);
+  End;
+End;
+
+Function FatChainLen(X : PFatSb; First : LongInt) : LongInt;
+Var C, N, Nx : LongInt;
+Begin
+  N := 0;
+  C := First;
+  While (C >= 2) And (N <= X^.Clusters) Do
+  Begin
+    Inc(N);
+    Nx := FatGet(X, C);
+    If (Nx < 2) Or (Nx = $0FFFFFF8) Then Break;
+    C := Nx;
+  End;
+  FatChainLen := N;
+End;
+
+{ Inode de l'entree (Dk, Idx) : en cache ou cree a partir de l'entree Ent }
+Function FatGetIno(Sb : PSuper; Dk, Idx, NLfn, Ent : LongInt;
+    Var Res : PInode) : LongInt;
+Var X : PFatSb; I : PInode; P : PFatIno; Attr, First : LongInt;
+Begin
+  X := FatOf(Sb);
+  I := InodeAll;
+  While I <> Nil Do
+  Begin
+    If I^.Sb = Sb Then
+    Begin
+      P := FatInoOf(I);
+      If (P <> Nil) And (P^.Parent = Dk) And (P^.Idx = Idx) Then
+      Begin
+        Inc(I^.Count);
+        Res := I;
+        FatGetIno := 0;
+        Exit;
+      End;
+    End;
+    I := I^.Next;
+  End;
+  Attr := Mem[0:Ent + 11];
+  I := NewInode(Sb, FatModeOf(X, Attr));
+  If I = Nil Then
+  Begin
+    FatGetIno := -ENOMEM;
+    Exit;
+  End;
+  P := Pointer(KMallocZ(SizeOf(TFatIno)));
+  If P = Nil Then
+  Begin
+    I^.Nlink := 0;
+    InodePut(LongInt(I));
+    FatGetIno := -ENOMEM;
+    Exit;
+  End;
+  First := MemW[0:Ent + 26];
+  If X^.Typ = 32 Then First := First Or (MemW[0:Ent + 20] Shl 16);
+  P^.First := First; P^.Parent := Dk; P^.Idx := Idx; P^.NLfn := NLfn;
+  P^.Attr := Attr; P^.CurClus := 0; P^.CurIdx := 0;
+  I^.Priv := LongInt(P);
+  I^.Uid := X^.Uid; I^.Gid := X^.Gid;
+  I^.Mtime := FatToUnix(MemW[0:Ent + 24], MemW[0:Ent + 22]);
+  I^.Atime := FatToUnix(MemW[0:Ent + 18], 0);
+  I^.Ctime := FatToUnix(MemW[0:Ent + 16], MemW[0:Ent + 14]);
+  I^.Nlink := 1;
+  If (Attr And FatAttrDir) <> 0 Then
+  Begin
+    I^.Nlink := 2;
+    I^.Size := FatChainLen(X, First) * X^.ClusBytes;
+  End
+  Else
+  Begin
+    I^.Size := MemL[0:Ent + 28];
+    If I^.Size < 0 Then I^.Size := $7FFFFFFF;
+  End;
+  I^.Blocks := ((I^.Size + X^.ClusBytes - 1) Div X^.ClusBytes)
+      * (X^.ClusBytes Div 512);
+  FatSetOps(I);
+  Res := I;
+  FatGetIno := 0;
+End;
+
+{ Ecrire l'entree de repertoire de l'inode (attributs, cluster, taille,
+  dates) }
+Function FatWriteInode(I : PInode) : LongInt;
+Var X : PFatSb; P : PFatIno; Ent : Array[0..31] Of Byte;
+    A, R, Attr, Dt, Tm : LongInt;
+Begin
+  FatWriteInode := 0;
+  I^.Dirty := 0;
+  P := FatInoOf(I);
+  If (P = Nil) Or (P^.Parent < 0) Then Exit;
+  X := FatOf(I^.Sb);
+  If X = Nil Then Exit;
+  A := LongInt(@Ent[0]);
+  R := DirRead(X, P^.Parent, P^.Idx, A);
+  If R <> 0 Then
+  Begin
+    FatWriteInode := R;
+    Exit;
+  End;
+  Attr := Mem[0:A + 11] And Not FatAttrRo;
+  If (I^.Mode And $92) = 0 Then Attr := Attr Or FatAttrRo;
+  If (I^.Mode And S_IFMT) <> S_IFDIR Then Attr := Attr Or FatAttrArc;
+  Mem[0:A + 11] := Attr;
+  P^.Attr := Attr;
+  MemW[0:A + 26] := P^.First And $FFFF;
+  If X^.Typ = 32 Then MemW[0:A + 20] := (P^.First Shr 16) And $FFFF;
+  If (I^.Mode And S_IFMT) = S_IFDIR Then MemL[0:A + 28] := 0
+  Else MemL[0:A + 28] := I^.Size;
+  UnixToFat(I^.Mtime, Dt, Tm);
+  MemW[0:A + 24] := Dt;
+  MemW[0:A + 22] := Tm;
+  UnixToFat(I^.Atime, Dt, Tm);
+  MemW[0:A + 18] := Dt;
+  FatWriteInode := DirWrite(X, P^.Parent, P^.Idx, A);
+End;
+
+{ Dernier acces a l'inode : liberer les clusters s'il est supprime }
+Procedure FatPutInode(I : PInode);
+Var P : PFatIno; X : PFatSb;
+Begin
+  P := FatInoOf(I);
+  If P = Nil Then Exit;
+  X := FatOf(I^.Sb);
+  If (I^.Nlink <= 0) And (P^.First >= 2) And (X <> Nil) Then
+    FatFreeChain(X, P^.First);
+  KFree(LongInt(P));
+  I^.Priv := 0;
+End;
+
+{ ---- Recherche et noms ---- }
+
+Function StrEqCi(Const A, B : String) : Boolean;
+Var I : LongInt;
+Begin
+  StrEqCi := False;
+  If Length(A) <> Length(B) Then Exit;
+  For I := 1 To Length(A) Do
+    If FatUpper(Ord(A[I])) <> FatUpper(Ord(B[I])) Then Exit;
+  StrEqCi := True;
+End;
+
+Function FatDirOf(I : PInode) : LongInt;
+Begin
+  FatDirOf := FatInoOf(I)^.First;
+End;
+
+{ Chercher Nm dans le repertoire Dk ; 0 (Ent = entree courte, Start/EntIdx),
+  -ENOENT ou erreur }
+Function FatFind(X : PFatSb; Dk : LongInt; Var Nm : String; Ent : LongInt;
+    Var Start, EntIdx : LongInt) : LongInt;
+Var Idx, R, Nq, Nu : LongInt; S, Sh : String;
+Begin
+  Nq := Utf8ToUcs(Nm, LongInt(@FatQ[0]));
+  Idx := 0;
+  While True Do
+  Begin
+    R := DirNext(X, Dk, Idx, Ent, S, Start, EntIdx, LongInt(@FatU[0]), Nu);
+    If R <> 0 Then
+    Begin
+      If R = 1 Then FatFind := -ENOENT Else FatFind := R;
+      Exit;
+    End;
+    If UcsEq(LongInt(@FatQ[0]), Nq, LongInt(@FatU[0]), Nu) Then
+    Begin
+      FatFind := 0;
+      Exit;
+    End;
+    If EntIdx <> Start Then
+    Begin
+      FatShortStr(Ent, Sh);
+      If StrEqCi(Sh, Nm) Then
+      Begin
+        FatFind := 0;
+        Exit;
+      End;
+    End;
+  End;
+End;
+
+Function FatCheckName(Const Nm : String) : LongInt;
+Var I, C, Dots : LongInt;
+Begin
+  FatCheckName := 0;
+  If Length(Nm) = 0 Then
+  Begin
+    FatCheckName := -EINVAL;
+    Exit;
+  End;
+  If Length(Nm) > 255 Then
+  Begin
+    FatCheckName := -ENAMETOOLONG;
+    Exit;
+  End;
+  Dots := 0;
+  For I := 1 To Length(Nm) Do
+  Begin
+    C := Ord(Nm[I]);
+    If C = 46 Then Inc(Dots);
+    If (C < 32) Or (C = 34) Or (C = 42) Or (C = 58) Or (C = 60) Or (C = 62)
+       Or (C = 63) Or (C = 92) Or (C = 124) Then
+    Begin
+      FatCheckName := -EINVAL;
+      Exit;
+    End;
+  End;
+  If Dots = Length(Nm) Then FatCheckName := -EINVAL;
+End;
+
+{ Un nom court (11 octets a l'adresse Sh) existe-t-il deja dans Dk ? }
+Function FatShortExists(X : PFatSb; Dk, Sh : LongInt) : Boolean;
+Var Idx, R, C, K, A : LongInt; Ent : Array[0..31] Of Byte; Same : Boolean;
+Begin
+  FatShortExists := False;
+  A := LongInt(@Ent[0]);
+  Idx := 0;
+  While True Do
+  Begin
+    R := DirRead(X, Dk, Idx, A);
+    If R <> 0 Then Exit;
+    C := Mem[0:A];
+    If C = 0 Then Exit;
+    If (C <> $E5) And ((Mem[0:A + 11] And $3F) <> FatAttrLfn) Then
+    Begin
+      Same := True;
+      For K := 0 To 10 Do
+        If Mem[0:A + K] <> Mem[0:Sh + K] Then Same := False;
+      If Same Then
+      Begin
+        FatShortExists := True;
+        Exit;
+      End;
+    End;
+    Inc(Idx);
+  End;
+End;
+
+{ Ajouter une entree (avec noms longs si necessaire) dans Dk ; retourne
+  l'indice de l'entree courte et le nombre d'entrees de nom long }
+Function FatDirAdd(X : PFatSb; Dk : LongInt; Var Nm : String;
+    Attr, First, Size : LongInt; Var EntIdx, NLfn : LongInt) : LongInt;
+Var Sh : Array[0..10] Of Byte; Ent : Array[0..31] Of Byte;
+    Lossy : Boolean; Nt, Nq, K, Idx, Run, RunStart, R, J, Seq, At, C, Sum,
+    Dt, Tm, N, SA, A, Tl, Bl, Q : LongInt; Tail : String;
+Begin
+  SA := LongInt(@Sh[0]);
+  A := LongInt(@Ent[0]);
+  Nq := Utf8ToUcs(Nm, LongInt(@FatQ[0]));
+  If Nq = 0 Then
+  Begin
+    FatDirAdd := -EINVAL;
+    Exit;
+  End;
+  FatShortName(Nm, SA, Lossy, Nt);
+  K := 0;
+  If Lossy Then
+  Begin
+    K := (Nq + 12) Div 13;
+    { nom court unique : BASE~N }
+    N := 1;
+    Bl := 0;
+    While (Bl < 8) And (Sh[Bl] <> 32) Do Inc(Bl);
+    While True Do
+    Begin
+      Tail := '~' + IntStr(N);
+      Tl := Length(Tail);
+      If Bl > 8 - Tl Then Q := 8 - Tl Else Q := Bl;
+      For J := 0 To Tl - 1 Do Sh[Q + J] := Ord(Tail[J + 1]);
+      For J := Q + Tl To 7 Do Sh[J] := 32;
+      If Not FatShortExists(X, Dk, SA) Then Break;
+      Inc(N);
+      If N > 999999 Then
+      Begin
+        FatDirAdd := -ENOSPC;
+        Exit;
+      End;
+    End;
+    Nt := 0;
+  End
+  Else If FatShortExists(X, Dk, SA) Then
+  Begin
+    FatDirAdd := -EEXIST;
+    Exit;
+  End;
+  { chercher K+1 entrees libres consecutives }
+  Idx := 0;
+  Run := 0;
+  RunStart := 0;
+  While Run < K + 1 Do
+  Begin
+    R := DirRead(X, Dk, Idx, A);
+    If R = 1 Then
+    Begin
+      R := DirGrow(X, Dk);
+      If R <> 0 Then
+      Begin
+        FatDirAdd := R;
+        Exit;
+      End;
+      Continue;
+    End;
+    If R < 0 Then
+    Begin
+      FatDirAdd := R;
+      Exit;
+    End;
+    C := Mem[0:A];
+    If (C = 0) Or (C = $E5) Then
+    Begin
+      If Run = 0 Then RunStart := Idx;
+      Inc(Run);
+    End
+    Else Run := 0;
+    Inc(Idx);
+  End;
+  UnixToFat(NowSec, Dt, Tm);
+  { entrees de nom long (la plus haute d'abord) }
+  Sum := FatSum(SA);
+  For J := 0 To K - 1 Do
+  Begin
+    Seq := K - J;
+    MemFill(A, 0, FatEntSz);
+    Mem[0:A] := Seq;
+    If J = 0 Then Mem[0:A] := Seq Or $40;
+    Mem[0:A + 11] := FatAttrLfn;
+    Mem[0:A + 13] := Sum;
+    At := (Seq - 1) * 13;
+    For N := 0 To 12 Do
+    Begin
+      If At + N < Nq Then C := MemL[0:LongInt(@FatQ[0]) + (At + N) * 4]
+      Else If At + N = Nq Then C := 0
+      Else C := $FFFF;
+      If N < 5 Then MemW[0:A + 1 + N * 2] := C
+      Else If N < 11 Then MemW[0:A + 14 + (N - 5) * 2] := C
+      Else MemW[0:A + 28 + (N - 11) * 2] := C;
+    End;
+    R := DirWrite(X, Dk, RunStart + J, A);
+    If R <> 0 Then
+    Begin
+      FatDirAdd := R;
+      Exit;
+    End;
+  End;
+  MemFill(A, 0, FatEntSz);
+  MemCopy(A, SA, 11);
+  Mem[0:A + 11] := Attr;
+  Mem[0:A + 12] := Nt;
+  MemW[0:A + 14] := Tm;
+  MemW[0:A + 16] := Dt;
+  MemW[0:A + 18] := Dt;
+  If X^.Typ = 32 Then MemW[0:A + 20] := (First Shr 16) And $FFFF;
+  MemW[0:A + 22] := Tm;
+  MemW[0:A + 24] := Dt;
+  MemW[0:A + 26] := First And $FFFF;
+  MemL[0:A + 28] := Size;
+  R := DirWrite(X, Dk, RunStart + K, A);
+  If R <> 0 Then
+  Begin
+    FatDirAdd := R;
+    Exit;
+  End;
+  EntIdx := RunStart + K;
+  NLfn := K;
+  FatDirAdd := 0;
+End;
+
+{ Marquer comme supprimees les entrees Start..EntIdx }
+Function FatDelEntries(X : PFatSb; Dk, Start, EntIdx : LongInt) : LongInt;
+Var K, R, A : LongInt; Ent : Array[0..31] Of Byte;
+Begin
+  A := LongInt(@Ent[0]);
+  FatDelEntries := 0;
+  For K := Start To EntIdx Do
+  Begin
+    R := DirRead(X, Dk, K, A);
+    If R <> 0 Then
+    Begin
+      FatDelEntries := R;
+      Exit;
+    End;
+    Mem[0:A] := $E5;
+    R := DirWrite(X, Dk, K, A);
+    If R <> 0 Then
+    Begin
+      FatDelEntries := R;
+      Exit;
+    End;
+  End;
+End;
+
+{ Repertoire vide (hors "." et "..") ? 0 ou -ENOTEMPTY }
+Function FatDirEmpty(X : PFatSb; Dk : LongInt) : LongInt;
+Var Idx, R, C, A : LongInt; Ent : Array[0..31] Of Byte;
+Begin
+  A := LongInt(@Ent[0]);
+  Idx := 0;
+  While True Do
+  Begin
+    R := DirRead(X, Dk, Idx, A);
+    If R = 1 Then
+    Begin
+      FatDirEmpty := 0;
+      Exit;
+    End;
+    If R < 0 Then
+    Begin
+      FatDirEmpty := R;
+      Exit;
+    End;
+    C := Mem[0:A];
+    If C = 0 Then
+    Begin
+      FatDirEmpty := 0;
+      Exit;
+    End;
+    If (C <> $E5) And ((Mem[0:A + 11] And $3F) <> FatAttrLfn)
+       And ((Mem[0:A + 11] And FatAttrVol) = 0)
+       And Not ((C = 46) And ((Mem[0:A + 1] = 32) Or ((Mem[0:A + 1] = 46)
+       And (Mem[0:A + 2] = 32)))) Then
+    Begin
+      FatDirEmpty := -ENOTEMPTY;
+      Exit;
+    End;
+    Inc(Idx);
+  End;
+End;
+
+{ ---- Operations sur les repertoires ---- }
+
+Function FatLookup(Dir : PInode; Var Nm : String; Var Res : PInode) : LongInt;
+Var X : PFatSb; Ent : Array[0..31] Of Byte; A, R, Start, EI : LongInt;
+Begin
+  If Length(Nm) > 255 Then
+  Begin
+    FatLookup := -ENAMETOOLONG;
+    Exit;
+  End;
+  X := FatOf(Dir^.Sb);
+  A := LongInt(@Ent[0]);
+  R := FatFind(X, FatDirOf(Dir), Nm, A, Start, EI);
+  If R <> 0 Then
+  Begin
+    FatLookup := R;
+    Exit;
+  End;
+  FatLookup := FatGetIno(Dir^.Sb, FatDirOf(Dir), EI, EI - Start, A, Res);
+End;
+
+Function FatReaddir(F : PFile; Var Ino : LongInt; Var Nm : String;
+    Var DType : LongInt) : LongInt;
+Var D : PInode; X : PFatSb; Ent : Array[0..31] Of Byte; Idx, R, Start, EI,
+    Nu, A : LongInt;
+Begin
+  D := F^.Inode;
+  X := FatOf(D^.Sb);
+  A := LongInt(@Ent[0]);
+  If F^.Pos = 0 Then
+  Begin
+    Ino := D^.Ino; Nm := '.'; DType := DT_DIR;
+    F^.Pos := 1;
+    FatReaddir := 1;
+    Exit;
+  End;
+  If F^.Pos = 1 Then
+  Begin
+    Ino := 1; Nm := '..'; DType := DT_DIR;
+    F^.Pos := 2;
+    FatReaddir := 1;
+    Exit;
+  End;
+  Idx := F^.Pos - 2;
+  R := DirNext(X, FatDirOf(D), Idx, A, Nm, Start, EI,
+      LongInt(@FatU[0]), Nu);
+  If R <> 0 Then
+  Begin
+    If R = 1 Then FatReaddir := 0 Else FatReaddir := R;
+    Exit;
+  End;
+  F^.Pos := Idx + 2;
+  Ino := (FatDirOf(D) Shl 12) Xor (EI + 2);
+  If Ino = 0 Then Ino := 1;
+  If (Mem[0:A + 11] And FatAttrDir) <> 0 Then DType := DT_DIR
+  Else DType := DT_REG;
+  FatReaddir := 1;
+End;
+
+Function FatCreate(Dir : PInode; Var Nm : String; Mode : LongInt;
+    Var Res : PInode) : LongInt;
+Var X : PFatSb; Ent : Array[0..31] Of Byte; A, R, Start, EI, NL, Dk : LongInt;
+Begin
+  X := FatOf(Dir^.Sb);
+  A := LongInt(@Ent[0]);
+  Dk := FatDirOf(Dir);
+  R := FatCheckName(Nm);
+  If R <> 0 Then
+  Begin
+    FatCreate := R;
+    Exit;
+  End;
+  R := FatFind(X, Dk, Nm, A, Start, EI);
+  If R = 0 Then
+  Begin
+    FatCreate := -EEXIST;
+    Exit;
+  End;
+  If R <> -ENOENT Then
+  Begin
+    FatCreate := R;
+    Exit;
+  End;
+  R := FatDirAdd(X, Dk, Nm, FatAttrArc, 0, 0, EI, NL);
+  If R <> 0 Then
+  Begin
+    FatCreate := R;
+    Exit;
+  End;
+  DirRead(X, Dk, EI, A);
+  R := FatGetIno(Dir^.Sb, Dk, EI, NL, A, Res);
+  Dir^.Mtime := NowSec; Dir^.Ctime := Dir^.Mtime;
+  DentryPurgeSb(Dir^.Sb);
+  FatCreate := R;
+End;
+
+Function FatMkdir(Dir : PInode; Var Nm : String; Mode : LongInt) : LongInt;
+Var X : PFatSb; Ent : Array[0..31] Of Byte; A, R, Start, EI, NL, Dk, C, Par,
+    Sec, Dt, Tm, K : LongInt; B : PBuf; I : PInode;
+Begin
+  X := FatOf(Dir^.Sb);
+  A := LongInt(@Ent[0]);
+  Dk := FatDirOf(Dir);
+  R := FatCheckName(Nm);
+  If R <> 0 Then
+  Begin
+    FatMkdir := R;
+    Exit;
+  End;
+  R := FatFind(X, Dk, Nm, A, Start, EI);
+  If R = 0 Then
+  Begin
+    FatMkdir := -EEXIST;
+    Exit;
+  End;
+  If R <> -ENOENT Then
+  Begin
+    FatMkdir := R;
+    Exit;
+  End;
+  R := FatAlloc(X, True, C);
+  If R <> 0 Then
+  Begin
+    FatMkdir := R;
+    Exit;
+  End;
+  If FatInoOf(Dir)^.Parent < 0 Then Par := 0 Else Par := Dk;
+  Sec := FatSecOfClus(X, C);
+  B := FatBuf(X, Sec);
+  If B = Nil Then
+  Begin
+    FatFreeChain(X, C);
+    FatMkdir := -EIO;
+    Exit;
+  End;
+  UnixToFat(NowSec, Dt, Tm);
+  MemFill(B^.Data, 0, FatEntSz * 2);
+  MemFill(B^.Data, 32, 11);
+  Mem[0:B^.Data] := 46;
+  Mem[0:B^.Data + 11] := FatAttrDir;
+  MemW[0:B^.Data + 14] := Tm; MemW[0:B^.Data + 16] := Dt;
+  MemW[0:B^.Data + 18] := Dt;
+  MemW[0:B^.Data + 22] := Tm; MemW[0:B^.Data + 24] := Dt;
+  MemW[0:B^.Data + 26] := C And $FFFF;
+  If X^.Typ = 32 Then MemW[0:B^.Data + 20] := (C Shr 16) And $FFFF;
+  MemCopy(B^.Data + 32, B^.Data, 32);
+  Mem[0:B^.Data + 33] := 46;
+  MemW[0:B^.Data + 32 + 26] := Par And $FFFF;
+  If X^.Typ = 32 Then MemW[0:B^.Data + 32 + 20] := (Par Shr 16) And $FFFF;
+  BDirty(B);
+  BRelease(B);
+  K := 0;
+  R := FatDirAdd(X, Dk, Nm, FatAttrDir, C, 0, EI, NL);
+  If R <> 0 Then
+  Begin
+    FatFreeChain(X, C);
+    FatMkdir := R;
+    Exit;
+  End;
+  DirRead(X, Dk, EI, A);
+  R := FatGetIno(Dir^.Sb, Dk, EI, NL, A, I);
+  If R = 0 Then InodePut(LongInt(I));
+  Dir^.Mtime := NowSec; Dir^.Ctime := Dir^.Mtime;
+  DentryPurgeSb(Dir^.Sb);
+  FatMkdir := R;
+End;
+
+Function FatUnlink(Dir : PInode; Var Nm : String; I : PInode) : LongInt;
+Var X : PFatSb; P : PFatIno; R : LongInt;
+Begin
+  X := FatOf(Dir^.Sb);
+  P := FatInoOf(I);
+  If (P = Nil) Or (P^.Parent < 0) Then
+  Begin
+    FatUnlink := -ENOENT;
+    Exit;
+  End;
+  R := FatDelEntries(X, P^.Parent, P^.Idx - P^.NLfn, P^.Idx);
+  If R <> 0 Then
+  Begin
+    FatUnlink := R;
+    Exit;
+  End;
+  P^.Parent := -2;
+  I^.Nlink := 0;
+  I^.Ctime := NowSec;
+  Dir^.Mtime := I^.Ctime; Dir^.Ctime := I^.Ctime;
+  DentryPurgeSb(Dir^.Sb);
+  FatUnlink := 0;
+End;
+
+Function FatRmdir(Dir : PInode; Var Nm : String; I : PInode) : LongInt;
+Var X : PFatSb; R : LongInt;
+Begin
+  X := FatOf(Dir^.Sb);
+  R := FatDirEmpty(X, FatDirOf(I));
+  If R <> 0 Then
+  Begin
+    FatRmdir := R;
+    Exit;
+  End;
+  FatRmdir := FatUnlink(Dir, Nm, I);
+End;
+
+Function FatRename(OD : PInode; Var ON : String; ND : PInode; Var NN : String;
+    Dummy : LongInt) : LongInt;
+Var X : PFatSb; E1, E2, E3 : Array[0..31] Of Byte; A1, A2, A3, Dk1, Dk2, R,
+    S1, I1, S2, I2, NL, EIn, Par, K : LongInt; I, V : PInode;
+    IsD, Same : Boolean;
+    P, PV : PFatIno; Attr, First, Size : LongInt;
+Begin
+  X := FatOf(OD^.Sb);
+  A1 := LongInt(@E1[0]); A2 := LongInt(@E2[0]); A3 := LongInt(@E3[0]);
+  Dk1 := FatDirOf(OD); Dk2 := FatDirOf(ND);
+  R := FatCheckName(NN);
+  If R <> 0 Then
+  Begin
+    FatRename := R;
+    Exit;
+  End;
+  R := FatFind(X, Dk1, ON, A1, S1, I1);
+  If R <> 0 Then
+  Begin
+    FatRename := R;
+    Exit;
+  End;
+  R := FatGetIno(OD^.Sb, Dk1, I1, I1 - S1, A1, I);
+  If R <> 0 Then
+  Begin
+    FatRename := R;
+    Exit;
+  End;
+  IsD := IsDir(I);
+  V := Nil;
+  Same := False;
+  R := FatFind(X, Dk2, NN, A2, S2, I2);
+  If R = 0 Then
+  Begin
+    R := FatGetIno(OD^.Sb, Dk2, I2, I2 - S2, A2, V);
+    If R <> 0 Then
+    Begin
+      InodePut(LongInt(I));
+      FatRename := R;
+      Exit;
+    End;
+    If V = I Then
+    Begin
+      InodePut(LongInt(V));
+      V := Nil;
+      If ON = NN Then
+      Begin
+        InodePut(LongInt(I));
+        FatRename := 0;
+        Exit;
+      End;
+      Same := True;
+    End
+    Else
+    Begin
+      R := 0;
+      If IsDir(V) And Not IsD Then R := -EISDIR
+      Else If IsD And Not IsDir(V) Then R := -ENOTDIR
+      Else If IsD Then R := FatDirEmpty(X, FatDirOf(V));
+      If R <> 0 Then
+      Begin
+        InodePut(LongInt(V)); InodePut(LongInt(I));
+        FatRename := R;
+        Exit;
+      End;
+    End;
+  End
+  Else If R <> -ENOENT Then
+  Begin
+    InodePut(LongInt(I));
+    FatRename := R;
+    Exit;
+  End;
+  P := FatInoOf(I);
+  Attr := Mem[0:A1 + 11];
+  First := P^.First;
+  Size := MemL[0:A1 + 28];
+  MemCopy(A3, A1, FatEntSz);
+  If V <> Nil Then
+  Begin
+    PV := FatInoOf(V);
+    R := FatDelEntries(X, PV^.Parent, PV^.Idx - PV^.NLfn, PV^.Idx);
+    PV^.Parent := -2;
+    V^.Nlink := 0;
+    V^.Ctime := NowSec;
+    InodePut(LongInt(V));
+  End;
+  If Same Then FatDelEntries(X, Dk1, S1, I1);
+  R := FatDirAdd(X, Dk2, NN, Attr, First, Size, EIn, NL);
+  If R <> 0 Then
+  Begin
+    InodePut(LongInt(I));
+    FatRename := R;
+    Exit;
+  End;
+  { conserver les dates de l'entree d'origine }
+  DirRead(X, Dk2, EIn, A2);
+  MemCopy(A2 + 13, A3 + 13, 7);
+  MemCopy(A2 + 22, A3 + 22, 4);
+  DirWrite(X, Dk2, EIn, A2);
+  If Not Same Then FatDelEntries(X, Dk1, S1, I1);
+  P^.Parent := Dk2;
+  P^.Idx := EIn;
+  P^.NLfn := NL;
+  If IsD And (Dk1 <> Dk2) Then
+  Begin
+    If FatInoOf(ND)^.Parent < 0 Then Par := 0 Else Par := Dk2;
+    If DirRead(X, First, 1, A2) = 0 Then
+    Begin
+      MemW[0:A2 + 26] := Par And $FFFF;
+      If X^.Typ = 32 Then MemW[0:A2 + 20] := (Par Shr 16) And $FFFF;
+      DirWrite(X, First, 1, A2);
+    End;
+  End;
+  K := NowSec;
+  OD^.Mtime := K; OD^.Ctime := K; ND^.Mtime := K; ND^.Ctime := K;
+  I^.Ctime := K;
+  InodePut(LongInt(I));
+  DentryPurgeSb(OD^.Sb);
+  FatRename := 0;
+End;
+
+{ ---- Fichiers : chaines de clusters ---- }
+
+{ Cluster d'indice Idx de la chaine de l'inode : 0, 1 (absent), <0 }
+Function FatClusAt(I : PInode; Idx : LongInt; Var Clus : LongInt) : LongInt;
+Var P : PFatIno; X : PFatSb; C, K, Nx : LongInt;
+Begin
+  P := FatInoOf(I);
+  X := FatOf(I^.Sb);
+  If P^.First < 2 Then
+  Begin
+    FatClusAt := 1;
+    Exit;
+  End;
+  If (P^.CurClus >= 2) And (P^.CurIdx <= Idx) Then
+  Begin
+    C := P^.CurClus;
+    K := P^.CurIdx;
+  End
+  Else
+  Begin
+    C := P^.First;
+    K := 0;
+  End;
+  While K < Idx Do
+  Begin
+    Nx := FatGet(X, C);
+    If Nx = $0FFFFFF8 Then
+    Begin
+      P^.CurClus := C;
+      P^.CurIdx := K;
+      FatClusAt := 1;
+      Exit;
+    End;
+    If Nx < 2 Then
+    Begin
+      FatClusAt := -EIO;
+      Exit;
+    End;
+    C := Nx;
+    Inc(K);
+  End;
+  P^.CurClus := C;
+  P^.CurIdx := K;
+  Clus := C;
+  FatClusAt := 0;
+End;
+
+{ Idem, en allongeant la chaine (clusters nuls) si Create }
+Function FatClusFor(I : PInode; Idx : LongInt; Create : Boolean;
+    Var Clus : LongInt) : LongInt;
+Var P : PFatIno; X : PFatSb; R, K, C, N : LongInt;
+Begin
+  R := FatClusAt(I, Idx, Clus);
+  If (R <> 1) Or (Not Create) Then
+  Begin
+    FatClusFor := R;
+    Exit;
+  End;
+  P := FatInoOf(I);
+  X := FatOf(I^.Sb);
+  If P^.First < 2 Then
+  Begin
+    R := FatAlloc(X, True, N);
+    If R <> 0 Then
+    Begin
+      FatClusFor := R;
+      Exit;
+    End;
+    P^.First := N;
+    K := 0;
+    C := N;
+  End
+  Else
+  Begin
+    K := P^.CurIdx;
+    C := P^.CurClus;
+  End;
+  While K < Idx Do
+  Begin
+    R := FatAlloc(X, True, N);
+    If R <> 0 Then
+    Begin
+      P^.CurClus := C;
+      P^.CurIdx := K;
+      FatClusFor := R;
+      Exit;
+    End;
+    FatSet(X, C, N);
+    C := N;
+    Inc(K);
+  End;
+  P^.CurClus := C;
+  P^.CurIdx := K;
+  Clus := C;
+  FatClusFor := 0;
+End;
+
+Function FatRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var I : PInode; X : PFatSb; N, Done, Idx, OffC, Off, Chunk, Sec, R, C : LongInt;
+    B : PBuf;
+Begin
+  I := F^.Inode;
+  X := FatOf(I^.Sb);
+  If F^.Pos >= I^.Size Then
+  Begin
+    FatRead := 0;
+    Exit;
+  End;
+  N := I^.Size - F^.Pos;
+  If N > Cnt Then N := Cnt;
+  Done := 0;
+  While Done < N Do
+  Begin
+    Idx := F^.Pos Div X^.ClusBytes;
+    OffC := F^.Pos Mod X^.ClusBytes;
+    R := FatClusAt(I, Idx, C);
+    If R <> 0 Then
+    Begin
+      If Done > 0 Then FatRead := Done
+      Else If R = 1 Then FatRead := -EIO
+      Else FatRead := R;
+      Exit;
+    End;
+    Sec := FatSecOfClus(X, C) + OffC Div X^.Bps;
+    Off := OffC Mod X^.Bps;
+    Chunk := X^.Bps - Off;
+    If Chunk > N - Done Then Chunk := N - Done;
+    B := FatBuf(X, Sec);
+    If B = Nil Then
+    Begin
+      If Done > 0 Then FatRead := Done Else FatRead := -EIO;
+      Exit;
+    End;
+    MemCopy(Buf + Done, B^.Data + Off, Chunk);
+    BRelease(B);
+    Done := Done + Chunk;
+    F^.Pos := F^.Pos + Chunk;
+  End;
+  I^.Atime := NowSec;
+  FatRead := Done;
+End;
+
+Function FatWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var I : PInode; X : PFatSb; Done, Idx, OffC, Off, Chunk, Sec, R, C, K,
+    Res : LongInt; B : PBuf;
+Begin
+  I := F^.Inode;
+  X := FatOf(I^.Sb);
+  If (F^.Pos < 0) Or (F^.Pos >= $7FFFFFFF) Then
+  Begin
+    FatWrite := -EFBIG;
+    Exit;
+  End;
+  If Cnt > $7FFFFFFF - F^.Pos Then Cnt := $7FFFFFFF - F^.Pos;
+  Done := 0;
+  Res := 0;
+  If F^.Pos > I^.Size Then
+    For K := 0 To (F^.Pos - 1) Div X^.ClusBytes Do
+    Begin
+      R := FatClusFor(I, K, True, C);
+      If R <> 0 Then
+      Begin
+        Res := R;
+        Break;
+      End;
+    End;
+  While (Res = 0) And (Done < Cnt) Do
+  Begin
+    Idx := F^.Pos Div X^.ClusBytes;
+    OffC := F^.Pos Mod X^.ClusBytes;
+    R := FatClusFor(I, Idx, True, C);
+    If R <> 0 Then
+    Begin
+      Res := R;
+      Break;
+    End;
+    Sec := FatSecOfClus(X, C) + OffC Div X^.Bps;
+    Off := OffC Mod X^.Bps;
+    Chunk := X^.Bps - Off;
+    If Chunk > Cnt - Done Then Chunk := Cnt - Done;
+    If Chunk = X^.Bps Then B := BGetBlk(X^.Dev, Sec, X^.Bps)
+    Else B := FatBuf(X, Sec);
+    If B = Nil Then
+    Begin
+      Res := -EIO;
+      Break;
+    End;
+    MemCopy(B^.Data + Off, Buf + Done, Chunk);
+    BDirty(B);
+    BRelease(B);
+    Done := Done + Chunk;
+    F^.Pos := F^.Pos + Chunk;
+    If F^.Pos > I^.Size Then I^.Size := F^.Pos;
+  End;
+  If Done > 0 Then
+  Begin
+    I^.Mtime := NowSec; I^.Ctime := I^.Mtime;
+    I^.Blocks := ((I^.Size + X^.ClusBytes - 1) Div X^.ClusBytes)
+        * (X^.ClusBytes Div 512);
+  End;
+  If (Done > 0) Or (I^.Dirty <> 0) Then FatWriteInode(I);
+  If Done > 0 Then FatWrite := Done Else FatWrite := Res;
+End;
+
+Function FatTruncate(I : PInode; Size : LongInt) : LongInt;
+Var X : PFatSb; P : PFatIno; Need, R, C, Nx, Off, S, A0, Sec : LongInt;
+    B : PBuf;
+Begin
+  X := FatOf(I^.Sb);
+  P := FatInoOf(I);
+  If Size <= 0 Then
+  Begin
+    If P^.First >= 2 Then FatFreeChain(X, P^.First);
+    P^.First := 0;
+    P^.CurClus := 0;
+  End
+  Else
+  Begin
+    Need := (Size + X^.ClusBytes - 1) Div X^.ClusBytes;
+    R := FatClusFor(I, Need - 1, True, C);
+    If R <> 0 Then
+    Begin
+      FatTruncate := R;
+      Exit;
+    End;
+    Nx := FatGet(X, C);
+    If (Nx >= 2) And (Nx <> $0FFFFFF8) Then
+    Begin
+      FatSet(X, C, FatEoc(X));
+      FatFreeChain(X, Nx);
+    End;
+    { zeros apres la nouvelle fin, dans le dernier cluster }
+    Off := Size Mod X^.ClusBytes;
+    If Off <> 0 Then
+    Begin
+      For S := Off Div X^.Bps To X^.Spc - 1 Do
+      Begin
+        Sec := FatSecOfClus(X, C) + S;
+        B := FatBuf(X, Sec);
+        If B = Nil Then Break;
+        If S = Off Div X^.Bps Then A0 := Off Mod X^.Bps Else A0 := 0;
+        MemFill(B^.Data + A0, 0, X^.Bps - A0);
+        BDirty(B);
+        BRelease(B);
+      End;
+    End;
+    P^.CurClus := 0;
+  End;
+  I^.Blocks := ((Size + X^.ClusBytes - 1) Div X^.ClusBytes)
+      * (X^.ClusBytes Div 512);
+  I^.Mtime := NowSec; I^.Ctime := I^.Mtime;
+  FatTruncate := FatWriteInode(I);
+End;
+
+Procedure FatSync(Sb : PSuper);
+Var X : PFatSb; B : PBuf;
+Begin
+  X := FatOf(Sb);
+  If X = Nil Then Exit;
+  If ((Sb^.Flags And MS_RDONLY) = 0) And (X^.Typ = 32) And (X^.FsInfo > 0)
+     And (X^.FsInfo < X^.Rsvd) Then
+  Begin
+    B := FatBuf(X, X^.FsInfo);
+    If B <> Nil Then
+    Begin
+      If (MemL[0:B^.Data] = $41615252) And (MemL[0:B^.Data + 484] = $61417272)
+      Then
+      Begin
+        MemL[0:B^.Data + 488] := X^.Free;
+        MemL[0:B^.Data + 492] := X^.Hint;
+        BDirty(B);
+      End;
+      BRelease(B);
+    End;
+  End;
+  BSync(X^.Dev);
+End;
+
+Function FatFsync(F : PFile) : LongInt;
+Begin
+  FatWriteInode(F^.Inode);
+  FatSync(F^.Inode^.Sb);
+  FatFsync := 0;
+End;
+
+Function FatSetattr(I : PInode) : LongInt;
+Var P : PFatIno; R : LongInt;
+Begin
+  P := FatInoOf(I);
+  R := FatWriteInode(I);
+  If P <> Nil Then I^.Mode := FatModeOf(FatOf(I^.Sb), P^.Attr);
+  FatSetattr := R;
+End;
+
+Procedure FatUmount(Sb : PSuper);
+Var X : PFatSb;
+Begin
+  X := FatOf(Sb);
+  If X = Nil Then Exit;
+  FatSync(Sb);
+  KFree(LongInt(X));
+  Sb^.Priv := 0;
+End;
+
+Function FatRemount(Sb : PSuper; NewFlags : LongInt) : LongInt;
+Begin
+  If ((Sb^.Flags And MS_RDONLY) <> 0) And ((NewFlags And MS_RDONLY) = 0)
+     And (Sb^.Used <> 0) Then
+  Begin
+    FatRemount := -EROFS;
+    Exit;
+  End;
+  If (NewFlags And MS_RDONLY) <> 0 Then FatSync(Sb);
+  Sb^.Flags := (Sb^.Flags And Not MS_RDONLY) Or (NewFlags And MS_RDONLY);
+  FatRemount := 0;
+End;
+
+Procedure FatStatfs(Sb : PSuper; Buf : LongInt);
+Var X : PFatSb;
+Begin
+  X := FatOf(Sb);
+  MemL[0:Buf] := X^.ClusBytes;
+  MemL[0:Buf + 4] := X^.Clusters;
+  MemL[0:Buf + 8] := X^.Free;
+  MemL[0:Buf + 12] := X^.Free;
+  MemL[0:Buf + 16] := 0;
+  MemL[0:Buf + 20] := 0;
+  MemL[0:Buf + 24] := 255;
+  MemL[0:Buf + 28] := FatMagic;
+End;
+
+{ ---- Montage ---- }
+
+Function FatMount(Sb : PSuper; Var DevName : String; Flags,
+    Data : LongInt) : LongInt;
+Var Dev, K, A, Tot, FatSz, Rds, N, Pos : LongInt; B : PBuf; X : PFatSb;
+    Ino : PInode; D : PDentry; Opt, Tok : String; Fb : PBuf; V : LongInt;
+Begin
+  FatMount := -EINVAL;
+  Dev := ExResolveDev(DevName);
+  If Dev = 0 Then
+  Begin
+    FatMount := -ENOTBLK;
+    Exit;
+  End;
+  If BlkSectors(Dev) = 0 Then
+  Begin
+    FatMount := -ENXIO;
+    Exit;
+  End;
+  For K := 0 To MaxSupers - 1 Do
+    If (Supers[K] <> Nil) And (Supers[K] <> Sb) And (Supers[K]^.Dev = Dev) Then
+    Begin
+      FatMount := -EBUSY;
+      Exit;
+    End;
+  B := BRead(Dev, 0, 512);
+  If B = Nil Then
+  Begin
+    FatMount := -EIO;
+    Exit;
+  End;
+  A := B^.Data;
+  If ((Mem[0:A] <> $EB) And (Mem[0:A] <> $E9)) Or (MemW[0:A + 510] <> $AA55)
+  Then
+  Begin
+    BRelease(B);
+    Exit;
+  End;
+  X := Pointer(KMallocZ(SizeOf(TFatSb)));
+  If X = Nil Then
+  Begin
+    BRelease(B);
+    FatMount := -ENOMEM;
+    Exit;
+  End;
+  X^.Dev := Dev;
+  X^.Bps := MemW[0:A + 11];
+  X^.Spc := Mem[0:A + 13];
+  X^.Rsvd := MemW[0:A + 14];
+  X^.NFats := Mem[0:A + 16];
+  X^.RootEnts := MemW[0:A + 17];
+  Tot := MemW[0:A + 19];
+  If Tot = 0 Then Tot := MemL[0:A + 32];
+  FatSz := MemW[0:A + 22];
+  If FatSz = 0 Then FatSz := MemL[0:A + 36];
+  X^.FatSz := FatSz;
+  If (X^.Bps < 512) Or (X^.Bps > 4096) Or ((X^.Bps And (X^.Bps - 1)) <> 0)
+     Or (X^.Spc = 0) Or ((X^.Spc And (X^.Spc - 1)) <> 0)
+     Or (X^.Bps * X^.Spc > 65536) Or (X^.Rsvd = 0) Or (X^.NFats = 0)
+     Or (FatSz = 0) Or (Tot = 0) Then
+  Begin
+    KLog('fat : secteur de boot incoherent');
+    BRelease(B);
+    KFree(LongInt(X));
+    Exit;
+  End;
+  X^.ClusBytes := X^.Bps * X^.Spc;
+  Rds := (X^.RootEnts * 32 + X^.Bps - 1) Div X^.Bps;
+  X^.FatStart := X^.Rsvd;
+  X^.RootStart := X^.Rsvd + X^.NFats * FatSz;
+  X^.DataStart := X^.RootStart + Rds;
+  If Tot <= X^.DataStart Then
+  Begin
+    BRelease(B);
+    KFree(LongInt(X));
+    Exit;
+  End;
+  X^.Clusters := (Tot - X^.DataStart) Div X^.Spc;
+  If X^.Clusters < 4085 Then X^.Typ := 12
+  Else If X^.Clusters < 65525 Then X^.Typ := 16
+  Else X^.Typ := 32;
+  If X^.Typ = 32 Then
+  Begin
+    X^.RootClus := MemL[0:A + 44];
+    X^.FsInfo := MemW[0:A + 48];
+    If (X^.RootClus < 2) Or (X^.RootEnts <> 0) Then
+    Begin
+      KLog('fat : racine FAT32 invalide');
+      BRelease(B);
+      KFree(LongInt(X));
+      Exit;
+    End;
+  End
+  Else If X^.RootEnts = 0 Then
+  Begin
+    BRelease(B);
+    KFree(LongInt(X));
+    Exit;
+  End;
+  BRelease(B);
+  If X^.FatStart + FatSz * X^.NFats > BlkSectors(Dev) Div (X^.Bps Div 512) Then
+  Begin
+    KLog('fat : peripherique trop petit');
+    KFree(LongInt(X));
+    Exit;
+  End;
+  X^.Free := -1;
+  X^.Hint := 2;
+  X^.DCDir := -1;
+  X^.Umask := 18;
+  X^.Uid := 0;
+  X^.Gid := 0;
+  { options : ro, rw, umask=NNN (octal), uid=N, gid=N }
+  If Data <> 0 Then
+    If GetUserStr(Data, Opt) = 0 Then
+    Begin
+      Pos := 1;
+      While Pos <= Length(Opt) Do
+      Begin
+        K := Pos;
+        While (K <= Length(Opt)) And (Opt[K] <> ',') Do Inc(K);
+        Tok := Copy(Opt, Pos, K - Pos);
+        If Tok = 'ro' Then Flags := Flags Or MS_RDONLY
+        Else If Tok = 'rw' Then Flags := Flags And Not MS_RDONLY
+        Else If Copy(Tok, 1, 6) = 'umask=' Then
+        Begin
+          V := 0;
+          For N := 7 To Length(Tok) Do
+            V := V * 8 + (Ord(Tok[N]) - 48);
+          X^.Umask := V And $1FF;
+        End
+        Else If Copy(Tok, 1, 4) = 'uid=' Then
+          X^.Uid := StrVal(Copy(Tok, 5, 10))
+        Else If Copy(Tok, 1, 4) = 'gid=' Then
+          X^.Gid := StrVal(Copy(Tok, 5, 10));
+        Pos := K + 1;
+      End;
+    End;
+  { nombre de clusters libres : FSInfo (FAT32) ou comptage }
+  If (X^.Typ = 32) And (X^.FsInfo > 0) And (X^.FsInfo < X^.Rsvd) Then
+  Begin
+    Fb := BRead(Dev, X^.FsInfo, X^.Bps);
+    If Fb <> Nil Then
+    Begin
+      If (MemL[0:Fb^.Data] = $41615252) And (MemL[0:Fb^.Data + 484] = $61417272)
+         And (MemL[0:Fb^.Data + 488] >= 0)
+         And (MemL[0:Fb^.Data + 488] <= X^.Clusters) Then
+      Begin
+        X^.Free := MemL[0:Fb^.Data + 488];
+        V := MemL[0:Fb^.Data + 492];
+        If (V >= 2) And (V < X^.Clusters + 2) Then X^.Hint := V;
+      End;
+      BRelease(Fb);
+    End;
+  End;
+  If X^.Free < 0 Then
+  Begin
+    X^.Free := 0;
+    For K := 2 To X^.Clusters + 1 Do
+      If FatGet(X, K) = 0 Then Inc(X^.Free);
+  End;
+  Sb^.Priv := LongInt(X);
+  Sb^.Dev := Dev;
+  Sb^.BlockSize := X^.ClusBytes;
+  Sb^.SOps := LongInt(@FatSOps[0]);
+  Sb^.Flags := Flags;
+  Sb^.Used := 0;
+  Sb^.NextIno := 1;
+  Ino := NewInode(Sb, S_IFDIR Or ($1FF And Not X^.Umask));
+  If Ino = Nil Then
+  Begin
+    KFree(LongInt(X));
+    Sb^.Priv := 0;
+    FatMount := -ENOMEM;
+    Exit;
+  End;
+  Ino^.Priv := KMallocZ(SizeOf(TFatIno));
+  If Ino^.Priv = 0 Then
+  Begin
+    Ino^.Nlink := 0;
+    InodePut(LongInt(Ino));
+    KFree(LongInt(X));
+    Sb^.Priv := 0;
+    FatMount := -ENOMEM;
+    Exit;
+  End;
+  FatInoOf(Ino)^.Parent := -1;
+  If X^.Typ = 32 Then FatInoOf(Ino)^.First := X^.RootClus
+  Else FatInoOf(Ino)^.First := 0;
+  Ino^.Uid := X^.Uid; Ino^.Gid := X^.Gid;
+  Ino^.Nlink := 2;
+  If X^.Typ = 32 Then Ino^.Size := FatChainLen(X, X^.RootClus) * X^.ClusBytes
+  Else Ino^.Size := X^.RootEnts * 32;
+  FatSetOps(Ino);
+  D := DentryNew(Nil, '', Ino, Sb);
+  If D = Nil Then
+  Begin
+    InodePut(LongInt(Ino));
+    InodePurgeSb(Sb);
+    KFree(LongInt(X));
+    Sb^.Priv := 0;
+    FatMount := -ENOMEM;
+    Exit;
+  End;
+  Sb^.Root := D;
+  FatMount := 0;
+End;
+
+Procedure InitFat;
+Begin
+  MemFill(LongInt(@FatFileIOps[0]), 0, SizeOf(FatFileIOps));
+  FatFileIOps[IoTruncate] := LongInt(@FatTruncate);
+  FatFileIOps[IoSetattr] := LongInt(@FatSetattr);
+  MemFill(LongInt(@FatDirIOps[0]), 0, SizeOf(FatDirIOps));
+  FatDirIOps[IoLookup] := LongInt(@FatLookup);
+  FatDirIOps[IoCreate] := LongInt(@FatCreate);
+  FatDirIOps[IoMkdir] := LongInt(@FatMkdir);
+  FatDirIOps[IoUnlink] := LongInt(@FatUnlink);
+  FatDirIOps[IoRmdir] := LongInt(@FatRmdir);
+  FatDirIOps[IoRename] := LongInt(@FatRename);
+  FatDirIOps[IoSetattr] := LongInt(@FatSetattr);
+  MemFill(LongInt(@FatFileFOps[0]), 0, SizeOf(FatFileFOps));
+  FatFileFOps[FoRead] := LongInt(@FatRead);
+  FatFileFOps[FoWrite] := LongInt(@FatWrite);
+  FatFileFOps[FoFsync] := LongInt(@FatFsync);
+  MemFill(LongInt(@FatDirFOps[0]), 0, SizeOf(FatDirFOps));
+  FatDirFOps[FoReaddir] := LongInt(@FatReaddir);
+  FatDirFOps[FoFsync] := LongInt(@FatFsync);
+  MemFill(LongInt(@FatSOps[0]), 0, SizeOf(FatSOps));
+  FatSOps[SoPutInode] := LongInt(@FatPutInode);
+  FatSOps[SoWriteInode] := LongInt(@FatWriteInode);
+  FatSOps[SoStatfs] := LongInt(@FatStatfs);
+  FatSOps[SoSync] := LongInt(@FatSync);
+  FatSOps[SoUmount] := LongInt(@FatUmount);
+  FatSOps[SoRemount] := LongInt(@FatRemount);
+  RegisterFs('vfat', LongInt(@FatMount));
+  RegisterFs('msdos', LongInt(@FatMount));
+  RegisterFs('fat', LongInt(@FatMount));
+End;
+
+{ ==================================================================== }
+{ Partie 26 - Swap (pagination sur disque des pages anonymes)          }
+{ ==================================================================== }
+{ (placee avant la partie 16) }
+
+{ swapon(2)/swapoff(2) sur un peripherique bloc prepare par mkswap (version
+  1, signature SWAPSPACE2, pages de 4 Ko) ; swap=/dev/hdaN sur la ligne de
+  commande l'active au demarrage. Quand les pages libres tombent sous
+  SwapLow, SwapReclaim ecrit sur le disque des pages anonymes privees (VMA
+  sans fichier, une seule reference, bit "accede" a zero : seconde chance
+  par balayage) et remplace leur PTE par un numero de case (bit 9, PTE non
+  present). Une faute de page relit la case. Les cases partagees (fork)
+  sont comptees ; les pages partagees par copie sur ecriture, les mappages
+  de fichiers et la memoire video ne sont jamais ecrits. 128 Mo au plus. }
+
+Var
+  SwapMapOrder : LongInt;
+  SwapNm : String;
+
+Function SwapAlloc : LongInt;
+Var N, S : LongInt;
+Begin
+  SwapAlloc := 0;
+  For N := 1 To SwapSlots - 1 Do
+  Begin
+    S := SwapHint + N - 1;
+    If S >= SwapSlots Then S := S - SwapSlots + 1;
+    If Mem[0:SwapMapA + S] = 0 Then
+    Begin
+      Mem[0:SwapMapA + S] := 1;
+      SwapHint := S + 1;
+      If SwapHint >= SwapSlots Then SwapHint := 1;
+      Inc(SwapUsed);
+      SwapAlloc := S;
+      Exit;
+    End;
+  End;
+End;
+
+Procedure SwapFreeSlot(S : LongInt);
+Var C : LongInt;
+Begin
+  If (S <= 0) Or (S >= SwapSlots) Then Exit;
+  C := Mem[0:SwapMapA + S];
+  If (C = 0) Or (C >= 250) Then Exit;
+  Mem[0:SwapMapA + S] := C - 1;
+  If C = 1 Then Dec(SwapUsed);
+End;
+
+Procedure SwapDup(S : LongInt);
+Var C : LongInt;
+Begin
+  If (S <= 0) Or (S >= SwapSlots) Then Exit;
+  C := Mem[0:SwapMapA + S];
+  If (C > 0) And (C < 250) Then Mem[0:SwapMapA + S] := C + 1;
+End;
+
+{ Relire la case d'un PTE dans la page Page (virtuelle) ; 0 ou -errno }
+Function SwapRead(Pte, Page : LongInt) : LongInt;
+Var S : LongInt;
+Begin
+  S := (Pte Shr 12) And $FFFFF;
+  If (S <= 0) Or (S >= SwapSlots) Or (Mem[0:SwapMapA + S] = 0) Then
+  Begin
+    SwapRead := -EIO;
+    Exit;
+  End;
+  If BlkRW(SwapDev, S * 8, 8, Page, False) <> 0 Then
+  Begin
+    SwapRead := -EIO;
+    Exit;
+  End;
+  SwapFreeSlot(S);
+  SwapRead := 0;
+End;
+
+{ Ecrire la page Pg sur le disque ; retourne la case ou 0 }
+Function SwapWrite(Pg : LongInt) : LongInt;
+Var S : LongInt;
+Begin
+  S := SwapAlloc;
+  SwapWrite := 0;
+  If S = 0 Then Exit;
+  If BlkRW(SwapDev, S * 8, 8, Pg, True) <> 0 Then
+  Begin
+    SwapFreeSlot(S);
+    Exit;
+  End;
+  SwapWrite := S;
+End;
+
+Procedure SwapReclaim;
+Var I, J, Freed, Pass, Va, P, Pte, Pg, S, Idx : LongInt; T : PTask; Mm : PMm;
+    V : PVma; Dup, Stop : Boolean;
+Begin
+  If (Not SwapOn) Or SwapBusy Or (SwapHold > 0) Then Exit;
+  If SwapSkip > 0 Then
+  Begin
+    Dec(SwapSkip);
+    Exit;
+  End;
+  SwapBusy := True;
+  Freed := 0;
+  Stop := False;
+  For Pass := 1 To 2 Do
+  Begin
+    If (Pass = 2) And ((Freed > 0) Or Stop) Then Break;
+    For I := 0 To MaxTasks - 1 Do
+    Begin
+      If Stop Then Break;
+      Idx := (I + SwapHand) Mod MaxTasks;
+      T := @Tasks[Idx];
+      If (T^.State = TsFree) Or (T^.Mm = Nil) Then Continue;
+      Mm := T^.Mm;
+      Dup := False;
+      For J := 0 To I - 1 Do
+        If (Tasks[(J + SwapHand) Mod MaxTasks].State <> TsFree)
+           And (Tasks[(J + SwapHand) Mod MaxTasks].Mm = Mm) Then Dup := True;
+      If Dup Then Continue;
+      V := Mm^.Vma;
+      While (V <> Nil) And Not Stop Do
+      Begin
+        If (V^.Ino = 0) And ((V^.Flags And VmPhys) = 0) Then
+        Begin
+          Va := V^.Start;
+          While ULt(Va, V^.Fin) And Not Stop Do
+          Begin
+            P := PtePtr(Mm, Va, False);
+            If P = 0 Then
+              Va := (Va + $400000) And LongInt($FFC00000)
+            Else
+            Begin
+              Pte := MemL[0:P];
+              If ((Pte And 1) <> 0) And ((Pte And PgDevBit) = 0) Then
+              Begin
+                Pg := P2V(Pte And LongInt($FFFFF000));
+                If PageRef(Pg) = 1 Then
+                Begin
+                  If ((Pte And PgAccessed) <> 0) And (Pass = 1) Then
+                    MemL[0:P] := Pte And Not PgAccessed
+                  Else
+                  Begin
+                    S := SwapWrite(Pg);
+                    If S = 0 Then Stop := True
+                    Else
+                    Begin
+                      MemL[0:P] := (S Shl 12) Or PgSwapBit;
+                      FreePages(Pg, 0);
+                      Dec(Mm^.Rss);
+                      Inc(Freed);
+                      If FreePagesCnt >= SwapHigh Then Stop := True;
+                    End;
+                  End;
+                End;
+              End;
+              Va := Va + PageSize;
+            End;
+            If Va = 0 Then Break;
+          End;
+        End;
+        V := V^.Next;
+      End;
+    End;
+  End;
+  SwapHand := (SwapHand + 1) Mod MaxTasks;
+  FlushTlb;
+  If Freed = 0 Then SwapSkip := 100;
+  SwapBusy := False;
+End;
+
+Function SwapOnDev(Const Nm : String) : LongInt;
+Var Dev, Total, Pg, Last, K, N, B, Pages : LongInt; Sig : String;
+Begin
+  If SwapOn Then
+  Begin
+    SwapOnDev := -EBUSY;
+    Exit;
+  End;
+  Dev := ExResolveDev(Nm);
+  If Dev = 0 Then
+  Begin
+    SwapOnDev := -ENOENT;
+    Exit;
+  End;
+  Total := BlkSectors(Dev) Div 8;
+  If Total < 10 Then
+  Begin
+    SwapOnDev := -EINVAL;
+    Exit;
+  End;
+  Pg := AllocPages(0);
+  If Pg = 0 Then
+  Begin
+    SwapOnDev := -ENOMEM;
+    Exit;
+  End;
+  SwapOnDev := -EINVAL;
+  If BlkRW(Dev, 0, 8, Pg, False) <> 0 Then
+  Begin
+    FreePages(Pg, 0);
+    SwapOnDev := -EIO;
+    Exit;
+  End;
+  Sig := 'SWAPSPACE2';
+  For K := 1 To 10 Do
+    If Mem[0:Pg + 4085 + K] <> Ord(Sig[K]) Then
+    Begin
+      FreePages(Pg, 0);
+      KLog('swap : signature SWAPSPACE2 absente');
+      Exit;
+    End;
+  Last := MemL[0:Pg + 1028];
+  If (MemL[0:Pg + 1024] <> 1) Or (Last < 1) Or (Last >= Total) Then
+  Begin
+    FreePages(Pg, 0);
+    KLog('swap : en-tete invalide');
+    Exit;
+  End;
+  If Last > 32767 Then Last := 32767;
+  Pages := (Last + 1 + 4095) Div 4096;
+  SwapMapOrder := 0;
+  While (1 Shl SwapMapOrder) < Pages Do Inc(SwapMapOrder);
+  SwapMapA := AllocPages(SwapMapOrder);
+  If SwapMapA = 0 Then
+  Begin
+    FreePages(Pg, 0);
+    SwapOnDev := -ENOMEM;
+    Exit;
+  End;
+  MemFill(SwapMapA, 0, (1 Shl SwapMapOrder) * 4096);
+  Mem[0:SwapMapA] := $FF;
+  N := MemL[0:Pg + 1032];
+  If N > 512 Then N := 512;
+  For K := 0 To N - 1 Do
+  Begin
+    B := MemL[0:Pg + 1036 + K * 4];
+    If (B > 0) And (B <= Last) Then Mem[0:SwapMapA + B] := $FF;
+  End;
+  FreePages(Pg, 0);
+  SwapDev := Dev;
+  SwapSlots := Last + 1;
+  SwapUsed := 0;
+  SwapHint := 1;
+  SwapSkip := 0;
+  SwapLow := 96;
+  SwapHigh := 192;
+  SwapNm := Nm;
+  SwapHook := LongInt(@SwapReclaim);
+  SwapOn := True;
+  KLog('swap : ' + Nm + ' ' + IntStr(Last * 4) + ' Ko');
+  SwapOnDev := 0;
+End;
+
+{ Relire toutes les pages en cache de swap avant swapoff }
+Function SwapOffAll : LongInt;
+Var I, J, Va, P, Pte, New : LongInt; T : PTask; Mm : PMm; V : PVma;
+    Dup : Boolean;
+Begin
+  SwapOffAll := 0;
+  For I := 0 To MaxTasks - 1 Do
+  Begin
+    T := @Tasks[I];
+    If (T^.State = TsFree) Or (T^.Mm = Nil) Then Continue;
+    Mm := T^.Mm;
+    Dup := False;
+    For J := 0 To I - 1 Do
+      If (Tasks[J].State <> TsFree) And (Tasks[J].Mm = Mm) Then Dup := True;
+    If Dup Then Continue;
+    V := Mm^.Vma;
+    While V <> Nil Do
+    Begin
+      Va := V^.Start;
+      While ULt(Va, V^.Fin) Do
+      Begin
+        P := PtePtr(Mm, Va, False);
+        If P = 0 Then
+          Va := (Va + $400000) And LongInt($FFC00000)
+        Else
+        Begin
+          Pte := MemL[0:P];
+          If ((Pte And 1) = 0) And ((Pte And PgSwapBit) <> 0) Then
+          Begin
+            New := AllocPages(0);
+            If New = 0 Then
+            Begin
+              SwapOffAll := -ENOMEM;
+              Exit;
+            End;
+            If SwapRead(Pte, New) <> 0 Then
+            Begin
+              FreePages(New, 0);
+              SwapOffAll := -EIO;
+              Exit;
+            End;
+            MemL[0:P] := V2P(New) Or PteFlags(V^.Prot, True);
+            Inc(Mm^.Rss);
+          End;
+          Va := Va + PageSize;
+        End;
+        If Va = 0 Then Break;
+      End;
+      V := V^.Next;
+    End;
+  End;
+  FlushTlb;
+End;
+
+Function SysSwapon(PathA, Flags : LongInt) : LongInt;
+Var Nm : String; R : LongInt;
+Begin
+  If Cur^.Euid <> 0 Then
+  Begin
+    SysSwapon := -EPERM;
+    Exit;
+  End;
+  R := GetUserStr(PathA, Nm);
+  If R < 0 Then
+  Begin
+    SysSwapon := R;
+    Exit;
+  End;
+  SysSwapon := SwapOnDev(Nm);
+End;
+
+Function SysSwapoff(PathA : LongInt) : LongInt;
+Var Nm : String; R : LongInt;
+Begin
+  If Cur^.Euid <> 0 Then
+  Begin
+    SysSwapoff := -EPERM;
+    Exit;
+  End;
+  R := GetUserStr(PathA, Nm);
+  If R < 0 Then
+  Begin
+    SysSwapoff := R;
+    Exit;
+  End;
+  If (Not SwapOn) Or (ExResolveDev(Nm) <> SwapDev) Then
+  Begin
+    SysSwapoff := -EINVAL;
+    Exit;
+  End;
+  SwapBusy := True;
+  R := SwapOffAll;
+  SwapBusy := False;
+  If R <> 0 Then
+  Begin
+    SysSwapoff := R;
+    Exit;
+  End;
+  SwapOn := False;
+  SwapHook := 0;
+  FreePages(SwapMapA, SwapMapOrder);
+  SwapMapA := 0;
+  SwapSlots := 0;
+  SwapUsed := 0;
+  SysSwapoff := 0;
 End;
 
 { ==================================================================== }
@@ -14846,8 +23386,10 @@ Begin
 End;
 
 Function DoMmap(Addr, Len, Prot, Flags, Fd, Off : LongInt) : LongInt;
-Var F : PFile; Ino, FSize, Rd : LongInt; Fl : LongInt;
+Var F : PFile; Ino, FSize, Rd : LongInt; Fl : LongInt; PhysMap : Boolean;
+    Vp : PVma;
 Begin
+  PhysMap := False;
   If (Len <= 0) Or ((Addr And $FFF) <> 0) And ((Flags And MAP_FIXED) <> 0) Then
   Begin
     DoMmap := -EINVAL;
@@ -14872,9 +23414,26 @@ Begin
       DoMmap := -EACCES;
       Exit;
     End;
+    If ((Flags And MAP_SHARED) <> 0) And ((Prot And PROT_WRITE) <> 0)
+       And ((F^.Flags And O_ACCMODE) = O_RDONLY) Then
+    Begin
+      DoMmap := -EACCES;
+      Exit;
+    End;
     If ((F^.Inode^.Mode And S_IFMT) = S_IFCHR) And ((F^.Inode^.Rdev Shr 8) = 1)
         And ((F^.Inode^.Rdev And $FF) = 5) Then
       Flags := Flags Or MAP_ANONYMOUS
+    Else If ((F^.Inode^.Mode And S_IFMT) = S_IFCHR) And FbOn
+        And ((F^.Inode^.Rdev Shr 8) = 29) Then
+    Begin
+      If (Off < 0) Or (Off + PageUp(Len) > PageUp(FbSize)) Then
+      Begin
+        DoMmap := -EINVAL;
+        Exit;
+      End;
+      PhysMap := True;
+      Flags := Flags Or MAP_SHARED;
+    End
     Else If (F^.Inode^.Mode And S_IFMT) <> S_IFREG Then
     Begin
       DoMmap := -ENODEV;
@@ -14889,8 +23448,17 @@ Begin
   End;
   Fl := Flags;
   If (Flags And MAP_SHARED) <> 0 Then Fl := Flags;
-  DoMmap := MmMap(Cur^.Mm, Addr, Len, Prot, Fl, Ino, Off, FSize);
-  Rd := 0;
+  Rd := MmMap(Cur^.Mm, Addr, Len, Prot, Fl, Ino, Off, FSize);
+  DoMmap := Rd;
+  If PhysMap And (Rd > 0) Then
+  Begin
+    Vp := FindVma(Cur^.Mm, Rd);
+    If Vp <> Nil Then
+    Begin
+      Vp^.Flags := Vp^.Flags Or VmPhys;
+      Vp^.Off := FbPhys + Off;
+    End;
+  End;
 End;
 
 { mmap (90) : ebx pointe vers six mots }
@@ -15647,6 +24215,7 @@ Begin
   SysReg(13, LongInt(@SysTime), 1);       SysReg(14, LongInt(@SysMknod), 3);
   SysReg(15, LongInt(@SysChmod), 2);      SysReg(16, LongInt(@SysLchown), 3);
   SysReg(19, LongInt(@SysLseek), 3);      SysReg(20, LongInt(@SysGetpid), 0);
+  SysReg(87, LongInt(@SysSwapon), 2);     SysReg(115, LongInt(@SysSwapoff), 1);
   SysReg(21, LongInt(@SysMount), 5);      SysReg(22, LongInt(@SysUmount), 1);
   SysReg(23, LongInt(@SysSetuid), 1);     SysReg(24, LongInt(@SysGetuid), 0);
   SysReg(25, LongInt(@SysStime), 1);      SysReg(26, LongInt(@SysEperm), 0);
@@ -15683,6 +24252,36 @@ Begin
   SysReg(96, LongInt(@SysGetpriority), 2); SysReg(97, LongInt(@SysSetpriority),
       3);
   SysReg(99, LongInt(@SysStatfs), 2);     SysReg(100, LongInt(@SysFstatfs), 2);
+  SysReg(102, LongInt(@SysSocketcall), 2);
+  SysReg(254, LongInt(@SysEpollCreate), 1);
+  SysReg(255, LongInt(@SysEpollCtl), 4);
+  SysReg(256, LongInt(@SysEpollWait), 4);
+  SysReg(291, LongInt(@SysInotifyInit), 0);
+  SysReg(292, LongInt(@SysInotifyAddWatch), 3);
+  SysReg(293, LongInt(@SysInotifyRmWatch), 2);
+  SysReg(319, LongInt(@SysEpollPwait), 5);
+  SysReg(322, LongInt(@SysTimerfdCreate), 2);
+  SysReg(323, LongInt(@SysEventfd), 1);
+  SysReg(325, LongInt(@SysTimerfdSettime), 4);
+  SysReg(326, LongInt(@SysTimerfdGettime), 2);
+  SysReg(328, LongInt(@SysEventfd2), 2);
+  SysReg(329, LongInt(@SysEpollCreate1), 1);
+  SysReg(332, LongInt(@SysInotifyInit1), 1);
+  SysReg(359, LongInt(@SysSocket), 3);
+  SysReg(360, LongInt(@SysSocketpair), 4);
+  SysReg(361, LongInt(@SysBind), 3);
+  SysReg(362, LongInt(@SysConnect), 3);
+  SysReg(363, LongInt(@SysListen), 2);
+  SysReg(364, LongInt(@SysAccept4), 4);
+  SysReg(365, LongInt(@SysGetsockopt), 5);
+  SysReg(366, LongInt(@SysSetsockopt), 5);
+  SysReg(367, LongInt(@SysGetsockname), 3);
+  SysReg(368, LongInt(@SysGetpeername), 3);
+  SysReg(369, LongInt(@SysSendto), 6);
+  SysReg(370, LongInt(@SysSendmsg), 3);
+  SysReg(371, LongInt(@SysRecvfrom), 6);
+  SysReg(372, LongInt(@SysRecvmsg), 3);
+  SysReg(373, LongInt(@SysShutdown), 2);
   SysReg(103, LongInt(@SysSyslog), 3);    SysReg(104, LongInt(@SysSetitimer),
       3);
   SysReg(105, LongInt(@SysGetitimer), 2); SysReg(106, LongInt(@SysStat), 2);
@@ -15697,7 +24296,7 @@ Begin
   SysReg(132, LongInt(@SysGetpgid), 1);   SysReg(133, LongInt(@SysFchdir), 1);
   SysReg(140, LongInt(@SysLlseek), 5);    SysReg(141, LongInt(@SysGetdents), 3);
   SysReg(142, LongInt(@SysNewselect), 5); SysReg(143, LongInt(@SysZero3), 2);
-  SysReg(144, LongInt(@SysZero3), 3);     SysReg(145, LongInt(@SysReadv), 3);
+  SysReg(144, LongInt(@SysMsync), 3);     SysReg(145, LongInt(@SysReadv), 3);
   SysReg(146, LongInt(@SysWritev), 3);    SysReg(147, LongInt(@SysGetsid), 1);
   SysReg(148, LongInt(@SysFsync), 1);     SysReg(150, LongInt(@SysZero3), 2);
   SysReg(151, LongInt(@SysZero3), 2);     SysReg(152, LongInt(@SysZero3), 1);
@@ -15740,7 +24339,9 @@ Begin
       3);
   SysReg(212, LongInt(@SysChown32), 3);   SysReg(213, LongInt(@SysSetuid32), 1);
   SysReg(214, LongInt(@SysSetgid32), 1);  SysReg(215, LongInt(@SysSetfsuid), 1);
-  SysReg(216, LongInt(@SysSetfsgid), 1); SysReg(217, LongInt(@SysPivotRoot), 2);  SysReg(219, LongInt(@SysMadvise), 3);
+  SysReg(216, LongInt(@SysSetfsgid), 1);
+  SysReg(217, LongInt(@SysPivotRoot), 2);
+  SysReg(219, LongInt(@SysMadvise), 3);
   SysReg(220, LongInt(@SysGetdents64), 3); SysReg(221, LongInt(@SysFcntl), 3);
   SysReg(224, LongInt(@SysGettid), 0);    SysReg(238, LongInt(@SysTkill), 2);
   SysReg(240, LongInt(@SysFutex), 5);     SysReg(243,
@@ -15889,6 +24490,7 @@ End;
 Procedure DoIrq(N : LongInt; FromUser : Boolean);
 Begin
   IrqAck(N);
+  If NetPresent And (N = NicIrq) Then NicIrqHandler;
   Case N Of
     0 : Begin
           TimerTick(FromUser);
@@ -15896,6 +24498,7 @@ Begin
         End;
     1 : KbdIrq;
     4 : SerialIrq;
+    12 : MouseIrq;
   End;
 End;
 
@@ -16015,6 +24618,19 @@ End;
 Procedure MakeDevNodes;
 Var I, D, P : LongInt; S : String;
 Begin
+  KMknod('/dev/mem', S_IFCHR Or $180, MkDev(1, 1));
+  KMknod('/dev/kmem', S_IFCHR Or $180, MkDev(1, 2));
+  KMknod('/dev/port', S_IFCHR Or $180, MkDev(1, 4));
+  KMknod('/dev/kmsg', S_IFCHR Or $180, MkDev(1, 11));
+  KMknod('/dev/rtc', S_IFCHR Or $180, MkDev(10, 135));
+  KMknod('/dev/rtc0', S_IFCHR Or $180, MkDev(10, 135));
+  KMknod('/dev/psaux', S_IFCHR Or $1B0, MkDev(10, 1));
+  KMkdir('/dev/input', $1ED);
+  KMknod('/dev/input/mice', S_IFCHR Or $1B0, MkDev(13, 63));
+  VfsSymlink('/proc/self/fd', '/dev/fd');
+  VfsSymlink('/proc/self/fd/0', '/dev/stdin');
+  VfsSymlink('/proc/self/fd/1', '/dev/stdout');
+  VfsSymlink('/proc/self/fd/2', '/dev/stderr');
   KMknod('/dev/null', S_IFCHR Or $1B6, MkDev(1, 3));
   KMknod('/dev/zero', S_IFCHR Or $1B6, MkDev(1, 5));
   KMknod('/dev/full', S_IFCHR Or $1B6, MkDev(1, 7));
@@ -16028,12 +24644,15 @@ Begin
       I));
   KMknod('/dev/ttyS0', S_IFCHR Or $1B6, MkDev(4, 64));
   KMknod('/dev/ram0', S_IFBLK Or $1B0, MkDev(1, 0));
+  If FbOn Then KMknod('/dev/fb0', S_IFCHR Or $1B6, MkDev(29, 0));
+  If FlpPresent Then KMknod('/dev/fd0', S_IFBLK Or $1B0, MkDev(MajFlp, 0));
   For D := 0 To 3 Do
     If DiskPresent[D] Then
     Begin
       If D < 2 Then S := 'hd' + Chr(97 + D) Else S := 'hd' + Chr(97 + D);
       If D < 2 Then KMknod('/dev/' + S, S_IFBLK Or $1B0, MkDev(3, D * 64))
       Else KMknod('/dev/' + S, S_IFBLK Or $1B0, MkDev(22, (D - 2) * 64));
+      If DiskAtapi[D] Then VfsSymlink('hd' + Chr(97 + D), '/dev/cdrom');
       For P := 1 To 15 Do
         If PartSize[D * 16 + P] > 0 Then
         Begin
@@ -16047,6 +24666,15 @@ End;
 
 { /sys : arbre statique decrivant les peripheriques detectes (sysfs
   minimal : block, class/{block,tty,mem,net}, kernel, devices/system/cpu) }
+Function Lower2(Const S : String) : String;
+Var R : String; I : LongInt;
+Begin
+  R := S;
+  For I := 1 To Length(R) Do
+    If (R[I] >= 'A') And (R[I] <= 'F') Then R[I] := Chr(Ord(R[I]) + 32);
+  Lower2 := R;
+End;
+
 Procedure SysDevFile(Const Dir : String; Maj, Min : LongInt);
 Begin
   KMkdir(Dir, $1ED);
@@ -16070,6 +24698,15 @@ Begin
   KWriteStr('/sys/devices/system/cpu/possible', $124, '0' + #10);
   KWriteStr('/sys/devices/system/cpu/present', $124, '0' + #10);
   KWriteStr('/sys/power/state', $124, 'mem' + #10);
+  If FlpPresent Then
+  Begin
+    KMkdir('/sys/block/fd0', $1ED);
+    KWriteStr('/sys/block/fd0/dev', $124, IntStr(MajFlp) + ':0' + #10);
+    KWriteStr('/sys/block/fd0/size', $124, IntStr(FlpTotal) + #10);
+    KWriteStr('/sys/block/fd0/removable', $124, '1' + #10);
+    KWriteStr('/sys/block/fd0/ro', $124, '0' + #10);
+    VfsSymlink('../../block/fd0', '/sys/class/block/fd0');
+  End;
   For D := 0 To 3 Do
     If DiskPresent[D] Then
     Begin
@@ -16101,6 +24738,26 @@ Begin
               '/sys/class/block/' + Pn);
         End;
     End;
+  KMkdir('/sys/class/net/lo', $1ED);
+  KWriteStr('/sys/class/net/lo/address', $124, '00:00:00:00:00:00' + #10);
+  KWriteStr('/sys/class/net/lo/mtu', $124, '65536' + #10);
+  KWriteStr('/sys/class/net/lo/type', $124, '772' + #10);
+  KWriteStr('/sys/class/net/lo/operstate', $124, 'unknown' + #10);
+  KWriteStr('/sys/class/net/lo/ifindex', $124, '1' + #10);
+  If NetPresent Then
+  Begin
+    KMkdir('/sys/class/net/eth0', $1ED);
+    KWriteStr('/sys/class/net/eth0/address', $124,
+        Lower2(HexStr(NicMac[0], 2)) + ':' + Lower2(HexStr(NicMac[1], 2)) + ':'
+        + Lower2(HexStr(NicMac[2], 2)) + ':' + Lower2(HexStr(NicMac[3], 2))
+        + ':' + Lower2(HexStr(NicMac[4], 2)) + ':'
+        + Lower2(HexStr(NicMac[5], 2))
+        + #10);
+    KWriteStr('/sys/class/net/eth0/mtu', $124, '1500' + #10);
+    KWriteStr('/sys/class/net/eth0/type', $124, '1' + #10);
+    KWriteStr('/sys/class/net/eth0/operstate', $124, 'up' + #10);
+    KWriteStr('/sys/class/net/eth0/ifindex', $124, '2' + #10);
+  End;
   SysDevFile('/sys/class/mem/null', 1, 3);
   SysDevFile('/sys/class/mem/zero', 1, 5);
   SysDevFile('/sys/class/mem/full', 1, 7);
@@ -16146,8 +24803,8 @@ End;
   encodes en base64, ecrits dans le tmpfs racine au demarrage. }
 
 Const
-  EmbCount = 16;
-  EmbPath : Array[0..15] Of String[20] = (
+  EmbCount = 28;
+  EmbPath : Array[0..27] Of String[20] = (
     '/sbin/init',
     '/bin/hello',
     '/bin/forkwait',
@@ -16163,1073 +24820,2207 @@ Const
     '/bin/stress',
     '/bin/kbdtest',
     '/bin/ext2test',
-    '/bin/ptytest');
-  EmbSize : Array[0..15] Of LongInt = (
-    3164, 1632, 1900, 2204, 2196, 2200, 3884, 1644, 1588, 2232, 4380, 2660,
-    2256, 1040, 11872, 2416);
-  EmbStart : Array[0..16] Of LongInt = (
-    0, 71, 108, 151, 200, 249, 298, 385, 422, 458, 508, 606, 666, 717, 741,
-    1005, 1059);
-  EmbData : Array[0..1058] Of String[60] = (
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAa4UECDQAAABECwAAAAAAADQAIAAC',
-    'ACgABwAGAAEAAAAAAAAAAIAECACABAicCQAAnAkAAAUAAAAAEAAAUeV0ZAAA',
+    '/bin/ptytest',
+    '/bin/mounttest',
+    '/bin/socktest',
+    '/bin/shmtest',
+    '/bin/limtest',
+    '/bin/evttest',
+    '/bin/devtest',
+    '/bin/mousetest',
+    '/bin/nettest',
+    '/bin/isotest',
+    '/bin/fattest',
+    '/bin/fbtest',
+    '/bin/swaptest');
+  EmbSize : Array[0..27] Of LongInt = (
+    3428, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
+    2320, 1104, 11936, 2476, 3268, 8720, 2376, 2004, 5100, 3248, 1712, 3568,
+    2812, 10656, 2748, 2640);
+  EmbStart : Array[0..28] Of LongInt = (
+    0, 77, 115, 159, 210, 261, 311, 399, 437, 474, 526, 627, 688, 740, 765,
+    1031, 1087, 1160, 1354, 1407, 1452, 1566, 1639, 1678, 1758, 1821, 2058,
+    2120, 2179);
+  EmbData : Array[0..2178] Of String[60] = (
+    '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',
-    'AM2ASHQUuDiHBAjoHgUAALgBAAAA6bsEAAC4QgAAAM2AuFiHBAgx/zHb6P8E',
-    'AACLDJ1giQQIhcl0XzHSiYwkkAEAAInIQ4mUJJQBAACNlCSQAQAAiUwkDOja',
-    'BAAAica4iYcECOjFBAAAi0QkDOi8BAAAuJGHBAiF9nQXuJaHBAhH6KgEAACJ',
-    '8Og8BQAAuDaHBAjolwQAAOuWuKSHBAjoiwQAAInY6B8FAAC4t4cECOh6BAAA',
-    'ifjoDgUAALg2hwQI6GkEAACDfQgBfjOLRQy6vocECItABOgWBAAAicaFwHUd',
-    'uCQAAADNgLhYAAAAu63e4f65aRkSKLrc/iFDzYAx0r4FAAAAu8eHBAiJ8InR',
-    'zYCJxoXAeQq41YcECOlAAQAAjYwkkAEAALr/AAAAuAMAAACJ882AiUQkDLgG',
+    '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',
-    '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',
+    'JAx+qjHAipAmiAQIOBQHdSVAg/gIde+4JAAAAM2AuFgAAAC7rd7h/rlpGRIo',
+    'Mfa63P4hQ82AR+u/D4QsAwAAuC+IBAgx2+iiAwAAuAMAAAC6/wAAAI2MJJAA',
     'AADNgIXAfteAvASPAAAACsaEBJAAAAAAdQjGhASPAAAAADH2gDkAdX8xwIlE',
-    'tBCF9nSyi3wkELoSiAQIifjo7AIAAIXAD4SDAAAAur6HBAiJ+OjYAgAAhcB0',
-    'c7oXiAQIifjoyAIAAIXAD4SiAgAAuhyIBAiJ+Oi0AgAAhcB1c04PhF////+L',
-    'XCQUuAwAAADNgIXAD4lM////uB+IBAjoyQIAAOk9////igE8IHUHQcZB/wDr',
+    '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',
-    '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',
+    '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',
-    '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',
-    'ieVTg+wIi0UIixCNSASNRJAIUFFS6Kz5//+Jw7gBAAAAzYCDxBDr/gAAAAAA',
-    'AAAAAABleGVjdmU6IAAgOiBlY2hlYwoAUEFUSD0vYmluOi9zYmluOi91c3Iv',
-    'YmluAEhPTUU9L3Jvb3QAVEVSTT1saW51eAAwMTIzNDU2Nzg5YWJjZGVmAC4A',
-    'LwoAaW5pdDogZG9pdCBldHJlIGxlIHByb2Nlc3N1cyAxCgAKPT09IExJTlVY',
-    'LTAgS0VSTkVMMzIgOiBpbml0IChiYW5jIGQnZXNzYWkpID09PQoAS1BST0c6',
-    'IAAgT0sKACBGQUlMIHN0YXR1cz0AS1RFU1Q6IERPTkUgcHJvZ3M9ACBmYWls',
-    'PQBwb3dlcm9mZgAvcHJvYy9jbWRsaW5lAEludGVycHJldGV1ciBkZSBjb21t',
-    'YW5kZXMgKGhhbHQgcG91ciBhcnJldGVyKSA6CgBrMzJwb3dlcgAjIABoYWx0',
-    'AGV4aXQAY2QAY2Q6IGVycmV1cgoAcHdkAGxzAGxzOiBlcnJldXIKAGNhdABj',
-    'YXQ6IGVycmV1cgoAZWNobwBta2RpcgBta2RpcjogZXJyZXVyCgBybQBybTog',
-    'ZXJyZXVyCgBbc3RhdHV0IABdCgAvYmluL2hlbGxvAC9iaW4vZm9ya3dhaXQA',
-    'L2Jpbi9waXBldGVzdAAvYmluL3NpZ3Rlc3QAL2Jpbi9tbWFwdGVzdAAvYmlu',
-    'L2RpcnRlc3QAL2Jpbi90dHl0ZXN0AC9iaW4vc2NoZWR0ZXN0AC9iaW4vYmxr',
-    'dGVzdAAvYmluL21pc2N0ZXN0AC9iaW4vcHJvY3Rlc3QAL2Jpbi9zdHJlc3MA',
-    'L2Jpbi9leHQydGVzdAAvYmluL3B0eXRlc3QAAPOGBAgMhwQIF4cECAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAhIgECI+IBAidiAQIq4gECLiIBAjGiAQI04gECOCI',
-    'BAjviAQI/IgECAqJBAgYiQQIJIkECDKJBAgAAAAAR0NDOiAoVWJ1bnR1IDEz',
-    'LjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAEAAAAAAAAAAAAAAAQA8f8IAAAAeIUECCAAAAACAAEADwAAAJiFBAgd',
-    'AAAAAgABABcAAAC1hQQICQAAAAIAAQAcAAAAvoUECJIAAAACAAEAIAAAAFCG',
-    'BAhdAAAAAgABACUAAABgiQQIPAAAAAEAAgArAAAArYYECCkAAAASAAEAMQAA',
-    'AGSFBAgAAAAAEAABAEMAAABrhQQIAAAAABAAAQA+AAAAnJkECAAAAAAQAAIA',
-    'LAAAAHSABAjwBAAAEgABAEoAAACcmQQIAAAAABAAAgBRAAAAnJkECAAAAAAQ',
-    'AAIAAGluaXQuYwBzdHJjbXAAcHV0c19mZABwdXRzAHJ1bgBwdXRkAHRlc3Rz',
-    'AGNtYWluAF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAA',
-    'LnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5jb21t',
-    'ZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAb',
-    'AAAAAQAAAAYAAAB0gAQIdAAAAGIGAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEA',
-    'AAACAAAA4IYECOAGAAC8AgAAAAAAAAAAAAAgAAAAAAAAACkAAAABAAAAMAAA',
-    'AAAAAACcCQAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAA',
-    'zAkAAPAAAAAFAAAACAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAALwKAABW',
-    'AAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAASCwAAMgAAAAAA',
-    'AAAAAAAAAQAAAAAAAAA=',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAEoIECDQAAAAgBQAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAiAAwAAgAMAAAUAAAAAEAAAAQAAAIAD',
-    'AACAkwQIgJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAGAAAAEAAAAFW44IIECInlVlOD5PCB7JABAACLdQiLXQzojQEAADHS',
-    'hfZ+CDHSgzsAD5XCuBuDBAjolQEAALgmgwQI6GsBAACLA+hkAQAAuBmDBAjo',
-    'WgEAAE5+HLgxgwQI6E0BAACLQwToRQEAALgZgwQI6DsBAACLRRAx0osAhcB0',
-    'CDHSgDhQD5TCuDyDBAiNXCQK6DoBAAC4egAAAM2AuEeDBAjoCQEAAInY6AIB',
-    'AAC43oIECOj4AAAAjUQkS+jvAAAAuN6CBAjo5QAAAI2EJIwAAADo2QAAALje',
-    'ggQI6M8AAACNhCTNAAAA6MMAAAC43oIECOi5AAAAjYQkDgEAAOitAAAAuBmD',
-    'BAjoowAAAInYulGDBAjodwAAAInDhcB1L7pZgwQIjYQkjAAAAOhgAAAAhcB1',
-    'HLpigwQIjYQkDgEAADHb6EkAAACFwA+Uw+sCMduJ2rhngwQI6HQAAAC4FAAA',
-    'AM2AMdJIuHODBAgPn8LoXQAAAI1l+DHAW15dw7itAAAAzYAx7Yngg+TwUOiE',
-    'AAAAVYnlVonGUzHbD7YEHg+2DBqEwHQFQzjIdO9bKcheXcNVicEx0onlU4A8',
-    'EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJxrjYggQIU4nT6M3///+J8OjG',
-    '////hdu40YIECLrMggQID0XC6LL///+F23QI/wWEkwQI6wb/BYCTBAhbXl3D',
-    'VYnlU4PsCItFCIsQjUgEjUSQCFBRUujW/f//icO4AQAAAM2Ag8QQ6/4gT0sK',
-    'ACBGQUlMCgBLVEVTVDogAEJvbmpvdXIgZGUgTElOVVgtMCBLRVJORUwzMiAo',
-    'cHJvZ3JhbW1lIEVMRiBpMzg2IHN0YXRpcXVlKQoAaGVsbG8uYXJndgAgIGFy',
-    'Z3ZbMF09ACAgYXJndlsxXT0AaGVsbG8uZW52cAAgIHVuYW1lOiAATElOVVgt',
-    'MABLRVJORUwzMgBpMzg2AGhlbGxvLnVuYW1lAGhlbGxvLmdldHBpZABHQ0M6',
-    'IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/wkAAAAfggQIIAAAAAIA',
-    'AQAQAAAAP4IECCAAAAACAAEAFQAAAF+CBAhEAAAAAgABABsAAACEkwQIBAAA',
-    'AAEAAwAjAAAAgJMECAQAAAABAAMAKwAAAKOCBAgpAAAAEgABADEAAAALggQI',
-    'AAAAABAAAQBDAAAAEoIECAAAAAAQAAEAPgAAAICTBAgAAAAAEAADACwAAACU',
-    'gAQIdwEAABIAAQBKAAAAgJMECAAAAAAQAAMAUQAAAIiTBAgAAAAAEAADAABo',
-    'ZWxsby5jAHN0cmNtcABwdXRzAGt0ZXN0AGt1X3Bhc3MAa3VfZmFpbABjbWFp',
-    'bgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10',
-    'YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNzAC5jb21t',
-    'ZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAbAAAAAQAAAAYAAACUgAQIlAAAADgCAAAAAAAAAAAAAAEAAAAAAAAAIQAA',
-    'AAEAAAAyAAAAzIIECMwCAAC0AAAAAAAAAAAAAAABAAAAAQAAACkAAAAIAAAA',
-    'AwAAAICTBAiAAwAACAAAAAAAAAAAAAAABAAAAAAAAAAuAAAAAQAAADAAAAAA',
-    'AAAAgAMAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAALAD',
-    'AADgAAAABgAAAAcAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAACQBAAAVgAA',
-    'AAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAA5gQAADcAAAAAAAAA',
-    'AAAAAAEAAAAAAAAA',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAW4MECDQAAAAsBgAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAigBAAAoAQAAAUAAAAAEAAAAQAAAKAE',
-    'AACglAQIoJQECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'XogECIn46IkBAACD/gEPlcOFwHVghNt0XDHSvgUAAACLXCQUifCJ0c2AicaF',
+    'wHgJjYwkkAEAAOsKuGKIBAjpmf7//78DAAAAugACAACJ84n4zYCJx4XAfhC4',
+    'BAAAALsBAAAAifrNgOvauAYAAADNgOmu/f//um+IBAiJ+OgTAQAAhcB1M7sB',
+    'AAAAOfN9IItEnBBD6DkBAAA587owiAQIuFeHBAgPTMLoJQEAAOvcuFaHBAjp',
+    'JP7//7p0iAQIifjo0AAAAIXAdSaE23Qii1wkFLgnAAAAue0BAADNgIXAD4k/',
+    '/f//uHqIBAjp7v3//7qJiAQIifjomgAAAIXAdSGE23Qdi1wkFLgKAAAAzYCF',
+    'wA+JDv3//7iMiAQI6b39//+NVCQQifjosAAAAInDhcAPhO/8//+4mIgECOiT',
+    'AAAAidjoJwEAALihiAQI6Y39//8xwI1l9FteX13DVVdWU4tEJBSLXCQYi0wk',
+    'HItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADNgDHtieCD5PBQ6DUBAABV',
+    'ieVWicZTMdsPtgQeD7YMGoTAdAVDOMh071spyF5dw1WJ0THSieVTicOAPBEA',
+    'dANC6/e4BAAAAM2AW13DicK4AQAAAOvaVYnlV1ZTg+wsiUXUuAIAAACJVdDN',
+    'gIXAdViNfdi+AIoECLkEAAAAi13U86WNVdi4CwAAAItN0M2AugCHBAi4AgAA',
+    'ALt/AAAA6I3///+LVdS4AgAAAOiA////ugmHBAi4AgAAAOhx////uAEAAADN',
+    'gOv+icO4/////3gPjU3YuAcAAAAx0s2Ai0XYg8QsW15fXcNVieVWU4nDg+ww',
+    'xkX3AIXAeQ732LkhAAAAvgoAAADrDXXyxkX2MLkgAAAA6x+FwHQRMdJJ9/aK',
+    'kkKHBAiIVA3W6+uF23kGxkQN1S1JjUXWAcjoD////4PEMFteXcNVieVTg+wI',
+    'i0UIixCNSASNRJAIUFFS6IX5//+Jw7gBAAAAzYCDxBDr/gAAAGV4ZWN2ZTog',
+    'ACA6IGVjaGVjCgBQQVRIPS9iaW46L3NiaW46L3Vzci9iaW4ASE9NRT0vcm9v',
+    'dABURVJNPWxpbnV4ADAxMjM0NTY3ODlhYmNkZWYALgAvCgBpbml0OiBkb2l0',
+    'IGV0cmUgbGUgcHJvY2Vzc3VzIDEKAAo9PT0gTElOVVgtMCBLRVJORUwzMiA6',
+    'IGluaXQgKGJhbmMgZCdlc3NhaSkgPT09CgBLUFJPRzogACBPSwoAIEZBSUwg',
+    'c3RhdHVzPQBLVEVTVDogRE9ORSBwcm9ncz0AIGZhaWw9AHBvd2Vyb2ZmAC9w',
+    'cm9jL2NtZGxpbmUASW50ZXJwcmV0ZXVyIGRlIGNvbW1hbmRlcyAoaGFsdCBw',
+    'b3VyIGFycmV0ZXIpIDoKAGszMnBvd2VyACMgAGhhbHQAZXhpdABjZABjZDog',
+    'ZXJyZXVyCgBwd2QAbHMAbHM6IGVycmV1cgoAY2F0AGNhdDogZXJyZXVyCgBl',
+    'Y2hvAG1rZGlyAG1rZGlyOiBlcnJldXIKAHJtAHJtOiBlcnJldXIKAFtzdGF0',
+    'dXQgAF0KAC9iaW4vaGVsbG8AL2Jpbi9mb3Jrd2FpdAAvYmluL3BpcGV0ZXN0',
+    'AC9iaW4vc2lndGVzdAAvYmluL21tYXB0ZXN0AC9iaW4vZGlydGVzdAAvYmlu',
+    'L3R0eXRlc3QAL2Jpbi9zY2hlZHRlc3QAL2Jpbi9ibGt0ZXN0AC9iaW4vbWlz',
+    'Y3Rlc3QAL2Jpbi9wcm9jdGVzdAAvYmluL3N0cmVzcwAvYmluL2V4dDJ0ZXN0',
+    'AC9iaW4vcHR5dGVzdAAvYmluL21vdW50dGVzdAAvYmluL3NvY2t0ZXN0AC9i',
+    'aW4vc2htdGVzdAAvYmluL2xpbXRlc3QAL2Jpbi9ldnR0ZXN0AC9iaW4vZGV2',
+    'dGVzdAAvYmluL21vdXNldGVzdAAvYmluL25ldHRlc3QAL2Jpbi9pc290ZXN0',
+    'AC9iaW4vZmF0dGVzdAAvYmluL2ZidGVzdAAvYmluL3N3YXB0ZXN0ABOHBAgs',
+    'hwQIN4cECAAAAAAAAAAAAAAAAAAAAAAAAAAApIgECK+IBAi9iAQIy4gECNiI',
+    'BAjmiAQI84gECACJBAgPiQQIHIkECCqJBAg4iQQIRIkECFKJBAhfiQQIbokE',
+    'CHyJBAiJiQQIlokECKOJBAiwiQQIv4kECMyJBAjZiQQI5okECPKJBAgAAAAA',
+    'R0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8IAAAAn4UECCAA',
+    'AAACAAEADwAAAL+FBAgdAAAAAgABABcAAADchQQICQAAAAIAAQAcAAAA5YUE',
+    'CJIAAAACAAEAIAAAAHeGBAhdAAAAAgABACUAAAAgigQIbAAAAAEAAgArAAAA',
+    '1IYECCkAAAASAAEAMQAAAGSFBAgAAAAAEAABADgAAACLhQQIAAAAABAAAQBK',
+    'AAAAkoUECAAAAAAQAAEARQAAAIyaBAgAAAAAEAACACwAAAB0gAQI8AQAABIA',
+    'AQBRAAAAjJoECAAAAAAQAAIAWAAAAIyaBAgAAAAAEAACAABpbml0LmMAc3Ry',
+    'Y21wAHB1dHNfZmQAcHV0cwBydW4AcHV0ZAB0ZXN0cwBjbWFpbgBrdV9zYzYA',
+    'X19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFi',
+    'AC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmNvbW1lbnQAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAA',
+    'AAYAAAB0gAQIdAAAAIkGAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAACAAAA',
+    'AIcECAAHAACMAwAAAAAAAAAAAAAgAAAAAAAAACkAAAABAAAAMAAAAAAAAACM',
+    'CgAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAAvAoAAAAB',
+    'AAAFAAAACAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAALwLAABdAAAAAAAA',
+    'AAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAAZDAAAMgAAAAAAAAAAAAAA',
+    'AQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAOYIECDQAAABYBQAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAinAwAApwMAAAUAAAAAEAAAAQAAAKgD',
+    'AACokwQIqJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFW4B4MECInlVlOD5PCB7JABAACLdQiLXQzotAEAADHS',
+    'hfZ+CDHSgzsAD5XCuEKDBAjovAEAALhNgwQI6JIBAACLA+iLAQAAuECDBAjo',
+    'gQEAAE5+HLhYgwQI6HQBAACLQwTobAEAALhAgwQI6GIBAACLRRAx0osAhcB0',
+    'CDHSgDhQD5TCuGODBAiNXCQK6GEBAAC4egAAAM2AuG6DBAjoMAEAAInY6CkB',
+    'AAC4BYMECOgfAQAAjUQkS+gWAQAAuAWDBAjoDAEAAI2EJIwAAADoAAEAALgF',
+    'gwQI6PYAAACNhCTNAAAA6OoAAAC4BYMECOjgAAAAjYQkDgEAAOjUAAAAuECD',
+    'BAjoygAAAInYuniDBAjongAAAInDhcB1L7qAgwQIjYQkjAAAAOiHAAAAhcB1',
+    'HLqJgwQIjYQkDgEAADHb6HAAAACFwA+Uw+sCMduJ2riOgwQI6JsAAAC4FAAA',
+    'AM2AMdJIuJqDBAgPn8LohAAAAI1l+DHAW15dw1VXVlOLRCQUi1wkGItMJByL',
+    'VCQgi3QkJIt8JCiLbCQszYBbXl9dw7itAAAAzYAx7Yngg+TwUOiEAAAAVYnl',
+    'VonGUzHbD7YEHg+2DBqEwHQFQzjIdO9bKcheXcNVicEx0onlU4A8EQB0A0Lr',
+    '97gEAAAAuwEAAADNgFtdw1WJ5VaJxrj/ggQIU4nT6M3///+J8OjG////hdu4',
+    '+IIECLrzggQID0XC6LL///+F23QI/wWskwQI6wb/BaiTBAhbXl3DVYnlU4Ps',
+    'CItFCIsQjUgEjUSQCFBRUuiv/f//icO4AQAAAM2Ag8QQ6/4gT0sKACBGQUlM',
+    'CgBLVEVTVDogAEJvbmpvdXIgZGUgTElOVVgtMCBLRVJORUwzMiAocHJvZ3Jh',
+    'bW1lIEVMRiBpMzg2IHN0YXRpcXVlKQoAaGVsbG8uYXJndgAgIGFyZ3ZbMF09',
+    'ACAgYXJndlsxXT0AaGVsbG8uZW52cAAgIHVuYW1lOiAATElOVVgtMABLRVJO',
+    'RUwzMgBpMzg2AGhlbGxvLnVuYW1lAGhlbGxvLmdldHBpZABHQ0M6IChVYnVu',
+    'dHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAA',
+    'AAAAAAAAAQAAAAAAAAAAAAAABADx/wkAAABGggQIIAAAAAIAAQAQAAAAZoIE',
+    'CCAAAAACAAEAFQAAAIaCBAhEAAAAAgABABsAAACskwQIBAAAAAEAAwAjAAAA',
+    'qJMECAQAAAABAAMAKwAAAMqCBAgpAAAAEgABADEAAAALggQIAAAAABAAAQA4',
+    'AAAAMoIECAAAAAAQAAEASgAAADmCBAgAAAAAEAABAEUAAACokwQIAAAAABAA',
+    'AwAsAAAAlIAECHcBAAASAAEAUQAAAKeTBAgAAAAAEAADAFgAAACwkwQIAAAA',
+    'ABAAAwAAaGVsbG8uYwBzdHJjbXAAcHV0cwBrdGVzdABrdV9wYXNzAGt1X2Zh',
+    'aWwAY21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRh',
+    'dGEAX2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9k',
+    'YXRhAC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiUAAAAXwIAAAAAAAAAAAAA',
+    'AQAAAAAAAAAhAAAAAQAAADIAAADzggQI8wIAALQAAAAAAAAAAAAAAAEAAAAB',
+    'AAAAKQAAAAgAAAADAAAAqJMECKgDAAAIAAAAAAAAAAAAAAAEAAAAAAAAAC4A',
+    'AAABAAAAMAAAAAAAAACnAwAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAA',
+    'AAAAAAAAAAAA1AMAAPAAAAAGAAAABwAAAAQAAAAQAAAACQAAAAMAAAAAAAAA',
+    'AAAAAMQEAABdAAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAAh',
+    'BQAANwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAgoMECDQAAABkBgAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAjHBAAAxwQAAAUAAAAAEAAAAQAAAMgE',
+    'AADIlAQIyJQECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
     'AAAAAAAGAAAAEAAAAFWJ5VdWMfZTg+Twg+wwiXQkBL4CAAAAifDNgIXAdQ64',
-    'AQAAALsHAAAAzYDr/g+fwonDvwcAAAC4CYQECA+20uiwAgAAifiNTCQEMdLN',
-    'gDHSOcO4EoQECA+UwuiVAgAAi0QkBDHSJX//AAA9AAcAALgbhAQID5TC6HgC',
+    'AQAAALsHAAAAzYDr/g+fwonDvwcAAAC4MIQECA+20ujXAgAAifiNTCQEMdLN',
+    'gDHSOcO4OYQECA+Uwui8AgAAi0QkBDHSJX//AAA9AAcAALhChAQID5TC6J8C',
     'AADHRCQIKgAAAInwzYCJw4XAdR3HRCQIYwAAAItEJAgx24P4Y7gBAAAAD5XD',
-    'zYDr/on4jUwkBDHSzYCLRCQIg/gqdQox0oN8JAQAD5TCuCeEBAgx2+ggAgAA',
+    'zYDr/on4jUwkBDHSzYCLRCQIg/gqdQox0oN8JAQAD5TCuE6EBAgx2+hHAgAA',
     'ugIAAACJ0M2AhcB1DIPDCrgBAAAAzYDr/olEnCBDg/sEdeK+CgAAAL8BAAAA',
     'i1y0+I1MJBQx0rgHAAAAzYA5RLT4dQ6LRCQUD7bEOfAPRfrrAjH/RoP+DnXT',
-    'ifq4MIQECL4HAAAAg8v/6LIBAACJ8I1MJAQx0s2AMdKD+Pa/AgAAALg7hAQI',
-    'D5TC6JEBAACJ+M2AicOFwHULuh0AAACJ0M2A6/q4JQAAALkJAAAAzYAx0onw',
-    'jUwkBM2Ai0QkBDHSg+B/g/gJuEeEBAgPlMLoTQEAAIn4zYCJw4XAdTeJ+M2A',
+    'ifq4V4QECL4HAAAAg8v/6NkBAACJ8I1MJAQx0s2AMdKD+Pa/AgAAALhihAQI',
+    'D5TC6LgBAACJ+M2AicOFwHULuh0AAACJ0M2A6/q4JQAAALkJAAAAzYAx0onw',
+    'jUwkBM2Ai0QkBDHSg+B/g/gJuG6EBAgPlMLodAEAAIn4zYCJw4XAdTeJ+M2A',
     'icGFwHUkMdvHRCQYgPD6AriiAAAAiVwkFI1cJBTNgLgBAAAAicvNgOv+uAEA',
-    'AADNgOv+ifCNTCQEMdLNgDHSg3wkBAC4VIQECA+UwujuAAAAifjNgIXAicON',
-    'fCQMdUQx0jHJuAsAAAC7YIQECIlUJByJ+olMJBCNTCQUx0QkFGCEBAjHRCQY',
-    'a4QECMdEJAxwhAQIzYC4AQAAALtjAAAAzYDr/onwjUwkBDHSzYAx0oN8JAQA',
-    'uHqEBAi7h4QECA+Uwuh5AAAAMcCNTCQUifqJRCQYiUQkDLgLAAAAx0QkFIWE',
-    'BAjNgDHSg/j+uJSEBAgPlMLoSAAAADHAgz2glAQIAA+VwI1l9FteX13DuK0A',
-    'AADNgDHtieCD5PBQ6GQAAABVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADN',
-    'gFtdw1WJ5VaJxrgBhAQIU4nT6M3///+J8OjG////hdu4+oMECLr1gwQID0XC',
-    '6LL///+F23QI/wWklAQI6wb/BaCUBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQ',
-    'CFBRUuit/P//icO4AQAAAM2Ag8QQ6/4gT0sKACBGQUlMCgBLVEVTVDogAGZv',
-    'cmsucGlkAHdhaXQucGlkAHdhaXQuc3RhdHVzAGZvcmsuY293AGZvcmsubXVs',
-    'dGkAd2FpdC5lY2hpbGQAd2FpdC5zaWdraWxsAGZvcmsub3JwaGFuAC9iaW4v',
-    'aGVsbG8AYXJnMQBQQVRIPS9iaW4AZXhlYy5oZWxsbwB4AC9iaW4vbmV4aXN0',
-    'ZQBleGVjLmVub2VudABHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0',
-    'LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAA',
-    'BADx/wwAAABogwQIIAAAAAIAAQARAAAAiIMECEQAAAACAAEAFwAAAKSUBAgE',
-    'AAAAAQADAB8AAACglAQIBAAAAAEAAwAnAAAAzIMECCkAAAASAAEALQAAAFSD',
-    'BAgAAAAAEAABAD8AAABbgwQIAAAAABAAAQA6AAAAoJQECAAAAAAQAAMAKAAA',
-    'AJSABAjAAgAAEgABAEYAAACglAQIAAAAABAAAwBNAAAAqJQECAAAAAAQAAMA',
-    'AGZvcmt3YWl0LmMAcHV0cwBrdGVzdABrdV9wYXNzAGt1X2ZhaWwAY21haW4A',
-    'X19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFi',
-    'AC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVu',
-    'dAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'GwAAAAEAAAAGAAAAlIAECJQAAABhAwAAAAAAAAAAAAABAAAAAAAAACEAAAAB',
-    'AAAAMgAAAPWDBAj1AwAAqwAAAAAAAAAAAAAAAQAAAAEAAAApAAAACAAAAAMA',
-    'AACglAQIoAQAAAgAAAAAAAAAAAAAAAQAAAAAAAAALgAAAAEAAAAwAAAAAAAA',
-    'AKAEAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAADQBAAA',
-    '0AAAAAYAAAAGAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAAoAUAAFIAAAAA',
-    'AAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAAPIFAAA3AAAAAAAAAAAA',
-    'AAABAAAAAAAAAA==',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAANYQECDQAAABcBwAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAiPBQAAjwUAAAUAAAAAEAAAAQAAAJAF',
-    'AACQlQQIkJUECAAAAAAMAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAGAAAAEAAAAFW4KgAAAInlV1ZTg+Twg+xwjVwkFM2AMdKFwLgQhQQI',
-    'D5TC6NMDAAC4AgAAAM2AiUQkDIXAdUa+BgAAAItcJBSJ8M2AvwQAAAC6BQAA',
-    'AItcJBi5HIUECIn4zYC5J4UECIn4i1wkGM2AifCLXCQYzYC4AQAAAItcJAzN',
+    'AADNgOv+ifCNTCQEMdLNgDHSg3wkBAC4e4QECA+UwugVAQAAifjNgIXAicON',
+    'fCQMdUQx0jHJuAsAAAC7h4QECIlUJByJ+olMJBCNTCQUx0QkFIeEBAjHRCQY',
+    'koQECMdEJAyXhAQIzYC4AQAAALtjAAAAzYDr/onwjUwkBDHSzYAx0oN8JAQA',
+    'uKGEBAi7roQECA+UwuigAAAAMcCNTCQUifqJRCQYiUQkDLgLAAAAx0QkFKyE',
+    'BAjNgDHSg/j+uLuEBAgPlMLobwAAADHAgz3IlAQIAA+VwI1l9FteX13DVVdW',
+    'U4tEJBSLXCQYi0wkHItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADNgDHt',
+    'ieCD5PBQ6GQAAABVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ',
+    '5VaJxrgohAQIU4nT6M3///+J8OjG////hdu4IYQECLochAQID0XC6LL///+F',
+    '23QI/wXMlAQI6wb/BciUBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBRUuiG',
+    '/P//icO4AQAAAM2Ag8QQ6/4gT0sKACBGQUlMCgBLVEVTVDogAGZvcmsucGlk',
+    'AHdhaXQucGlkAHdhaXQuc3RhdHVzAGZvcmsuY293AGZvcmsubXVsdGkAd2Fp',
+    'dC5lY2hpbGQAd2FpdC5zaWdraWxsAGZvcmsub3JwaGFuAC9iaW4vaGVsbG8A',
+    'YXJnMQBQQVRIPS9iaW4AZXhlYy5oZWxsbwB4AC9iaW4vbmV4aXN0ZQBleGVj',
+    'LmVub2VudABHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEp',
+    'IDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/wwAAACP',
+    'gwQIIAAAAAIAAQARAAAAr4MECEQAAAACAAEAFwAAAMyUBAgEAAAAAQADAB8A',
+    'AADIlAQIBAAAAAEAAwAnAAAA84MECCkAAAASAAEALQAAAFSDBAgAAAAAEAAB',
+    'ADQAAAB7gwQIAAAAABAAAQBGAAAAgoMECAAAAAAQAAEAQQAAAMiUBAgAAAAA',
+    'EAADACgAAACUgAQIwAIAABIAAQBNAAAAx5QECAAAAAAQAAMAVAAAANCUBAgA',
+    'AAAAEAADAABmb3Jrd2FpdC5jAHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWls',
+    'AGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRh',
+    'AF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0',
+    'YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAAIgDAAAAAAAAAAAAAAEA',
+    'AAAAAAAAIQAAAAEAAAAyAAAAHIQECBwEAACrAAAAAAAAAAAAAAABAAAAAQAA',
+    'ACkAAAAIAAAAAwAAAMiUBAjIBAAACAAAAAAAAAAAAAAABAAAAAAAAAAuAAAA',
+    'AQAAADAAAAAAAAAAxwQAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAA',
+    'AAAAAAAAAPQEAADgAAAABgAAAAYAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAA',
+    'AADUBQAAWQAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAALQYA',
+    'ADcAAAAAAAAAAAAAAAEAAAAAAAAA',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    'uAcAAADNgItcJBSJ8M2AunSFBAiNRCQwu4eFBAjodwEAADHShcC4fYUECA+U',
+    'wuizAQAAuA4AAAC5gBEAADHSzYAx0oXAuI+FBAgPlMLolAEAALgCAAAAzYCJ',
+    'RCQMhcB1Pb8FAAAAuQEAAACLVCQMifjNgLmahQQIiUQkCIn6uAQAAACLXCQI',
+    'zYCJ8ItcJAjNgLgBAAAAi1wkDM2A6/4xybgFAAAAu4eFBAiJys2AukAAAACJ',
+    'w41MJDCJ+M2AMdKFwA9IwsZEBDAAifDNgLgHAAAAi1wkDI1MJBDNgLqahQQI',
+    'jUQkMLuHhQQI6KoAAAAx0oXAuKCFBAgPlMLo5gAAALgKAAAAzYC4KgAAAI1c',
     'JBTNgLg3AAAAi1wkFLkEAAAAugAIAADNgLoBAAAAi1wkFIn4jUwkMM2AMdKD',
-    '+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',
-    '4IPk8FDokQAAAFWJ5VaJxlMx2w+2BB4PtgwahMB0BUM4yHTvWynIXl3DVYnl',
-    'i0UIXaOQlQQIw1WJwTHSieVTgDwRAHQDQuv3uAQAAAC7AQAAAM2AW13DVYnl',
-    'VonGuAiFBAhTidPozf///4nw6Mb///+F27gBhQQIuvyEBAgPRcLosv///4Xb',
-    'dAj/BZiVBAjrBv8FlJUECFteXcNVieVTg+wIi0UIixCNSASNRJAIUFFS6Kb7',
-    '//+Jw7gBAAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtURVNUOiAAcGlwZS5jcmVh',
-    'dGUAc2FsdXQAc2FsdXQgdHViZQBwaXBlLmRhdGEAcGlwZS5lb2YAeABwaXBl',
-    'LmVwaXBlAHZpYSBkdXAyAHBpcGUuZHVwMgAvdG1wL2ZmAGZpZm8ubWtub2QA',
-    'ZmlmbyEAZmlmby5kYXRhAHBpcGUuZWFnYWluAEdDQzogKFVidW50dSAxMy4z',
-    'LjAtNnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAB',
-    'AAAAAAAAAAAAAAAEAPH/DAAAAEKEBAggAAAAAgABABMAAABihAQIDQAAAAIA',
-    'AQAaAAAAkJUECAQAAAABAAMAIwAAAG+EBAggAAAAAgABACgAAACPhAQIRAAA',
-    'AAIAAQAuAAAAmJUECAQAAAABAAMANgAAAJSVBAgEAAAAAQADAD4AAADThAQI',
-    'KQAAABIAAQBEAAAALoQECAAAAAAQAAEAVgAAADWEBAgAAAAAEAABAFEAAACQ',
-    'lQQIAAAAABAAAwA/AAAAlIAECJoDAAASAAEAXQAAAI+VBAgAAAAAEAADAGQA',
-    'AACclQQIAAAAABAAAwAAcGlwZXRlc3QuYwBzdHJjbXAAb25waXBlAGdvdF9w',
-    'aXBlAHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGNtYWluAF9fcmVzdG9y',
-    'ZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3RydGFi',
-    'AC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAA',
-    'AJSABAiUAAAAaAQAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAADIAAAD8hAQI',
-    '/AQAAJMAAAAAAAAAAAAAAAEAAAABAAAAKQAAAAgAAAADAAAAkJUECJAFAAAM',
-    'AAAAAAAAAAAAAAAEAAAAAAAAAC4AAAABAAAAMAAAAAAAAACPBQAALQAAAAAA',
-    'AAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAAvAUAAAABAAAGAAAACQAA',
-    'AAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAALwGAABpAAAAAAAAAAAAAAABAAAA',
-    'AAAAABEAAAADAAAAAAAAAAAAAAAlBwAANwAAAAAAAAAAAAAAAQAAAAAAAAA=',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAANoMECDQAAABUBwAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAjyBAAA8gQAAAUAAAAAEAAAAQAAAPQE',
-    'AAD0lAQI9JQECAAAAAAcAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAGAAAAEAAAAFW6Q4MECLgKAAAAieVXVlOD5PCD7BDoSwMAALgUAAAA',
-    'zYC5CgAAAInDuCUAAADNgKEElQQISHUPoQCVBAgx0oP4Cg+UwusCMdK4coQE',
-    'CL+vAAAAMdu+CAAAAOjDAgAAMdKJ+I1MJAiJVCQMidrHRCQIAAIAAM2AuBQA',
-    'AADNgLkKAAAAicO4JQAAAM2AoQSVBAgx0rsBAAAASLh+hAQID5TC6HwCAAAx',
-    'yYn4MdKJTCQMjUwkCMdEJAgAAgAAzYChBJUECDHSg/gCuIqEBAgPlMLoTQIA',
-    'ALpbgwQIuA4AAADoggIAALgbAAAAzYC4HQAAAM2AofyUBAgx0r8CAAAASLiW',
-    'hAQID5TC6BYCAAC6Z4MECLgRAAAA6EsCAACJ+M2AicOFwHUJuAEAAADNgOv+',
-    'vgcAAACNTCQIMdKJ8M2AofiUBAgx0oXAuKCEBAgPn8LozwEAADHSuBEAAADo',
-    'BwIAALoBAAAAuAwAAADo+AEAALgUAAAAzYC5DAAAAInDuCUAAADNgLoBAAAA',
-    'uKyEBAjokAEAAIn4zYCJw4XAdSMx0rgMAAAA6L4BAAC4FAAAAM2AuQwAAACJ',
-    'w7glAAAAzYDr/onwjUwkCDHSzYCLRCQIMdKD4H+D+Ay4t4QECA+UwuhAAQAA',
-    'ifjNgInDhcB1GLpzgwQIuAsAAADoawEAADHAowAAAAAPC4nwjUwkCDHSzYAx',
-    '0oN8JAgAuMiEBAgPlMLoAAEAAIn4zYCJw4XAdRjHBRAAAAABAAAAuAEAAAC7',
-    'BQAAAM2A6/6J8I1MJAgx0s2Ai0QkCDHSuzB1AACD4H+D+Au42YQECA+Uwui2',
-    'AAAAuCUAAAAxyc2AMdKD+P246IQECA+UwuibAAAAMcCDPQiVBAgAD5XAjWX0',
-    'W15fXcO4rQAAAM2AMe2J4IPk8FDo8gAAAFWhBJUECECJ5aMElQQIi0UIXaMA',
-    'lQQIw6H8lAQIQKP8lAQIw6H4lAQIQKP4lAQIw1Wh9JQECECJ5VMx26P0lAQI',
-    'ofSUBAhIuAEAAAAPlcPNgOv+VYnBMdKJ5VOAPBEAdANC6/e4BAAAALsBAAAA',
-    'zYBbXcNVieVWica4aoQECFOJ0+jN////ifDoxv///4XbuGOEBAi6XoQECA9F',
-    'wuiy////hdt0CP8FDJUECOsG/wUIlQQIW15dw1WJ5Va+CAAAAFOJwzHAjU3k',
-    'g+wgiVXkMdKJRfSJRfC4rgAAAMdF6AQAAATHRewvgwQIzYCDxCBbXl3DVYnl',
-    'U4PsCItFCIsQjUgEjUSQCFBRUuhE/P//icO4AQAAAM2Ag8QQ6/4gT0sKACBG',
-    'QUlMCgBLVEVTVDogAHNpZy5oYW5kbGVyAHNpZy5ibG9ja2VkAHNpZy51bmJs',
-    'b2NrAHNpZy5hbGFybQBzaWcuc2lnY2hsZABzaWcuaWdub3JlAHNpZy5kZWZh',
-    'dWx0X3Rlcm0Ac2lnLnNlZ3ZfaGFuZGxlcgBzaWcuc2Vndl9mYXRhbABzaWcu',
-    'ZXNyY2gAR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAx',
-    'My4zLjAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAEAPH/CwAAAEOD',
-    'BAgYAAAAAgABAA4AAAAElQQIBAAAAAEAAwASAAAAAJUECAQAAAABAAMAFwAA',
-    'AFuDBAgMAAAAAgABABgAAAD8lAQIBAAAAAEAAwAdAAAAZ4MECAwAAAACAAEA',
-    'HgAAAPiUBAgEAAAAAQADACMAAABzgwQIIwAAAAIAAQAkAAAA9JQECAQAAAAB',
-    'AAMAKQAAAJaDBAggAAAAAgABAC4AAAC2gwQIRAAAAAIAAQA0AAAADJUECAQA',
-    'AAABAAMAPAAAAAiVBAgEAAAAAQADAEQAAAD6gwQIOwAAAAIAAQBiAAAANYQE',
-    'CCkAAAASAAEAaAAAAC+DBAgAAAAAEAABAHoAAAA2gwQIAAAAABAAAQB1AAAA',
-    '9JQECAAAAAAQAAMAYwAAAJSABAibAgAAEgABAIEAAADylAQIAAAAABAAAwCI',
-    'AAAAEJUECAAAAAAQAAMAAHNpZ3Rlc3QuYwBoMQBjbnQAbGFzdABoYWxybQBo',
-    'Y2hsZABoc2VndgBwdXRzAGt0ZXN0AGt1X3Bhc3MAa3VfZmFpbABzaWduYWxf',
-    'c2V0LmNvbnN0cHJvcC4wLmlzcmEuMABjbWFpbgBfX3Jlc3RvcmVfcnQAX19i',
-    'c3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0',
-    'YWIALnRleHQALnJvZGF0YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAA',
-    'AMoDAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAAXoQECF4EAACUAAAA',
-    'AAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAAPSUBAj0BAAAHAAAAAAAAAAA',
-    'AAAABAAAAAAAAAAuAAAAAQAAADAAAAAAAAAA8gQAAC0AAAAAAAAAAAAAAAEA',
-    'AAABAAAAAQAAAAIAAAAAAAAAAAAAACAFAABwAQAABgAAABAAAAAEAAAAEAAA',
-    'AAkAAAADAAAAAAAAAAAAAACQBgAAjQAAAAAAAAAAAAAAAQAAAAAAAAARAAAA',
-    'AwAAAAAAAAAAAAAAHQcAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAa4QECDQAAABYBwAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAi8BQAAvAUAAAUAAAAAEAAAAQAAALwF',
-    'AAC8lQQIvJUECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAGAAAAEAAAAFWJ5VdWU4Pk8I2EJADg/P+B7AAQAACDDCQAOcR18oPs',
-    'ILotAAAAMduJ0M2AicaNmAAwAACJ0M2AMdI5w7gohQQID5TC6MoDAADGBgHG',
-    'hv8vAAACigb+yHUPiob/LwAAMdI8Ag+UwusCMdK4MYUECInz6J0DAAC4LQAA',
-    'AM2AMdI5xrg4hQQID5TCMfYx24PP/+h+AwAAiXQkILkAgAAAugMAAAC+IgAA',
-    'ALjAAAAAVYtsJCDNgF0x0oXAiUQkDLhDhQQID5/C6EkDAAC6AQAAADHAMcmL',
-    'fCQMgDw4AA9F0UA9AIAAAHXtuE2FBAjoIwMAADHAicKLfCQMBQAQAADB+gxC',
-    'iJQ4APD//z0AgAAAdeO6AQAAADH2McCJ8Yt8JAxGweEMD74MOTnxD0XQg/4I',
-    'dei4V4UECOjZAgAAi0QkDLkAIAAAjZgAIAAAuFsAAADNgDHShcC4X4UECA+U',
-    'wuiyAgAAuAIAAADNgInHhcB1TTHbx0QkIHiEBAiNTCQgifqJXCQwuK4AAACJ',
-    'XCQsuwsAAADHRCQkBAAABMdEJChkhAQIzYCLRCQMuwMAAADGgAAgAAABuAEA',
-    'AADNgOv+uAcAAACJ+41MJBgx0s2AMdKDfCQYALhmhQQID5TC6DUCAACLXCQM',
-    'uH0AAAC5ABAAALoBAAAAzYAx0oXAuHKFBAgPlMLoDwIAALgCAAAAzYCJx4XA',
-    'dUkxybiuAAAAuwsAAACJ+olMJDCJTCQsjUwkIMdEJCB4hAQIx0QkJAQAAATH',
-    'RCQoZIQECM2Ai0QkDLsDAAAAxgAJuAEAAADNgOv+uAcAAACJ+41MJBgx0s2A',
-    'MdKDfCQYALh7hQQID5TC6JYBAACLXCQMuH0AAAC6AwAAALkAEAAAzYCLRCQM',
-    'xgALuAIAAADNgInDhcB1EItEJAzGABa4AQAAAM2A6/64BwAAAI1MJBgx0s2A',
-    'i0QkDIA4C3UKMdKDfCQYAA+UwriHhQQI6DMBAADGRCQgATHSxoQkHyADAAKK',
-    'RCQg/sh1DoqEJB8gAwAx0jwCD5TCuJCFBAi7wAAAAL4iAAAAg8//6PcAAAAx',
-    'wLkAAEAAugMAAACJRCQcidgx21WLbCQczYBdxgABicO6AQAAAMaA//8/AAK4',
-    'm4UECOjAAAAAuFsAAAC5AABAAM2AvwUAAAAxybukhQQIifiJys2AMdKJx7kA',
-    'EAAAuMAAAACJVCQcvgIAAAC6AQAAADHbVYtsJBzNgF0x0oXAfhWAeAFFdQ+A',
-    'eAJMdQkx0oB4A0YPlMK4soUECOhXAAAAMcCDPbyVBAgAD5XAjWX0W15fXcO4',
-    'rQAAAM2AMe2J4IPk8FDocwAAAFW4AQAAAInlUzHbzYDr/lWJwTHSieVTgDwR',
-    'AHQDQuv3uAQAAAC7AQAAAM2AW13DVYnlVonGuCCFBAhTidPozf///4nw6Mb/',
-    '//+F27gZhQQIuhSFBAgPRcLosv///4XbdAj/BcCVBAjrBv8FvJUECFteXcNV',
-    'ieVTg+wIi0UIixCNSASNRJAIUFFS6I77//+Jw7gBAAAAzYCDxBDr/iBPSwoA',
-    'IEZBSUwKAEtURVNUOiAAYnJrLmdyb3cAYnJrLnJ3AGJyay5zaHJpbmsAbW1h',
-    'cC5hbm9uAG1tYXAuemVybwBtbWFwLnJ3AG11bm1hcABtdW5tYXAuaG9sZQBt',
-    'cHJvdGVjdABtcHJvdGVjdC5ybwBtbWFwLmNvdwBzdGFjay5ncm93AG1tYXAu',
-    'NG1iAC9iaW4vbW1hcHRlc3QAbW1hcC5maWxlAEdDQzogKFVidW50dSAxMy4z',
-    'LjAtNnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAABAAAAAAAAAAAAAAAEAPH/DAAAAHiEBAgPAAAAAgABAA8AAACHhAQIIAAA',
-    'AAIAAQAUAAAAp4QECEQAAAACAAEAGgAAAMCVBAgEAAAAAQADACIAAAC8lQQI',
-    'BAAAAAEAAwAqAAAA64QECCkAAAASAAEAMAAAAGSEBAgAAAAAEAABAEIAAABr',
-    'hAQIAAAAABAAAQA9AAAAvJUECAAAAAAQAAMAKwAAAJSABAjQAwAAEgABAEkA',
-    'AAC8lQQIAAAAABAAAwBQAAAAxJUECAAAAAAQAAMAAG1tYXB0ZXN0LmMAaHMA',
-    'cHV0cwBrdGVzdABrdV9wYXNzAGt1X2ZhaWwAY21haW4AX19yZXN0b3JlX3J0',
-    'AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNo',
-    'c3RydGFiAC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAE',
-    'CJQAAACABAAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAMgAAABSFBAgUBQAA',
-    'qAAAAAAAAAAAAAAAAQAAAAEAAAApAAAACAAAAAMAAAC8lQQIvAUAAAgAAAAA',
-    'AAAAAAAAAAQAAAAAAAAALgAAAAEAAAAwAAAAAAAAALwFAAAtAAAAAAAAAAAA',
-    'AAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAADsBQAA4AAAAAYAAAAHAAAABAAA',
-    'ABAAAAAJAAAAAwAAAAAAAAAAAAAAzAYAAFUAAAAAAAAAAAAAAAEAAAAAAAAA',
-    'EQAAAAMAAAAAAAAAAAAAACEHAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAnIgECDQAAADsDQAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAgwDAAAMAwAAAUAAAAAEAAAAQAAADAM',
-    'AAAwnAQIMJwECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAGAAAAEAAAAFW57QEAAInlV1a+JwAAAFOJ8LsQigQIg+TwgeygAQAA',
-    'zYAx0oXAuBiKBAgPlMLoyAgAAInwue0BAADNgDHSg/jvvgUAAAC4HooECA+U',
-    'wrsqigQI6KMIAAC5QgIAALqkAQAAifDNgInCica/BAAAALg4igQI99KJ88Hq',
-    'H+h7CAAAifi5PooECLoKAAAAzYAx0oP4CrhJigQID5TC6FsIAAC5AwAAALgT',
-    'AAAAMdLNgDHSg/gDuE+KBAgPlMLoOwgAALgDAAAAjUwkdIn6zYAx0oXAD0nQ',
-    'xkQUdAAx0oP4BHUTulWKBAiJyOgpBwAAMdKFwA+UwrhaigQIifPo/AcAALgG',
-    'AAAAzYC4wwAAALsqigQIjUwkFM2AicKFwHUjg3wkRAB1HoN8JEAKdReLRCQk',
-    'MdIl//EAAD2kgQAAD5TC6wIx0rhfigQIu2aKBAjoqwcAALlCAAAAuoABAAC4',
+    '+PW4qoUECA+UwuicAAAAMcCDPbyVBAgAD5XAjWX0W15fXcNVV1ZTi0QkFItc',
+    'JBiLTCQci1QkIIt0JCSLfCQoi2wkLM2AW15fXcO4rQAAAM2AMe2J4IPk8FDo',
+    'kQAAAFWJ5VaJxlMx2w+2BB4PtgwahMB0BUM4yHTvWynIXl3DVYnli0UIXaO4',
+    'lQQIw1WJwTHSieVTgDwRAHQDQuv3uAQAAAC7AQAAAM2AW13DVYnlVonGuC+F',
+    'BAhTidPozf///4nw6Mb///+F27gohQQIuiOFBAgPRcLosv///4XbdAj/BcCV',
+    'BAjrBv8FvJUECFteXcNVieVTg+wIi0UIixCNSASNRJAIUFFS6H/7//+Jw7gB',
+    'AAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtURVNUOiAAcGlwZS5jcmVhdGUAc2Fs',
+    'dXQAc2FsdXQgdHViZQBwaXBlLmRhdGEAcGlwZS5lb2YAeABwaXBlLmVwaXBl',
+    'AHZpYSBkdXAyAHBpcGUuZHVwMgAvdG1wL2ZmAGZpZm8ubWtub2QAZmlmbyEA',
+    'Zmlmby5kYXRhAHBpcGUuZWFnYWluAEdDQzogKFVidW50dSAxMy4zLjAtNnVi',
+    'dW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAA',
+    'AAAAAAAABADx/wwAAABphAQIIAAAAAIAAQATAAAAiYQECA0AAAACAAEAGgAA',
+    'ALiVBAgEAAAAAQADACMAAACWhAQIIAAAAAIAAQAoAAAAtoQECEQAAAACAAEA',
+    'LgAAAMCVBAgEAAAAAQADADYAAAC8lQQIBAAAAAEAAwA+AAAA+oQECCkAAAAS',
+    'AAEARAAAAC6EBAgAAAAAEAABAEsAAABVhAQIAAAAABAAAQBdAAAAXIQECAAA',
+    'AAAQAAEAWAAAALiVBAgAAAAAEAADAD8AAACUgAQImgMAABIAAQBkAAAAtpUE',
+    'CAAAAAAQAAMAawAAAMSVBAgAAAAAEAADAABwaXBldGVzdC5jAHN0cmNtcABv',
+    'bnBpcGUAZ290X3BpcGUAcHV0cwBrdGVzdABrdV9wYXNzAGt1X2ZhaWwAY21h',
+    'aW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2Vu',
+    'ZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5i',
+    'c3MALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAAI8EAAAAAAAAAAAAAAEAAAAA',
+    'AAAAIQAAAAEAAAAyAAAAI4UECCMFAACTAAAAAAAAAAAAAAABAAAAAQAAACkA',
+    'AAAIAAAAAwAAALiVBAi4BQAADAAAAAAAAAAAAAAABAAAAAAAAAAuAAAAAQAA',
+    'ADAAAAAAAAAAtgUAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAA',
+    'AAAAAOQFAAAQAQAABgAAAAkAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAAD0',
+    'BgAAcAAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAAZAcAADcA',
+    'AAAAAAAAAAAAAAEAAAAAAAAA',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAXYMECDQAAACUBwAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAgZBQAAGQUAAAUAAAAAEAAAAQAAABwF',
+    'AAAclQQIHJUECAAAAAAcAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFW6aoMECLgKAAAAieVXVlOD5PCD7BDocgMAALgUAAAA',
+    'zYC5CgAAAInDuCUAAADNgKEslQQISHUPoSiVBAgx0oP4Cg+UwusCMdK4mYQE',
+    'CL+vAAAAMdu+CAAAAOjqAgAAMdKJ+I1MJAiJVCQMidrHRCQIAAIAAM2AuBQA',
+    'AADNgLkKAAAAicO4JQAAAM2AoSyVBAgx0rsBAAAASLilhAQID5TC6KMCAAAx',
+    'yYn4MdKJTCQMjUwkCMdEJAgAAgAAzYChLJUECDHSg/gCuLGEBAgPlMLodAIA',
+    'ALqCgwQIuA4AAADoqQIAALgbAAAAzYC4HQAAAM2AoSSVBAgx0r8CAAAASLi9',
+    'hAQID5TC6D0CAAC6joMECLgRAAAA6HICAACJ+M2AicOFwHUJuAEAAADNgOv+',
+    'vgcAAACNTCQIMdKJ8M2AoSCVBAgx0oXAuMeEBAgPn8Lo9gEAADHSuBEAAADo',
+    'LgIAALoBAAAAuAwAAADoHwIAALgUAAAAzYC5DAAAAInDuCUAAADNgLoBAAAA',
+    'uNOEBAjotwEAAIn4zYCJw4XAdSMx0rgMAAAA6OUBAAC4FAAAAM2AuQwAAACJ',
+    'w7glAAAAzYDr/onwjUwkCDHSzYCLRCQIMdKD4H+D+Ay43oQECA+UwuhnAQAA',
+    'ifjNgInDhcB1GLqagwQIuAsAAADokgEAADHAowAAAAAPC4nwjUwkCDHSzYAx',
+    '0oN8JAgAuO+EBAgPlMLoJwEAAIn4zYCJw4XAdRjHBRAAAAABAAAAuAEAAAC7',
+    'BQAAAM2A6/6J8I1MJAgx0s2Ai0QkCDHSuzB1AACD4H+D+Au4AIUECA+Uwujd',
+    'AAAAuCUAAAAxyc2AMdKD+P24D4UECA+UwujCAAAAMcCDPTCVBAgAD5XAjWX0',
+    'W15fXcNVV1ZTi0QkFItcJBiLTCQci1QkIIt0JCSLfCQoi2wkLM2AW15fXcO4',
+    'rQAAAM2AMe2J4IPk8FDo8gAAAFWhLJUECECJ5aMslQQIi0UIXaMolQQIw6Ek',
+    'lQQIQKMklQQIw6EglQQIQKMglQQIw1WhHJUECECJ5VMx26MclQQIoRyVBAhI',
+    'uAEAAAAPlcPNgOv+VYnBMdKJ5VOAPBEAdANC6/e4BAAAALsBAAAAzYBbXcNV',
+    'ieVWica4kYQECFOJ0+jN////ifDoxv///4XbuIqEBAi6hYQECA9Fwuiy////',
+    'hdt0CP8FNJUECOsG/wUwlQQIW15dw1WJ5Va+CAAAAFOJwzHAjU3kg+wgiVXk',
+    'MdKJRfSJRfC4rgAAAMdF6AQAAATHRexWgwQIzYCDxCBbXl3DVYnlU4PsCItF',
+    'CIsQjUgEjUSQCFBRUugd/P//icO4AQAAAM2Ag8QQ6/4gT0sKACBGQUlMCgBL',
+    'VEVTVDogAHNpZy5oYW5kbGVyAHNpZy5ibG9ja2VkAHNpZy51bmJsb2NrAHNp',
+    'Zy5hbGFybQBzaWcuc2lnY2hsZABzaWcuaWdub3JlAHNpZy5kZWZhdWx0X3Rl',
+    'cm0Ac2lnLnNlZ3ZfaGFuZGxlcgBzaWcuc2Vndl9mYXRhbABzaWcuZXNyY2gA',
+    'R0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/wsAAABqgwQIGAAA',
+    'AAIAAQAOAAAALJUECAQAAAABAAMAEgAAACiVBAgEAAAAAQADABcAAACCgwQI',
+    'DAAAAAIAAQAYAAAAJJUECAQAAAABAAMAHQAAAI6DBAgMAAAAAgABAB4AAAAg',
+    'lQQIBAAAAAEAAwAjAAAAmoMECCMAAAACAAEAJAAAAByVBAgEAAAAAQADACkA',
+    'AAC9gwQIIAAAAAIAAQAuAAAA3YMECEQAAAACAAEANAAAADSVBAgEAAAAAQAD',
+    'ADwAAAAwlQQIBAAAAAEAAwBEAAAAIYQECDsAAAACAAEAYgAAAFyEBAgpAAAA',
+    'EgABAGgAAAAvgwQIAAAAABAAAQBvAAAAVoMECAAAAAAQAAEAgQAAAF2DBAgA',
+    'AAAAEAABAHwAAAAclQQIAAAAABAAAwBjAAAAlIAECJsCAAASAAEAiAAAABmV',
+    'BAgAAAAAEAADAI8AAAA4lQQIAAAAABAAAwAAc2lndGVzdC5jAGgxAGNudABs',
+    'YXN0AGhhbHJtAGhjaGxkAGhzZWd2AHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9m',
+    'YWlsAHNpZ25hbF9zZXQuY29uc3Rwcm9wLjAuaXNyYS4wAGNtYWluAGt1X3Nj',
+    'NgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10',
+    'YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNzAC5jb21t',
+    'ZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'GwAAAAEAAAAGAAAAlIAECJQAAADxAwAAAAAAAAAAAAABAAAAAAAAACEAAAAB',
+    'AAAAMgAAAIWEBAiFBAAAlAAAAAAAAAAAAAAAAQAAAAEAAAApAAAACAAAAAMA',
+    'AAAclQQIHAUAABwAAAAAAAAAAAAAAAQAAAAAAAAALgAAAAEAAAAwAAAAAAAA',
+    'ABkFAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAABIBQAA',
+    'gAEAAAYAAAAQAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAAyAYAAJQAAAAA',
+    'AAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAAFwHAAA3AAAAAAAAAAAA',
+    'AAABAAAAAAAAAA==',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAboQECDQAAABwBwAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAi/BQAAvwUAAAUAAAAAEAAAAQAAAMAF',
+    'AADAlQQIwJUECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAI1MJASD5PD/cfxVieVXVlNRjYQkAOD8/4HsABAAAIMM',
+    'JAA5xHXyg+wYui0AAAAx24nQzYCJxo2YADAAAInQzYAx0jnDuCuFBAgPlMLo',
+    'xQMAAMYGAcaG/y8AAAKKBv7IdQ+Khv8vAAAx0jwCD5TC6wIx0rg0hQQIifPo',
+    'mAMAALgtAAAAzYAx0jnGuDuFBAgPlMLogAMAAFZqAGr/aiJqA2gAgAAAagBo',
+    'wAAAAOj8AgAAg8QgMdKFwInHuEaFBAgPn8LoUAMAALoBAAAAMcAxyYA8OAAP',
+    'RdFAPQCAAAB18bhQhQQI6C4DAAAxwInCBQAQAADB+gxCiJQ4APD//z0AgAAA',
+    'dee6AQAAADH2McCJ8UbB4QwPvgw5OfEPRdCD/gh17LhahQQIjZ8AIAAA6OYC',
+    'AAC4WwAAALkAIAAAzYAx0oXAuGKFBAgPlMLoyQIAALgCAAAAzYCJwoXAdVMx',
+    '242N6N/8/8eF6N/8/3uEBAi4rgAAAImd+N/8/4md9N/8/7sLAAAAx4Xs3/z/',
+    'BAAABMeF8N/8/2eEBAjNgLgBAAAAxocAIAAAAbsDAAAAzYDr/onTuAcAAACN',
+    'jeTf/P8x0s2AMdKDveTf/P8AuGmFBAiJ+w+UwuhAAgAAuH0AAAC5ABAAALoB',
+    'AAAAzYAx0oXAuHWFBAgPlMLoHgIAALgCAAAAzYCJwoXAdU8xybiuAAAAx4Xo',
+    '3/z/e4QECLsLAAAAiY343/z/iY303/z/jY3o3/z/x4Xs3/z/BAAABMeF8N/8',
+    '/2eEBAjNgLgBAAAAxgcJuwMAAADNgOv+idO4BwAAAI2N5N/8/zHSzYAx0oO9',
+    '5N/8/wC4foUECIn7D5TC6JkBAAC4fQAAALoDAAAAuQAQAADNgLgCAAAAxgcL',
+    'zYCJw4XAdQzGBxa4AQAAAM2A6/64BwAAAI2N5N/8/zHSzYCAPwt1DDHSg73k',
+    '3/z/AA+UwriKhQQI6EIBAADGhejf/P8BMdLGRecCioXo3/z//sh1CopF5zHS',
+    'PAIPlMK4k4UECOgXAQAAUGoAav9qImoDaAAAQABqAGjAAAAA6JMAAACDxCC6',
+    'AQAAAMYAAYnDxoD//z8AAriehQQI6N8AAAC4WwAAALkAAEAAzYAx0rgFAAAA',
+    'u6eFBAiJ0c2AUmoAUGoCagFoABAAAGoAaMAAAADoQAAAAIPEIDHShcB+FYB4',
+    'AUV1D4B4Akx1CTHSgHgDRg+Uwri1hQQI6IIAAAAxwIM9wJUECAAPlcCNZfBZ',
+    'W15fXY1h/MNVV1ZTi0QkFItcJBiLTCQci1QkIIt0JCSLfCQoi2wkLM2AW15f',
+    'XcO4rQAAAM2AMe2J4IPk8FDocwAAAFW4AQAAAInlUzHbzYDr/lWJwTHSieVT',
+    'gDwRAHQDQuv3uAQAAAC7AQAAAM2AW13DVYnlVonGuCOFBAhTidPozf///4nw',
+    '6Mb///+F27gchQQIuheFBAgPRcLosv///4XbdAj/BcSVBAjrBv8FwJUECFte',
+    'XcNVieVTg+wIi0UIixCNSASNRJAIUFFS6Iv7//+Jw7gBAAAAzYCDxBDr/iBP',
+    'SwoAIEZBSUwKAEtURVNUOiAAYnJrLmdyb3cAYnJrLnJ3AGJyay5zaHJpbmsA',
+    'bW1hcC5hbm9uAG1tYXAuemVybwBtbWFwLnJ3AG11bm1hcABtdW5tYXAuaG9s',
+    'ZQBtcHJvdGVjdABtcHJvdGVjdC5ybwBtbWFwLmNvdwBzdGFjay5ncm93AG1t',
+    'YXAuNG1iAC9iaW4vbW1hcHRlc3QAbW1hcC5maWxlAEdDQzogKFVidW50dSAx',
+    'My4zLjAtNnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAA',
+    'AAABAAAAAAAAAAAAAAAEAPH/DAAAAHuEBAgPAAAAAgABAA8AAACKhAQIIAAA',
+    'AAIAAQAUAAAAqoQECEQAAAACAAEAGgAAAMSVBAgEAAAAAQADACIAAADAlQQI',
+    'BAAAAAEAAwAqAAAA7oQECCkAAAASAAEAMAAAAECEBAgAAAAAEAABADcAAABn',
+    'hAQIAAAAABAAAQBJAAAAboQECAAAAAAQAAEARAAAAMCVBAgAAAAAEAADACsA',
+    'AACUgAQIrAMAABIAAQBQAAAAv5UECAAAAAAQAAMAVwAAAMiVBAgAAAAAEAAD',
+    'AABtbWFwdGVzdC5jAGhzAHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGNt',
+    'YWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9l',
+    'bmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAu',
+    'YnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAECJQAAACDBAAAAAAAAAAAAAABAAAA',
+    'AAAAACEAAAABAAAAMgAAABeFBAgXBQAAqAAAAAAAAAAAAAAAAQAAAAEAAAAp',
+    'AAAACAAAAAMAAADAlQQIwAUAAAgAAAAAAAAAAAAAAAQAAAAAAAAALgAAAAEA',
+    'AAAwAAAAAAAAAL8FAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAA',
+    'AAAAAADsBQAA8AAAAAYAAAAHAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAA',
+    '3AYAAFwAAAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAADgHAAA3',
+    'AAAAAAAAAAAAAAABAAAAAAAAAA==',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAw4gECDQAAAAkDgAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAhXDAAAVwwAAAUAAAAAEAAAAQAAAFgM',
+    'AABYnAQIWJwECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFW57QEAAInlV1a+JwAAAFOJ8Ls3igQIg+TwgeygAQAA',
+    'zYAx0oXAuD+KBAgPlMLo7wgAAInwue0BAADNgDHSg/jvvgUAAAC4RYoECA+U',
+    'wrtRigQI6MoIAAC5QgIAALqkAQAAifDNgInCica/BAAAALhfigQI99KJ88Hq',
+    'H+iiCAAAifi5ZYoECLoKAAAAzYAx0oP4CrhwigQID5TC6IIIAAC5AwAAALgT',
+    'AAAAMdLNgDHSg/gDuHaKBAgPlMLoYggAALgDAAAAjUwkdIn6zYAx0oXAD0nQ',
+    'xkQUdAAx0oP4BHUTunyKBAiJyOhQBwAAMdKFwA+UwriBigQIifPoIwgAALgG',
+    'AAAAzYC4wwAAALtRigQIjUwkFM2AicKFwHUjg3wkRAB1HoN8JEAKdReLRCQk',
+    'MdIl//EAAD2kgQAAD5TC6wIx0riGigQIu42KBAjo0gcAALlCAAAAuoABAAC4',
     'BQAAAM2AiUQkDDH2vwQAAAC6LAEAAI1EJHSJwYnzQIgZjYwkoAEAADnIde6L',
     'XCQMifiNTCR0zYBGgf4sAQAAddUx0rgTAAAAi1wkDInRzYC+AQAAADH/uiwB',
     'AACLXCQMuAMAAACNTCR0zYA9LAEAAHUZifg4RCR0dRE4hCSfAQAAuAAAAAAP',
-    'RfDrAjH2R4H/LAEAAHXGifK4b4oECOj+BgAAi1wkDLhdAAAAuWQAAADNgDHS',
-    'hcC4d4oECA+UwujdBgAAi1wkDLjFAAAAjUwkFM2Ai0QkQDHSg/BkC0QkRLiB',
-    'igQID5TC6LQGAACLXCQMuAYAAADNgLgKAAAAu2aKBAjNgLoyigQIuBCKBAjo',
-    'yAUAAEh0BDHS6ye6kYoECLgQigQI6LIFAABIdeq6kIoECLgQigQI6KAFAAAx',
-    '0kgPlMK4k4oECL6cigQIuyqKBAjoTAYAALgmAAAAifHNgIXAdAQx0usouqSK',
-    'BAi4EIoECOhmBQAASHXqujKKBAi4EIoECOhUBQAAMdKFwA+UwriqigQIifPo',
-    'BwYAALgJAAAAubGKBAjNgDHShcC434oECLuxigQID5TC6OUFAAC4wwAAAI1M',
-    'JBTNgDHSg3wkKAK4v4oECInzD5TC6MQFAAC4CgAAAM2AMdKFwHUVuCEAAAC7',
-    'sYoECInRzYAx0oXAD5TCuMqKBAi7uYoECOiTBQAAuFMAAAC50YoECM2AMdKF',
-    'wLj5igQIu9GKBAgPlMLocQUAALhVAAAAuiwBAACNTCR0zYCFwH8EMdLrH8ZE',
-    'BHQAg/gFdfK6uYoECI1EJHToWwQAADHShcAPlMK424oECLvRigQI6CsFAAAx',
+    'RfDrAjH2R4H/LAEAAHXGifK4looECOglBwAAi1wkDLhdAAAAuWQAAADNgDHS',
+    'hcC4nooECA+UwugEBwAAi1wkDLjFAAAAjUwkFM2Ai0QkQDHSg/BkC0QkRLio',
+    'igQID5TC6NsGAACLXCQMuAYAAADNgLgKAAAAu42KBAjNgLpZigQIuDeKBAjo',
+    '7wUAAEh0BDHS6ye6uIoECLg3igQI6NkFAABIdeq6t4oECLg3igQI6McFAAAx',
+    '0kgPlMK4uooECL7DigQIu1GKBAjocwYAALgmAAAAifHNgIXAdAQx0usousuK',
+    'BAi4N4oECOiNBQAASHXqulmKBAi4N4oECOh7BQAAMdKFwA+UwrjRigQIifPo',
+    'LgYAALgJAAAAudiKBAjNgDHShcC4BosECLvYigQID5TC6AwGAAC4wwAAAI1M',
+    'JBTNgDHSg3wkKAK45ooECInzD5TC6OsFAAC4CgAAAM2AMdKFwHUVuCEAAAC7',
+    '2IoECInRzYAx0oXAD5TCuPGKBAi74IoECOi6BQAAuFMAAAC5+IoECM2AMdKF',
+    'wLggiwQIu/iKBAgPlMLomAUAALhVAAAAuiwBAACNTCR0zYCFwH8EMdLrH8ZE',
+    'BHQAg/gFdfK64IoECI1EJHToggQAADHShcAPlMK4AosECLv4igQI6FIFAAAx',
     '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',
-    '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',
+    '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',
-    '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',
-    'v9wAAACLneT7//+Njej7//+6AAQAAIn4zYCJx4XAfjkx242MHej7//+LleD7',
-    '//+NQROJjdz7///odf///4uN3Pv//4XAuAEAAAAPRPAPt0EQAcM5+3zL66eL',
-    'neT7//+4BgAAAM2A6wODzv+BxBwEAACJ8FteX13DVYnBMdKJ5VOAPBEAdANC',
-    '6/e4BAAAALsBAAAAzYBbXcNVieVWica4CIoECFOJ0+jN////ifDoxv///4Xb',
-    'uAGKBAi6/IkECA9Fwuiy////hdt0CP8FNJwECOsG/wUwnAQIW15dw1WJ5VOD',
-    '7AiLRQiLEI1IBI1EkAhQUVLopvb//4nDuAEAAADNgIPEEOv+IE9LCgAgRkFJ',
-    'TAoAS1RFU1Q6IAAvdG1wL2QxAG1rZGlyAG1rZGlyLmV4aXN0AC90bXAvZDEv',
-    'Zi50eHQAY3JlYXQAMDEyMzQ1Njc4OQB3cml0ZQBsc2VlawAzNDU2AHJlYWQA',
-    'c3RhdDY0AC90bXAvYmlnAGJpZ2ZpbGUAZnRydW5jYXRlAGZ0cnVuY2F0ZS5z',
-    'aXplAC4uAGdldGRlbnRzAC90bXAvZDEvZy50eHQAcmVuYW1lAC90bXAvZDEv',
-    'aC50eHQAbGluay5ubGluawB1bmxpbmsAL3RtcC9kMS9zAHJlYWRsaW5rAHN5',
-    'bWxpbmsuZm9sbG93AGxzdGF0LnN5bWxpbmsAcm1kaXIubm90ZW1wdHkAcm1k',
-    'aXIAL3RtcC9jdwBnZXRjd2QAL3RtcC9jdy9yZWwudHh0AHJlbGF0aXZlAC8A',
-    'L3RtcC9hAC90bXAvYS9iAC90bXAvYS9iLy4uLy4uL2EvLi9iAGRvdGRvdAAv',
-    'ZGV2L3plcm8AZGV2Lnplcm8AL2Rldi9udWxsAGFiYwBkZXYubnVsbAAvZGV2',
-    'L3VyYW5kb20AZGV2LnVyYW5kb20AY29uc29sZQAvZGV2AHR0eTEAdHR5UzAA',
-    'ZGV2Lm5vZGVzAC90bXAvcGVybQBwZXJtLnJvb3Rfb3BlbgBwZXJtLnVzZXJf',
-    'ZGVuaWVkAC9ub25leGlzdGVudABlbm9lbnQAL2Jpbi9oZWxsby94AGVub3Rk',
-    'aXIAL3RtcABlaXNkaXIAR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4y',
-    'NC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAA',
-    'AAQA8f8LAAAAqYgECCAAAAACAAEAEgAAAMmIBAimAAAAAgABABwAAABviQQI',
-    'IAAAAAIAAQAhAAAAj4kECEQAAAACAAEAJwAAADScBAgEAAAAAQADAC8AAAAw',
-    'nAQIBAAAAAEAAwA3AAAA04kECCkAAAASAAEAPQAAAJWIBAgAAAAAEAABAE8A',
-    'AACciAQIAAAAABAAAQBKAAAAMJwECAAAAAAQAAMAOAAAAJSABAgBCAAAEgAB',
-    'AFYAAAAwnAQIAAAAABAAAwBdAAAAOJwECAAAAAAQAAMAAGRpcnRlc3QuYwBz',
-    'dHJjbXAAaGFzX2VudHJ5AHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGNt',
-    'YWluAF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5',
-    'bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5ic3MALmNv',
-    'bW1lbnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAABsAAAABAAAABgAAAJSABAiUAAAAaAkAAAAAAAAAAAAAAQAAAAAAAAAh',
-    'AAAAAQAAADIAAAD8iQQI/AkAADQCAAAAAAAAAAAAAAEAAAABAAAAKQAAAAgA',
-    'AAADAAAAMJwECDAMAAAIAAAAAAAAAAAAAAAEAAAAAAAAAC4AAAABAAAAMAAA',
-    'AAAAAAAwDAAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAA',
-    'YAwAAPAAAAAGAAAACAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAFANAABi',
-    'AAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAACyDQAANwAAAAAA',
-    'AAAAAAAAAQAAAAAAAAA=',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAcYIECDQAAAAsBQAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAikAwAApAMAAAUAAAAAEAAAAQAAAKQD',
-    'AACkkwQIpJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'dInzifjNgInHuAYAAADNgDHSg/8QdRAx0opEJHQKhCSDAAAAD5TCuJ2LBAi+',
+    'BQAAALumiwQI6PoCAAC5AQAAAInwMdLNgL8DAAAAiUQkDLmwiwQIi1wkDLgE',
+    'AAAAifrNgDHSg/gDuLSLBAgPlMLowgIAAItcJAy4BgAAAM2AMcm7vYsECInw',
+    'icrNgInGuhAAAACNTCR0ifiJ882Aice4BgAAAM2AMdKD/xC4yosECA+Uwuh+',
+    'AgAAutaLBAi43osECOipAQAASHQEMdLrJ7rjiwQIuN6LBAjokwEAAEh16rro',
+    'iwQIuN6LBAjogQEAADHSSA+UwrjuiwQIvgUAAAC7+IsECOgtAgAAuUEAAACJ',
+    '8DHSzYCJx7gGAAAAifvNgLv4iwQIifCJ0c2A99DB6B+JwrgCjAQI6PsBAAC4',
+    'AgAAAM2AiceFwHUquBcAAAC76AMAAM2Au/iLBAiJ8In5ifrNgDHbg/jzuAEA',
+    'AAAPlcPNgOv+jUwkELgHAAAAifsx0s2AMdKDfCQQALgRjAQIu/iLBAgPlMLo',
+    'nAEAALgKAAAAzYAxyYnwuyKMBAiJys2AMdKD+P64L4wECLs2jAQID5TC6HEB',
+    'AAAxyYnwicrNgDHSg/jsuEOMBAi7S4wECA+UwuhSAQAAifC5AQAAADHSzYAx',
+    '0oP467hQjAQID5TC6DUBAAAxwIM9WJwECAAPlcCNZfRbXl9dw1VXVlOLRCQU',
+    'i1wkGItMJByLVCQgi3QkJIt8JCiLbCQszYBbXl9dw7itAAAAzYAx7Yngg+Tw',
+    'UOgqAQAAVYnlVonGUzHbD7YEHg+2DBqEwHQFQzjIdO9bKcheXcNVuQAAAQCJ',
+    '5VdWU4nDuAUAAACB7BwEAACJleD7//8x0s2AMfaJheT7//+FwHhov9wAAACL',
+    'neT7//+Njej7//+6AAQAAIn4zYCJx4XAfjkx242MHej7//+LleD7//+NQROJ',
+    'jdz7///odf///4uN3Pv//4XAuAEAAAAPRPAPt0EQAcM5+3zL66eLneT7//+4',
+    'BgAAAM2A6wODzv+BxBwEAACJ8FteX13DVYnBMdKJ5VOAPBEAdANC6/e4BAAA',
+    'ALsBAAAAzYBbXcNVieVWica4L4oECFOJ0+jN////ifDoxv///4XbuCiKBAi6',
+    'I4oECA9Fwuiy////hdt0CP8FXJwECOsG/wVYnAQIW15dw1WJ5VOD7AiLRQiL',
+    'EI1IBI1EkAhQUVLof/b//4nDuAEAAADNgIPEEOv+IE9LCgAgRkFJTAoAS1RF',
+    'U1Q6IAAvdG1wL2QxAG1rZGlyAG1rZGlyLmV4aXN0AC90bXAvZDEvZi50eHQA',
+    'Y3JlYXQAMDEyMzQ1Njc4OQB3cml0ZQBsc2VlawAzNDU2AHJlYWQAc3RhdDY0',
+    'AC90bXAvYmlnAGJpZ2ZpbGUAZnRydW5jYXRlAGZ0cnVuY2F0ZS5zaXplAC4u',
+    'AGdldGRlbnRzAC90bXAvZDEvZy50eHQAcmVuYW1lAC90bXAvZDEvaC50eHQA',
+    'bGluay5ubGluawB1bmxpbmsAL3RtcC9kMS9zAHJlYWRsaW5rAHN5bWxpbmsu',
+    'Zm9sbG93AGxzdGF0LnN5bWxpbmsAcm1kaXIubm90ZW1wdHkAcm1kaXIAL3Rt',
+    'cC9jdwBnZXRjd2QAL3RtcC9jdy9yZWwudHh0AHJlbGF0aXZlAC8AL3RtcC9h',
+    'AC90bXAvYS9iAC90bXAvYS9iLy4uLy4uL2EvLi9iAGRvdGRvdAAvZGV2L3pl',
+    'cm8AZGV2Lnplcm8AL2Rldi9udWxsAGFiYwBkZXYubnVsbAAvZGV2L3VyYW5k',
+    'b20AZGV2LnVyYW5kb20AY29uc29sZQAvZGV2AHR0eTEAdHR5UzAAZGV2Lm5v',
+    'ZGVzAC90bXAvcGVybQBwZXJtLnJvb3Rfb3BlbgBwZXJtLnVzZXJfZGVuaWVk',
+    'AC9ub25leGlzdGVudABlbm9lbnQAL2Jpbi9oZWxsby94AGVub3RkaXIAL3Rt',
+    'cABlaXNkaXIAR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4x',
+    'KSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8LAAAA',
+    '0IgECCAAAAACAAEAEgAAAPCIBAimAAAAAgABABwAAACWiQQIIAAAAAIAAQAh',
+    'AAAAtokECEQAAAACAAEAJwAAAFycBAgEAAAAAQADAC8AAABYnAQIBAAAAAEA',
+    'AwA3AAAA+okECCkAAAASAAEAPQAAAJWIBAgAAAAAEAABAEQAAAC8iAQIAAAA',
+    'ABAAAQBWAAAAw4gECAAAAAAQAAEAUQAAAFicBAgAAAAAEAADADgAAACUgAQI',
+    'AQgAABIAAQBdAAAAV5wECAAAAAAQAAMAZAAAAGCcBAgAAAAAEAADAABkaXJ0',
+    'ZXN0LmMAc3RyY21wAGhhc19lbnRyeQBwdXRzAGt0ZXN0AGt1X3Bhc3MAa3Vf',
+    'ZmFpbABjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9l',
+    'ZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5y',
+    'b2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAECJQAAACPCQAAAAAAAAAA',
+    'AAABAAAAAAAAACEAAAABAAAAMgAAACOKBAgjCgAANAIAAAAAAAAAAAAAAQAA',
+    'AAEAAAApAAAACAAAAAMAAABYnAQIWAwAAAgAAAAAAAAAAAAAAAQAAAAAAAAA',
+    'LgAAAAEAAAAwAAAAAAAAAFcMAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAAC',
+    'AAAAAAAAAAAAAACEDAAAAAEAAAYAAAAIAAAABAAAABAAAAAJAAAAAwAAAAAA',
+    'AAAAAAAAhA0AAGkAAAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAA',
+    'AO0NAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAmIIECDQAAABoBQAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAjLAwAAywMAAAUAAAAAEAAAAQAAAMwD',
+    'AADMkwQIzJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
     'AAAAAAAGAAAAEAAAAFW5AVQAAInlV1a+NgAAAFOJ8DHbg+Twg+xwjVQkKM2A',
-    'MdKFwLgfgwQID5TC6NkBAACLRCQ0MdL30KgKuCqDBAgPlMLowgEAAI1UJCCJ',
-    '8LkTVAAAzYAx0oXAdRVmg3wkIgCJwnQLMdJmg3wkIAAPlcK4NIMECDHb6I4B',
-    'AAAxwI1UJBS5D1QAAIlEJBS4NgAAAM2AMdKFwHUKMdKDfCQUAA+fwrg+gwQI',
-    'jXwkTI10JCgx2+hUAQAAuQkAAADzpY18JEy+NgAAAGbHRCRiAAGJ8In6g2Qk',
-    'WPWJTCQMuQJUAADNgDHShcC4TIMECA+UwugYAQAAi1wkDInwuQFUAACJ+s2A',
-    'i1QkWLhXgwQI0eqD8gGD4gHo8wAAAItcJAyJ8LkCVAAAjVQkKM2AuCoAAACN',
-    'XCQYzYC5AVQAAItcJBiJ8M2AMdKD+Oe+BQAAALhfgwQID5TCu2qDBAjorgAA',
-    'AItUJAy5AgAAAInwzYCJwonGuHODBAj30sHqH+iOAAAAhfZ4GrgEAAAAuX6D',
-    'BAi6GAAAAInzzYC4BgAAAM2AuAQAAAC7AQAAALmXgwQIugIAAADNgDHSg/gC',
-    'uJqDBAgPlMLoSAAAADHAgz2kkwQIAA+VwI1l9FteX13DuK0AAADNgDHtieCD',
-    '5PBQ6GQAAABVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJ',
-    'xrgXgwQIU4nT6M3///+J8OjG////hdu4EIMECLoLgwQID0XC6LL///+F23QI',
-    '/wWokwQI6wb/BaSTBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBRUuiX/f//',
-    'icO4AQAAAM2Ag8QQ6/4gT0sKACBGQUlMCgBLVEVTVDogAHR0eS50Y2dldHMA',
-    'dHR5LmNhbm9uAHR0eS53aW5zegB0dHkudGNnZXRwZ3JwAHR0eS50Y3NldHMA',
-    'dHR5LnJhdwB0dHkuZW5vdHR5AC9kZXYvdHR5AHR0eS5kZXZ0dHkAW2Vjcml0',
-    'dXJlIHZpYSAvZGV2L3R0eV0KAHgKAHR0eS53cml0ZQBHQ0M6IChVYnVudHUg',
-    'MTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAQAAAAAAAAAAAAAABADx/wsAAAB+ggQIIAAAAAIAAQAQAAAAnoIE',
-    'CEQAAAACAAEAFgAAAKiTBAgEAAAAAQADAB4AAACkkwQIBAAAAAEAAwAmAAAA',
-    '4oIECCkAAAASAAEALAAAAGqCBAgAAAAAEAABAD4AAABxggQIAAAAABAAAQA5',
-    'AAAApJMECAAAAAAQAAMAJwAAAJSABAjWAQAAEgABAEUAAACkkwQIAAAAABAA',
-    'AwBMAAAArJMECAAAAAAQAAMAAHR0eXRlc3QuYwBwdXRzAGt0ZXN0AGt1X3Bh',
-    'c3MAa3VfZmFpbABjbWFpbgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2Vk',
-    'YXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJv',
-    'ZGF0YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAAHcCAAAAAAAAAAAA',
-    'AAEAAAAAAAAAIQAAAAEAAAAyAAAAC4MECAsDAACZAAAAAAAAAAAAAAABAAAA',
-    'AQAAACkAAAAIAAAAAwAAAKSTBAikAwAACAAAAAAAAAAAAAAABAAAAAAAAAAu',
-    'AAAAAQAAADAAAAAAAAAApAMAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIA',
-    'AAAAAAAAAAAAANQDAADQAAAABgAAAAYAAAAEAAAAEAAAAAkAAAADAAAAAAAA',
-    'AAAAAACkBAAAUQAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAA',
-    '9QQAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAVYIECDQAAAD0BAAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAhVAwAAVQMAAAUAAAAAEAAAAQAAAFgD',
-    'AABYkwQIWJMECAAAAAAMAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'MdKFwLhGgwQID5TC6AACAACLRCQ0MdL30KgKuFGDBAgPlMLo6QEAAI1UJCCJ',
+    '8LkTVAAAzYAx0oXAdRVmg3wkIgCJwnQLMdJmg3wkIAAPlcK4W4MECDHb6LUB',
+    'AAAxwI1UJBS5D1QAAIlEJBS4NgAAAM2AMdKFwHUKMdKDfCQUAA+fwrhlgwQI',
+    'jXwkTI10JCgx2+h7AQAAuQkAAADzpY18JEy+NgAAAGbHRCRiAAGJ8In6g2Qk',
+    'WPWJTCQMuQJUAADNgDHShcC4c4MECA+Uwug/AQAAi1wkDInwuQFUAACJ+s2A',
+    'i1QkWLh+gwQI0eqD8gGD4gHoGgEAAItcJAyJ8LkCVAAAjVQkKM2AuCoAAACN',
+    'XCQYzYC5AVQAAItcJBiJ8M2AMdKD+Oe+BQAAALiGgwQID5TCu5GDBAjo1QAA',
+    'AItUJAy5AgAAAInwzYCJwonGuJqDBAj30sHqH+i1AAAAhfZ4GrgEAAAAuaWD',
+    'BAi6GAAAAInzzYC4BgAAAM2AuAQAAAC7AQAAALm+gwQIugIAAADNgDHSg/gC',
+    'uMGDBAgPlMLobwAAADHAgz3MkwQIAA+VwI1l9FteX13DVVdWU4tEJBSLXCQY',
+    'i0wkHItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADNgDHtieCD5PBQ6GQA',
+    'AABVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJxrg+gwQI',
+    'U4nT6M3///+J8OjG////hdu4N4MECLoygwQID0XC6LL///+F23QI/wXQkwQI',
+    '6wb/BcyTBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBRUuhw/f//icO4AQAA',
+    'AM2Ag8QQ6/4gT0sKACBGQUlMCgBLVEVTVDogAHR0eS50Y2dldHMAdHR5LmNh',
+    'bm9uAHR0eS53aW5zegB0dHkudGNnZXRwZ3JwAHR0eS50Y3NldHMAdHR5LnJh',
+    'dwB0dHkuZW5vdHR5AC9kZXYvdHR5AHR0eS5kZXZ0dHkAW2Vjcml0dXJlIHZp',
+    'YSAvZGV2L3R0eV0KAHgKAHR0eS53cml0ZQBHQ0M6IChVYnVudHUgMTMuMy4w',
+    'LTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAQAA',
+    'AAAAAAAAAAAABADx/wsAAAClggQIIAAAAAIAAQAQAAAAxYIECEQAAAACAAEA',
+    'FgAAANCTBAgEAAAAAQADAB4AAADMkwQIBAAAAAEAAwAmAAAACYMECCkAAAAS',
+    'AAEALAAAAGqCBAgAAAAAEAABADMAAACRggQIAAAAABAAAQBFAAAAmIIECAAA',
+    'AAAQAAEAQAAAAMyTBAgAAAAAEAADACcAAACUgAQI1gEAABIAAQBMAAAAy5ME',
+    'CAAAAAAQAAMAUwAAANSTBAgAAAAAEAADAAB0dHl0ZXN0LmMAcHV0cwBrdGVz',
+    'dABrdV9wYXNzAGt1X2ZhaWwAY21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABf',
+    'X2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0',
+    'cnRhYgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQI',
+    'lAAAAJ4CAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAAMoMECDIDAACZ',
+    'AAAAAAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAAMyTBAjMAwAACAAAAAAA',
+    'AAAAAAAABAAAAAAAAAAuAAAAAQAAADAAAAAAAAAAywMAAC0AAAAAAAAAAAAA',
+    'AAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAAPgDAADgAAAABgAAAAYAAAAEAAAA',
+    'EAAAAAkAAAADAAAAAAAAAAAAAADYBAAAWAAAAAAAAAAAAAAAAQAAAAAAAAAR',
+    'AAAAAwAAAAAAAAAAAAAAMAUAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAfIIECDQAAAA0BQAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAh8AwAAfAMAAAUAAAAAEAAAAQAAAHwD',
+    'AAB8kwQIfJMECAAAAAAMAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
     'AAAAAAAGAAAAEAAAAFW6TgAAADHJidCJ5VdWU4Pk8IPsQI1cJATNgDHAx0Qk',
     'GADC6wuNXCQUiUQkFLiiAAAAzYCNXCQMidDNgItEJBArRCQIuegDAACZi3Qk',
-    'DCt0JAT3+Wn26AMAADHSAcaNhkL///+J8z3RAAAAuAODBAgPlsLodgEAALgS',
-    'gwQI6EwBAACF9sZEJD0AjUwkHHkJ99u/IQAAAOsOdffGRCQ8ML8gAAAA6yeF',
-    '23QZidgx0rsKAAAAT/fzipJEgwQIicOIFDnr44X2eQbGRDwbLU+NBDm+AgAA',
-    'AOj0AAAAuBuDBAjo6gAAAInwzYCFwInDjUwkHHUcuwAtMQGhWJMECECjWJME',
-    'CEt18rgBAAAAzYDr/onwzYCJxoXAdRy7AC0xAaFYkwQIQKNYkwQIS3XyuAEA',
-    'AADNgOv+vwcAAAAx0on4zYCJ+InzzYC6AQAAALgggwQIuwUAAADolQAAALgi',
-    'AAAAzYAx0oXAuCqDBAgPlMIx2+h7AAAAuCsAAADNgDHShcC4L4MECA+fwuhj',
-    'AAAAuA0AAADNgDHSPQDxU2W4OoMECA+fwuhIAAAAMcCDPVyTBAgAD5XAjWX0',
-    'W15fXcO4rQAAAM2AMe2J4IPk8FDoZAAAAFWJwTHSieVTgDwRAHQDQuv3uAQA',
-    'AAC7AQAAAM2AW13DVYnlVonGuPuCBAhTidPozf///4nw6Mb///+F27j0ggQI',
-    'uu+CBAgPRcLosv///4XbdAj/BWCTBAjrBv8FXJMECFteXcNVieVTg+wIi0UI',
-    'ixCNSASNRJAIUFFS6LP9//+Jw7gBAAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtU',
-    'RVNUOiAAdGltZS5uYW5vc2xlZXAAICBkb3JtaSAAIG1zCgBzY2hlZC5jcHUA',
-    'bmljZQB0aW1lLnRpbWVzAHRpbWUudGltZQAwMTIzNDU2Nzg5YWJjZGVmAEdD',
-    'QzogKFVidW50dSAxMy4zLjAtNnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8NAAAAYoIECCAAAAAC',
-    'AAEAEgAAAIKCBAhEAAAAAgABABgAAABgkwQIBAAAAAEAAwAgAAAAXJMECAQA',
-    'AAABAAMAKAAAAFiTBAgEAAAAAQADAC0AAADGggQIKQAAABIAAQAzAAAAToIE',
-    'CAAAAAAQAAEARQAAAFWCBAgAAAAAEAABAEAAAABYkwQIAAAAABAAAwAuAAAA',
-    'lIAECLoBAAASAAEATAAAAFWTBAgAAAAAEAADAFMAAABkkwQIAAAAABAAAwAA',
-    'c2NoZWR0ZXN0LmMAcHV0cwBrdGVzdABrdV9wYXNzAGt1X2ZhaWwAc3BpbgBj',
-    'bWFpbgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5z',
-    'eW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNzAC5j',
-    'b21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAGwAAAAEAAAAGAAAAlIAECJQAAABbAgAAAAAAAAAAAAABAAAAAAAAACEA',
-    'AAABAAAAMgAAAO+CBAjvAgAAZgAAAAAAAAAAAAAAAQAAAAEAAAApAAAACAAA',
-    'AAMAAABYkwQIWAMAAAwAAAAAAAAAAAAAAAQAAAAAAAAALgAAAAEAAAAwAAAA',
-    'AAAAAFUDAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAACE',
-    'AwAA4AAAAAYAAAAHAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAAZAQAAFgA',
-    'AAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAALwEAAA3AAAAAAAA',
-    'AAAAAAABAAAAAAAAAA==',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAA44MECDQAAAB4BwAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAjbBQAA2wUAAAUAAAAAEAAAAQAAANwF',
-    'AADclQQI3JUECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAGAAAAEAAAAFW5AgAAADHSuAUAAACJ5VdWU7u2hAQIg+TwgewQCAAA',
-    'zYCJwolEJAy4wIQECDH299LB6h/oaAMAALIHifAPr8KIRDQQRoH+AAQAAHXu',
+    'DCt0JAT3+Wn26AMAADHSAcaNhkL///+J8z3RAAAAuCqDBAgPlsLonQEAALg5',
+    'gwQI6HMBAACF9sZEJD0AjUwkHHkJ99u/IQAAAOsOdffGRCQ8ML8gAAAA6yeF',
+    '23QZidgx0rsKAAAAT/fzipJrgwQIicOIFDnr44X2eQbGRDwbLU+NBDm+AgAA',
+    'AOgbAQAAuEKDBAjoEQEAAInwzYCFwInDjUwkHHUcuwAtMQGhfJMECECjfJME',
+    'CEt18rgBAAAAzYDr/onwzYCJxoXAdRy7AC0xAaF8kwQIQKN8kwQIS3XyuAEA',
+    'AADNgOv+vwcAAAAx0on4zYCJ+InzzYC6AQAAALhHgwQIuwUAAADovAAAALgi',
+    'AAAAzYAx0oXAuFGDBAgPlMIx2+iiAAAAuCsAAADNgDHShcC4VoMECA+fwuiK',
+    'AAAAuA0AAADNgDHSPQDxU2W4YYMECA+fwuhvAAAAMcCDPYCTBAgAD5XAjWX0',
+    'W15fXcNVV1ZTi0QkFItcJBiLTCQci1QkIIt0JCSLfCQoi2wkLM2AW15fXcO4',
+    'rQAAAM2AMe2J4IPk8FDoZAAAAFWJwTHSieVTgDwRAHQDQuv3uAQAAAC7AQAA',
+    'AM2AW13DVYnlVonGuCKDBAhTidPozf///4nw6Mb///+F27gbgwQIuhaDBAgP',
+    'RcLosv///4XbdAj/BYSTBAjrBv8FgJMECFteXcNVieVTg+wIi0UIixCNSASN',
+    'RJAIUFFS6Iz9//+Jw7gBAAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtURVNUOiAA',
+    'dGltZS5uYW5vc2xlZXAAICBkb3JtaSAAIG1zCgBzY2hlZC5jcHUAbmljZQB0',
+    'aW1lLnRpbWVzAHRpbWUudGltZQAwMTIzNDU2Nzg5YWJjZGVmAEdDQzogKFVi',
+    'dW50dSAxMy4zLjAtNnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAABAAAAAAAAAAAAAAAEAPH/DQAAAImCBAggAAAAAgABABIA',
+    'AACpggQIRAAAAAIAAQAYAAAAhJMECAQAAAABAAMAIAAAAICTBAgEAAAAAQAD',
+    'ACgAAAB8kwQIBAAAAAEAAwAtAAAA7YIECCkAAAASAAEAMwAAAE6CBAgAAAAA',
+    'EAABADoAAAB1ggQIAAAAABAAAQBMAAAAfIIECAAAAAAQAAEARwAAAHyTBAgA',
+    'AAAAEAADAC4AAACUgAQIugEAABIAAQBTAAAAfJMECAAAAAAQAAMAWgAAAIiT',
+    'BAgAAAAAEAADAABzY2hlZHRlc3QuYwBwdXRzAGt0ZXN0AGt1X3Bhc3MAa3Vf',
+    'ZmFpbABzcGluAGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3Rh',
+    'cnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRl',
+    'eHQALnJvZGF0YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiUAAAAggIA',
+    'AAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAADIAAAAWgwQIFgMAAGYAAAAAAAAA',
+    'AAAAAAEAAAABAAAAKQAAAAgAAAADAAAAfJMECHwDAAAMAAAAAAAAAAAAAAAE',
+    'AAAAAAAAAC4AAAABAAAAMAAAAAAAAAB8AwAALQAAAAAAAAAAAAAAAQAAAAEA',
+    'AAABAAAAAgAAAAAAAAAAAAAArAMAAPAAAAAGAAAABwAAAAQAAAAQAAAACQAA',
+    'AAMAAAAAAAAAAAAAAJwEAABfAAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAA',
+    'AAAAAAAAAAD7BAAANwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAACoQECDQAAAC4BwAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAgCBgAAAgYAAAUAAAAAEAAAAQAAAAQG',
+    'AAAElgQIBJYECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFW5AgAAADHSuAUAAACJ5VdWU7vdhAQIg+TwgewQCAAA',
+    'zYCJwolEJAy454QECDH299LB6h/ojwMAALIHifAPr8KIRDQQRoH+AAQAAHXu',
     'vxMAAACLXCQMuYgTAAAx0on4zYC4BAAAAItcJAyNTCQQifLNgDHSPQAEAAC4',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
-    '//+Jw7gBAAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtURVNUOiAAL2Rldi9yYW0w',
-    'AGJsay5yYW1fb3BlbgBibGsucmFtX3dyaXRlAGJsay5yYW1fcmVhZAAvZGV2',
-    'L2hkYQAgIChwYXMgZGUgZGlzcXVlIGhkYSA6IHRlc3RzIElERSBpZ25vcmVz',
-    'KQoAYmxrLmhkYV9tYnIAL2Rldi9oZGExAGJsay5oZGExX29wZW4AUEFSVElU',
-    'SU9OLU9ORS4uLgAgIChwYXJ0aXRpb24gZGUgdGVzdCBhYnNlbnRlIDogZWNy',
-    'aXR1cmUgaWdub3JlZSkKAGJsay5oZGExX3JlYWQAYmxrLmhkYTFfd3JpdGUA',
-    'YmxrLmhkYTFfcmVhZGJhY2sAL2Rldi9oZGEyAFBBUlRJVElPTi1UV08uLi4A',
-    'YmxrLmhkYTJfcmVhZABHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0',
-    'LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx',
-    '/wsAAADwgwQIJQAAAAIAAQATAAAAFYQECCAAAAACAAEAGAAAADWEBAhEAAAA',
-    'AgABAB4AAADglQQIBAAAAAEAAwAmAAAA3JUECAQAAAABAAMALgAAAHmEBAgp',
-    'AAAAEgABADQAAADcgwQIAAAAABAAAQBGAAAA44MECAAAAAAQAAEAQQAAANyV',
-    'BAgAAAAAEAADAC8AAACUgAQISAMAABIAAQBNAAAA25UECAAAAAAQAAMAVAAA',
-    'AOSVBAgAAAAAEAADAABibGt0ZXN0LmMAbWVtY21wXwBwdXRzAGt0ZXN0AGt1',
-    'X3Bhc3MAa3VfZmFpbABjbWFpbgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQA',
-    'X2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQA',
-    'LnJvZGF0YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAAA4EAAAAAAAA',
-    'AAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAAooQECKIEAAA5AQAAAAAAAAAAAAAB',
-    'AAAAAQAAACkAAAAIAAAAAwAAANyVBAjcBQAACAAAAAAAAAAAAAAABAAAAAAA',
-    'AAAuAAAAAQAAADAAAAAAAAAA2wUAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAA',
-    'AAIAAAAAAAAAAAAAAAgGAADgAAAABgAAAAcAAAAEAAAAEAAAAAkAAAADAAAA',
-    'AAAAAAAAAADoBgAAWQAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAA',
-    'AAAAQQcAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAB4sECDQAAADcDwAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAgADgAAAA4AAAUAAAAAEAAAAQAAAAAO',
-    'AAAAngQIAJ4ECAAAAAAQAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAGAAAAEAAAAFW4JwAAALntAQAAieVXVlO70IsECIPk8IHsMAMAAM2A',
-    'Mfa4FQAAALvXiwQIuuKLBAi50IsECIn3zYAx0oXAuNyLBAi76IsECA+Uwuhp',
-    'CgAAuAUAAAC5QQAAALqkAQAAzYCJxrnxiwQIuAQAAAC6AwAAAInzzYC4BgAA',
-    'AM2AvyEAAAC76IsECDHJifjNgDHShcC+FgAAALj1iwQID5TCu9CLBAjoEQoA',
-    'AInwzYAx0oXAuACMBAi76IsECA+Uwuj3CQAAifgxyc2AMdKD+P64B4wECLvQ',
-    'iwQID5TC6NoJAACJ8M2AMdKD+Oq4E4wECLshjAQID5TC6L8JAAC4JwAAALnt',
-    'AQAAzYC4JwAAALsrjAQIzYC+BQAAALs5jAQIuUEAAAC6pAEAAInwzYCJxrlJ',
-    'jAQIuAQAAAC6AgAAAInzzYC4BgAAAM2AuAIAAADNgInGhcB1Srg9AAAAuyGM',
-    'BAjNgLgMAAAAu0yMBAjNgLtCjAQIifiJ8c2AuwEAAACJwoXAdROJ+LtOjAQI',
-    'idHNgDHbg/j+D5XDuAEAAADNgOv+uAcAAACJ841MJAQx0s2AMdKDfCQEALhT',
-    'jAQIv1qMBAgPlMK+YowECOjvCAAAulMAAACJ84n5idDNgInQifuJ8c2AMcm4',
-    'BQAAAInzicrNgDHSg/jYuGqMBAgPlMLouwgAALoKAAAAidDNgInQifvNgLgq',
-    'AAAAjVwkEM2Ai0QkEI1cJDC5AgAAADHSx0QkNAEAAACJRCQwi0QkFMdEJDwE',
-    'AAAAiUQkOLioAAAAzYBIdRH2RCQ+BHQKZotUJDb30oPiAbh4jAQI6FEIAACL',
-    'XCQUuAQAAAC5iYwECLoBAAAAzYC4qAAAALkCAAAAjVwkMDHSZsdEJDYAAM2A',
-    'g/gCdQhmi1QkNoPiAbiLjAQIvqgAAAC/AQAAAOgCCAAAjVwkMInwugoAAACJ',
-    '+c2AMdJIuJuMBAgPlMLo4wcAALgDAAAAi1wkEIn6jYwkMAIAAM2AujIAAABm',
-    'x0QkNgAAifCJ+Y1cJDDNgDHShcC4qIwECA+UwuioBwAAjYQksAEAAInCjbwk',
-    'MAIAAEDGAgA5+HXvi0wkEDH2uAEAAACNfCQYiXQkGDH20+CNWQHHRCQcIE4A',
-    'AInyiYQksAEAAI2MJLABAAC4jgAAAM2AMdKFwLi2jAQID5TC6EYHAACLXCQU',
-    'uAQAAAC5xYwECLoBAAAAzYCLTCQQuAEAAACJ8tPgjVkBjYwksAEAAImEJLAB',
-    'AAC4jgAAAM2ASHUQi0wkEIuUJLABAADT6oPiAbjHjAQIjXwkQL7QjQQI6OYG',
-    'AACNXCQQuQQAAAC4KgAAAPOlzYC+AgAAAItcJBSNTCRAuJIAAACJ8s2AMdKD',
-    '+AW41IwECA+UwuisBgAAjUQkAYtcJBCJ8olEJFCNRCQMjUwkUIlEJFi4kQAA',
-    'AMdEJFQCAAAAx0QkXAMAAADNgDHSg/gFdRGAfCQBYXUKMdKAfCQOZQ+Uwrjb',
-    'jAQIuwUAAADoVAYAAInYuUIAAAC6gAEAALvhjAQIzYC6CgAAAInDuemMBAi4',
-    'BAAAAM2AuLQAAAC+BgAAADH/ugQAAACNjCQwAgAAzYAxyYP4BHUegLwkMAIA',
-    'ADZ1FLgTAAAAugEAAADNgDHJg/gKD5TBicq49IwECOjjBQAAuAYAAADNgLgK',
-    'AAAAu+GMBAjNgLgpAAAAuwEAAADNgDHSg/gCicO+NwAAAA+fwrj8jAQI6KsF',
-    'AACJ8DHSuQEAAADNgIXAdAQx0usiuQIAAACJ8LoBAAAAzYCJx4XAdeiJ0Ynw',
-    'ifrNgDHSSA+UwrgAjQQIvjcAAADoZwUAALoKAAAAifAxyc2AMdKD+AmJxrgM',
-    'jQQID5/C6EgFAAC6BgAAAInQzYCJ0InzzYAx242MJFABAAC4rgAAADHSiZwk',
-    'YAEAAL4IAAAAiZwkXAEAALsOAAAAx4QkUAEAACGLBAjHhCRUAQAABAAABMeE',
-    'JFgBAAAAiwQIzYC+4I0ECI18JGC5BAAAAInT86W4aAAAAI1MJGDNgDHAixUA',
-    'ngQIPQDh9QV0CIP6An8DQOvrMdIx/7hoAAAAiVQkZIn7iVQkbIn6zYChAJ4E',
-    'CDHSvgoAAACJ84P4ArgYjQQID5/C6IUEAAAxybhDAAAAifqJTCR0iUwkeIlM',
-    'JHyNTCRwx0QkcBSLBAjNgLgUAAAAzYCJw4nxuCUAAADNgKEEngQIMdKD+Aq4',
-    'Io0ECA+Uwug5BAAAuBgAAADNgIXAdAQx0usZuC8AAADNgIXAdfG4MQAAAM2A',
-    'MdKFwA+UwrgwjQQIvgIAAADoAgQAAInwzYCJw4XAdTK4QgAAAM2AicG4FAAA',
-    'AM2AuwEAAACJwjnIdQ64QQAAAM2AMds5wg+Vw7gBAAAAzYDr/r8HAAAAjUwk',
-    'BDHSifjNgDHSg3wkBAC4NI0ECA+UwuijAwAAifDNgInGhcB1I7oXAAAAu/QB',
-    'AACJ0M2AidCJ882AMdtAuAEAAAAPlcPNgOv+ifiJ841MJAQx0s2AMdKDfCQE',
-    'ALg7jQQIuz8AAAAPlMLoUQMAALo8AAAAidDNgInBMcCD+RJ1D4nQicvNgIP4',
-    'Pw+UwA+2wInCuEiNBAi7BwAAAOgfAwAAjUwkILhMAAAAzYAx0oF8JCD/AAAA',
-    'uE6NBAgPn8KNnCSQAAAA6PYCAAC4dAAAAM2AMdKFwHUNMdKDvCSgAAAAAA+f',
-    'wrhYjQQIuwEAAADozQIAAI1MJCi4CQEAAM2AMdKFwHUJi1QkKPfSweofuGCN',
-    'BAi7TowECOikAgAAjYwk0AAAALhjAAAAzYAx0oXAdRyLhCTQAAAAPZQZAgEP',
-    'lMI9U+8AAA+UwAnCD7bSuG6NBAi+dY0ECL8FAAAA6GACAACJ87lCAAAAifi6',
-    'gAEAAM2Aice6CgAAALgEAAAAuemMBAiJ+82AuAYAAADNgLhcAAAAuQMAAACJ',
-    '882AMdKFwLh9jQQID5TC6BUCAACNjCQQAQAAuGoAAADNgDHSg7wkJAEAAAN1',
-    'FIuEJBgBAAAx0mYlAPBmPQCAD5TCuIaNBAiJ8+jbAQAAuAoAAADNgL4FAAAA',
-    'uUIAAAC6gAEAALuPjQQIifDNgInGuAYAAACJ882AvvCNBAi5BAAAALgPAQAA',
-    'u4+NBAiNvCSAAAAA86WNjCSAAAAAzYAx0oXAuJeNBAgPlMLoegEAAI2MJFAB',
-    'AAC4wwAAAM2AMdKBvCSYAQAAgIQeAHUQMdKBvCSQAQAAQEIPAA+UwriejQQI',
-    'u4+NBAjoPgEAALgKAAAAzYC+BQAAALtMjAQIuQAAAQAx0onwzYCJxroAAQAA',
-    'uI0AAACJ842MJDACAADNgDHShcB+DjHSZoO8JDgCAAALD5fCuKuNBAiJ8+jr',
-    'AAAAuAYAAADNgDHAuwAAAFC5ACAAAIPP/4lEJAi+MgAAALjAAAAAugMAAABV',
-    'i2wkCM2AXTHSPQAAAFC4uI0ECA+UwuimAAAAuL4AAADNgInDhcB1DrgBAAAA',
-    'uwMAAADNgOv+uAcAAAAx0o1MJATNgItEJAQx0iUA/wAAPQADAAC4w40ECA+U',
-    'wuhhAAAAMcCDPQieBAgAD5XAjWX0W15fXcO4rQAAAM2AMe2J4IPk8FDofQAA',
-    'AFWJ5YtFCF2jBJ4ECMOhAJ4ECECjAJ4ECMNVicEx0onlU4A8EQB0A0Lr97gE',
-    'AAAAuwEAAADNgFtdw1WJ5VaJxrjIiwQIU4nT6M3///+J8OjG////hdu4wYsE',
-    'CLq8iwQID0XC6LL///+F23QI/wUMngQI6wb/BQieBAhbXl3DVYnlU4PsCItF',
-    'CIsQjUgEjUSQCFBRUujo9P//icO4AQAAAM2Ag8QQ6/4AACBPSwoAIEZBSUwK',
-    'AEtURVNUOiAAL21udC90AG5vbmUAbW91bnQudG1wZnMAL21udC90L3gAYWJj',
-    'AG1vdW50LmZpbGUAdW1vdW50AHVtb3VudC5nb25lAHVtb3VudC5laW52YWwA',
-    'L3RtcC9yb290AC90bXAvcm9vdC9ldGMAL3RtcC9yb290L2V0Yy9mAGluAC8A',
-    'L3RtcABjaHJvb3QAL3RtcC9sYgAvdG1wL2xhAHN5bWxpbmsuZWxvb3AAcG9s',
-    'bC53cml0ZV9yZWFkeQB6AHBvbGwucmVhZF9yZWFkeQBwb2xsLnRpbWVvdXQA',
-    'cG9sbC50aW1lb3V0MABzZWxlY3QudGltZW91dABxAHNlbGVjdC5yZWFkeQB3',
-    'cml0ZXYAcmVhZHYAL3RtcC9wcgAwMTIzNDU2Nzg5AHByZWFkNjQAZHVwAGZj',
-    'bnRsLmdldGZkAGZjbnRsLmR1cGZkAHNldGl0aW1lcgBzaWdhY3Rpb24ub2xk',
-    'AGlkcwBzZXRzaWQAc2V0dWlkLmVwZXJtAHVtYXNrAGdldHJsaW1pdABzeXNp',
-    'bmZvAGNsb2NrX2dldHRpbWUAc3RhdGZzAC90bXAvdHIAdHJ1bmNhdGUAc3Rh',
-    'dC5vbGQAL3RtcC91dAB1dGltZXMAdXRpbWVzLm10aW1lAGdldGRlbnRzLm9s',
-    'ZABtbWFwLmZpeGVkAHZmb3JrAGFiAGNkZQDJjQQIAgAAAMyNBAgDAAAAAAAA',
-    'AFDDAAAAAAAAUMMAAEBCDwAAAAAAgIQeAAAAAABHQ0M6IChVYnVudHUgMTMu',
-    'My4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAQAAAAAAAAAAAAAABADx/wwAAAAUiwQIDQAAAAIAAQARAAAABJ4ECAQA',
-    'AAABAAMAGQAAACGLBAgMAAAAAgABABoAAAAAngQIBAAAAAEAAwAeAAAALYsE',
-    'CCAAAAACAAEAIwAAAE2LBAhEAAAAAgABACkAAAAMngQIBAAAAAEAAwAxAAAA',
-    'CJ4ECAQAAAABAAMAOQAAAJGLBAgpAAAAEgABAD8AAAAAiwQIAAAAABAAAQBR',
-    'AAAAB4sECAAAAAAQAAEATAAAAACeBAgAAAAAEAADADoAAACUgAQIbAoAABIA',
-    'AQBYAAAAAJ4ECAAAAAAQAAMAXwAAABCeBAgAAAAAEAADAABtaXNjdGVzdC5j',
-    'AG9sZGgAb2xkX3NpZwBoaXR2AHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWls',
-    'AGNtYWluAF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAA',
-    'LnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5ic3MA',
-    'LmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAACYLAAAAAAAAAAAAAAEAAAAAAAAA',
-    'IQAAAAEAAAACAAAAvIsECLwLAABEAgAAAAAAAAAAAAAEAAAAAAAAACkAAAAI',
-    'AAAAAwAAAACeBAgADgAAEAAAAAAAAAAAAAAABAAAAAAAAAAuAAAAAQAAADAA',
-    'AAAAAAAAAA4AAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAA',
-    'ADAOAAAQAQAABgAAAAoAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAABADwAA',
-    'ZAAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAApA8AADcAAAAA',
-    'AAAAAAAAAAEAAAAAAAAA',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAZIQECDQAAAAkCQAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAhiBwAAYgcAAAUAAAAAEAAAAQAAAGQH',
-    'AABklwQIZJcECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAGAAAAEAAAAFW4y4UECInlV1ZTg+TwgexgDAAAjZQkYAQAAOgTBAAA',
-    'MdKFwH4YutmFBAiNhCRgBAAA6LQDAAAx0oXAD5XCuOKFBAjoNwQAAI2UJGAE',
-    'AAC474UECOjaAwAAMdKFwH4vuv2FBAiNhCRgBAAA6HsDAACJwoXAdBi6B4YE',
-    'CI2EJGAEAADoZAMAADHShcAPlcK4EIYECOjnAwAAjZQkYAQAALgdhgQI6IoD',
-    'AAAx0oXAfhGKhCRgBAAAMdKD6DA8CQ+WwrgqhgQI6LUDAACNlCRgBAAAuDaG',
-    'BAjoWAMAADHShcB+L7pDhgQIjYQkYAQAAOj5AgAAicKFwHQYui+HBAiNhCRg',
-    'BAAA6OICAAAx0oXAD5XCuEyGBAjoZQMAAI2UJGAEAAC4WIYECOgIAwAAicO4',
+    'PQAEAAB1F4n6uQAEAACNRCQQ6NYAAAAx0oXAD5TCuMeFBAiJ8+gIAQAAuAYA',
+    'AADNgDHSvgUAAAC72YUECInwidHNgInGuhAAAACNTCQQuAMAAACJ882AMdKF',
+    'wA9J0MZEFBAAg/gQdR+5EAAAALrjhQQIjUQkEOhyAAAAhcAPlMAPtsCJRCQM',
+    'i1QkDLj0hQQI6J0AAAC4BgAAAInzzYAxwIM9BJYECAAPlcCNZfRbXl9dw1VX',
+    'VlOLRCQUi1wkGItMJByLVCQgi3QkJIt8JCiLbCQszYBbXl9dw7itAAAAzYAx',
+    '7Yngg+TwUOiJAAAAVQHBieVWidZTicMPtgMPthY40HQEKdDrCENGOct17DHA',
+    'W15dw1WJwTHSieVTgDwRAHQDQuv3uAQAAAC7AQAAAM2AW13DVYnlVonGuNWE',
+    'BAhTidPozf///4nw6Mb///+F27jOhAQIusmEBAgPRcLosv///4XbdAj/BQiW',
+    'BAjrBv8FBJYECFteXcNVieVTg+wIi0UIixCNSASNRJAIUFFS6Nn7//+Jw7gB',
+    'AAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtURVNUOiAAL2Rldi9yYW0wAGJsay5y',
+    'YW1fb3BlbgBibGsucmFtX3dyaXRlAGJsay5yYW1fcmVhZAAvZGV2L2hkYQAg',
+    'IChwYXMgZGUgZGlzcXVlIGhkYSA6IHRlc3RzIElERSBpZ25vcmVzKQoAYmxr',
+    'LmhkYV9tYnIAL2Rldi9oZGExAGJsay5oZGExX29wZW4AUEFSVElUSU9OLU9O',
+    'RS4uLgAgIChwYXJ0aXRpb24gZGUgdGVzdCBhYnNlbnRlIDogZWNyaXR1cmUg',
+    'aWdub3JlZSkKAGJsay5oZGExX3JlYWQAYmxrLmhkYTFfd3JpdGUAYmxrLmhk',
+    'YTFfcmVhZGJhY2sAL2Rldi9oZGEyAFBBUlRJVElPTi1UV08uLi4AYmxrLmhk',
+    'YTJfcmVhZABHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEp',
+    'IDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8LAAAA',
+    'F4QECCUAAAACAAEAEwAAADyEBAggAAAAAgABABgAAABchAQIRAAAAAIAAQAe',
+    'AAAACJYECAQAAAABAAMAJgAAAASWBAgEAAAAAQADAC4AAACghAQIKQAAABIA',
+    'AQA0AAAA3IMECAAAAAAQAAEAOwAAAAOEBAgAAAAAEAABAE0AAAAKhAQIAAAA',
+    'ABAAAQBIAAAABJYECAAAAAAQAAMALwAAAJSABAhIAwAAEgABAFQAAAAClgQI',
+    'AAAAABAAAwBbAAAADJYECAAAAAAQAAMAAGJsa3Rlc3QuYwBtZW1jbXBfAHB1',
+    'dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGNtYWluAGt1X3NjNgBfX3Jlc3Rv',
+    'cmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRh',
+    'YgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNzAC5jb21tZW50AAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAG',
+    'AAAAlIAECJQAAAA1BAAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAMgAAAMmE',
+    'BAjJBAAAOQEAAAAAAAAAAAAAAQAAAAEAAAApAAAACAAAAAMAAAAElgQIBAYA',
+    'AAgAAAAAAAAAAAAAAAQAAAAAAAAALgAAAAEAAAAwAAAAAAAAAAIGAAAtAAAA',
+    'AAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAAAwBgAA8AAAAAYAAAAH',
+    'AAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAAIAcAAGAAAAAAAAAAAAAAAAEA',
+    'AAAAAAAAEQAAAAMAAAAAAAAAAAAAAIAHAAA3AAAAAAAAAAAAAAABAAAAAAAA',
+    'AA==',
+    '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',
+    'AM2AuFwAAAC5AwAAAInzzYAx0oXAuAGOBAgPlMLoMAIAAI2NyP3//7hqAAAA',
+    'zYAx0oO93P3//wN1E4uF0P3//zHSZiUA8GY9AIAPlMK4Co4ECInz6PkBAAC4',
+    'CgAAAM2AvgUAAAC5QgAAALqAAQAAuxOOBAiJ8M2Aica4BgAAAInzzYC+dI4E',
+    'CI29OP3//7kEAAAAuA8BAADzpbsTjgQIjY04/f//zYAx0oXAuBuOBAgPlMLo',
+    'mgEAAI2NCP7//7jDAAAAzYAx0oG9UP7//4CEHgB1DzHSgb1I/v//QEIPAA+U',
+    'wrgijgQIuxOOBAjoYQEAALgKAAAAzYC+BQAAALvQjAQIuQAAAQAx0onwzYCJ',
+    'xroAAQAAuI0AAACJ842N6P7//82AMdKFwH4NMdJmg73w/v//Cw+XwrgvjgQI',
+    'ifPoEAEAALgGAAAAzYBQagBq/2oyagNoACAAAGgAAABQaMAAAADoeAAAAIPE',
+    'IDHSPQAAAFC4PI4ECA+UwujVAAAAuL4AAADNgInDhcB1DrgBAAAAuwMAAADN',
+    'gOv+uAcAAAAx0o2NwPz//82Ai4XA/P//MdIlAP8AAD0AAwAAuEeOBAgPlMLo',
+    'jAAAADHAgz2MngQIAA+VwI1l8FlbXl9djWH8w1VXVlOLRCQUi1wkGItMJByL',
+    'VCQgi3QkJIt8JCiLbCQszYBbXl9dw7itAAAAzYAx7Yngg+TwUOh9AAAAVYnl',
+    'i0UIXaOIngQIw6GEngQIQKOEngQIw1WJwTHSieVTgDwRAHQDQuv3uAQAAAC7',
+    'AQAAAM2AW13DVYnlVonGuEyMBAhTidPozf///4nw6Mb///+F27hFjAQIukCM',
+    'BAgPRcLosv///4XbdAj/BZCeBAjrBv8FjJ4ECFteXcNVieVTg+wIi0UIixCN',
+    'SASNRJAIUFFS6GX0//+Jw7gBAAAAzYCDxBDr/gAAACBPSwoAIEZBSUwKAEtU',
+    'RVNUOiAAL21udC90AG5vbmUAbW91bnQudG1wZnMAL21udC90L3gAYWJjAG1v',
+    'dW50LmZpbGUAdW1vdW50AHVtb3VudC5nb25lAHVtb3VudC5laW52YWwAL3Rt',
+    'cC9yb290AC90bXAvcm9vdC9ldGMAL3RtcC9yb290L2V0Yy9mAGluAC8AL3Rt',
+    'cABjaHJvb3QAL3RtcC9sYgAvdG1wL2xhAHN5bWxpbmsuZWxvb3AAcG9sbC53',
+    'cml0ZV9yZWFkeQB6AHBvbGwucmVhZF9yZWFkeQBwb2xsLnRpbWVvdXQAcG9s',
+    'bC50aW1lb3V0MABzZWxlY3QudGltZW91dABxAHNlbGVjdC5yZWFkeQB3cml0',
+    'ZXYAcmVhZHYAL3RtcC9wcgAwMTIzNDU2Nzg5AHByZWFkNjQAZHVwAGZjbnRs',
+    'LmdldGZkAGZjbnRsLmR1cGZkAHNldGl0aW1lcgBzaWdhY3Rpb24ub2xkAGlk',
+    'cwBzZXRzaWQAc2V0dWlkLmVwZXJtAHVtYXNrAGdldHJsaW1pdABzeXNpbmZv',
+    'AGNsb2NrX2dldHRpbWUAc3RhdGZzAC90bXAvdHIAdHJ1bmNhdGUAc3RhdC5v',
+    'bGQAL3RtcC91dAB1dGltZXMAdXRpbWVzLm10aW1lAGdldGRlbnRzLm9sZABt',
+    'bWFwLmZpeGVkAHZmb3JrAGFiAGNkZQBNjgQIAgAAAFCOBAgDAAAAAAAAAFDD',
+    'AAAAAAAAUMMAAEBCDwAAAAAAgIQeAAAAAABHQ0M6IChVYnVudHUgMTMuMy4w',
+    'LTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AQAAAAAAAAAAAAAABADx/wwAAACXiwQIDQAAAAIAAQARAAAAiJ4ECAQAAAAB',
+    'AAMAGQAAAKSLBAgMAAAAAgABABoAAACEngQIBAAAAAEAAwAeAAAAsIsECCAA',
+    'AAACAAEAIwAAANCLBAhEAAAAAgABACkAAACQngQIBAAAAAEAAwAxAAAAjJ4E',
+    'CAQAAAABAAMAOQAAABSMBAgpAAAAEgABAD8AAABciwQIAAAAABAAAQBGAAAA',
+    'g4sECAAAAAAQAAEAWAAAAIqLBAgAAAAAEAABAFMAAACEngQIAAAAABAAAwA6',
+    'AAAAlIAECMgKAAASAAEAXwAAAISeBAgAAAAAEAADAGYAAACUngQIAAAAABAA',
+    'AwAAbWlzY3Rlc3QuYwBvbGRoAG9sZF9zaWcAaGl0dgBwdXRzAGt0ZXN0AGt1',
+    'X3Bhc3MAa3VfZmFpbABjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9fYnNz',
+    'X3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFi',
+    'AC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAA',
+    'AKkLAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAACAAAAQIwECEAMAABEAgAA',
+    'AAAAAAAAAAAEAAAAAAAAACkAAAAIAAAAAwAAAISeBAiEDgAAEAAAAAAAAAAA',
+    'AAAABAAAAAAAAAAuAAAAAQAAADAAAAAAAAAAhA4AAC0AAAAAAAAAAAAAAAEA',
+    'AAABAAAAAQAAAAIAAAAAAAAAAAAAALQOAAAgAQAABgAAAAoAAAAEAAAAEAAA',
+    'AAkAAAADAAAAAAAAAAAAAADUDwAAawAAAAAAAAAAAAAAAQAAAAAAAAARAAAA',
+    'AwAAAAAAAAAAAAAAPxAAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAi4QECDQAAABgCQAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAiJBwAAiQcAAAUAAAAAEAAAAQAAAIwH',
+    'AACMlwQIjJcECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFW48oUECInlV1ZTg+TwgexgDAAAjZQkYAQAAOg6BAAA',
+    'MdKFwH4YugCGBAiNhCRgBAAA6NsDAAAx0oXAD5XCuAmGBAjoXgQAAI2UJGAE',
+    'AAC4FoYECOgBBAAAMdKFwH4vuiSGBAiNhCRgBAAA6KIDAACJwoXAdBi6LoYE',
+    'CI2EJGAEAADoiwMAADHShcAPlcK4N4YECOgOBAAAjZQkYAQAALhEhgQI6LED',
+    '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',
-    'iFQMX+vvjXwkEInIif6FwHQLSEeKVARgiFf/6/HGRAwQADHShdt+J7pohgQI',
-    'jYQkYAQAAOhXAgAAicKFwHQQMdKKRCQQOIQkYAQAAA+UwrhzhgQI6MsCAACN',
-    'lCRgBAAAuIKGBAjobgIAADHShcB+L7qUhgQIjYQkYAQAAOgPAgAAicKFwHQY',
-    'uqWGBAiNhCRgBAAA6PgBAAAx0oXAD5XCuK+GBAi7xIUECOh2AgAAjUQkIInB',
-    'ihNDQIhQ/4TSdfWJyI1cJBCKE0NAiFAFhNJ19Ynw6KsBAACNXAEGMcCKkMCG',
-    'BAiIFANAhNJ18o2UJGAEAACJyOjfAQAAMdKD+Ah+GLrJhgQIjYQkYAQAAOh/',
-    'AQAAMdKFwA+VwrjXhgQI6AICAACNlCRgBAAAuOSGBAjopQEAADHShcB+L7r0',
-    'hgQIjYQkYAQAAOhGAQAAicKFwHQYuvmGBAiNhCRgBAAA6C8BAAAx0oXAD5XC',
-    'uAGHBAjosgEAAI2UJGAEAAC4C4cECOhVAQAAMdKFwH4YukaGBAiNhCRgBAAA',
-    '6PYAAAAx0oXAD5XCuB2HBAi7LocECOh0AQAAuQAAAQAx0rgFAAAAzYCJRCQI',
+    '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',
-    'BH/D66OLXCQIuAYAAADNgLg0hwQIifK7RYcECOjnAAAAMdK4BQAAAInRzYAx',
-    '0oP4/rhWhwQID5TC6MoAAAAxwIM9ZJcECAAPlcCNZfRbXl9dw7itAAAAzYAx',
-    '7Yngg+TwUOgWAQAAicIxwIA8AgB0A0Dr98NVicGJ0InlV1ZTg+wciVXk6N3/',
-    '//+JxonIgDgAicJ0HotN5I08Bjn6dA2KGTgadANA6+ZCQevvuAEAAADrAjHA',
-    'g8QcW15fXcNVieVXVlOJw7gFAAAAUYlV8DHSidHNgInHhcB4Kb4DAAAAi03w',
-    'uv8HAACJ+4nwzYCJxrgGAAAAzYCF9ngHi0XwxgQwAInwWlteX13DVbm8hQQI',
-    'ieVXvwQAAABWidZTuwEAAACD7ByJReS4vIUECOg3////icKJ+M2Ai0Xk6Cn/',
-    '//+LTeSJwon4zYC4sIUECIX2ubWFBAgPRciJyOgK////icKJ+M2AhfZ0CP8F',
-    'aJcECOsG/wVklwQIg8QcW15fXcNVieVTg+wIi0UIixCNSASNRJAIUFFS6PL6',
-    '//+Jw7gBAAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtURVNUOiAAL3Byb2MvAC9w',
-    'cm9jL3ZlcnNpb24AS0VSTkVMMzIAcHJvYy52ZXJzaW9uAC9wcm9jL21lbWlu',
-    'Zm8ATWVtVG90YWw6AE1lbUZyZWU6AHByb2MubWVtaW5mbwAvcHJvYy91cHRp',
-    'bWUAcHJvYy51cHRpbWUAL3Byb2MvbW91bnRzACAvIHRtcGZzAHByb2MubW91',
-    'bnRzAC9wcm9jL3NlbGYvc3RhdAAocHJvY3Rlc3QpAHByb2Muc2VsZi5zdGF0',
-    'AC9wcm9jL3NlbGYvc3RhdHVzAE5hbWU6ICAgcHJvY3Rlc3QAVWlkOiAgICAw',
-    'AHByb2Muc2VsZi5zdGF0dXMAL2NtZGxpbmUAL2Jpbi9wcm9jdGVzdABwcm9j',
-    'LmNtZGxpbmUAL3Byb2Mvc2VsZi9tYXBzAHIteHAAW3N0YWNrXQBwcm9jLm1h',
-    'cHMAL3Byb2MvZmlsZXN5c3RlbXMAcHJvYy5maWxlc3lzdGVtcwAvcHJvYwBw',
-    'cm9jLnJlYWRkaXJfcGlkAC9wcm9jLzk5OTk5L3N0YXQAcHJvYy5lbm9lbnQA',
-    'R0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAA',
-    'AAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAEAPH/DAAAAHGEBAgOAAAA',
-    'AgABABMAAAB/hAQISAAAAAIAAQAXAAAAx4QECEwAAAACAAEAKQAAABOFBAh0',
-    'AAAAAgABAC8AAABolwQIBAAAAAEAAwA3AAAAZJcECAQAAAABAAMAPwAAAIeF',
-    'BAgpAAAAEgABAEUAAABdhAQIAAAAABAAAQBXAAAAZIQECAAAAAAQAAEAUgAA',
-    'AGSXBAgAAAAAEAADAEAAAACUgAQIyQMAABIAAQBeAAAAYpcECAAAAAAQAAMA',
-    'ZQAAAGyXBAgAAAAAEAADAABwcm9jdGVzdC5jAHN0cmxlbgBoYXMAc2x1cnAu',
-    'Y29uc3Rwcm9wLjAAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGNtYWluAF9fcmVz',
-    'dG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3Ry',
-    'dGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAAB',
-    'AAAABgAAAJSABAiUAAAAHAUAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAADIA',
-    'AACwhQQIsAUAALIBAAAAAAAAAAAAAAEAAAABAAAAKQAAAAgAAAADAAAAZJcE',
-    'CGQHAAAIAAAAAAAAAAAAAAAEAAAAAAAAAC4AAAABAAAAMAAAAAAAAABiBwAA',
-    'LQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAAkAcAAPAAAAAG',
-    'AAAACAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAIAIAABqAAAAAAAAAAAA',
-    'AAABAAAAAAAAABEAAAADAAAAAAAAAAAAAADqCAAANwAAAAAAAAAAAAAAAQAA',
-    'AAAAAAA=',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAa4MECDQAAACQBwAAAAAAADQAIAAD',
-    'ACgACAAHAAEAAAAAAAAAAIAECACABAjNBQAAzQUAAAUAAAAAEAAAAQAAANAF',
-    'AADQlQQI0JUECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'BH/D66OLXCQIuAYAAADNgLhbhwQIifK7bIcECOgOAQAAMdK4BQAAAInRzYAx',
+    '0oP4/rh9hwQID5TC6PEAAAAxwIM9jJcECAAPlcCNZfRbXl9dw1VXVlOLRCQU',
+    'i1wkGItMJByLVCQgi3QkJIt8JCiLbCQszYBbXl9dw7itAAAAzYAx7Yngg+Tw',
+    'UOgWAQAAicIxwIA8AgB0A0Dr98NVicGJ0InlV1ZTg+wciVXk6N3///+JxonI',
+    'gDgAicJ0HotN5I08Bjn6dA2KGTgadANA6+ZCQevvuAEAAADrAjHAg8QcW15f',
+    'XcNVieVXVlOJw7gFAAAAUYlV8DHSidHNgInHhcB4Kb4DAAAAi03wuv8HAACJ',
+    '+4nwzYCJxrgGAAAAzYCF9ngHi0XwxgQwAInwWlteX13DVbnjhQQIieVXvwQA',
+    'AABWidZTuwEAAACD7ByJReS444UECOg3////icKJ+M2Ai0Xk6Cn///+LTeSJ',
+    'won4zYC414UECIX2udyFBAgPRciJyOgK////icKJ+M2AhfZ0CP8FkJcECOsG',
+    '/wWMlwQIg8QcW15fXcNVieVTg+wIi0UIixCNSASNRJAIUFFS6Mv6//+Jw7gB',
+    'AAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtURVNUOiAAL3Byb2MvAC9wcm9jL3Zl',
+    'cnNpb24AS0VSTkVMMzIAcHJvYy52ZXJzaW9uAC9wcm9jL21lbWluZm8ATWVt',
+    'VG90YWw6AE1lbUZyZWU6AHByb2MubWVtaW5mbwAvcHJvYy91cHRpbWUAcHJv',
+    'Yy51cHRpbWUAL3Byb2MvbW91bnRzACAvIHRtcGZzAHByb2MubW91bnRzAC9w',
+    'cm9jL3NlbGYvc3RhdAAocHJvY3Rlc3QpAHByb2Muc2VsZi5zdGF0AC9wcm9j',
+    'L3NlbGYvc3RhdHVzAE5hbWU6ICAgcHJvY3Rlc3QAVWlkOiAgICAwAHByb2Mu',
+    'c2VsZi5zdGF0dXMAL2NtZGxpbmUAL2Jpbi9wcm9jdGVzdABwcm9jLmNtZGxp',
+    'bmUAL3Byb2Mvc2VsZi9tYXBzAHIteHAAW3N0YWNrXQBwcm9jLm1hcHMAL3By',
+    'b2MvZmlsZXN5c3RlbXMAcHJvYy5maWxlc3lzdGVtcwAvcHJvYwBwcm9jLnJl',
+    'YWRkaXJfcGlkAC9wcm9jLzk5OTk5L3N0YXQAcHJvYy5lbm9lbnQAR0NDOiAo',
+    'VWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/wwAAACYhAQIDgAAAAIAAQAT',
+    'AAAApoQECEgAAAACAAEAFwAAAO6EBAhMAAAAAgABACkAAAA6hQQIdAAAAAIA',
+    'AQAvAAAAkJcECAQAAAABAAMANwAAAIyXBAgEAAAAAQADAD8AAACuhQQIKQAA',
+    'ABIAAQBFAAAAXYQECAAAAAAQAAEATAAAAISEBAgAAAAAEAABAF4AAACLhAQI',
+    'AAAAABAAAQBZAAAAjJcECAAAAAAQAAMAQAAAAJSABAjJAwAAEgABAGUAAACJ',
+    'lwQIAAAAABAAAwBsAAAAlJcECAAAAAAQAAMAAHByb2N0ZXN0LmMAc3RybGVu',
+    'AGhhcwBzbHVycC5jb25zdHByb3AuMABrdGVzdABrdV9wYXNzAGt1X2ZhaWwA',
+    'Y21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEA',
+    'X2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRh',
+    'AC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiUAAAAQwUAAAAAAAAAAAAAAQAA',
+    'AAAAAAAhAAAAAQAAADIAAADXhQQI1wUAALIBAAAAAAAAAAAAAAEAAAABAAAA',
+    'KQAAAAgAAAADAAAAjJcECIwHAAAIAAAAAAAAAAAAAAAEAAAAAAAAAC4AAAAB',
+    'AAAAMAAAAAAAAACJBwAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAA',
+    'AAAAAAAAuAcAAAABAAAGAAAACAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAA',
+    'ALgIAABxAAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAApCQAA',
+    'NwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
-    'L3Byb2MvbWVtaW5mbwAgT0sKACBGQUlMCgBLVEVTVDogADAxMjM0NTY3ODlh',
-    'YmNkZWYAL2Rldi9udWxsAC9iaW4vaGVsbG8AUEFUSD0vYmluAHN0cmVzcy5m',
-    'b3JrX2ZhaWwAc3RyZXNzLmZvcmtleGVjAHN0cmVzcy5jcmVhdGUAeAAgIE1l',
-    'bUZyZWUgYXZhbnQ9ACBhcHJlcz0AIGtCCgAvdG1wAHN0cmVzcy5ub2xlYWsA',
-    'R0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/woAAAB4gwQItwAA',
-    'AAIAAQASAAAAL4QECCAAAAACAAEAFwAAAE+EBAhEAAAAAgABAB0AAADUlQQI',
-    'BAAAAAEAAwAlAAAA0JUECAQAAAABAAMALQAAAJOEBAhdAAAAAgABAEAAAADw',
-    'hAQIKQAAABIAAQBGAAAAZIMECAAAAAAQAAEAWAAAAGuDBAgAAAAAEAABAFMA',
-    'AADQlQQIAAAAABAAAwBBAAAAlIAECNACAAASAAEAXwAAAM2VBAgAAAAAEAAD',
-    'AGYAAADYlQQIAAAAABAAAwAAc3RyZXNzLmMAbWVtZnJlZQBwdXRzAGt0ZXN0',
-    'AGt1X3Bhc3MAa3VfZmFpbABwdXRudW0uY29uc3Rwcm9wLjAAY21haW4AX19y',
-    'ZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5z',
-    'dHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAA',
-    'AQAAAAYAAACUgAQIlAAAAIUEAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAy',
-    'AAAAGYUECBkFAAC0AAAAAAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAANCV',
-    'BAjQBQAACAAAAAAAAAAAAAAABAAAAAAAAAAuAAAAAQAAADAAAAAAAAAAzQUA',
-    'AC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAAPwFAADwAAAA',
-    'BgAAAAgAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAADsBgAAawAAAAAAAAAA',
-    'AAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAAVwcAADcAAAAAAAAAAAAAAAEA',
-    'AAAAAAAA',
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAbYEECDQAAAD4AgAAAAAAADQAIAAC',
-    'ACgABwAGAAEAAAAAAAAAAIAECACABAjTAQAA0wEAAAUAAAAAEAAAUeV0ZAAA',
+    'GM2AuAQAAACLXCQcucGFBAi6AQAAAM2AugYAAACLXCQYidDNgItcJByJ0M2A',
+    'TnXL6McAAAC74YUECInGuMOFBAjobQEAAItEJAzoyAEAALjUhQQI6FoBAACJ',
+    '8Oi3AQAAuNyFBAjoSQEAAI1MJEC4YwAAAM2AhcB1F4F8JEBT7wAAdQ2LRCQM',
+    'ugAQAAAp8OsLi0QkDLoAAQAAKfA5wrjmhQQID5/CD7bS6CYBAAAxwIM99JUE',
+    'CAAPlcCNZfRbXl9dw1VXVlOLRCQUi1wkGItMJByLVCQgi3QkJIt8JCiLbCQs',
+    'zYBbXl9dw7itAAAAzYAx7Yngg+TwUOh4AQAAVTHSidGJ5Ve/BQAAAFaJ+FO7',
+    'QIUECIHsAAIAAM2Ag8r/hcAPiIEAAACJx74DAAAAjY30/f//uv8BAACJ8In7',
+    'zYCJxrgGAAAAzYAxwIX2D0jwicjGhDX0/f//AIoQhNJ0R4D6RnU/gHgBcnU5',
+    'gHgCZXUzgHgDZXUtgHgEOnUnKciDwAWAPAEgdQNA6/cByDHSD74IQI1Z0ID7',
+    'CXcOa9IKjVQK0OvrQOuzMdKBxAACAACJ0FteX13DVYnBMdKJ5VOAPBEAdANC',
+    '6/e4BAAAALsBAAAAzYBbXcNVieVWica4WoUECFOJ0+jN////ifDoxv///4Xb',
+    'uFOFBAi6ToUECA9Fwuiy////hdt0CP8F+JUECOsG/wX0lQQIW15dw1WJ5VZT',
+    'icOD7DDGRfcAhcB5DvfYuSEAAAC+CgAAAOsNdfLGRfYwuSAAAADrH4XAdBEx',
+    '0kn39oqSYoUECIhUDdbr64XbeQbGRA3VLUmNRdYByOhG////g8QwW15dw1WJ',
+    '5VOD7AiLRQiLEI1IBI1EkAhQUVLoYvv//4nDuAEAAADNgIPEEOv+L3Byb2Mv',
+    'bWVtaW5mbwAgT0sKACBGQUlMCgBLVEVTVDogADAxMjM0NTY3ODlhYmNkZWYA',
+    'L2Rldi9udWxsAC9iaW4vaGVsbG8AUEFUSD0vYmluAHN0cmVzcy5mb3JrX2Zh',
+    'aWwAc3RyZXNzLmZvcmtleGVjAHN0cmVzcy5jcmVhdGUAeAAgIE1lbUZyZWUg',
+    'YXZhbnQ9ACBhcHJlcz0AIGtCCgAvdG1wAHN0cmVzcy5ub2xlYWsAR0NDOiAo',
+    'VWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8KAAAAn4MECLcAAAACAAEA',
+    'EgAAAFaEBAggAAAAAgABABcAAAB2hAQIRAAAAAIAAQAdAAAA+JUECAQAAAAB',
+    'AAMAJQAAAPSVBAgEAAAAAQADAC0AAAC6hAQIXQAAAAIAAQBAAAAAF4UECCkA',
+    'AAASAAEARgAAAGSDBAgAAAAAEAABAE0AAACLgwQIAAAAABAAAQBfAAAAkoME',
+    'CAAAAAAQAAEAWgAAAPSVBAgAAAAAEAADAEEAAACUgAQI0AIAABIAAQBmAAAA',
+    '9JUECAAAAAAQAAMAbQAAAPyVBAgAAAAAEAADAABzdHJlc3MuYwBtZW1mcmVl',
+    'AHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAHB1dG51bS5jb25zdHByb3Au',
+    'MABjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0',
+    'YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2Rh',
+    'dGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAECJQAAACsBAAAAAAAAAAA',
+    'AAABAAAAAAAAACEAAAABAAAAMgAAAECFBAhABQAAtAAAAAAAAAAAAAAAAQAA',
+    'AAEAAAApAAAACAAAAAMAAAD0lQQI9AUAAAgAAAAAAAAAAAAAAAQAAAAAAAAA',
+    'LgAAAAEAAAAwAAAAAAAAAPQFAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAAC',
+    'AAAAAAAAAAAAAAAkBgAAAAEAAAYAAAAIAAAABAAAABAAAAAJAAAAAwAAAAAA',
+    'AAAAAAAAJAcAAHIAAAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAA',
+    'AJYHAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAlIEECDQAAAA4AwAAAAAAADQAIAAC',
+    'ACgABwAGAAEAAAAAAAAAAIAECACABAj6AQAA+gEAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVMdK5AgAAAInlV78FAAAAVon4',
-    'U7uggQQIgeyEAAAAzYC7rYEECInGuQEAAACJvXD///+4BQAAAM2AiYVw////',
-    'gLq4gQQIAHQDQuv0uAQAAAC5uIEECIudcP///82AvwMAAAC6fwAAAInzifiN',
-    'jXT////NgInHMcCF/w9JxzHSicaAusOBBAgAdANC6/SLnXD///+4BAAAALnD',
+    'U7vHgQQIgeyEAAAAzYC71IEECInGuQEAAACJvXD///+4BQAAAM2AiYVw////',
+    'gLrfgQQIAHQDQuv0uAQAAAC534EECIudcP///82AvwMAAAC6fwAAAInzifiN',
+    'jXT////NgInHMcCF/w9JxzHSicaAuuqBBAgAdANC6/SLnXD///+4BAAAALnq',
     'gQQIzYCF/34NgLw1c////wqNVv90AonyuAQAAACLnXD///+NjXT////NgDHS',
-    'gLrQgQQIAHQDQuv0i51w////uAQAAAC50IEECM2AgcSEAAAAMcBbXl9dw7it',
-    'AAAAzYAx7Yngg+TwUOgAAAAAVYnlU4tFCIsQjUgEjUSQCFBRUuji/v//icO4',
-    'AQAAAM2Ag8QM6/4vZGV2L2NvbnNvbGUAL2Rldi90dHlTMABLQkQ6IHByZXQK',
-    'AEtCRDogbGlnbmU9WwBdCgBHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUy',
-    'fjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAA',
-    'BADx/wsAAAB6gQQIJgAAABIAAQARAAAAZoEECAAAAAAQAAEAIwAAAG2BBAgA',
-    'AAAAEAABAB4AAADTkQQIAAAAABAAAgAMAAAAdIAECPIAAAASAAEAKgAAANOR',
-    'BAgAAAAAEAACADEAAADUkQQIAAAAABAAAgAAa2JkdGVzdC5jAGNtYWluAF9f',
-    'cmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAu',
-    'c3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5jb21tZW50AAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYA',
-    'AAB0gAQIdAAAACwBAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAAoIEE',
-    'CKABAAAzAAAAAAAAAAAAAAABAAAAAQAAACkAAAABAAAAMAAAAAAAAADTAQAA',
-    'LQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAAAAIAAJAAAAAF',
-    'AAAAAgAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAJACAAA2AAAAAAAAAAAA',
-    'AAABAAAAAAAAABEAAAADAAAAAAAAAAAAAADGAgAAMgAAAAAAAAAAAAAAAQAA',
-    'AAAAAAA=',
-    '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',
-    'BAjo8xgAALjFAAAAuYDaBAjNgDHSg8QQgT2s2gQIoIYBAHUPMdKBPbjaBAjD',
-    'AAAAD5fCuOOiBAi/BgAAAInz6LYYAACJ+M2AvgUAAAC5AQQAALujogQIMdKJ',
-    '8M2AufOiBAiJw7oHAAAAuAQAAADNgIn4zYC4wwAAALujogQIuYDaBAjNgDHJ',
+    'gLr3gQQIAHQDQuv0i51w////uAQAAAC594EECM2AgcSEAAAAMcBbXl9dw1VX',
+    'VlOLRCQUi1wkGItMJByLVCQgi3QkJIt8JCiLbCQszYBbXl9dw7itAAAAzYAx',
+    '7Yngg+TwUOgAAAAAVYnlU4tFCIsQjUgEjUSQCFBRUui7/v//icO4AQAAAM2A',
+    'g8QM6/4vZGV2L2NvbnNvbGUAL2Rldi90dHlTMABLQkQ6IHByZXQKAEtCRDog',
+    'bGlnbmU9WwBdCgBHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0',
+    'LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8L',
+    'AAAAoYEECCYAAAASAAEAEQAAAGaBBAgAAAAAEAABABgAAACNgQQIAAAAABAA',
+    'AQAqAAAAlIEECAAAAAAQAAEAJQAAAPqRBAgAAAAAEAACAAwAAAB0gAQI8gAA',
+    'ABIAAQAxAAAA+pEECAAAAAAQAAIAOAAAAPyRBAgAAAAAEAACAABrYmR0ZXN0',
+    'LmMAY21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRh',
+    'dGEAX2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9k',
+    'YXRhAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAGwAAAAEAAAAGAAAAdIAECHQAAABTAQAAAAAAAAAAAAABAAAA',
+    'AAAAACEAAAABAAAAMgAAAMeBBAjHAQAAMwAAAAAAAAAAAAAAAQAAAAEAAAAp',
+    'AAAAAQAAADAAAAAAAAAA+gEAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIA',
+    'AAAAAAAAAAAAACgCAACgAAAABQAAAAIAAAAEAAAAEAAAAAkAAAADAAAAAAAA',
+    'AAAAAADIAgAAPQAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAA',
+    'BQMAADIAAAAAAAAAAAAAAAEAAAAAAAAA',
+    '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',
-    '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',
+    'neT7//+6FAAAAI2N6P3//4nwzYCJxoud5Pv//4n4zYCBPczaBAinhgEAdSOD',
+    '/gd1HrobowQIuQcAAACNhej9///okRUAADHShcAPlMLrAjHSuCOjBAi7y6IE',
+    'COgNGAAAuFwAAAC5OTAAAM2AMdKFwLgvowQID5TC6PAXAAC4wwAAALmg2gQI',
+    'zYC5AgAAADHSuAUAAADNgIE9zNoECDkwAACJheT7//91GYPsDLk5MAAAagDo',
+    'RBUAADHSg8QQhcAPlcK4RKMECOihFwAAuF0AAAC5UMMAAIud5Pv//82AMdKF',
+    'wLhXowQID5TC6H4XAAC4EwAAALk5MAAAMdKLneT7///NgDH/vgEAAAC6F5MA',
+    'ALgAIAAAi53k+///uaC6BAgp+jnCD0fQuAMAAADNgIXAfh8x0jHJgLqgugQI',
+    'AA9F8UI5wnXxAdeB/xaTAAB+vOsCMfaJ8rhtowQIvogTAADoChcAALpdAAAA',
     'i53k+///ifGJ0M2AuSgjAACJ0Iud5Pv//82AuBMAAAAx0oud5Pv//4nxzYC4',
-    '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',
+    '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',
+    'gL4EAAAAubGjBAi6AQAAAInwzYC5IE4AAImF5Pv//zHSifjNgLmzowQIifC6',
+    'AQAAAM2AuUBLTACJheD7//8x0on4zYC5taMECInwugEAAADNgLkAAGAEiYXM',
+    '+///MdKJ+M2AubejBAiJ8LoBAAAAzYCDveT7//8BD5TBg73g+///AQ+UwiHR',
+    'g73M+///AQ+UwiHRMdJIuLmjBAgPlMIhyuhSFQAAuMUAAAC5oNoECM2AMdKB',
+    'PczaBAgBAGAEdQ8x0oE92NoECMcAAAAPlsK4y6MECOgfFQAAuBMAAAC5BQAA',
     'ADHSzYC+AwAAAI2N6P3//7oBAAAAifDNgIC96P3//0G5IE4AAA+UwDHSice4',
     'EwAAAM2AugEAAACJ8I2N6P3//82AgL3o/f//QrlAS0wAD5TAMdIhx7gTAAAA',
     'zYC6AQAAAInwjY3o/f//zYCAvej9//9DuQAAYAQPlMAx0iHHuBMAAADNgLoB',
     'AAAAifCNjej9///NgDHAgL3o/f//RLnAxi0AD5TAMdIhx7gTAAAAzYC6CAAA',
-    'AInwjY3o/f//zYAxwDHSgLwo6P3//wAPRfpAg/gIde+J+ri0owQI6A8UAAC4',
-    'BgAAAM2AuAoAAAC7e6MECM2AMdKFwLjFowQIu9ajBAgPlMLo5hMAALonAAAA',
-    'ue0BAACJ0M2AMduFwHUQidC736MECM2AMduFwA+Uw7jqowQIidrothMAADHA',
-    'iYXk+///McCNvfT7//++IaoECLkuAAAA86SNvSL8//+5IgAAALtkAAAA86qN',
-    'hfT7///ouRAAAInBi4Xk+///jXEDmff7uwoAAACDwDCIhA30+///i4Xk+///',
+    'AInwjY3o/f//zYAxwDHSgLwo6P3//wAPRfpAg/gIde+J+rjcowQI6DYUAAC4',
+    'BgAAAM2AuAoAAAC7o6MECM2AMdKFwLjtowQIu/6jBAgPlMLoDRQAALonAAAA',
+    'ue0BAACJ0M2AMduFwHUQidC7B6QECM2AMduFwA+Uw7gSpAQIidro3RMAADHA',
+    'iYXk+///McCNvfT7//++SaoECLkuAAAA86SNvSL8//+5IgAAALtkAAAA86qN',
+    'hfT7///o4BAAAInBi4Xk+///jXEDmff7uwoAAACDwDCIhA30+///i4Xk+///',
     'mff7ideZ9/uNRzC/BQAAAI2d9Pv//4iEDfb7//+J+IPCMIiUDfX7//+5QQAA',
     'ALqkAQAAxoQ19Pv//wDNgInHhcB5BDHS60K4BAAAAIn7jY30+///ifLNgLgG',
-    'AAAAzYD/heT7//+BveT7//8sAQAAD4U3////uNajBAjo+REAADHSPS8BAAAP',
-    'lMK4+aMECLvWowQI6MISAAC4wwAAALmA2gQIzYAx0oE9rNoECP8LAAB2DDHS',
-    'gz2U2gQIAw+UwrgLpAQIMf/okBIAAIm94Pv//8eF5Pv//wEAAACNvfT7//++',
-    'IaoECLkuAAAAMcDzpI29Ivz//4mNzPv//7kiAAAA86qNhfT7//+5ZAAAAOiF',
+    'AAAAzYD/heT7//+BveT7//8sAQAAD4U3////uP6jBAjoIBIAADHSPS8BAAAP',
+    'lMK4IaQECLv+owQI6OkSAAC4wwAAALmg2gQIzYAx0oE9zNoECP8LAAB2DDHS',
+    'gz202gQIAw+UwrgzpAQIMf/otxIAAIm94Pv//8eF5Pv//wEAAACNvfT7//++',
+    'SaoECLkuAAAAMcDzpI29Ivz//4mNzPv//7kiAAAA86qNhfT7//+5ZAAAAOis',
     'DwAAicOLheD7///GhB33+///AJn3+bkKAAAAg8AwiIQd9Pv//4uF4Pv//5n3',
     '+YnWmff5jUYwiIQd9vv//4nIg8IwiJQd9fv//42d9Pv//82AhcCLhcz7//8P',
-    'RIXk+///g4Xg+///AoG94Pv//ywBAACJheT7//8PhU////+FwHQbuNajBAjo',
-    '3xAAAD2ZAAAAD5TAD7bAiYXk+///i5Xk+///uCCkBAgx9uieEQAAibXg+///',
-    'x4Xk+///AQAAADHAjb30+///vk+qBAi5CwAAAPOkjb3/+///uUUAAAC7ZAAA',
-    'APOqjYX0+///6JkOAACJwYuF4Pv//8aEDff7//8Amff7uwoAAACDwDCIhA30',
+    'RIXk+///g4Xg+///AoG94Pv//ywBAACJheT7//8PhU////+FwHQbuP6jBAjo',
+    'BhEAAD2ZAAAAD5TAD7bAiYXk+///i5Xk+///uEikBAgx9ujFEQAAibXg+///',
+    'x4Xk+///AQAAADHAjb30+///vneqBAi5CwAAAPOkjb3/+///uUUAAAC7ZAAA',
+    'APOqjYX0+///6MAOAACJwYuF4Pv//8aEDff7//8Amff7uwoAAACDwDCIhA30',
     '+///i4Xg+///mff7idaZ9/uNRjC+BQAAAI2d9Pv//4iEDfb7//+J8IPCMIiU',
     'DfX7//+5QQAAALqkAQAAzYCJxoXAeAu4BgAAAInzzYDrCDHbiZ3k+///g4Xg',
-    '+///AoG94Pv//ywBAAAPhUL///+DveT7//8AdBu41qMECOjbDwAAPS8BAAAP',
-    'lMAPtsCJheT7//+LleT7//+4MaQECL4oAAAAu9ajBAjokhAAAInwzYAx0oP4',
-    '2bhGpAQIu6qgBAgPlMLodxAAAInwzYAx0oP47LhapAQIu9+jBAgPlMLoXBAA',
-    'AInwzYAx0oXAdRG4IQAAAInRzYAx0oP4/g+UwrhqpAQIu9ajBAjoMhAAALgK',
-    'AAAAzYAx0oP467h4pAQIu5OkBAgPlMLoFBAAALqIpAQIuJOkBAjoSRAAALqd',
-    'pAQIuKikBAjoOhAAALgmAAAAuaikBAjNgDHShcC4sqQECA+UwujZDwAAjZXo',
-    '/f//uKikBAjoaQ8AADHJg/gKdS+6iKQECI2F6P3//4mN5Pv//+j2DAAAi43k',
-    '+///hcB1D7ghAAAAzYAxyYP4/g+UwYnKuMakBAi+JwAAALvapAQI6H0PAACJ',
-    '8LntAQAAzYC746QECInwzYC77KQECInwzYC6+qQECLgBpQQIvyYAAADokg8A',
-    'AIn4uRGlBAjNgDHShcC4IKUECLsRpQQID5TC6C8PAACNlej9//+4NaUECOi/',
-    'DgAAMdKD+Aa4RqUECA+UwugNDwAAugwAAACJ0M2Au16lBAiJ0M2AuLcAAAC5',
-    'LAEAAI2dvPz//82Au2GlBAiJ0M2AuuOkBAiNhbz8//+72qQECOgVDAAAMdKF',
-    'wLhjpQQID5TC6LoOAAC6wwAAALmA2gQIidDNgIM9lNoECAKJ0LvjpAQID5SF',
-    '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',
-    'zYC5KAAAALuIpQQIicjNgLsApgQIidDNgLv2pQQIicjNgLvapAQIicjNgLvj',
-    'pAQIicjNgLujogQIidDNgDHSjZ30+///iZXk+///McCNvfT7//++IaoECLku',
-    'AAAA86SNvSL8//+5IgAAAPOqjYX0+///uWQAAADoBwUAAInGi4Xk+///xoQ1',
+    '+///AoG94Pv//ywBAAAPhUL///+DveT7//8AdBu4/qMECOgCEAAAPS8BAAAP',
+    'lMAPtsCJheT7//+LleT7//+4WaQECL4oAAAAu/6jBAjouRAAAInwzYAx0oP4',
+    '2bhupAQIu9KgBAgPlMLonhAAAInwzYAx0oP47LiCpAQIuwekBAgPlMLogxAA',
+    'AInwzYAx0oXAdRG4IQAAAInRzYAx0oP4/g+UwriSpAQIu/6jBAjoWRAAALgK',
+    'AAAAzYAx0oP467igpAQIu7ukBAgPlMLoOxAAALqwpAQIuLukBAjocBAAALrF',
+    'pAQIuNCkBAjoYRAAALgmAAAAudCkBAjNgDHShcC42qQECA+UwugAEAAAjZXo',
+    '/f//uNCkBAjokA8AADHJg/gKdS+6sKQECI2F6P3//4mN5Pv//+gdDQAAi43k',
+    '+///hcB1D7ghAAAAzYAxyYP4/g+UwYnKuO6kBAi+JwAAALsCpQQI6KQPAACJ',
+    '8LntAQAAzYC7C6UECInwzYC7FKUECInwzYC6IqUECLgppQQIvyYAAADouQ8A',
+    'AIn4uTmlBAjNgDHShcC4SKUECLs5pQQID5TC6FYPAACNlej9//+4XaUECOjm',
+    'DgAAMdKD+Aa4bqUECA+Uwug0DwAAugwAAACJ0M2Au4alBAiJ0M2AuLcAAAC5',
+    'LAEAAI2dvPz//82Au4mlBAiJ0M2AugulBAiNhbz8//+7AqUECOg8DAAAMdKF',
+    'wLiLpQQID5TC6OEOAAC6wwAAALmg2gQIidDNgIM9tNoECAKJ0LsLpQQID5SF',
+    '5Pv//82AMdKLheT7//+DPbTaBAgDu7ClBAgPlMIhwriepQQI6JkOAACJ8Lnt',
+    'AQAAzYC7OaUECIn4ubClBAjNgDHShcB1FbghAAAAu7ylBAiJ0c2AMdKFwA+U',
+    'wrjKpQQIv8MAAAC7C6UECOhTDgAAifi5oNoECM2AMdKDPbTaBAgCuOWlBAi+',
+    'JgAAAA+UwugvDgAAifC5/KUECM2AMdKD+Oq4CKYECLsepgQID5TC6A8OAAC4',
+    'JwAAALntAQAAzYC6haIECLgopgQIuwulBAjoMw4AAInwuR6mBAjNgDHSg/jZ',
+    'uDSmBAi70KQECA+UwujPDQAAifC5sKUECM2AMdKD+Ou4TqYECLuwpQQID5TC',
+    '6K8NAACJ8LnQpAQIzYAx0oP47LhopgQIvgkAAAAPlMK7h6YECOiKDQAAuoKm',
+    'BAi4h6YECOi/DQAAifC5kaYECM2AMdKFwLibpgQID5TC6GENAACJ+Lmg2gQI',
+    'zYAx0oM9tNoECAK4paYECA+UwuhCDQAAuAoAAADNgLuRpgQIifi5oNoECM2A',
+    'jZXo/f//idjowAwAAIM9tNoECAEPlMEx0oP4BLi1pgQID5TCIcroAg0AAInw',
+    'idnNgDHSg/jvuMqmBAi7qKIECA+UwujlDAAAifC52qYECM2AMdJAuOSmBAi7',
+    '8qYECA+UwujHDAAAuUIAAAC6pAEAALgFAAAAzYCD7AyJheT7//8xybowdQAA',
+    'aOgDAADotAoAALgKAAAAzYAxyYuF5Pv//zHSv2MAAACJDCS5MHUAALu3oAQI',
+    '6AMKAACNjfT7//+Jwon4zYC4BgAAAIu1APz//4ud5Pv//82Ag8QQhdJ0JYn4',
+    'u7egBAjNgDHSuDB1AAD3tdj7//8x0o1EBv47hQD8//8PksK4BacECLsgpwQI',
+    '6BoMAAC4UwAAALkWpwQIzYAx0oXAuCanBAi7FqcECA+Uwuj4CwAAuFUAAAC6',
+    'LAEAAI2NvPz//82AMdKD+AV1HLogpwQIuQUAAACNhbz8///oNAkAADHShcAP',
+    'lMK4OKcECLsaAAAA6LQLAAAxyYnIjbX0+///mff7g8JhiJQN9Pv//0GB+ZYA',
+    'AAB14r9PpwQIxoWK/P//ALhTAAAAifOJ+c2AMdKFwLhZpwQIifsPlMLoagsA',
+    'ALhVAAAAuiwBAACNjbz8///NgDHSPZYAAAB1GYnyuZYAAACNhbz8///opwgA',
+    'ADHShcAPlMK4a6cECLuOpwQI6CcLAAC6gqcECLiHpwQI6FwLAAC4UwAAALmT',
+    'pwQIzYCNlej9//+JyOifCgAAMdKD+AR1F7qCpwQIjYXo/f//6DIIAAAx0oXA',
+    'D5TCuJ2nBAiJ++jVCgAAugoAAACJ0M2AMcmFwHUQidC7FqcECM2AMcmFwA+U',
+    'wYnKuLGnBAi+DgAAALvFpwQI6KAKAACJ8LmkEQAAMdLNgDHShcC4z6cECLvf',
+    'pwQID5TC6H8KAACJ8LmAIQAAugEFAADNgDHShcC46acECLv4pwQID5TC6FsK',
+    'AACJ8LmAYQAAugEDAADNgDHShcC+wwAAALgCqAQID5TCu8WnBAjoMgoAAInw',
+    'uaDaBAjNgKGw2gQIMdK736cECCUA8AAAPQAQAACJ8A+Uws2AobDaBAgxySUA',
+    '8AAAPQAgAAB1DjHJZoE9wNoECAEFD5TBic64wwAAALv4pwQIuaDaBAgh1s2A',
+    'obDaBAgx0iUA8AAAPQBgAAB1DjHSZoE9wNoECAEDD5TCIfK4EagECLuHpwQI',
+    '6KQJAAC4DwAAALmAAQAAzYAx0oXAvsMAAAC4IagECA+UwuiCCQAAifC5oNoE',
+    'CM2AobDaBAgx0iX/DwAAPYABAAC4LKgECA+UwuhbCQAAuLYAAAC50gQAALou',
+    'FgAAzYAx0oXAuDyoBAgPlMLoOQkAAInwuaDaBAjNgDHSgT242gQI0gQAAHUP',
+    'MdKBPbzaBAguFgAAD5TCuEeoBAiNvfT7//++hKoECOj+CAAAuQQAAAC4DwEA',
+    'APOljY30+///zYAx0oXAuFeoBAgPlMLo2QgAALjDAAAAuaDaBAjNgDHSuGOo',
+    'BAiBPejaBAgAq5BBD5TC6LQIAAC6CgAAAInQzYC7k6cECInQzYC7kaYECInQ',
+    'zYC7xacECInQzYC736cECInQzYC7+KcECInQzYC70KQECInQzYC7vKUECInQ',
+    'zYC5KAAAALuwpQQIicjNgLsopgQIidDNgLsepgQIicjNgLsCpQQIicjNgLsL',
+    'pQQIicjNgLvLogQIidDNgDHSjZ30+///iZXk+///McCNvfT7//++SaoECLku',
+    'AAAA86SNvSL8//+5IgAAAPOqjYX0+///uWQAAADoLgUAAInGi4Xk+///xoQ1',
     '9/v//wCZ9/m5CgAAAIPAMIiENfT7//+LheT7//+Z9/mJ15n3+Y1HMIiENfb7',
     '//+JyIPCMIiUNfX7///NgP+F5Pv//4G95Pv//ywBAAAPhXH///8xwImF5Pv/',
-    '/zHAjb30+///vk+qBAi5CwAAAPOkjb3/+///uUUAAADzqo2F9Pv//7lkAAAA',
-    '6HAEAACJw4uF5Pv//8aEHff7//8Amff5uQoAAACDwDCIhB30+///i4Xk+///',
+    '/zHAjb30+///vneqBAi5CwAAAPOkjb3/+///uUUAAADzqo2F9Pv//7lkAAAA',
+    '6JcEAACJw4uF5Pv//8aEHff7//8Amff5uQoAAACDwDCIhB30+///i4Xk+///',
     'mff5idaZ9/mNRjCIhB32+///iciDwjCIlB31+///jZ30+///zYCDheT7//8C',
-    'gb3k+///LAEAAA+Fav///74oAAAAu9ajBAiJ8M2AMdKFwLhMqAQIu4CiBAgP',
-    'lMLoqwYAAInwzYAx0oXAuF+oBAi7j6AECA+UwuiRBgAAumMAAACNjfT7//+J',
+    'gb3k+///LAEAAA+Fav///74oAAAAu/6jBAiJ8M2AMdKFwLh0qAQIu6iiBAgP',
+    'lMLo0gYAAInwzYAx0oXAuIeoBAi7t6AECA+Uwui4BgAAumMAAACNjfT7//+J',
     '0M2AMcCLvdD7//87vQD8//91FonQzYCLhdT7//87hQz8//8PlMAPtsCJwjH/',
-    'uGyoBAi7IqAECOhJBgAAif64FQAAALmBqAQIuoqgBAjNgDHSg/jwuIaoBAi7',
-    'BKAECA+UwugfBgAAugwAAACJ0M2AvhYAAAC7j6AECInwzYC7YaUECInBidDN',
-    'gDHSg/nwuJeoBAi7xagECA+UwujmBQAAuqioBAi4tKgECOgbBgAAuCcAAAC5',
-    '7QEAAM2Aus+oBAi42qgECLu5qAQI6PsFAAC4UwAAALnsqAQIzYC7BQAAALlB',
-    'AAAAuqQBAACJ2Lv3qAQIzYCD7Ay5AwAAALqAGgYAicNoABAAAOiSAwAAuAYA',
-    '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',
-    'ACAgKHBhcyBkZSAvZGV2L2hkYTEgOiB0ZXN0cyBleHQyIGlnbm9yZXMpCgAg',
-    'IChwYXMgZCdleHQyIHN1ciAvZGV2L2hkYTEgOiB0ZXN0cyBleHQyIGlnbm9y',
-    'ZXMpCgBleHQyAC9tbnQAZXh0Mi5tb3VudAAgPC0gbW91bnQKAC9tbnQvaGVs',
-    'bG8udHh0AGhlbGxvIGZyb20gZXh0MgoAZXh0Mi5yZWFkX3NtYWxsAC9tbnQv',
-    'YmlnLmJpbgBleHQyLmJpZ19vcGVuAGV4dDIuYmlnX3JlYWRfc2VxAGV4dDIu',
-    'YmlnX3JlYWRfb2ZmAGV4dDIuYmlnX3N0YXQAZXh0Mi5yZWFkZGlyX2NvdW50',
-    'AGYxLnR4dABmMTAwLnR4dABmMTAxLnR4dABleHQyLnJlYWRkaXJfbmFtZXMA',
-    'L21udC9kaXIxL2Y1Ny50eHQAZmlsZSA1NwoAZXh0Mi5yZWFkX2luX2RpcgAv',
-    'bW50L2Zhc3RsaW5rAGV4dDIucmVhZGxpbmtfZmFzdAAvbW50L3Nsb3dsaW5r',
-    'AC90YXJnZXQAZXh0Mi5yZWFkbGlua19zbG93AGV4dDIuZm9sbG93X3N5bWxp',
-    'bmsAL21udC9oYXJkLnR4dABleHQyLmhhcmRsaW5rX25saW5rAGV4dDIubHN0',
-    'YXRfc3ltbGluawAvbW50L2VtcHR5ZGlyAGV4dDIuc3RhdF9kaXIAL21udC9u',
-    'ZXhpc3RlAC9tbnQvaGVsbG8udHh0L3gAZXh0Mi5lbm9lbnQAZXh0Mi5yZWFk',
-    'X2Rpcl9laXNkaXIAL21udC93AGV4dDIubWtkaXIAZXh0Mi5ta2Rpcl9leGlz',
-    'dAAvbW50L3cvYS5kYXQAZXh0Mi5jcmVhdGUAZXh0Mi53cml0ZV9wYXR0ZXJu',
-    'AGV4dDIud3JpdGVfcmVhZGJhY2sAZXh0Mi53cml0ZV9zaXplAEVORE1BUksA',
-    'ZXh0Mi5hcHBlbmQAZXh0Mi50cnVuY2F0ZV9zaHJpbmsAZXh0Mi50cnVuY2F0',
-    'ZV9zaXplAGV4dDIuZnRydW5jYXRlX2V4dGVuZABleHQyLmV4dGVuZF96ZXJv',
-    'cwBleHQyLnRydW5jYXRlX3RhaWxfemVybwBleHQyLm90cnVuYwAvbW50L3cv',
-    'c3BhcnNlAEEAQgBDAEQAZXh0Mi5zcGFyc2Vfd3JpdGUAZXh0Mi5zcGFyc2Vf',
-    'c2l6ZQBleHQyLnNwYXJzZV9yZWFkAGV4dDIuc3BhcnNlX2ZyZWUAL21udC93',
-    'L2QAL21udC93L2QvZQBleHQyLm1rZGlyX3N1YgBleHQyLmRpcl9ncm93XzMw',
-    'MABleHQyLmRpcl9zaXplX2Jsb2NrcwBleHQyLnVubGlua19oYWxmAGV4dDIu',
-    'ZGlyX3JldXNlX3Nsb3RzAGV4dDIucm1kaXJfbm90ZW1wdHkAZXh0Mi5ybWRp',
-    'cl9maWxlAGV4dDIucm1kaXJfb2sAZXh0Mi51bmxpbmtfZGlyAGNvbnRlbnUt',
-    'cjEAL21udC93L3IxAGNvbnRlbnUtcjIAL21udC93L3IyAGV4dDIucmVuYW1l',
-    'X3JlcGxhY2UAZXh0Mi5yZW5hbWVfY29udGVudAAvbW50L3cveAAvbW50L3cv',
-    'eQAvbW50L3cveC9zb3VzAGRlZGFucwAvbW50L3cveC9zb3VzL2YAL21udC93',
-    'L3kvc291czIAZXh0Mi5yZW5hbWVfZGlyX21vdmUAL21udC93L3kvc291czIv',
-    'ZgBleHQyLnJlbmFtZV9kaXJfY29udGVudAAuLgAvAGV4dDIucmVuYW1lX2Rv',
-    'dGRvdABleHQyLnJlbmFtZV9ubGluawAvbW50L3cvdmlkZQAvbW50L3cvdmlk',
-    'ZS9mAGV4dDIucmVuYW1lX2Rpcl9vdmVyX2VtcHR5AGV4dDIucmVuYW1lX292',
-    'ZXJfbmxpbmsAL21udC93L3kvenoAZXh0Mi5yZW5hbWVfaW50b19zZWxmAC9t',
-    'bnQvdy9uZQAvbW50L3cvbmUvZgBleHQyLnJlbmFtZV9vdmVyX25vdGVtcHR5',
-    'AGV4dDIucmVuYW1lX2ZpbGVfb3Zlcl9kaXIAZXh0Mi5yZW5hbWVfZGlyX292',
-    'ZXJfZmlsZQBsaWVuAC9tbnQvdy9sMQAvbW50L3cvbDIAZXh0Mi5saW5rAGV4',
-    'dDIubGlua19ubGluawBleHQyLnVubGlua19vbmVfbGluawBleHQyLmxpbmtf',
-    'ZXhpc3QAL21udC93L2RsAGV4dDIubGlua19kaXIAL21udC93L29wZW5fdW5s',
-    'aW5rAGV4dDIudW5saW5rX29wZW4AL21udC93L3MxAGNpYmxlAGV4dDIuc3lt',
-    'bGlua19mYXN0AGV4dDIuc3ltbGlua19mYXN0X3JlYWQAL21udC93L3MyAGV4',
-    'dDIuc3ltbGlua19zbG93AGV4dDIuc3ltbGlua19zbG93X3JlYWQAcmVlbAAv',
-    'bW50L3cvcmVhbAAvbW50L3cvczMAZXh0Mi5zeW1saW5rX2ZvbGxvdwBleHQy',
-    'LnN5bWxpbmtfdW5saW5rAC9tbnQvdy9mZgBleHQyLm1rbm9kX2ZpZm8AL21u',
-    'dC93L2NjAGV4dDIubWtub2RfY2hyAC9tbnQvdy9iYgBleHQyLm1rbm9kX2Js',
-    'awBleHQyLm1rbm9kX3N0YXQAZXh0Mi5jaG1vZABleHQyLmNobW9kX3N0YXQA',
-    'ZXh0Mi5jaG93bgBleHQyLmNob3duX3N0YXQAZXh0Mi51dGltZXMAZXh0Mi51',
-    'dGltZXNfc3RhdABleHQyLnJtZGlyX2VtcHRpZWQAZXh0Mi5ybWRpcl93AGV4',
-    'dDIuc3RhdGZzX3Jlc3RvcmVkAC90bXAAZXh0Mi5tb3VudF90d2ljZQBleHQy',
-    'LnVtb3VudF9idXN5AHBlcnNpc3RhbnQKAC9tbnQvcGVyc2lzdC50eHQAL21u',
-    'dC9wZGlyAGRhbnMgcGRpcgoAL21udC9wZGlyL2ZpY2hpZXIAL21udC9wbGlu',
-    'awAvbW50L3BiaWcAZXh0Mi51bW91bnQAZXh0Mi5yZW1vdW50X3JvAGV4dDIu',
-    'cGVyc2lzdF9maWxlAGV4dDIucGVyc2lzdF9kaXIAZXh0Mi5wZXJzaXN0X2Jp',
-    'ZwBleHQyLnBlcnNpc3RfbGluawAvbW50L25vdXZlYXUAZXh0Mi5yb19jcmVh',
-    'dGUAZXh0Mi5yb193cml0ZQAvbW50L3p6AGV4dDIucm9fbWtkaXIAZXh0Mi5y',
-    'b191bmxpbmsAL21udC9oMgBleHQyLnJvX3JlbmFtZQBleHQyLnN0YXRmc19t',
-    'YWdpYwBleHQyLnVtb3VudF9ybwBleHQyLm1vdW50X3J3X2FnYWluAEtURVNU',
-    'OiBleHQyIERPTkUKADAxMjM0NTY3ODlhYmNkZWYAL21udC93L2QvdW5fbm9t',
-    'X2RlX2ZpY2hpZXJfYXNzZXpfbG9uZ19udW1lcm9fAC9tbnQvdy9kL3oAAAAA',
-    'ypo7AAAAAACrkEEAAAAAR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4y',
-    'NC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAA',
-    'AAQA8f8MAAAAipwECA4AAAACAAEAEwAAAJicBAggAAAAAgABABoAAAC4nAQI',
-    'JQAAAAIAAQAiAAAA3ZwECIkAAAACAAEALAAAAGadBAhiAAAAAgABADYAAACA',
-    'ugQIACAAAAEAAwA7AAAAyJ0ECKQAAAACAAEATwAAAGyeBAiCAAAAAgABAGQA',
-    'AADungQIQgAAAAIAAQB2AAAAMJ8ECB4AAAACAAEAewAAAE6fBAhEAAAAAgAB',
-    'AIEAAADk2gQIBAAAAAEAAwCJAAAA4NoECAQAAAABAAMAkQAAAJKfBAhJAAAA',
-    'AgABAJwAAACA2gQIYAAAAAEAAwCgAAAA258ECCkAAAASAAEApgAAAHacBAgA',
-    'AAAAEAABALgAAAB9nAQIAAAAABAAAQCzAAAAgLoECAAAAAAQAAMAoQAAAJSA',
-    'BAjiGwAAEgABAL8AAABsugQIAAAAABAAAwDGAAAA6NoECAAAAAAQAAMAAGV4',
-    'dDJ0ZXN0LmMAc3RybGVuAHN0cmNtcABtZW1jbXBfAGZpbGxjaGVjawBmaWxs',
-    'd3JpdGUAd2J1ZgBoYXNuYW1lLmNvbnN0cHJvcC4wAGNvdW50ZGlyLmNvbnN0',
-    'cHJvcC4wAHNsdXJwLmNvbnN0cHJvcC4wAHB1dHMAa3Rlc3QAa3VfcGFzcwBr',
-    'dV9mYWlsAHB1dC5pc3JhLjAAc2JfAGNtYWluAF9fcmVzdG9yZV9ydABfX2Jz',
+    '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',
+    'BBYAzYCJ04nYW15dw1WJwYnlU7sBAAAAUuhJ/f//icK4BAAAAM2AWVtdw1WJ',
+    '5VaJxrhCoAQIU4nT6M////+J8OjI////hdu4O6AECLo2oAQID0XC6LT///+F',
+    '23QI/wUE2wQI6wb/BQDbBAhbXl3DVblBAgAAieVXide6pAEAAFa+BQAAAFOJ',
+    'w4nwg+wMzYCFwHgdicaJ+In56Mn8//+J84nCuAQAAADNgLgGAAAAzYCDxAxb',
+    'Xl9dw1WJ5VOD7AiLRQiLEI1IBI1EkAhQUVLod+D//4nDuAEAAADNgIPEEOv+',
+    'AC9tbnQvZGlyMQAgT0sKACBGQUlMCgBLVEVTVDogAC9kZXYvaGRhMQAgIChw',
+    'YXMgZGUgL2Rldi9oZGExIDogdGVzdHMgZXh0MiBpZ25vcmVzKQoAICAocGFz',
+    'IGQnZXh0MiBzdXIgL2Rldi9oZGExIDogdGVzdHMgZXh0MiBpZ25vcmVzKQoA',
+    'ZXh0MgAvbW50AGV4dDIubW91bnQAIDwtIG1vdW50CgAvbW50L2hlbGxvLnR4',
+    'dABoZWxsbyBmcm9tIGV4dDIKAGV4dDIucmVhZF9zbWFsbAAvbW50L2JpZy5i',
+    'aW4AZXh0Mi5iaWdfb3BlbgBleHQyLmJpZ19yZWFkX3NlcQBleHQyLmJpZ19y',
+    'ZWFkX29mZgBleHQyLmJpZ19zdGF0AGV4dDIucmVhZGRpcl9jb3VudABmMS50',
+    'eHQAZjEwMC50eHQAZjEwMS50eHQAZXh0Mi5yZWFkZGlyX25hbWVzAC9tbnQv',
+    'ZGlyMS9mNTcudHh0AGZpbGUgNTcKAGV4dDIucmVhZF9pbl9kaXIAL21udC9m',
+    'YXN0bGluawBleHQyLnJlYWRsaW5rX2Zhc3QAL21udC9zbG93bGluawAvdGFy',
+    'Z2V0AGV4dDIucmVhZGxpbmtfc2xvdwBleHQyLmZvbGxvd19zeW1saW5rAC9t',
+    'bnQvaGFyZC50eHQAZXh0Mi5oYXJkbGlua19ubGluawBleHQyLmxzdGF0X3N5',
+    'bWxpbmsAL21udC9lbXB0eWRpcgBleHQyLnN0YXRfZGlyAC9tbnQvbmV4aXN0',
+    'ZQAvbW50L2hlbGxvLnR4dC94AGV4dDIuZW5vZW50AGV4dDIucmVhZF9kaXJf',
+    'ZWlzZGlyAC9tbnQvdwBleHQyLm1rZGlyAGV4dDIubWtkaXJfZXhpc3QAL21u',
+    'dC93L2EuZGF0AGV4dDIuY3JlYXRlAGV4dDIud3JpdGVfcGF0dGVybgBleHQy',
+    'LndyaXRlX3JlYWRiYWNrAGV4dDIud3JpdGVfc2l6ZQBFTkRNQVJLAGV4dDIu',
+    'YXBwZW5kAGV4dDIudHJ1bmNhdGVfc2hyaW5rAGV4dDIudHJ1bmNhdGVfc2l6',
+    'ZQBleHQyLmZ0cnVuY2F0ZV9leHRlbmQAZXh0Mi5leHRlbmRfemVyb3MAZXh0',
+    'Mi50cnVuY2F0ZV90YWlsX3plcm8AZXh0Mi5vdHJ1bmMAL21udC93L3NwYXJz',
+    'ZQBBAEIAQwBEAGV4dDIuc3BhcnNlX3dyaXRlAGV4dDIuc3BhcnNlX3NpemUA',
+    'ZXh0Mi5zcGFyc2VfcmVhZABleHQyLnNwYXJzZV9mcmVlAC9tbnQvdy9kAC9t',
+    'bnQvdy9kL2UAZXh0Mi5ta2Rpcl9zdWIAZXh0Mi5kaXJfZ3Jvd18zMDAAZXh0',
+    'Mi5kaXJfc2l6ZV9ibG9ja3MAZXh0Mi51bmxpbmtfaGFsZgBleHQyLmRpcl9y',
+    'ZXVzZV9zbG90cwBleHQyLnJtZGlyX25vdGVtcHR5AGV4dDIucm1kaXJfZmls',
+    'ZQBleHQyLnJtZGlyX29rAGV4dDIudW5saW5rX2RpcgBjb250ZW51LXIxAC9t',
+    'bnQvdy9yMQBjb250ZW51LXIyAC9tbnQvdy9yMgBleHQyLnJlbmFtZV9yZXBs',
+    'YWNlAGV4dDIucmVuYW1lX2NvbnRlbnQAL21udC93L3gAL21udC93L3kAL21u',
+    'dC93L3gvc291cwBkZWRhbnMAL21udC93L3gvc291cy9mAC9tbnQvdy95L3Nv',
+    'dXMyAGV4dDIucmVuYW1lX2Rpcl9tb3ZlAC9tbnQvdy95L3NvdXMyL2YAZXh0',
+    'Mi5yZW5hbWVfZGlyX2NvbnRlbnQALi4ALwBleHQyLnJlbmFtZV9kb3Rkb3QA',
+    'ZXh0Mi5yZW5hbWVfbmxpbmsAL21udC93L3ZpZGUAL21udC93L3ZpZGUvZgBl',
+    'eHQyLnJlbmFtZV9kaXJfb3Zlcl9lbXB0eQBleHQyLnJlbmFtZV9vdmVyX25s',
+    'aW5rAC9tbnQvdy95L3p6AGV4dDIucmVuYW1lX2ludG9fc2VsZgAvbW50L3cv',
+    'bmUAL21udC93L25lL2YAZXh0Mi5yZW5hbWVfb3Zlcl9ub3RlbXB0eQBleHQy',
+    'LnJlbmFtZV9maWxlX292ZXJfZGlyAGV4dDIucmVuYW1lX2Rpcl9vdmVyX2Zp',
+    'bGUAbGllbgAvbW50L3cvbDEAL21udC93L2wyAGV4dDIubGluawBleHQyLmxp',
+    'bmtfbmxpbmsAZXh0Mi51bmxpbmtfb25lX2xpbmsAZXh0Mi5saW5rX2V4aXN0',
+    'AC9tbnQvdy9kbABleHQyLmxpbmtfZGlyAC9tbnQvdy9vcGVuX3VubGluawBl',
+    'eHQyLnVubGlua19vcGVuAC9tbnQvdy9zMQBjaWJsZQBleHQyLnN5bWxpbmtf',
+    'ZmFzdABleHQyLnN5bWxpbmtfZmFzdF9yZWFkAC9tbnQvdy9zMgBleHQyLnN5',
+    'bWxpbmtfc2xvdwBleHQyLnN5bWxpbmtfc2xvd19yZWFkAHJlZWwAL21udC93',
+    'L3JlYWwAL21udC93L3MzAGV4dDIuc3ltbGlua19mb2xsb3cAZXh0Mi5zeW1s',
+    'aW5rX3VubGluawAvbW50L3cvZmYAZXh0Mi5ta25vZF9maWZvAC9tbnQvdy9j',
+    'YwBleHQyLm1rbm9kX2NocgAvbW50L3cvYmIAZXh0Mi5ta25vZF9ibGsAZXh0',
+    'Mi5ta25vZF9zdGF0AGV4dDIuY2htb2QAZXh0Mi5jaG1vZF9zdGF0AGV4dDIu',
+    'Y2hvd24AZXh0Mi5jaG93bl9zdGF0AGV4dDIudXRpbWVzAGV4dDIudXRpbWVz',
+    'X3N0YXQAZXh0Mi5ybWRpcl9lbXB0aWVkAGV4dDIucm1kaXJfdwBleHQyLnN0',
+    'YXRmc19yZXN0b3JlZAAvdG1wAGV4dDIubW91bnRfdHdpY2UAZXh0Mi51bW91',
+    'bnRfYnVzeQBwZXJzaXN0YW50CgAvbW50L3BlcnNpc3QudHh0AC9tbnQvcGRp',
+    'cgBkYW5zIHBkaXIKAC9tbnQvcGRpci9maWNoaWVyAC9tbnQvcGxpbmsAL21u',
+    'dC9wYmlnAGV4dDIudW1vdW50AGV4dDIucmVtb3VudF9ybwBleHQyLnBlcnNp',
+    'c3RfZmlsZQBleHQyLnBlcnNpc3RfZGlyAGV4dDIucGVyc2lzdF9iaWcAZXh0',
+    'Mi5wZXJzaXN0X2xpbmsAL21udC9ub3V2ZWF1AGV4dDIucm9fY3JlYXRlAGV4',
+    'dDIucm9fd3JpdGUAL21udC96egBleHQyLnJvX21rZGlyAGV4dDIucm9fdW5s',
+    'aW5rAC9tbnQvaDIAZXh0Mi5yb19yZW5hbWUAZXh0Mi5zdGF0ZnNfbWFnaWMA',
+    'ZXh0Mi51bW91bnRfcm8AZXh0Mi5tb3VudF9yd19hZ2FpbgBLVEVTVDogZXh0',
+    'MiBET05FCgAwMTIzNDU2Nzg5YWJjZGVmAC9tbnQvdy9kL3VuX25vbV9kZV9m',
+    'aWNoaWVyX2Fzc2V6X2xvbmdfbnVtZXJvXwAvbW50L3cvZC96AAAAAMqaOwAA',
+    'AAAAq5BBAAAAAEdDQzogKFVidW50dSAxMy4zLjAtNnVidW50dTJ+MjQuMDQu',
+    'MSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAEAPH/',
+    'DAAAALGcBAgOAAAAAgABABMAAAC/nAQIIAAAAAIAAQAaAAAA35wECCUAAAAC',
+    'AAEAIgAAAASdBAiJAAAAAgABACwAAACNnQQIYgAAAAIAAQA2AAAAoLoECAAg',
+    'AAABAAMAOwAAAO+dBAikAAAAAgABAE8AAACTngQIggAAAAIAAQBkAAAAFZ8E',
+    'CEIAAAACAAEAdgAAAFefBAgeAAAAAgABAHsAAAB1nwQIRAAAAAIAAQCBAAAA',
+    'BNsECAQAAAABAAMAiQAAAADbBAgEAAAAAQADAJEAAAC5nwQISQAAAAIAAQCc',
+    'AAAAoNoECGAAAAABAAMAoAAAAAKgBAgpAAAAEgABAKYAAAB2nAQIAAAAABAA',
+    'AQCtAAAAnZwECAAAAAAQAAEAvwAAAKScBAgAAAAAEAABALoAAACgugQIAAAA',
+    'ABAAAwChAAAAlIAECOIbAAASAAEAxgAAAJS6BAgAAAAAEAADAM0AAAAI2wQI',
+    'AAAAABAAAwAAZXh0MnRlc3QuYwBzdHJsZW4Ac3RyY21wAG1lbWNtcF8AZmls',
+    'bGNoZWNrAGZpbGx3cml0ZQB3YnVmAGhhc25hbWUuY29uc3Rwcm9wLjAAY291',
+    'bnRkaXIuY29uc3Rwcm9wLjAAc2x1cnAuY29uc3Rwcm9wLjAAcHV0cwBrdGVz',
+    'dABrdV9wYXNzAGt1X2ZhaWwAcHV0LmlzcmEuMABzYl8AY21haW4Aa3Vfc2M2',
+    'AF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRh',
+    'YgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1l',
+    'bnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'ABsAAAABAAAABgAAAJSABAiUAAAAlx8AAAAAAAAAAAAAAQAAAAAAAAAhAAAA',
+    'AQAAAAIAAAAsoAQILCAAAGgKAAAAAAAAAAAAAAQAAAAAAAAAKQAAAAgAAAAD',
+    'AAAAoLoECKAqAABoIAAAAAAAAAAAAAAgAAAAAAAAAC4AAAABAAAAMAAAAAAA',
+    'AACUKgAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAAxCoA',
+    'AJABAAAGAAAAEQAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAFQsAADSAAAA',
+    'AAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAAmLQAANwAAAAAAAAAA',
+    'AAAAAQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAA4IQECDQAAABsCAAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAi3BgAAtwYAAAUAAAAAEAAAAQAAALgG',
+    'AAC4lgQIuJYECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFUx0rkCAAAAuAUAAACJ5VdWU7u4hQQIg+TwgeygAAAA',
+    'iVQkGDHSx0QkFP/////NgIlEJAyFwHkRuMKFBAjoNwQAADHA6c0DAAC6AQAA',
+    'ALjYhQQI6EEEAACLXCQMjVQkFLg2AAAAuTBUBIDNgDHShcB1CYtUJBT30sHq',
+    'H7johQQI6BQEAAC6roUECI1EJByKCkJAiEj/hMl19YpEJBS/BQAAAMZEJCYA',
+    'MdKNXCQcuQIAAACDwDCIRCQlifjNgMHoH742AAAAicK48IUECOjIAwAAi1wk',
+    'DI1UJBiJ8LkxVARAzYAx0oXAjVwkHLj7hQQID5TC6KIDAACJ+LkCAAAAMdLN',
+    'gInCice4BoYECPfSweof6IQDAAAxwItcJAyNVCQ8iUQkQLkUVAAAiUQkYIlE',
+    'JGSJ8MdEJDwYAFAAzYC5E1QAAI1UJGCJ8In7zYAx0maDfCRgGHULMdJmg3wk',
+    'YlAPlMK4FYYECOgvAwAAi1wkDLgEAAAAuSGGBAi6BgAAAM2AuAMAAAC6PwAA',
+    'AI1MJGCJ+82AMdKFwIlEJBAPSdDGRBRgADHSg/gGdRO6IYYECInI6KUCAAAx',
+    '0oXAD5TCuCiGBAjo1AIAAItcJAy4AwAAALo/AAAAjUwkYM2AMdKFwIlEJBAP',
+    'SdDGRBRgADHSg/gHdRO6PIYECInI6F0CAAAx0oXAD5TCuESGBAiJ++iKAgAA',
+    'uAQAAAC5TYYECInCzYC4AwAAAItcJAy6PwAAAI1MJGDNgDHShcCJRCQQD0nQ',
+    'xkQUYAAx0oP4BXUTulKGBAiJyOgFAgAAMdKFwA+UwrhYhgQIvjYAAACJ++gt',
+    'AgAAjVQkPInwuQFUAADNgLkCVAAAg2QkSPWJ8M2AugEAAACLXCQMuAQAAAC5',
+    'wIUECM2AuAMAAACJ+41MJGDNgDHSiUQkEEh1CjHSgHwkYHgPlMK4bIYECI1c',
+    'JDzozwEAAItEJAy5AQAAADHSx0QkQAEAAACJRCQ8uKgAAADNgIXAfgUPv0Qk',
+    'QjHShcC+AQAAALh0hgQID5TCifvokAEAALgEAAAAuYOGBAiJ8s2Ai0QkDI1c',
+    'JDy6ZAAAAInxx0QkQAEAAACJRCQ8uKgAAADNgIXAfgUPv0QkQoPgAb4DAAAA',
+    'icK4hYYECOhDAQAAi1wkDInwugEAAACNTCRgzYC4BgAAAItcJAzNgLoKAAAA',
+    'ifCJ+82AMdKFwLiRhgQID5TC6AsBAAC4BgAAAM2AvgUAAAAx/41cJBy5AgAA',
+    'AInwifrNgMHoH7u4hQQIicK4nYYECOjaAAAAifCJ+rkCAAAAzYCJxoXAeQQx',
+    '0usjjVQkELg2AAAAuTBUBICJ882AhcB15jHSi0QkFDlEJBAPlMK4rIYECInz',
+    '6JYAAAC4BgAAAM2AMcCDPbiWBAgAD5XAjWX0W15fXcNVV1ZTi0QkFItcJBiL',
+    'TCQci1QkIIt0JCSLfCQoi2wkLM2AW15fXcO4rQAAAM2AMe2J4IPk8FDohAAA',
+    'AFWJ5VaJxlMx2w+2BB4PtgwahMB0BUM4yHTvWynIXl3DVYnBMdKJ5VOAPBEA',
+    'dANC6/e4BAAAALsBAAAAzYBbXcNVieVWica4poUECFOJ0+jN////ifDoxv//',
+    '/4XbuJ+FBAi6moUECA9Fwuiy////hdt0CP8FvJYECOsG/wW4lgQIW15dw1WJ',
+    '5VOD7AiLRQiLEI1IBI1EkAhQUVLoCPv//4nDuAEAAADNgIPEEOv+IE9LCgAg',
+    'RkFJTAoAS1RFU1Q6IAAvZGV2L3B0cy8AL2Rldi9wdG14ACAgKHBhcyBkZSAv',
+    'ZGV2L3B0bXgpCgBwdHkub3Blbl9tYXN0ZXIAcHR5LnB0bgBwdHkubG9ja2Vk',
+    'AHB0eS51bmxvY2sAcHR5Lm9wZW5fc2xhdmUAcHR5LndpbnNpemUAaGVsbG8K',
+    'AHB0eS5tYXN0ZXJfdG9fc2xhdmUAaGVsbG8NCgBwdHkuZWNobwBvdXQKAG91',
+    'dA0KAHB0eS5zbGF2ZV90b19tYXN0ZXIAcHR5LnJhdwBwdHkucG9sbF9lbXB0',
+    'eQB6AHB0eS5wb2xsX2luAHB0eS5odXBfZW9mAHB0eS5zbGF2ZV9nb25lAHB0',
+    'eS5yZW9wZW4AR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4x',
+    'KSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8LAAAA',
+    '7YQECCAAAAACAAEAEgAAAA2FBAggAAAAAgABABcAAAAthQQIRAAAAAIAAQAd',
+    'AAAAvJYECAQAAAABAAMAJQAAALiWBAgEAAAAAQADAC0AAABxhQQIKQAAABIA',
+    'AQAzAAAAsoQECAAAAAAQAAEAOgAAANmEBAgAAAAAEAABAEwAAADghAQIAAAA',
+    'ABAAAQBHAAAAuJYECAAAAAAQAAMALgAAAJSABAgeBAAAEgABAFMAAAC3lgQI',
+    'AAAAABAAAwBaAAAAwJYECAAAAAAQAAMAAHB0eXRlc3QuYwBzdHJjbXAAcHV0',
+    'cwBrdGVzdABrdV9wYXNzAGt1X2ZhaWwAY21haW4Aa3Vfc2M2AF9fcmVzdG9y',
+    'ZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3RydGFi',
+    'AC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAG',
+    'AAAAlIAECJQAAAAGBQAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAMgAAAJqF',
+    'BAiaBQAAHQEAAAAAAAAAAAAAAQAAAAEAAAApAAAACAAAAAMAAAC4lgQIuAYA',
+    'AAgAAAAAAAAAAAAAAAQAAAAAAAAALgAAAAEAAAAwAAAAAAAAALcGAAAtAAAA',
+    'AAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAADkBgAA8AAAAAYAAAAH',
+    'AAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAA1AcAAF8AAAAAAAAAAAAAAAEA',
+    'AAAAAAAAEQAAAAMAAAAAAAAAAAAAADMIAAA3AAAAAAAAAAAAAAABAAAAAAAA',
+    'AA==',
+    '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',
+    'AAAAicvNgDHSg/jquLqJBAgPlMLouAAAADHAgz3QmQQIAA+VwI1l9FteX13D',
+    'VVdWU4tEJBSLXCQYi0wkHItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADN',
+    'gDHtieCD5PBQ6K0AAABVuUECAACJ5Ve/BQAAAFaJ1rqkAQAAU4nDifjNgDHS',
+    'iceFwHgfgDwWAHQDQuv3uAQAAACJ+4nxzYCJwbgGAAAAzYCJyFteX13DVYnB',
+    'MdKJ5VOAPBEAdANC6/e4BAAAALsBAAAAzYBbXcNVieVWica4nocECFOJ0+jN',
+    '////ifDoxv///4XbuJeHBAi6kocECA9Fwuiy////hdt0CP8F1JkECOsG/wXQ',
+    'mQQIW15dw1WJ5VOD7AiLRQiLEI1IBI1EkAhQUVLoEPn//4nDuAEAAADNgIPE',
+    'EOv+IE9LCgAgRkFJTAoAS1RFU1Q6IAAvdG1wAC90bXAvYjEAL3RtcC9iMgAv',
+    'dG1wL20xAC90bXAvbTIAWAAvdG1wL2IxL2YAbm9uZQBtb3VudC5iaW5kAC90',
+    'bXAvYjIvZgBtb3VudC5iaW5kX3JlYWQAWQAvdG1wL2IyL2cAL3RtcC9iMS9n',
+    'AG1vdW50LmJpbmRfd3JpdGUAbW91bnQuYmluZF91bmxpbmtfYWxpYXMAL3Rt',
+    'cC9iMi9kAC90bXAvYjEvZABtb3VudC5iaW5kX21rZGlyAC4uAC8AbW91bnQu',
+    'YmluZF9kb3Rkb3QAbW91bnQuYmluZF9idXN5AG1vdW50LmJpbmRfdW1vdW50',
+    'AG1vdW50LnRtcGZzAC90bXAvbTEvYQBtb3VudC53cml0ZV9ydwBtb3VudC5y',
+    'ZW1vdW50X3JvAC90bXAvbTEvYgBtb3VudC5yb19jcmVhdGUAbW91bnQucmVt',
+    'b3VudF9ydwBtb3VudC5tb3ZlAC90bXAvbTIvYQBtb3VudC5tb3ZlX2NvbnRl',
+    'bnQAbW91bnQudW1vdW50X2ZsYWcAL3RtcC9uci9vbGQAL3RtcC9uci9iaW4A',
+    'TgAvdG1wL25yL2Jpbi94AC9vbGQvYmluL2hlbGxvAC9vbGQvc2Jpbi9pbml0',
+    'AC9vbGQvdG1wL25yAC9vbGQvdG1wL2JhY2sAL3RtcC9iYWNrL2Jpbi94AG1v',
+    'dW50LnBpdm90X3Jvb3QAbW91bnQucGl2b3RfZWludmFsAEdDQzogKFVidW50',
+    'dSAxMy4zLjAtNnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8NAAAAvIYECEkAAAACAAEAEQAAAAWH',
+    'BAggAAAAAgABABYAAAAlhwQIRAAAAAIAAQAcAAAA1JkECAQAAAABAAMAJAAA',
+    'ANCZBAgEAAAAAQADACwAAABphwQIKQAAABIAAQAyAAAAgYYECAAAAAAQAAEA',
+    'OQAAAKiGBAgAAAAAEAABAEsAAACvhgQIAAAAABAAAQBGAAAA0JkECAAAAAAQ',
+    'AAMALQAAAJSABAjtBQAAEgABAFIAAADNmQQIAAAAABAAAwBZAAAA2JkECAAA',
+    'AAAQAAMAAG1vdW50dGVzdC5jAHB1dABwdXRzAGt0ZXN0AGt1X3Bhc3MAa3Vf',
+    'ZmFpbABjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9l',
+    'ZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5y',
+    'b2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAECJQAAAD+BgAAAAAA',
+    'AAAAAAABAAAAAAAAACEAAAABAAAAMgAAAJKHBAiSBwAAOwIAAAAAAAAAAAAA',
+    'AQAAAAEAAAApAAAACAAAAAMAAADQmQQI0AkAAAgAAAAAAAAAAAAAAAQAAAAA',
+    'AAAALgAAAAEAAAAwAAAAAAAAAM0JAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEA',
+    'AAACAAAAAAAAAAAAAAD8CQAA8AAAAAYAAAAHAAAABAAAABAAAAAJAAAAAwAA',
+    'AAAAAAAAAAAA7AoAAF4AAAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAA',
+    'AAAAAEoLAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAd5gECDQAAADQIAAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAioHgAAqB4AAAUAAAAAEAAAAQAAAKgO',
+    'AACorgQIqK4ECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAI1MJASD5PD/cfxVieVXVlNRgewAEAAAgwwkAIHsABAA',
+    'AIMMJACB7KgCAAC5AQAAALhoAQAAMdKJy421YN3//82AMdKFwLjOmQQID5TC',
+    '6AMYAACLnWDd//+6AwAAALgEAAAAud+ZBAjNgInQi51k3f//ugoAAACNjeje',
+    '///NgDHSg/gDdRy635kECLkDAAAAjYXo3v//6HYXAAAx0oXAD5TCuOOZBAjo',
+    'qhcAAIudZN3//7oDAAAAuAQAAAC58JkECM2AidCLnWDd//+6CgAAAI2N6N7/',
+    '/82AMdKD+AN1HLrwmQQIuQMAAACNheje///oHRcAADHShcAPlMK49JkECI2d',
+    '6N///+hLFwAAi4Vg3f//uQEAAAAx0seF7N///wEAAACJhejf//+4qAAAAM2A',
+    'hcB+Bw+/he7f//8x0oXAvgEAAAC4BpoECA+UwugGFwAAi51k3f//uAQAAACJ',
+    '8rkbmgQIzYCLhWDd//+Nnejf//+6ZAAAAInxx4Xs3///AQAAAImF6N///7io',
+    'AAAAzYCFwH4HD7+F7t///4PgAb8DAAAAicK4HZoECOipFgAAi51g3f//ifiN',
+    'jeje//+6AQAAAM2AuHUBAACLnWDd//+J0c2AvgoAAACLnWTd//+J+I2N6N7/',
+    '/4nyzYAx0oXAuC+aBAgPlMLoXRYAAIudZN3//7gEAAAAufKZBAi6AQAAAM2A',
+    'i51g3f//ifiNjeje//+J8s2AMdJIuEGaBAgPlMLoJBYAAIudYN3//7gGAAAA',
+    'zYCLnWTd//+J+I2N6N7//4nyzYAx0oXAuFSaBAi7DQAAAA+Uwr4IAAAA6OoV',
+    'AAAxwI2N6N///zHSiYX43///iYX03///uK4AAADHhejf//8BAAAAx4Xs3///',
+    'BAAABMeF8N///3CYBAjNgLgEAAAAuWOaBAi6AQAAAIudZN3//82AMdKD+OC4',
+    'ZZoECA+UwuiGFQAAi51k3f//uAYAAADNgLhoAQAAuQIAAAC7AQAAADHSjbVg',
+    '3f//zYC4BAAAAIudYN3//7lwmgQIifrNgLgEAAAAuXSaBAi6BQAAAIudYN3/',
+    '/82AumQAAACLnWTd//+J+I2N6N7//82AMcmD+AN1FoudZN3//42N6N7//82A',
+    'McmD+AUPlMGJyrh6mgQI6PcUAACLnWTd//+4NwAAALkEAAAAugAIAADNgL4K',
+    'AAAAi51k3f//uAMAAACNjeje//+J8s2AMdKD+PW4kJoECA+Uwui0FAAAugYA',
+    'AACLnWDd//+J0M2Ai51k3f//idDNgLuimgQIifDNgLkBAAAAMdK4ZwEAAInL',
+    'zYC6opoECImFUN3//42FnN3//+i9FAAAi51Q3f//uGkBAAC6DgAAAI2NnN3/',
+    '/82AMdKFwLiumgQIu6KaBAgPlMLoPhQAAI2N6N///7jDAAAAzYAx0oXAdRWL',
+    'hfjf//8x0iUA8AAAPQDAAAAPlMK4vZoECL9nAQAAMfa7AQAAAOgAFAAAifiJ',
+    '2YnyzYC6DgAAAInDjY2c3f//uGkBAADNgInBuAYAAADNgDHSg/meuMyaBAgP',
+    'lMLoyRMAAIudUN3//7hrAQAAuQUAAADNgDHShcC7AQAAALjhmgQID5TC6KET',
+    'AACJvVTd//+J2YnyuGcBAADNgLoOAAAAiYVU3f//jY2c3f//i51U3f//uGoB',
+    'AADNgDHShcC48poECA+UwuhhEwAAi51Q3f//ifGJ8rhsAQAAzYCJwomFTN3/',
+    '/7gEmwQI99LB6h/oORMAALgEAAAAi51U3f//uRWbBAiJws2AuAMAAACLnUzd',
+    '//+6CgAAAI2N6N7//82AMdKD+AR1HLoVmwQIuQQAAACNheje///orBIAADHS',
+    'hcAPlMK4GpsECOjgEgAAuAQAAACLnUzd//+5KJsECInCzYC4AwAAAIudVN3/',
+    '/7oKAAAAjY3o3v//zYAx0oP4BHUcuiibBAi5BAAAAI2F6N7//+hTEgAAMdKF',
+    'wA+UwrgtmwQI6IcSAACNhQre//+6bgAAAMeFXN3//24AAADosRIAAIudUN3/',
+    '/7hvAQAAjY0K3v//jZVc3f//zYCJwoXAdSNmg70K3v//AXUbuqKaBAiNhQze',
+    '///ozxEAADHShcAPlMLrAjHSuDubBAjoHxIAAI2FCt7//7puAAAAx4Vc3f//',
+    'bgAAAOhJEgAAi51U3f//uHABAACNjQre//+NlVzd///NgDHShcB1F7qimgQI',
+    'jYUM3v//6HERAAAx0oXAD5TCuFGbBAiNtejf//+NvXje///ouREAADHAi51M',
+    '3f//x4V43v//DAAAAImF6N///7kBAAAAuhEAAACJhezf//+JhfDf//+4bQEA',
+    'AM2AMdKFwHUVi5Xo3///uBQAAADNgDnCD5TCD7bSuGebBAiNtXje//+Nvejf',
+    '///oUxEAADHAi51U3f//x4Xo3///BAAAAImFeN7//7kBAAAAuG0BAAC6AwAA',
+    'AM2AMdKFwHUMMdKDvXje//8BD5TCuHqbBAjoDhEAAIudUN3//7g3AAAAuQQA',
+    'AAC6AAgAAM2AMcmLnVDd//+4bAEAAInKic7NgDHSg/j1vgYAAAC4j5sECA+U',
+    'wujNEAAAi51M3f//ifDNgLgDAAAAi51U3f//ugoAAACNjeje///NgDHShcC4',
+    'o5sECA+UwuiaEAAAi51U3f//ifDNgIudUN3//4nwzYC7AQAAALhnAQAAMdKJ',
+    '2c2Av2oBAACJw7oOAAAAifiNjZzd///NgInBifDNgDHSg/mRuLibBAi7opoE',
+    'CA+UwuhDEAAAuAoAAADNgLsBAAAAuGcBAAAx0onZzYC6DgAAAInDjY2c3f//',
+    'ifjNgInHifDNgDHSg//+uMqbBAi7AQAAAA+Uwo216N///+j4DwAAifC6bgAA',
+    'AOgwEAAAxoXs3///QonZMdLHhejf//8BAABBuGcBAADNgImFVN3//7hnAQAA',
+    'zYC6BQAAAImFUN3//4udVN3//4nxuGkBAADNgDHShcB1GbhrAQAAi51U3f//',
+    'uQEAAADNgDHShcAPlMK42psECOiADwAAi51Q3f//uGoBAACJ8boFAAAAzYAx',
+    '0oXAuO2bBAgPlMLoWw8AADHJi51U3f//uGwBAACJyonOzYC5A5wECInHugIA',
+    'AACLnVDd//+4BAAAAM2AvgoAAAC4AwAAAIn7jY3o3v//ifLNgPfTidqJ+8Hq',
+    'H4P4Ag+UwCHCuAacBAjo/g4AALoGAAAAidDNgIudUN3//4nQzYCLnVTd//+J',
+    '0M2AuxmcBAiJ8M2AuyacBAiJ8M2AuhmcBAiNhXje//+/ZwEAAOgLDwAAidqN',
+    'hejf//+7AQAAAOj5DgAAifi5AgAAADHSzYCJxon4zYC6EAAAAInHifO4aQEA',
+    'AI2NeN7//82AuGkBAACJ+42N6N///82AUI2FeN7//2oQUGoAagVoM5wECFdo',
+    'cQEAAOi0DQAAg8QgicOD+AUPhJYAAAC4OZwECOgcDgAAxoWZ3f//AInYhdt5',
+    'BPfY6xV1E8aFmN3//zDHhVTd//8gAAAA60rHhVTd//8hAAAAhcB0JLkKAAAA',
+    'MdL/jVTd///38YuNVN3//4qSl54ECIiUDXjd///r2IXbeRT/jVTd//+LhVTd',
+    '///GhAV43f//LYuFVN3//42EBXjd///omg0AALi9mQQI6JANAAAx0oP7BbhG',
+    'nAQID5TCMdvonA0AAI2FCt7//7puAAAAx4Vc3f//bgAAAOjGDQAAUI2FXN3/',
+    '/1CNhQre//9QjYXo3v//akBqZFBWaHMBAADovQwAAIPEIIP4BXUwuQUAAAC6',
+    'M5wECI2F6N7//+j7DAAAhcB1F7omnAQIjYUM3v//MdvoxQwAAIXAD5TDidq4',
+    'WZwECIn76BcNAAC4agEAALoQAAAAjY143v//zYCFwHQEMdLrOLgEAAAAue6Z',
+    'BAi6AQAAAM2ASHXojYXo3v//U2oAagBqQGoKUFZocwEAAOguDAAAMdKDxCBI',
+    'D5TCuG6cBAiJ8+i5DAAAuAYAAADNgLgGAAAAifvNgLoKAAAAuxmcBAiJ0M2A',
+    'uyacBAiJ0M2AuQEAAAC4aAEAADHSicuNtWDd///NgLgqAAAAjZ1o3f//zYC6',
+    'HAAAAI2FeN7//4216N///8eFeN3//4KcBAjHhXzd//8BAAAAjb143f//6IMM',
+    'AACJ8LogAAAAib2A3v//x4WE3v//AQAAAOhnDAAAi4Vo3f//MdLHhejf//8Q',
+    'AAAAx4Xs3///AQAAAIudYN3//42NeN7//4mF9N///7hyAQAAx4Xw3///AQAA',
+    'AIm1iN7//8eFjN7//xAAAADNgDHSSLiEnAQID5TC6MQLAACLnWjd//+4BgAA',
+    'AM2AjYXo3v//uhwAAADHhXzd//8KAAAAiYV43f//jYV43v//6NULAACJ8Log',
+    'AAAAib2A3v//x4WE3v//AQAAAOi5CwAAibWI3v//uHQBAAAx0seFjN7//yAA',
+    'AACLnWTd//+NjXje///NgEiLtfTf//91HYO97N///wF1FIO98N///wEPlMAx',
+    '0oP+Ag+fwiHCuJKcBAjoIAsAALgEAAAAi51s3f//uaCcBAiJws2AuAMAAAC6',
+    'CgAAAInzjY3o3v//zYAx0oP4BHUcuqCcBAi5BAAAAI2F6N7//+iXCgAAMdKF',
+    'wA+UwrilnAQIvwYAAADoxgoAAIudYN3//4n4zYCLnWTd//+J+M2Ai51s3f//',
+    'ifjNgIn4ifPNgLsBAAAAMdK4aAEAAInZjbVg3f//zYC4AgAAAM2AicaJ+IX2',
+    'dT6LnWDd///NgL8DAAAAi51k3f//ugoAAACNjeje//+J+M2AiceLnWTd//+4',
+    'BAAAAIn6zYC4AQAAAInzzYDr/oudZN3//82AMcmNnejf//+4ogAAAMeF7N//',
+    '/4Dw+gKJjejf//+J0c2AuAQAAACLnWDd//+5t5wECInCzYC4AwAAAIudYN3/',
+    '/7oKAAAAjY3o3v//zYAx0oP4BHUcurecBAi5BAAAAI2F6N7//+iJCQAAMdKF',
+    'wA+Uwri8nAQIifPouwkAAI2N6N///7gHAAAAMdLNgLgGAAAAi51g3f//zYC7',
+    'AgAAALhnAQAAidnNgInGuGcBAADNgLqgDwAAiYVU3f//v2kBAACJ842FaN3/',
+    '/+joCQAAifiNjWjd//+6EAAAAM2AMdKFwLsCAAAAuM+cBAgPlMLoRgkAALhn',
+    'AQAAidkx0s2AuhAAAACJw42NaN3//4n4zYCJx7gGAAAAzYAx0oP/nrjdnAQI',
+    'D5TC6A8JAABQjYVo3f//ahBQagBqBWjxnAQI/7VU3f//aHEBAADoTAgAAIPE',
+    'IDHSg/gFuPecBAgPlMLo1wgAAI2FeN3//7oQAAAAx4Vc3f//EAAAAOgBCQAA',
+    'UI2FXN3//1CNhXjd//9QjYXo3v//akBqZFBWaHMBAADo+AcAAIPEIDHSg/gF',
+    'dUS68ZwECLkFAAAAjYXo3v//6DQIAACJwoXAdSdmg7143f//AnUfgb183f//',
+    'fwAAAXUTZouVet3//4byD7/Sweof6wIx0rgHnQQI6EAIAABQjYV43f//ahBQ',
+    'agBqBGgBmgQIVmhxAQAA6IIHAACDxCAx0oP4BHUrUI2F6N7//2oAagBqQGoK',
+    'UP+1VN3//2hzAQAA6FgHAAAx0oPEIIP4BA+UwrgZnQQI6OMHAACLnVTd//+4',
+    'agEAALoQAAAAjY1o3f//zYCFwHQEMdLrPoudVN3//7gEAAAAuTmbBAi6AQAA',
+    'AM2ASHXiUI2F6N7//2oAagBqQGoKUFZocwEAAOjuBgAAMdKDxCBID5TCjZ3o',
+    '3///uCidBAjodQcAALo1AAAAidjo5gcAAMeF7N///wgICAhXahBTagBqAWhj',
+    'mgQIVmhxAQAA6KcGAACDxCAx0oP4m7g7nQQID5TC6DIHAACJtejf//+4qAAA',
+    'ADHSx4Xs3///AQAAALkBAAAAzYCFwH4HD7+F7t///zHShcC4TJ0ECInzD5TC',
+    '6PYGAAC6BgAAAInQzYCLnVTd//+J0M2AuGcBAAC7AgAAALkBAAAAMdLNgLqz',
+    'FQAAiYVU3f//vwQAAACNhWjd///oMgcAAI216N///4udVN3//8eF6N///wEA',
+    'AAC4bgEAALkBAAAAugIAAADNgL4QAAAAi51U3f//uGkBAACNjWjd//+J8s2A',
+    'MdKFwLhanQQID5TC6GMGAACLnVTd//+4awEAAIn5zYAx0oXAuGidBAi7AgAA',
+    'AA+Uwug+BgAAuGcBAAC5AQAAADHSzYCJhVDd//+NjWjd//+J8oudUN3//7hq',
+    'AQAAzYAx0oXAuHidBAgPlMIx9ugCBgAAi51U3f//uGwBAADHhVzd//8QAAAA',
+    'jY143f//jZVc3f//zYAx0omFTN3//4XAeBlmg7143f//AnUPMdKBvXzd//9/',
+    'AAABD5TCuImdBAjosAUAAIudUN3//7oDAAAAuAQAAAC5mZ0ECM2AidCLnUzd',
+    '//+6CgAAAI2N6N7//82AMdKD+AN1HLqZnQQIuQMAAACNheje///oIwUAADHS',
+    'hcAPlMK4nZ0ECOhXBQAAjYV43f//uhAAAADHhVzd//8QAAAA6IEFAACLnVDd',
+    '//+4cAEAAI2NeN3//42VXN3//82AMdKFwHUOMdJmgb163f//FbMPlMK4q50E',
+    'COgGBQAAjYV43f//uhAAAADHhVzd//8QAAAA6DAFAACLnUzd//+4bwEAAI2N',
+    'eN3//42VXN3//82AMdKFwHUOMdJmgb163f//FbMPlMK4wJ0ECL8CAAAAu2cB',
+    'AADoqwQAAInYuQEAAAAx0on7zYC6tBUAAInDjYXo3///6AkFAAC5agEAALoQ',
+    'AAAAiciNjejf///NgL4GAAAAicGJ8M2AMdKD+ZG41Z0ECA+UwuhbBAAAib1I',
+    '3f//uAIAAADNgInCiYVI3f//ifCF0nVwi51Q3f//zYCJ8IudVN3//82AsQOJ',
+    '0A+vwYiEFejf//9CgfoAEAAAdeu+MgAAAL8EAAAAi51M3f//ifiNjejf///N',
+    'gD0AEAAAdAu4AQAAAInDzYDr/k5127gGAAAAi51M3f//zYC4AQAAAInzzYDr',
+    '/oudTN3//82Ax4VM3f//AQAAADH2vwMAAACLnVDd//+6ACAAAI2N6N///4n4',
+    'zYCJx4XAfjQxybsAEAAAjQQOmff7sAMPr8I4hA3o3///uAAAAAAPRIVM3f//',
+    'QYmFTN3//zn5ddcBzuusi4VM3f//MdKB/gAgAwAPlMIhwrjmnQQI6EsDAAC4',
+    'BwAAADHSi51I3f//jY3o3///zYC6BgAAAIudUN3//4nQzYCJ0IudVN3//82A',
+    'uhAAAACNhXje///oUQMAAMaFeN7//wgxwMeFfN7//xI0AAGKkPSdBAiIlAWA',
+    '3v//QIP4CHXtjZV43v//jZ2I3v//McAPtgoPtnIBg8ICweEICfEByDnTdeuJ',
+    'wsHqEHQHD7fAAdDr8jX//wAAvmcBAAC7AgAAALkDAAAAhuC6AQAAAGaJhXre',
+    '//+J8M2AicKJxo296N///7j9nQQI99LB6h/odwIAADHSjYVo3f//6OcCAACN',
+    'hWjd//9RahBQjYV43v//agBqEFBWaHEBAADoqgEAAIPEIDHSg/gQuBCeBAgP',
+    'lMLoNQIAAI2FXN3//8eFXN3//xAAAABTUI2FeN3//1BqQGpAV1ZocwEAAOhs',
+    'AQAAg8QgMdKD+CR1PIC96N///0V1M4C98d///wF1KoC9/N///wB1IYC9AOD/',
+    '/xJ1GIC9AeD//zR1DzHSgb183f//fwAAAQ+UwrgjngQIifPougEAALgGAAAA',
+    'zYC5AgAAAL5nAQAAugEAAACJ8InLzYCJwonGuDeeBAj30sHqH+iLAQAAUI2F',
+    'aN3//2oQUI2FeN7//2oAahBQVmhxAQAA6MsAAACDxCAx0oP4ELhMngQID5TC',
+    '6FYBAABSagBqAGpAakBXVmhzAQAA6KEAAACDxCAx0oP4EHUVgL3o3///AHUM',
+    'MdKAvezf//8SD5TCuGGeBAiJ8+gWAQAAuAYAAADNgDH2uGcBAAC7CgAAALkB',
+    'AAAAifLNgDHSg/ifuHeeBAiJ8w+UwujmAAAAuG8BAACNjQre//+NlVzd///N',
+    'gIP4qA+UwoP49w+UwAnCuImeBAgPttLouAAAADHAgz2orgQIAA+VwI1l8Flb',
+    'Xl9djWH8w1VXVlOLRCQUi1wkGItMJByLVCQgi3QkJIt8JCiLbCQszYBbXl9d',
+    'w7itAAAAzYAx7Yngg+TwUOgNAQAAVYnlVonGUzHbD7YEHg+2DBqEwHQFQzjI',
+    'dO9bKcheXcNVAcGJ5VaJ1lOJww+2Aw+2FjjQdAQp0OsIQ0Y5y3XsMcBbXl3D',
+    'VYnBMdKJ5VOAPBEAdANC6/e4BAAAALsBAAAAzYBbXcNVieVWica4xpkECFOJ',
+    '0+jN////ifDoxv///4XbuL+ZBAi6upkECA9Fwuiy////hdt0CP8FrK4ECOsG',
+    '/wWorgQIW15dwwHCicFAxgEAOdB19sNVieVWida6bgAAAFOJw+jg////ZscD',
+    'AQAxwIoUBoTSdAeIVAMCQOvyW15dw1WJ5VaJ1roQAAAAU2bBxgiJw+iw////',
+    'ZscDAgBmiXMCx0MEfwAAAVteXcNVieVTg+wIi0UIixCNSASNRJAIUFFS6Ojm',
+    '//+Jw7gBAAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtURVNUOiAAc29jay5wYWly',
+    'X3N0cmVhbQBhYmMAc29jay5wYWlyX3J3AHh5egBzb2NrLnBhaXJfcndfYmFj',
+    'awBzb2NrLnBhaXJfcG9sbF9lbXB0eQBxAHNvY2sucGFpcl9wb2xsX2luAHNv',
+    'Y2suc2h1dGRvd25fZW9mAHNvY2suc2h1dGRvd25faGFsZgBzb2NrLmNsb3Nl',
+    'X2VvZgB4AHNvY2suZXBpcGUAb25lAHRocmVlAHNvY2suZGdyYW1fYm91bmRh',
+    'cmllcwBzb2NrLmRncmFtX2VhZ2FpbgAvdG1wL3Muc29jawBzb2NrLnVuaXhf',
+    'YmluZABzb2NrLnVuaXhfbm9kZQBzb2NrLnVuaXhfYmluZF9pbnVzZQBzb2Nr',
+    'LnVuaXhfbGlzdGVuAHNvY2sudW5peF9jb25uZWN0AHNvY2sudW5peF9hY2Nl',
+    'cHQAcGluZwBzb2NrLnVuaXhfYzJzAHBvbmcAc29jay51bml4X3MyYwBzb2Nr',
+    'LnVuaXhfZ2V0c29ja25hbWUAc29jay51bml4X2dldHBlZXJuYW1lAHNvY2su',
+    'dW5peF9wZWVyY3JlZABzb2NrLmdldHNvY2tvcHRfdHlwZQBzb2NrLnVuaXhf',
+    'bmJfYWNjZXB0AHNvY2sudW5peF9wZWVyX2Nsb3NlAHNvY2sudW5peF9yZWZ1',
+    'c2VkAHNvY2sudW5peF9ub2VudABzb2NrLmFic3RyYWN0X2JpbmQAc29jay5h',
+    'YnN0cmFjdF9jb25uZWN0AGFiAHNvY2suYWJzdHJhY3RfZGF0YQAvdG1wL2Qx',
+    'LnNvY2sAL3RtcC9kMi5zb2NrAGhlbGxvACAgc2VuZHRvIHJjPQBzb2NrLnVk',
+    'Z3JhbV9zZW5kdG8Ac29jay51ZGdyYW1fcmVjdmZyb20Ac29jay51ZGdyYW1f',
+    'Y29ubmVjdABGAHNvY2suc2NtX3NlbmQAc29jay5zY21fcmVjdgB0aHJ1AHNv',
+    'Y2suc2NtX2ZkX3dvcmtzAGVjaG8Ac29jay5mb3JrX2Jsb2NraW5nAHNvY2su',
+    'dWRwX2JpbmQAc29jay51ZHBfYmluZF9pbnVzZQBkZ3JhbQBzb2NrLnVkcF9z',
+    'ZW5kdG8Ac29jay51ZHBfcmVjdmZyb20Ac29jay51ZHBfcmVwbHkAc29jay51',
+    'ZHBfY29ubmVjdGVkAHNvY2sudWRwX3VucmVhY2gAc29jay51ZHBfcG9sbABz',
+    'b2NrLnRjcF9iaW5kAHNvY2sudGNwX2xpc3RlbgBzb2NrLnRjcF9jb25uZWN0',
+    'AHNvY2sudGNwX2FjY2VwdABHRVQAc29jay50Y3BfZGF0YQBzb2NrLnRjcF9n',
+    'ZXRwZWVybmFtZQBzb2NrLnRjcF9nZXRzb2NrbmFtZQBzb2NrLnRjcF9yZWZ1',
+    'c2VkAHNvY2sudGNwX2J1bGsAcGluZ2RhdGEAc29jay5pY21wX3Jhd19vcGVu',
+    'AHNvY2suaWNtcF9yYXdfc2VuZABzb2NrLmljbXBfcmF3X3JlcGx5AHNvY2su',
+    'aWNtcF9kZ3JhbV9vcGVuAHNvY2suaWNtcF9kZ3JhbV9zZW5kAHNvY2suaWNt',
+    'cF9kZ3JhbV9yZXBseQBzb2NrLmVhZm5vc3VwcG9ydABzb2NrLmVub3Rzb2Nr',
+    'ADAxMjM0NTY3ODlhYmNkZWYAR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1',
+    'Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAA',
+    'AAAAAAQA8f8MAAAAhJgECCAAAAACAAEAEwAAAKSYBAglAAAAAgABABsAAADJ',
+    'mAQIIAAAAAIAAQAgAAAA6ZgECEQAAAACAAEAJgAAAKyuBAgEAAAAAQADAC4A',
+    'AACorgQIBAAAAAEAAwA2AAAALZkECA0AAAACAAEAUAAAADqZBAgsAAAAAgAB',
+    'AFYAAABmmQQIKwAAAAIAAQBcAAAAkZkECCkAAAASAAEAYgAAAEmYBAgAAAAA',
+    'EAABAGkAAABwmAQIAAAAABAAAQB7AAAAd5gECAAAAAAQAAEAdgAAAKiuBAgA',
+    'AAAAEAADAF0AAACUgAQItRcAABIAAQCCAAAAqK4ECAAAAAAQAAMAiQAAALCu',
+    'BAgAAAAAEAADAABzb2NrdGVzdC5jAHN0cmNtcABtZW1jbXBfAHB1dHMAa3Rl',
+    'c3QAa3VfcGFzcwBrdV9mYWlsAG1lbXNldC5jb25zdHByb3AuMC5pc3JhLjAA',
+    'bWtzdW4AbWtzaW4AY21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABfX2Jzc19z',
+    'dGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAu',
+    'dGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiUAAAA',
+    'JhkAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAADIAAAC6mQQIuhkAAO4EAAAA',
+    'AAAAAAAAAAEAAAABAAAAKQAAAAgAAAADAAAAqK4ECKgeAAAIAAAAAAAAAAAA',
+    'AAAEAAAAAAAAAC4AAAABAAAAMAAAAAAAAACoHgAALQAAAAAAAAAAAAAAAQAA',
+    'AAEAAAABAAAAAgAAAAAAAAAAAAAA2B4AADABAAAGAAAACwAAAAQAAAAQAAAA',
+    'CQAAAAMAAAAAAAAAAAAAAAggAACOAAAAAAAAAAAAAAABAAAAAAAAABEAAAAD',
+    'AAAAAAAAAAAAAACWIAAANwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAToQECDQAAAAICAAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAhEBgAARAYAAAUAAAAAEAAAAQAAAEQG',
+    'AABElgQIRJYECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAI1MJASD5PD/cfxVieVXVlNRg+w46BIEAACJRcRWagBQ',
+    'agFqA2gAIAAAagBowAAAAOhXAwAAg8QgMdKJxgUAEAAAPQAQAAC4ZoUECA+X',
+    'wuiUAwAAigYx0jxBdQ2Khv8fAAAx0jxBD5TCuG+FBAjodQMAAMZGCkKLXcQx',
+    '0rgTAAAAuQoAAADNgLgDAAAAi13EugEAAACNTdjNgDHSSHUJMdKAfdhCD5TC',
+    'uICFBAjoNgMAAItdxLgTAAAAMdK5ZAAAAM2AvwQAAACLXcS5kYUECLoBAAAA',
+    'ifjNgIpGZDHSifM8Q7iThQQID5TC6PkCAAC4kAAAALkAIAAAifrNgDHShcC4',
+    'pYUECA+UwujaAgAAuQIAAACJyM2AiceFwHU/uAUAAAC7XIUECIn6zYBTiftq',
+    'AFBqAWoDaAAgAABqAGjAAAAA6EcCAADGgIgTAABExgBauAEAAADNgIPEIOv+',
+    'jU3UuAcAAACJ+zHSzYCKhogTAAA8RHUJigYx0jxaD5TCuK+FBAjoYQIAAItd',
+    'xLgTAAAAMdK5iBMAAM2AuAMAAACLXcS6AQAAAI1N2M2AMdJIdQkx0oB92EQP',
+    'lMK4zIUECInz6CQCAAC4WwAAALkAIAAAzYC+BgAAAItdxInwzYC/BQAAADHJ',
+    'u1yFBAiJ+InKzYC5CgAAAInDuBMAAADNgLgDAAAAjU3YugEAAADNgDHSgH3Y',
+    'QrjphQQID5TC6MoBAACJ8M2AuQIAAACJfcS4BQAAADHSu1yFBAjNgIlFxFFq',
+    'AFBqAmoDaAAQAABqAGjAAAAA6DkBAACLXcS5FAAAADHSxkAUUInHuBMAAADN',
+    'gLgDAAAAi13EjU3YugEAAADNgDHSg8QggH3YQXUKikcUMdI8UA+UwrgChgQI',
+    'vlsAAACJ++hFAQAAifC5ABAAAM2AUGoA/3XEagFqAWgAEAAAagBowAAAAOjG',
+    'AAAAi13EuR4AAAAx0onHuBMAAADNgLgEAAAAi13EuRqGBAi6AQAAAM2Aikce',
+    'g8QgMdKJ+zxSuByGBAgPlMLo4QAAAInwuQAQAADNgL4GAAAAi13EifDNgDHJ',
+    'uAUAAAC7XIUECInKzYBSicdqAIn7UGoBagNoABAAAGoAaMAAAADoRAAAAIPE',
+    'IDHSBf8PAAA9/g8AALg0hgQID5bC6IMAAACJ8M2AuAoAAAC7XIUECM2AMcCD',
+    'PUSWBAgAD5XAjWXwWVteX12NYfzDVVdWU4tEJBSLXCQYi0wkHItUJCCLdCQk',
+    'i3wkKItsJCzNgFteX13DuK0AAADNgDHtieCD5PBQ6MQAAABVicEx0onlU4A8',
+    'EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJxrhUhQQIU4nT6M3///+J8OjG',
+    '////hdu4TYUECLpIhQQID0XC6LL///+F23QI/wVIlgQI6wb/BUSWBAhbXl3D',
+    'VYnlV1ZTgewAEAAAgwwkAL4FAAAAu1yFBAi5QgIAALqkAQAAifDNgInGjYX0',
+    '7///icGJwo199EDGAkE5+HXzvwQAAAC6ABAAAInzifjNgIn4zYCBxAAQAACJ',
+    '8FteX13DVYnlU4PsCItFCIsQjUgEjUSQCFBRUuha+///icO4AQAAAM2Ag8QQ',
+    '6/4gT0sKACBGQUlMCgBLVEVTVDogAC90bXAvc2htMQBzaG0ubW1hcABzaG0u',
+    'cmVhZF9pbml0aWFsAHNobS5tbWFwX3RvX3JlYWQAQwBzaG0ud3JpdGVfdG9f',
+    'bW1hcABzaG0ubXN5bmMAc2htLnNoYXJlZF9iZXR3ZWVuX3Byb2Nlc3NlcwBz',
+    'aG0uY2hpbGRfd3JpdGVfdmlzaWJsZV9yZWFkAHNobS5wZXJzaXN0X2FmdGVy',
+    'X211bm1hcABzaG0ucHJpdmF0ZV9ub3Rfd3JpdHRlbgBSAHNobS5yZWFkb25s',
+    'eV9zZWVzX3dyaXRlAHNobS5yd19vbl9yb19mZABHQ0M6IChVYnVudHUgMTMu',
+    'My4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAQAAAAAAAAAAAAAABADx/wsAAABbhAQIIAAAAAIAAQAQAAAAe4QECEQA',
+    'AAACAAEAFgAAAEiWBAgEAAAAAQADAB4AAABElgQIBAAAAAEAAwAmAAAAv4QE',
+    'CGAAAAACAAEAOQAAAB+FBAgpAAAAEgABAD8AAAAghAQIAAAAABAAAQBGAAAA',
+    'R4QECAAAAAAQAAEAWAAAAE6EBAgAAAAAEAABAFMAAABElgQIAAAAABAAAwA6',
+    'AAAAlIAECIwDAAASAAEAXwAAAESWBAgAAAAAEAADAGYAAABMlgQIAAAAABAA',
+    'AwAAc2htdGVzdC5jAHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAG1rZmls',
+    'ZS5jb25zdHByb3AuMABjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9fYnNz',
+    'X3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFi',
+    'AC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAA',
+    'ALQEAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAASIUECEgFAAD8AAAA',
+    'AAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAAESWBAhEBgAACAAAAAAAAAAA',
+    'AAAABAAAAAAAAAAuAAAAAQAAADAAAAAAAAAARAYAAC0AAAAAAAAAAAAAAAEA',
+    'AAABAAAAAQAAAAIAAAAAAAAAAAAAAHQGAADwAAAABgAAAAcAAAAEAAAAEAAA',
+    'AAkAAAADAAAAAAAAAAAAAABkBwAAawAAAAAAAAAAAAAAAQAAAAAAAAARAAAA',
+    'AwAAAAAAAAAAAAAAzwcAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAA94MECDQAAACUBgAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAj0BAAA9AQAAAUAAAAAEAAAAQAAAPQE',
+    'AAD0lAQI9JQECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAI1MJASD5PD/cfxVieVXVlNRgewAEAAAgwwkAIPsKI2F',
+    '6O///4nCjXXoQMYCeDnwdfO4AgAAAM2AiceFwA+F1QAAADHbjY3U7///uK4A',
+    'AACJ+omd5O///74IAAAAiZ3g7///uxkAAADHhdTv//8BAAAAx4XY7///BAAA',
+    'BMeF3O////CDBAjNgL4BAAAAuEsAAADHhdTv///oAwAAx4XY7///6AMAAInz',
+    'zYC7BQAAALlCAgAAuqQBAACJ2LulhAQIzYC60AcAAInDjY3o7///uAQAAADN',
+    'gD3oAwAAdAiJ8InzzYDr/roKAAAAuAQAAACNjejv///NgIP45XQLifC7AgAA',
+    'AM2A6/6J0LulhAQIzYCJ8In7zYDr/r4HAAAAifuNjdDv//8x0onwzYAx0oO9',
+    '0O///wC4r4QECA+UwuhQAgAAuAIAAADNgInHhcB1aI2N1O///7hLAAAAuwEA',
+    'AADHhdTv///0AQAAx4XY7///9AEAAM2AuwUAAAC5QgIAALqkAQAAidi7u4QE',
+    'CM2AvgQAAACJw7rQBwAAifCNjejv///NgLoKAAAAifDNgLgBAAAAifvNgOv+',
+    'ifCJ+42N0O///zHSzYCLhdDv//8x0ru7hAQIg+B/g/gZuMWEBAgPlMLorQEA',
+    'ALgKAAAAzYC4AgAAAM2AiceFwA+FkgAAAI2N1O///7hLAAAAuwkAAADHhdTv',
+    '//8AAAACx4XY7///AAAAAs2AUWoAav9qImoDaAAAAARqAGjAAAAA6PoAAACD',
+    'xCAFABAAAD0AEAAAdgu4AQAAAInDzYDr/lJqAGr/aiJqA2gAABAAagBowAAA',
+    'AOjGAAAAg8QgPQHw//+4AQAAAHIJuwIAAADNgOv+ifvNgOv+ifCJ+42N0O//',
+    '/zHSzYAx0oO90O///wC42YQECA+UwujfAAAAuAIAAADNgInDhcB1OMeF1O//',
+    '/wEAAACNjdTv//+4SwAAAMeF2O///wIAAADNgDHAiYXU7///i4XU7///QImF',
+    '1O///+vxifCNjdDv//8x0s2Ai4XQ7///MdKD4H+D+Bi44oQECA+UwuhzAAAA',
+    'McCDPfSUBAgAD5XAjWXwWVteX12NYfzDVVdWU4tEJBSLXCQYi0wkHItUJCCL',
+    'dCQki3wkKItsJCzNgFteX13DuK0AAADNgDHtieCD5PBQ6GQAAABVicEx0onl',
+    'U4A8EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJxridhAQIU4nT6M3///+J',
+    '8OjG////hdu4loQECLqRhAQID0XC6LL///+F23QI/wX4lAQI6wb/BfSUBAhb',
+    'Xl3DVYnlU4PsCItFCIsQjUgEjUSQCFBRUugR/P//icO4AQAAAM2Ag8QQ6/4g',
+    'T0sKACBGQUlMCgBLVEVTVDogAC90bXAvbGltMQBsaW1pdC5mc2l6ZQAvdG1w',
+    'L2xpbTIAbGltaXQuZnNpemVfc2lneGZzegBsaW1pdC5hcwBsaW1pdC5jcHVf',
+    'c2lneGNwdQBHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEp',
+    'IDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/wsA',
+    'AAAEhAQIIAAAAAIAAQAQAAAAJIQECEQAAAACAAEAFgAAAPiUBAgEAAAAAQAD',
+    'AB4AAAD0lAQIBAAAAAEAAwAmAAAAaIQECCkAAAASAAEALAAAAMmDBAgAAAAA',
+    'EAABADMAAADwgwQIAAAAABAAAQBFAAAA94MECAAAAAAQAAEAQAAAAPSUBAgA',
+    'AAAAEAADACcAAACUgAQINQMAABIAAQBMAAAA9JQECAAAAAAQAAMAUwAAAPyU',
+    'BAgAAAAAEAADAABsaW10ZXN0LmMAcHV0cwBrdGVzdABrdV9wYXNzAGt1X2Zh',
+    'aWwAY21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRh',
+    'dGEAX2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9k',
+    'YXRhAC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAAP0DAAAAAAAAAAAA',
+    'AAEAAAAAAAAAIQAAAAEAAAAyAAAAkYQECJEEAABjAAAAAAAAAAAAAAABAAAA',
+    'AQAAACkAAAAIAAAAAwAAAPSUBAj0BAAACAAAAAAAAAAAAAAABAAAAAAAAAAu',
+    'AAAAAQAAADAAAAAAAAAA9AQAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIA',
+    'AAAAAAAAAAAAACQFAADgAAAABgAAAAYAAAAEAAAAEAAAAAkAAAADAAAAAAAA',
+    'AAAAAAAEBgAAWAAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAA',
+    'XAYAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAUowECDQAAACsEgAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAijEAAAoxAAAAUAAAAAEAAAAQAAAMAA',
+    'AADAoAQIwKAECAAAAAAoBAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFW5AAgAAInlV1a+SAEAAFOJ8LsDAAAAg+TwgeywAAAA',
+    'zYCJwonGuKWNBAj30sHqH+jWCwAAidi6CAAAAInzjUwkGM2AMdKD+Ah1EItE',
+    'JBgx0oPwAwtEJBwPlMK4uI0ECInz6KQLAAC4AwAAAI1MJBi6CAAAAM2AMdKD',
+    '+PW4zI0ECL8EAAAAD5TC6H0LAAAxwI1MJBi6CAAAAIlEJByJ+MdEJBgFAAAA',
+    'zYAxwMdEJBgHAAAAiUQkHIn4zYC4AwAAAM2AMdKD+Ah1EItEJBgx0oPwDAtE',
+    'JBwPlMK4340ECI2cJIAAAADoIQsAAIm0JIAAAAC4qAAAADHSx4QkhAAAAAEA',
+    'AAC5AQAAAM2AicKFwH4ID7+UJIYAAAAxwIXSdTCJtCSAAAAAuKgAAAC5AQAA',
+    'AMeEJIQAAAAEAAAAzYCFwH4ID7+EJIYAAADB6AKD4AGJwrjvjQQIifPorwoA',
+    'ALgGAAAAzYC+SAEAALsCAAAAuQEIAACJ8M2Aica6CAAAAI1MJBi4AwAAAInz',
+    'zYAx0oP4CHUQi0QkGDHSg/ABC0QkHA+UwrgAjgQIifPoXgoAALgGAAAAzYAx',
+    '9rhCAQAAuwEAAACJ8c2AiccxwMdEJFyA8PoCjVQkUIlEJFCJ+4lEJFSJRCRY',
+    'uEUBAADNgDHShcCNnCSAAAAAuBCOBAgPlMLoCgoAAIm8JIAAAAC4qAAAAIny',
+    'x4QkhAAAAAEAAAC5AQAAAM2AhcB+CA+/hCSGAAAAMdKFwLgkjgQIifsPlMLo',
+    'ywkAALgDAAAAuggAAACNTCQYzYAx0oP4CHUQi0QkGDHSg/ABC0QkHA+Uwrg4',
+    'jgQIifvomAkAADHJuEUBAACNVCRQx0QkVADh9QWJzsdEJFyA8PoCzYAx27ii',
+    'AAAAjbQkgAAAAMeEJIQAAACAk9wUiZwkgAAAAInzzYC4AwAAALoIAAAAjUwk',
+    'GIn7zYAxyYP4CHUdi0QkGItUJBy7AgAAAIPA/YPS/znDGdEPk8EPtsmJyrhJ',
+    'jgQIifvoEQkAALhGAQAAifHNgDHShcB1DTHSg7wkhAAAAAAPn8K4Xo4ECIn7',
+    '6OkIAAAxybhFAQAAjVQkUIlMJFyJTCRYiUwkVIlMJFAxyYnOzYC4qAAAAIl8',
+    'JCCNXCQguQEAAADHRCQkAQAAALpkAAAAzYCFwH4FD79EJCYx0oXAuHKOBAiJ',
+    '+w+UwuiLCAAAuAYAAADNgDHbuEkBAADNgInCiUQkDLiFjgQIjZwkgAAAAPfS',
+    'weof6F8IAAC4KgAAAM2AMdK//wAAAItcJAy5AQAAAIlUJCiJ+IuUJIAAAACN',
+    'dCQgx0QkIAEAAADHRCQkNBIAAM2AMdKFwLiWjgQID5TC6BQIAACLXCQMifi5',
+    'AQAAAIuUJIAAAADNgDHSg/jvvwABAAC4pI4ECA+Uwr4yAAAA6OQHAACLXCQM',
+    'ifiNTCQgugQAAADNgDHShcC4to4ECA+UwujCBwAAuAQAAAC5yI4ECIucJIQA',
+    'AAC6AQAAAM2AvugDAACLXCQMifiNTCQgugQAAADNgDHSSHUU9kQkIAF0DTHS',
+    'gXwkJDQSAAAPlMK4yo4ECL8AAQAAMfboagcAAItcJAyJ+I1MJCC6BAAAAM2A',
+    'MdJIuNqOBAgPlMLoSQcAAIucJIAAAACNTCRQuAMAAAC6AQAAAM2AugQAAACL',
+    'XCQMifiNTCQgzYAx0oXAuOqOBAgPlMLoEAcAAIuUJIAAAACLXCQMuP8AAAC5',
+    'AgAAAM2AuAQAAACLnCSEAAAAudiOBAi6AQAAAM2AugQAAACLXCQMifiNTCQg',
+    'zYAx0oXAjXQkILj8jgQID5TC6LsGAACLlCSAAAAAi1wkDMdEJCABAACAx0Qk',
+    'JAcAAAC4/wAAALkBAAAAzYC6BAAAAInxi1wkDIn4MfbNgDHSSLgKjwQID5TC',
+    '6HMGAACLXCQMifiNTCQgugQAAADNgDHShcC4HY8ECA+UwuhRBgAAi5QkgAAA',
+    'AItcJAy4/wAAALkCAAAAzYC4/wAAAItcJAyNdCQgx0QkIAEAAECLlCSAAAAA',
+    'uQEAAADNgLoEAAAAifGLXCQMifgx9s2ASHUSifiLXCQMzYCFwA+UwA+2wInG',
+    'ifK4MY8ECL//AAAAMfbo3gUAAItcJAyJ+LkCAAAAi5QkgAAAAM2AuQEAAACL',
+    'XCQMifiNdCQgx0QkIAEAAACLlCSAAAAAzYC4AwAAAIucJIAAAACNTCRQugEA',
+    'AADNgLgGAAAAi5wkhAAAAM2AuAABAACLXCQMugQAAACNTCQgvmQAAADNgDHS',
+    'SHUKi1QkIMHqBIPiAbhDjwQI6FMFAACLnCSAAAAAuAYAAADNgDH/i1wkDLgA',
+    'AQAAjUwkILoEAAAAif7NgDHShcC7AQAAALhRjwQID5TCjbQkgAAAAOgQBQAA',
+    'uGgBAACJ2Yn6zYC4SAEAAIn7ifnNgL//AAAAiUQkCIuUJIAAAAC5AQAAAMdE',
+    'JCABAAAAi1wkDIn4jXQkIMdEJCQBAAAAzYDHRCQgAQAAAItcJAyJ+MdEJCQC',
+    'AAAAi1QkCM2AuAQAAACLnCSEAAAAuWWPBAi6AQAAAM2AuAABAACLXCQMvmQA',
+    'AACNTCQgugQAAADNgDHSSHUKMdKDfCQkAQ+UwrhnjwQI6GMEAACLnCSAAAAA',
+    'jUwkULgDAAAAugEAAADNgDHAvwQAAACLXCQIuggAAACJRCRUifjHRCRQAQAA',
+    'AM2AuAABAACLXCQMvmQAAACJ+o1MJCDNgDHSSHUKMdKDfCQkAg+Uwrh4jwQI',
+    '6P0DAAC6BgAAAIucJIAAAACJ0M2Ai5wkhAAAAInQzYCLXCQIidDNgItcJAyJ',
+    '0M2AuCcAAAC57QEAALuKjwQIzYC/TAEAALsACAAAifjNgInCice+JAEAALiT',
+    'jwQI99KJ+8HqH+iZAwAAuv8PAACJ8LmKjwQIzYAx0oXAica4pI8ECA+fwrsF',
+    'AAAA6HMDAACNVCRQifjorAMAADHSg/j1uLSPBAgPlMLoVgMAAInYuUIAAAC6',
+    'pAEAALvGjwQIzYCNVCRQicOJ+Oh6AwAAMdKFwH4iOXQkUHUc9kQkVQF0FbrP',
+    'jwQIjUQkYOjVAgAAMdKFwA+UwrjRjwQI6AQDAACNVCRQifjoPQMAADHShcB+',
+    'HPZEJFQgdBW6z48ECI1EJGDongIAADHShcAPlMK45I8ECOjNAgAAuAQAAAC5',
+    '9Y8ECLoCAAAAzYCNVCRQifjo9QIAADHShcB+HPZEJFQCdBW6z48ECI1EJGDo',
+    'VgIAADHShcAPlMK4+I8ECOiFAgAAuAYAAADNgI1UJFCJ+Oi3AgAAMdKFwH4K',
+    'i1QkVMHqA4PiAbgLkAQIu8aPBAjoVAIAALgmAAAAuSOQBAjNgI1UJFCJ+DHb',
+    '6H8CAACNlCSAAAAAifjocQIAAPZEJFRAdE66z48ECI1EJGDo2AEAAInDhcB1',
+    'OPaEJIQAAACAdDC6LJAECI2EJJAAAADotwEAAIXAdRuLRCRYOYQkiAAAAA+U',
+    'wjHbhcAPlcMh0+sCMduJ2rgukAQIuyOQBAjoxwEAALgKAAAAzYCNVCRQifjo',
+    '+QEAADHShcB+HPZEJFUCdBW6LJAECI1EJGDoWgEAADHShcAPlMK4P5AECLtS',
+    'kAQI6IQBAAC4JwAAALntAQAAzYCNVCRQifjosQEAADHShcB+IotEJFT30KkA',
+    'AQBAdRW6W5AECI1EJGDoDAEAADHShcAPlMK4XZAECOg7AQAAuCgAAADNgI1U',
+    'JFCJ+I2cJIAAAADoZgEAAIm8JIAAAAC4qAAAADHSx4QkhAAAAAEAAAC5AQAA',
+    'AM2AhcB+CA+/hCSGAAAAMdKFwLhvkAQIifsPlMLo4wAAALglAQAAifHNgDHS',
+    'hcC4gJAECA+UwujJAAAAjVQkUIn46AIBAAAx0oXAfgqLVCRUweoPg+IBuI+Q',
+    'BAiJ++iiAAAAuAYAAADNgLgoAAAAu4qPBAjNgDHAgz3gpAQIAA+VwI1l9Fte',
+    'X13DVVdWU4tEJBSLXCQYi0wkHItUJCCLdCQki3wkKItsJCzNgFteX13DuK0A',
+    'AADNgDHtieCD5PBQ6AkBAABVieVWicZTMdsPtgQeD7YMGoTAdAVDOMh071sp',
+    'yF5dw1WJwTHSieVTgDwRAHQDQuv3uAQAAAC7AQAAAM2AW13DVYnlVonGuJ2N',
+    'BAhTidPozf///4nw6Mb///+F27iWjQQIupGNBAgPRcLosv///4XbdAj/BeSk',
+    'BAjrBv8F4KQECFteXcNVieVXiddWU4nDocSgBAg5BcCgBAh8KDHAueCgBAi6',
+    'AAQAAKPEoAQIo8CgBAi4AwAAAM2AicKFwH5Eo8SgBAiLDcCgBAiNXzCLgeyg',
+    'BAiNUBCJ+InGQMYGADnYdfa4MAAAAI2x4KAECDnCD07CAfg5x3QDpOv5AdGJ',
+    'DcCgBAhbidBeX13DVYnlU4PsCItFCIsQjUgEjUSQCFBRUugR8///icO4AQAA',
+    'AM2Ag8QQ6/4gT0sKACBGQUlMCgBLVEVTVDogAGV2dC5ldmVudGZkX2NyZWF0',
+    'ZQBldnQuZXZlbnRmZF9pbml0aWFsAGV2dC5ldmVudGZkX2VhZ2FpbgBldnQu',
+    'ZXZlbnRmZF9zdW0AZXZ0LmV2ZW50ZmRfcG9sbABldnQuZXZlbnRmZF9zZW0A',
+    'ZXZ0LnRpbWVyZmRfc2V0dGltZQBldnQudGltZXJmZF9ub3RfeWV0AGV2dC50',
+    'aW1lcmZkX3JlYWQAZXZ0LnRpbWVyZmRfaW50ZXJ2YWwAZXZ0LnRpbWVyZmRf',
+    'Z2V0dGltZQBldnQudGltZXJmZF9kaXNhcm0AZXZ0LmVwb2xsX2NyZWF0ZQBl',
+    'dnQuZXBvbGxfYWRkAGV2dC5lcG9sbF9hZGRfZHVwAGV2dC5lcG9sbF90aW1l',
+    'b3V0AHgAZXZ0LmVwb2xsX3JlYWR5AGV2dC5lcG9sbF9sZXZlbABldnQuZXBv',
+    'bGxfZHJhaW5lZABldnQuZXBvbGxfZGVsAGV2dC5lcG9sbF9ldF9maXJzdABl',
+    'dnQuZXBvbGxfZXRfc2Vjb25kAGV2dC5lcG9sbF9vbmVzaG90AGV2dC5lcG9s',
+    'bF9odXAAZXZ0LmVwb2xsX2Nsb3NlZF9mZABzAGV2dC5lcG9sbF9zb2NrZXQA',
+    'ZXZ0LmVwb2xsX2V2ZW50ZmQAL3RtcC9pbm8AZXZ0Lmlub3RpZnlfaW5pdABl',
+    'dnQuaW5vdGlmeV9hZGQAZXZ0Lmlub3RpZnlfZW1wdHkAL3RtcC9pbm8vYQBl',
+    'dnQuaW5vdGlmeV9jcmVhdGUAZXZ0Lmlub3RpZnlfb3BlbgB6egBldnQuaW5v',
+    'dGlmeV9tb2RpZnkAZXZ0Lmlub3RpZnlfY2xvc2Vfd3JpdGUAL3RtcC9pbm8v',
+    'YgBldnQuaW5vdGlmeV9tb3ZlAGV2dC5pbm90aWZ5X2RlbGV0ZQAvdG1wL2lu',
+    'by9kAGV2dC5pbm90aWZ5X21rZGlyAGV2dC5pbm90aWZ5X3BvbGwAZXZ0Lmlu',
+    'b3RpZnlfcm0AZXZ0Lmlub3RpZnlfaWdub3JlZABHQ0M6IChVYnVudHUgMTMu',
+    'My4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAA',
+    'AQAAAAAAAAAAAAAABADx/wsAAABfjAQIIAAAAAIAAQASAAAAf4wECCAAAAAC',
+    'AAEAFwAAAJ+MBAhEAAAAAgABAB0AAADkpAQIBAAAAAEAAwAlAAAA4KQECAQA',
+    'AAABAAMALQAAAOOMBAiFAAAAAgABADYAAADEoAQIBAAAAAEAAwA7AAAAwKAE',
+    'CAQAAAABAAMAQAAAAOCgBAgABAAAAQADAEMAAABojQQIKQAAABIAAQBJAAAA',
+    'JIwECAAAAAAQAAEAUAAAAEuMBAgAAAAAEAABAGIAAABSjAQIAAAAABAAAQBd',
+    'AAAAwKAECAAAAAAQAAMARAAAAJSABAiQCwAAEgABAGkAAACjoAQIAAAAABAA',
+    'AwBwAAAA6KQECAAAAAAQAAMAAGV2dHRlc3QuYwBzdHJjbXAAcHV0cwBrdGVz',
+    'dABrdV9wYXNzAGt1X2ZhaWwAaW5vX25leHQAaWxlbgBpcG9zAGliAGNtYWlu',
+    'AGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQA',
+    'AC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNz',
+    'AC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAAP0MAAAAAAAAAAAAAAEAAAAAAAAA',
+    'IQAAAAEAAAAyAAAAkY0ECJENAAASAwAAAAAAAAAAAAABAAAAAQAAACkAAAAI',
+    'AAAAAwAAAMCgBAjAEAAAKAQAAAAAAAAAAAAAIAAAAAAAAAAuAAAAAQAAADAA',
+    'AAAAAAAAoxAAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAA',
+    'ANAQAAAwAQAABgAAAAsAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAAAAEgAA',
+    'dQAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAAdRIAADcAAAAA',
+    'AAAAAAAAAAEAAAAAAAAA',
+    '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',
+    'BQAAAM2AiUQkDDHAjYwkQAEAAIlEJAiLXCQMuNwAAAC6AAIAAM2AhcB+HzHS',
+    'jTwRil8Tg+swgPsKD7dfEINUJAgAAdo5wnzl682LVCQM99LB6h+DfCQIAw+f',
+    'wCHCuKiJBAjoogAAALoGAAAAi1wkDInQzYCJ0InzzYAxwIM9vJkECAAPlcCN',
+    'ZfRbXl9dw1VXVlOLRCQUi1wkGItMJByLVCQgi3QkJIt8JCiLbCQszYBbXl9d',
+    'w7itAAAAzYAx7Yngg+TwUOiEAAAAVYnlVonGUzHbD7YEHg+2DBqEwHQFQzjI',
+    'dO9bKcheXcNVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJ',
+    'xrjWhwQIU4nT6M3///+J8OjG////hdu4z4cECLrKhwQID0XC6LL///+F23QI',
+    '/wXAmQQI6wb/BbyZBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBRUujY+P//',
+    'icO4AQAAAM2Ag8QQ6/4gT0sKACBGQUlMCgBLVEVTVDogAC9kZXYva21zZwBk',
+    'ZXYua21zZ19vcGVuAExJTlVYLTAAZGV2Lmttc2dfcmVhZABkZXZ0ZXN0LW1h',
+    'cnF1ZS14eXoKAGRldnRlc3QtbWFycXVlLXh5egBkZXYua21zZ193cml0ZQAv',
+    'ZGV2L21lbQBkZXYubWVtX29wZW4AZGV2Lm1lbV9yZWFkAC9kZXYvcG9ydABk',
+    'ZXYucG9ydF9jbW9zAC9kZXYvcnRjAGRldi5ydGNfb3BlbgBkZXYucnRjX3Jk',
+    'X3RpbWUAZGV2LnJ0Y19zZXRfdGltZQBkZXYucnRjX3JlYWRiYWNrAGRldi5y',
+    'dGNfdGltZV9mb2xsb3dzAC9kZXYvc3RkaW4AL3Byb2Mvc2VsZi9mZC8wAGRl',
+    'di5zdGRpbl9saW5rAC9kZXYvZmQAL3Byb2Mvc2VsZi9mZABkZXYuZmRfbGlu',
+    'awBkZXYucHJvY19mZF9vcGVuAC9wcm9jL3NlbGYvZXhlAC9iaW4vZGV2dGVz',
+    'dABkZXYucHJvY19leGUAL3Byb2Mvc2VsZi9jd2QAZGV2LnByb2NfY3dkAC9k',
+    'ZXYvbnVsbAAvcHJvYy9zZWxmL2ZkLwBkZXYucHJvY19mZF90YXJnZXQAZGV2',
+    'LnByb2NfZmRfbGlzdABHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0',
+    'LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAE',
+    'APH/CwAAAB2HBAggAAAAAgABABIAAAA9hwQIIAAAAAIAAQAXAAAAXYcECEQA',
+    'AAACAAEAHQAAAMCZBAgEAAAAAQADACUAAAC8mQQIBAAAAAEAAwAtAAAAoYcE',
+    'CCkAAAASAAEAMwAAAOKGBAgAAAAAEAABADoAAAAJhwQIAAAAABAAAQBMAAAA',
+    'EIcECAAAAAAQAAEARwAAALyZBAgAAAAAEAADAC4AAACUgAQITgYAABIAAQBT',
+    'AAAAuZkECAAAAAAQAAMAWgAAAMSZBAgAAAAAEAADAABkZXZ0ZXN0LmMAc3Ry',
+    'Y21wAHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGNtYWluAGt1X3NjNgBf',
+    'X3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIA',
+    'LnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNzAC5jb21tZW50',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsA',
+    'AAABAAAABgAAAJSABAiUAAAANgcAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAA',
+    'ADIAAADKhwQIygcAAO8BAAAAAAAAAAAAAAEAAAABAAAAKQAAAAgAAAADAAAA',
+    'vJkECLwJAAAIAAAAAAAAAAAAAAAEAAAAAAAAAC4AAAABAAAAMAAAAAAAAAC5',
+    'CQAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAA6AkAAPAA',
+    'AAAGAAAABwAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAANgKAABfAAAAAAAA',
+    'AAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAA3CwAANwAAAAAAAAAAAAAA',
+    'AQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAfoIECDQAAABwBQAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAjMAwAAzAMAAAUAAAAAEAAAAQAAAMwD',
+    'AADMkwQIzJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFUx0onRieVXVr4FAAAAU4nwuyyDBAiD5PCB7DABAADN',
+    'gDH/hcB4HYnGjUwkMLgDAAAAuv8AAACJ882Aice4BgAAAM2AMfYxyY1BBznH',
+    'fiKNRCQwjRwIMcCKkDqDBAg4FAN1C0CD+Ah1774BAAAAQevXhfZ1D7hDgwQI',
+    '6HgBAADpLgEAALtwgwQIuQAIAAAx0rgFAAAAzYCJwolEJBi4gIMECDH/99LB',
+    '6h/oaQEAALiLgwQI6D8BAAAxwIlEJAyJRCQQiUQkFIlEJByLRCQYuQEAAAC6',
+    'ZAAAAMdEJCwBAAAAjVwkKIlEJCi4qAAAAM2AjUwkJYXAflm4AwAAAItcJBiJ',
+    'ws2Ag/gDdUcPtkQkJUeoCHUFv5z///+LXCQcqAEPtlQkJg9F3olcJByJw8Hg',
+    'A8HjBCUAAQAAgeMAAQAAKdoBVCQUD7ZUJCcpwgFUJBDrp/9EJAyDfCQMd38J',
+    'g/8DD45m////MdKF/7iYgwQID5/C6KIAAACLVCQcuKaDBAjolAAAAItEJBQx',
+    '0gtEJBAPlcK4s4MECOh9AAAAuMCDBAjoUwAAADHAgz3MkwQIAA+VwInGjWX0',
+    'ifBbXl9dw1VXVlOLRCQUi1wkGItMJByLVCQgi3QkJIt8JCiLbCQszYBbXl9d',
+    'w7itAAAAzYAx7Yngg+TwUOhkAAAAVYnBMdKJ5VOAPBEAdANC6/e4BAAAALsB',
+    'AAAAzYBbXcNVieVWica4JIMECFOJ0+jN////ifDoxv///4XbuB2DBAi6GIME',
+    'CA9Fwuiy////hdt0CP8F0JMECOsG/wXMkwQIW15dw1WJ5VOD7AiLRQiLEI1I',
+    'BI1EkAhQUVLoiv3//4nDuAEAAADNgIPEEOv+IE9LCgAgRkFJTAoAS1RFU1Q6',
+    'IAAvcHJvYy9jbWRsaW5lAGszMm1vdXNlACAgKHNvdXJpcyA6IGVzc2FpIGln',
+    'bm9yZSwgdm9pciBSVU5NT1VTRS5TSCkKAC9kZXYvaW5wdXQvbWljZQBtb3Vz',
+    'ZS5vcGVuAE1PVVNFLVJFQURZCgBtb3VzZS5wYWNrZXRzAG1vdXNlLmJ1dHRv',
+    'bgBtb3VzZS5tb3Rpb24ATU9VU0UtRE9ORQoAR0NDOiAoVWJ1bnR1IDEzLjMu',
+    'MC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAEAAAAAAAAAAAAAAAQA8f8NAAAAi4IECCAAAAACAAEAEgAAAKuCBAhEAAAA',
+    'AgABABgAAADQkwQIBAAAAAEAAwAgAAAAzJMECAQAAAABAAMAKAAAAO+CBAgp',
+    'AAAAEgABAC4AAABQggQIAAAAABAAAQA1AAAAd4IECAAAAAAQAAEARwAAAH6C',
+    'BAgAAAAAEAABAEIAAADMkwQIAAAAABAAAwApAAAAlIAECLwBAAASAAEATgAA',
+    'AMyTBAgAAAAAEAADAFUAAADUkwQIAAAAABAAAwAAbW91c2V0ZXN0LmMAcHV0',
+    'cwBrdGVzdABrdV9wYXNzAGt1X2ZhaWwAY21haW4Aa3Vfc2M2AF9fcmVzdG9y',
+    'ZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3RydGFi',
+    'AC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAA',
+    'BgAAAJSABAiUAAAAhAIAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAADIAAAAY',
+    'gwQIGAMAALQAAAAAAAAAAAAAAAEAAAABAAAAKQAAAAgAAAADAAAAzJMECMwD',
+    'AAAIAAAAAAAAAAAAAAAEAAAAAAAAAC4AAAABAAAAMAAAAAAAAADMAwAALQAA',
+    'AAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAA/AMAAOAAAAAGAAAA',
+    'BgAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAANwEAABaAAAAAAAAAAAAAAAB',
+    'AAAAAAAAABEAAAADAAAAAAAAAAAAAAA2BQAANwAAAAAAAAAAAAAAAQAAAAAA',
+    'AAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAfIgECDQAAACwDAAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAjhCgAA4QoAAAUAAAAAEAAAAQAAAOQK',
+    'AADkmgQI5JoECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAI1MJASD5PD/cfxVieVXVlNRgewAEAAAgwwkAIHsABAA',
+    'AIMMJACB7AAQAACDDCQAgexIAQAAMdK/BQAAALt3iQQIifiJ0c2AMfaFwHgf',
+    'iceNjejO//+4AwAAALr/AAAAifvNgInGuAYAAADNgDHAMdu/AQAAAImFsM7/',
+    '/41DBTnwfSuNhejO//+5BgAAALqFiQQIAdjoXAcAAIXAi4Wwzv//D0THQ4mF',
+    'sM7//+vOg72wzv//AHUPuIyJBAjoWgcAAOnjBgAAjYXoz///jY34z///icKJ',
+    'w0DGAwA5yHX2xoXoz///CDHAZseF7M///1VmxoXvz///AYqIt4kECIiMBfDP',
+    '//9Ag/gIde2NnfjP//8xwA+2Cg+2cgGDwgLB4QgJ8QHIOdN164nHwe8Qib2s',
+    'zv//dA2LtazO//8Pt8AB8OvmNf//AAC+ZwEAALsCAAAAuQMAAACG4LoBAAAA',
+    'ZomF6s///4nwzYAxyboKAAICicaNhcjO///oBAcAAFdqEFCNhejP//9qAGoQ',
+    'UFZocQEAAOgmBgAAg8QgMdKD+BC4wIkECA+UwjH/6I8GAADHhbzO//8QAAAA',
+    'jYW8zv//U1CNhdjO//9QjYXo3///akBqQFBWaHMBAADo4AUAAIPEIInChcB/',
+    'ITHJjZ3Azv//uKIAAADHhcTO//+AlpgAiY3Azv//McnNgEeB/ysBAAB/BIXS',
+    'fpoxwIP6JHUhgL383///AHUYgL0A4P//VXUPMcCBvdzO//8KAAICD5TAicK4',
+    'zokECInz6PMFAAC4BgAAAM2AuQIAAAC+ZwEAADHSifCJy82AugoAAgK5hCMA',
+    'AInGjYXIzv//6AcGAABSahBQagBqCWjdiQQIVmhxAQAA6CsFAACDxCAx0oP4',
+    'CbjniQQID5TCMf/olAUAAMeFvM7//xAAAABQjYW8zv//UI2F2M7//1CNhejP',
+    '//9qQGpkUFZocwEAAOjlBAAAg8QgicKFwH8hMdu4ogAAADHJx4Xs3///gJaY',
+    'AImd6N///42d6N///82AR4H/KwEAAH8EhdJ+mjHbg/oJdSe5CQAAALrdiQQI',
+    'jYXoz///6M0EAACFwHUOMdtmgb3azv//I4QPlMOJ2rj0iQQIifPo8gQAALgG',
+    'AAAAzYC7AgAAALkBAAAAMdK4ZwEAAM2AuYMjAACJhbTO//+6CgACAo2FyM7/',
+    '/+gBBQAAi520zv//uGoBAAC6EAAAAI2NyM7//82AMdKFwLgBigQID5TC6JQE',
+    'AACLnbTO//+4BAAAALkRigQIugoAAADNgLgDAAAAi520zv//ugAQAACNjejP',
+    '///NgDHSg/gKdRy6EYoECLkKAAAAjYXoz///6AQEAAAx0oXAD5TCuByKBAjo',
+    'OAQAADHSsQeJ0A+vwYiEFejf//9CgfoAIAAAdeu4BAAAALkpigQIugUAAACL',
+    'nbTO///NgDH2vwQAAACNjejf//+LnbTO//+J+LoAIAAAzYA9ACAAAHUQgcYA',
+    'IAAAgf4AAAUAddzrCDHJiY2wzv//i4Wwzv//MdKB/gAABQAPlMIhwrgvigQI',
+    '6LADAACLnbTO//+4AwAAALpAAAAAjY3oz///zYAx0oXAD0nQxoQV6M///wC6',
+    'AAAAAH4cukGKBAi5CQAAAI2F6M///+goAwAAMdKFwA+UwrhLigQI6FwDAAC4',
+    'BAAAALlcigQIugUAAACLnbTO///NgDH2i520zv//uAMAAACNjejP//+6ABAA',
+    'AM2AhcB+KDHSjV4BD7a8KujP//+NDBNCD6/PAY2szv//OcJ15wHWgf4foQcA',
+    'fryB/iChBwAPlMAx0oG9rM7//yA2Rq4PlMIhwrhiigQI6NsCAACLnbTO//+4',
+    'dQEAALkBAAAAzYC4AwAAAIudtM7//7oKAAAAjY3oz///zYAx0oXAvgYAAAC4',
+    'dIoECA+UwuibAgAAi520zv//ifDNgL9nAQAAuwIAAAC5AQAAADHSifjNgLmL',
+    'IwAAicO6CgACAo2FyM7//+ipAgAAuGoBAACNjcjO//+6EAAAAM2AMdKD+JG4',
+    'gIoECA+UwuhBAgAAifDNgLhnAQAAib20zv//uwIAAAAx0rkBAAAAzYC5YR4A',
+    'AImFtM7//42FyM7//+hSAgAAi520zv//uGkBAACNjcjO//+6EAAAAM2AMdKF',
+    'wHUZuGsBAAC5BAAAAIudtM7//82AMdKFwA+UwriQigQIMfboywEAALibigQI',
+    '6KEBAAAx0omVsM7//4udtM7//7hsAQAAjY3Yzv//jZW8zv//zYCJx4XAeTaJ',
+    'tejf//+Nnejf//+4ogAAAInxx4Xs3///gJaYAM2AuDcAAAC5BAAAALoACAAA',
+    'i520zv//zYD/hbDO//+BvbDO//9XAgAAfwSF/3iVifq4qooECPfSweof6D0B',
+    'AACF/3h+uAMAAAC6ABAAAIn7jY3oz///zYAx0oP4CHUcurWKBAi5CAAAAI2F',
+    '6M///+jEAAAAMdKFwA+Uwri+igQIifvo9gAAALgEAAAAuc6KBAi6CAAAAM2A',
+    'McCNnejf//8xyceF7N///wCj4RGJhejf//+4ogAAAM2AuAYAAACJ+82AuAYA',
+    'AACLnbTO///NgLjXigQI6IQAAAAxwIM95JoECAAPlcCJhbDO//+LhbDO//+N',
+    'ZfBZW15fXY1h/MNVV1ZTi0QkFItcJBiLTCQci1QkIIt0JCSLfCQoi2wkLM2A',
+    'W15fXcO4rQAAAM2AMe2J4IPk8FDosQAAAFUBwYnlVonWU4nDD7YDD7YWONB0',
+    'BCnQ6whDRjnLdewxwFteXcNVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADN',
+    'gFtdw1WJ5VaJxrhviQQIU4nT6M3///+J8OjG////hdu4aIkECLpjiQQID0XC',
+    '6LL///+F23QI/wXomgQI6wb/BeSaBAhbXl3DVYnlV1aNcBBTicOJ30PGBwA5',
+    '83X2hulbXmbHAAIAX12JUARmiUgCw1WJ5VOD7AiLRQiLEI1IBI1EkAhQUVLo',
+    'P/f//4nDuAEAAADNgIPEEOv+IE9LCgAgRkFJTAoAS1RFU1Q6IAAvcHJvYy9j',
+    'bWRsaW5lAGszMm5ldAAgIChyZXNlYXUgOiBlc3NhaSBpZ25vcmUsIHZvaXIg',
+    'UlVOTkVULlNIKQoAcGluZ2RhdGEAbmV0LnBpbmdfc2VuZABuZXQucGluZ19y',
+    'ZXBseQB1ZHAtaGVsbG8AbmV0LnVkcF9zZW5kAG5ldC51ZHBfZWNobwBuZXQu',
+    'dGNwX2Nvbm5lY3QAdGNwLWhlbGxvCgBuZXQudGNwX2VjaG8AQlVMSwoAbmV0',
+    'LnRjcF9idWxrX3NlbmQAT0sgMzI3NjgwAG5ldC50Y3BfYnVsa19hY2sAU0VO',
+    'RAoAbmV0LnRjcF9idWxrX3JlY3YAbmV0LnRjcF9lb2YAbmV0LnRjcF9yZWZ1',
+    'c2VkAG5ldC5saXN0ZW4ATkVULUxJU1RFTklORwoAbmV0LmFjY2VwdABwaW5n',
+    'LWluCgBuZXQuc2VydmVyX3JlYWQAcG9uZy1pbgoATkVULURPTkUKAEdDQzog',
+    'KFVidW50dSAxMy4zLjAtNnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8LAAAAiYgECCUAAAACAAEA',
+    'EwAAAK6IBAggAAAAAgABABgAAADOiAQIRAAAAAIAAQAeAAAA6JoECAQAAAAB',
+    'AAMAJgAAAOSaBAgEAAAAAQADAC4AAAASiQQIKAAAAAIAAQA0AAAAOokECCkA',
+    'AAASAAEAOgAAAE6IBAgAAAAAEAABAEEAAAB1iAQIAAAAABAAAQBTAAAAfIgE',
+    'CAAAAAAQAAEATgAAAOSaBAgAAAAAEAADADUAAACUgAQIugcAABIAAQBaAAAA',
+    '4ZoECAAAAAAQAAMAYQAAAOyaBAgAAAAAEAADAABuZXR0ZXN0LmMAbWVtY21w',
+    'XwBwdXRzAGt0ZXN0AGt1X3Bhc3MAa3VfZmFpbABta3NpbgBjbWFpbgBrdV9z',
+    'YzYAX19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3lt',
+    'dGFiAC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmJzcwAuY29t',
+    'bWVudAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAGwAAAAEAAAAGAAAAlIAECJQAAADPCAAAAAAAAAAAAAABAAAAAAAAACEA',
+    'AAABAAAAMgAAAGOJBAhjCQAAfgEAAAAAAAAAAAAAAQAAAAEAAAApAAAACAAA',
+    'AAMAAADkmgQI5AoAAAgAAAAAAAAAAAAAAAQAAAAAAAAALgAAAAEAAAAwAAAA',
+    'AAAAAOEKAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAAAQ',
+    'CwAAAAEAAAYAAAAIAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAAEAwAAGYA',
+    'AAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAAHYMAAA3AAAAAAAA',
+    'AAAAAAABAAAAAAAAAA==',
+    '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',
+    'UFFS6Dj6//+Jw7gBAAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtURVNUOiAAL3By',
+    'b2MvY21kbGluZQBrMzJpc28AICAoaXNvOTY2MCA6IGVzc2FpIGlnbm9yZSwg',
+    'dm9pciBSVU5JU08uU0gpCgAvZGV2L2hkYwBpc28uY2Ryb21fb3BlbgBDRDAw',
+    'MQBpc28ucHZkAC9tbnQAaXNvOTY2MABpc28ubW91bnQAL21udC9oZWxsby50',
+    'eHQAaXNvIGhlbGxvCgBpc28ucmVhZF9zbWFsbAAvbW50L2JpZy5iaW4AaXNv',
+    'LnJlYWRfYmlnAGlzby5zZWVrX3JlYWQAL21udC9zdWIvZGVlcC9maWxlLnR4',
+    'dABkZWVwCgBpc28uZGVlcF9wYXRoAC9tbnQvbGluawBpc28ucnJfc3ltbGlu',
+    'awAvbW50L3N1Yi91cABpc28uc3ltbGlua19mb2xsb3cAL21udC9zdWIAaXNv',
+    'LnJlYWRkaXIAL21udC9uZXhpc3RlAGlzby5lbm9lbnQAL21udC9uZXcAaXNv',
+    'LnJvZnMAaXNvLnN0YXRmcwBpc28udW1vdW50AEdDQzogKFVidW50dSAxMy4z',
+    'LjAtNnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAEAAAAAAAAAAAAAAAQA8f8LAAAAuIUECCUAAAACAAEAEwAAAN2FBAggAAAA',
+    'AgABABgAAAD9hQQIRAAAAAIAAQAeAAAADJgECAQAAAABAAMAJgAAAAiYBAgE',
+    'AAAAAQADAC4AAABBhgQIKQAAABIAAQA0AAAAfYUECAAAAAAQAAEAOwAAAKSF',
+    'BAgAAAAAEAABAE0AAACrhQQIAAAAABAAAQBIAAAACJgECAAAAAAQAAMALwAA',
+    'AJSABAjpBAAAEgABAFQAAAAFmAQIAAAAABAAAwBbAAAAEJgECAAAAAAQAAMA',
+    'AGlzb3Rlc3QuYwBtZW1jbXBfAHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWls',
+    'AGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRh',
+    'AF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0',
+    'YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAECJQAAADWBQAAAAAAAAAAAAAB',
+    'AAAAAAAAACEAAAABAAAAMgAAAGqGBAhqBgAAmwEAAAAAAAAAAAAAAQAAAAEA',
+    'AAApAAAACAAAAAMAAAAImAQICAgAAAgAAAAAAAAAAAAAAAQAAAAAAAAALgAA',
+    'AAEAAAAwAAAAAAAAAAUIAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAACAAAA',
+    'AAAAAAAAAAA0CAAA8AAAAAYAAAAHAAAABAAAABAAAAAJAAAAAwAAAAAAAAAA',
+    'AAAAJAkAAGAAAAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAAIQJ',
+    'AAA3AAAAAAAAAAAAAAABAAAAAAAAAA==',
+    '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',
+    'AM2AiYVQ////hcB4STH2jY1U////v9wAAACLnVD///+6oAAAAIn4zYCJx4XA',
+    'fhMxwA+3lAVk////RgHQOfh88evTi51Q////uAYAAADNgIX/D0X36waLtVD/',
+    '//+BxKQAAACJ8FteX13DVYnlVonWMdJTidGJw7gFAAAAzYCJw4XAeCK4AwAA',
+    'ALr/AQAAifHNgDHShcAPSdC4BgAAAMYEFgDNgInTidhbXl3DVYnBMdKJ5VOA',
+    'PBEAdANC6/e4BAAAALsBAAAAzYBbXcNVieVWica4lJoECFOJ0+jN////ifDo',
+    'xv///4XbuI2aBAi6iJoECA9Fwuiy////hdt0CP8FBNYECOsG/wUA1gQIW15d',
+    'w1WJ5VOD7AiLRQiLEI1IBI1EkAhQUVLoGub//4nDuAEAAADNgIPEEOv+IE9L',
+    'CgAgRkFJTAoAS1RFU1Q6IAAvZGV2L2ZkMAAvZGV2L2hkYgAgIChwYXMgZGUg',
+    'L2Rldi9oZGIgbmkgZGUgL2Rldi9mZDAgOiB0ZXN0cyBGQVQgaWdub3JlcykK',
+    'ACAgKHBhcyBkZSBGQVQgc3VyIC9kZXYvaGRiIG5pIC9kZXYvZmQwIDogdGVz',
+    'dHMgRkFUIGlnbm9yZXMpCgB2ZmF0AC9tbnQAZmF0Lm1vdW50ACA8LSBtb3Vu',
+    'dAoAL21udC9oZWxsby50eHQAaGVsbG8gZnJvbSBmYXQKAGZhdC5yZWFkX3Nt',
+    'YWxsAC9tbnQvSEVMTE8uVFhUAGZhdC5jYXNlX2luc2Vuc2l0aXZlAC9tbnQv',
+    'TG9uZyBGaWxlIE5hbWUgRXhhbXBsZS50eHQAbG9uZyBuYW1lIGZpbGUKAGZh',
+    'dC5yZWFkX2xvbmduYW1lAGZhdC5sb25nbmFtZV9saXN0ZWQAL21udC9iaWcu',
+    'YmluAGZhdC5iaWdfb3BlbgBmYXQuYmlnX3JlYWRfc2VxAGZhdC5iaWdfcmVh',
+    'ZF9vZmYAZmF0LmJpZ19zdGF0AC9tbnQvZGlyMQBmYXQucmVhZGRpcl9jb3Vu',
+    'dABmNDAudHh0AHN1YgBmNDEudHh0AGZhdC5yZWFkZGlyX25hbWVzAC9tbnQv',
+    'ZGlyMS9mMjMudHh0AGZpbGUgMjMKAGZhdC5yZWFkX2luX2RpcgAvbW50L2Rp',
+    'cjEvc3ViL2RlZXAudHh0AGRlZXAKAGZhdC5yZWFkX2RlZXAAL21udC9lbXB0',
+    'eWRpcgBmYXQuc3RhdF9kaXIAL21udC9uZXhpc3RlAC9tbnQvaGVsbG8udHh0',
+    'L3gAZmF0LmVub2VudABmYXQucmVhZF9kaXJfZWlzZGlyAGZhdC5zdGF0ZnMA',
+    'L21udC9kaXIxL3N1Yi8uLgAvbW50L2RpcjEvc3ViLy4uL2YxLnR4dABmYXQu',
+    'ZG90ZG90AC9tbnQvdwBmYXQubWtkaXIAL21udC9XAGZhdC5ta2Rpcl9leGlz',
+    'dAAvbW50L3cvYS5kYXQAZmF0LmNyZWF0ZQBmYXQud3JpdGVfcGF0dGVybgBm',
+    'YXQud3JpdGVfcmVhZGJhY2sAZmF0LndyaXRlX3NpemUARU5ETUFSSwBmYXQu',
+    'YXBwZW5kAGZhdC50cnVuY2F0ZV9zaHJpbmsAZmF0LnRydW5jYXRlX3NpemUA',
+    'ZmF0LmZ0cnVuY2F0ZV9leHRlbmQAZmF0LnRydW5jYXRlX3RhaWxfemVybwBU',
+    'QUlMAGZhdC53cml0ZV9wYXN0X2VuZABmYXQub3RydW5jAGZhdC51bmxpbmsA',
+    'ZmF0LmZyZWVfcmVzdG9yZWQAZmF0LnVubGlua19lbm9lbnQAU0hPUlQKAC9t',
+    'bnQvdy9zaG9ydC50eHQAZmF0LnB1dF9zaG9ydABsb3dlcgoAL21udC93L2xv',
+    'd2VyLnR4dAAvbW50L3cvTE9XRVIuVFhUAGZhdC5wdXRfbG93ZXIAZmF0Lmxp',
+    'c3RlZF9jYXNlAGxvbmcKAC9tbnQvdy9BIFZlcnkgTG9uZyBGaWxlIE5hbWUg',
+    'V2l0aCBTcGFjZXMuZGF0YQBmYXQucHV0X2xvbmcAZmF0LmxvbmdfbGlzdGVk',
+    'AC9tbnQvdy9hIHZlcnkgbG9uZyBmaWxlIG5hbWUgd2l0aCBzcGFjZXMuREFU',
+    'QQBmYXQubG9uZ19jaQBtCgAvbW50L3cvTWl4ZWRDYXNlLlR4dABtaXhlZGNh',
+    'c2UudHh0AGZhdC5wdXRfbWl4ZWQAY2FmZQoAL21udC93L2NhZsOpLnR4dABm',
+    'YXQucHV0X3V0ZjgAZAoAL21udC93L3R3by5kb3RzLmluLm5hbWUudHh0AGZh',
+    'dC5wdXRfZG90cwAvbW50L3cvYmFkP25hbWUAL21udC93L2JhZDpuYW1lAGZh',
+    'dC5iYWRfbmFtZQAxCgAvbW50L3cvbG9uZ25hbWVfbnVtYmVyX29uZS50eHQA',
+    'MgoAL21udC93L2xvbmduYW1lX251bWJlcl90d28udHh0AGZhdC50aWxkZV9u',
+    'YW1lcwAvbW50L3cvU0hPUlQuVFhUAGZhdC5jcmVhdGVfZXhpc3QAL21udC93',
+    'L3JlbmFtZWQudHh0AGZhdC5yZW5hbWUAL21udC93L25vdyBhIG11Y2ggbG9u',
+    'Z2VyIG5hbWUudHh0AGZhdC5yZW5hbWVfdG9fbG9uZwAvbW50L3cvTE9XRVIu',
+    'dHh0AGZhdC5yZW5hbWVfY2FzZQAvbW50L3cvc3ViMQAvbW50L3cvc3ViMgBt',
+    'b3ZlCgAvbW50L3cvc3ViMS9tLnR4dAAvbW50L3cvc3ViMi9tb3ZlZC50eHQA',
+    'ZmF0LnJlbmFtZV94ZGlyAG9sZCB0YXJnZXQKAC9tbnQvdy9zdWIyL3Rhcmdl',
+    'dC50eHQAZmF0LnJlbmFtZV9vdmVyAC9tbnQvdy9zdWIyL3N1YjFtb3ZlZABm',
+    'YXQucmVuYW1lX2RpcgBpbnNpZGUKAC9tbnQvdy9zdWIyL3N1YjFtb3ZlZC9p',
+    'bi50eHQAL21udC93L3N1YjIvc3ViMW1vdmVkLy4uAC9tbnQvdy9zdWIyL3N1',
+    'YjFtb3ZlZC8uLi90YXJnZXQudHh0AGZhdC5yZW5hbWVfZGlyX2NvbnRlbnQA',
+    'L21udC93L3N1YjJ4AC9tbnQvdy9lMQBmYXQucmVuYW1lX2Rpcl9kc3Rfbm90',
+    'ZW1wdHkAZmF0LnJlbmFtZV9maWxlX292ZXJfZGlyAGZhdC5yZW5hbWVfZGly',
+    'X292ZXJfZmlsZQAvbW50L3cvbG93ZXIuVFhUAGZhdC5yZW5hbWVfc2FtZQBm',
+    'YXQucm1kaXJfbm90ZW1wdHkAZmF0LnJtZGlyX2VtcHR5AGZhdC5ybWRpcl9m',
+    'aWxlAGZhdC51bmxpbmtfZGlyAC9tbnQvdy9tYW55AC9tbnQvdy9tYW55L2Zp',
+    'bGVfd2l0aF9hX2xvbmdfbmFtZV8AeAoAZmF0Lm1hbnlfY3JlYXRlAGZhdC5t',
+    'YW55X2NvdW50AGZhdC5tYW55X3VubGlua19oYWxmAC9tbnQvdy9tYW55L2Fu',
+    'b3RoZXJfbG9uZ19maWxlX25hbWVfAHkKAGZhdC5tYW55X3JlZmlsbABmYXQu',
+    'bWFueV9zdGlsbF90aGVyZQAvbW50L3cvYmlnMi5iaW4AZmF0LmJpZ193cml0',
+    'ZQBmYXQuYmlnX3JlYWRiYWNrAC9tbnQvdy9zaG9ydDIudHh0AHMKAGZhdC5j',
+    'aG1vZF9ybwBmYXQuY2htb2RfcncAZmF0LnV0aW1lcwBmYXQubXRpbWVfbm93',
+    'AGZhdC51bW91bnRfYnVzeQBmYXQudW1vdW50AGZhdC5yZW1vdW50X2ZzAGZh',
+    'dC5wZXJzaXN0X2JpZwAvbW50L3cvc3ViMngvc3ViMW1vdmVkAGZhdC5wZXJz',
+    'aXN0X25hbWVzAGZhdC5wZXJzaXN0X21hbnkAZmF0LnBlcnNpc3Rfb3JpZwBm',
+    'YXQucmVtb3VudF9ybwAvbW50L3cvcm8udHh0AC9tbnQvdy9yb2QAZmF0LnJv',
+    'X3dyaXRlAGZhdC5yb19yZWFkAHJ3CgAvbW50L3cvcncudHh0AGZhdC5yZW1v',
+    'dW50X3J3AGZhdC5mcmVlX2FmdGVyX3VubGluawBmaW5hbAoAL21udC9maW5h',
+    'bC50eHQAZmF0LnVtb3VudF9maW5hbABmYXQgRE9ORQoAMDEyMzQ1Njc4OWFi',
+    'Y2RlZgAAAADKmjsAAAAAAMqaOwAAAABHQ0M6IChVYnVudHUgMTMuMy4wLTZ1',
+    'YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA',
+    'AAAAAAAAAAAABADx/wsAAABNlgQIIAAAAAIAAQASAAAAbZYECIkAAAACAAEA',
+    'HAAAAPaWBAhJAAAAAgABACAAAAA/lwQIoQAAAAIAAQAoAAAA4JcECCgAAAAC',
+    'AAEALAAAAKDVBAhgAAAAAQADADAAAAAImAQIXwAAAAIAAQA6AAAAoLUECAAg',
+    'AAABAAMAPwAAAGeYBAhwAAAAAgABAEYAAADXmAQIYAAAAAIAAQBcAAAAN5kE',
+    'CIIAAAACAAEAcQAAALmZBAhCAAAAAgABAIMAAAD7mQQIIAAAAAIAAQCIAAAA',
+    'G5oECEQAAAACAAEAjgAAAATWBAgEAAAAAQADAJYAAAAA1gQIBAAAAAEAAwCe',
+    'AAAAX5oECCkAAAASAAEApAAAABKWBAgAAAAAEAABAKsAAAA5lgQIAAAAABAA',
+    'AQC9AAAAQJYECAAAAAAQAAEAuAAAAKC1BAgAAAAAEAADAJ8AAACUgAQIfhUA',
+    'ABIAAQDEAAAAiLUECAAAAAAQAAMAywAAAAjWBAgAAAAAEAADAABmYXR0ZXN0',
+    'LmMAc3RyY21wAGZpbGxjaGVjawBwdXQAaGFzbmFtZQBpc3oAc2JfAHplcm9j',
+    'aGVjawB3YnVmAG1rbmFtZQBmaWxsd3JpdGUuY29uc3Rwcm9wLjAAY291bnRk',
+    'aXIuY29uc3Rwcm9wLjAAc2x1cnAuY29uc3Rwcm9wLjAAcHV0cwBrdGVzdABr',
+    'dV9wYXNzAGt1X2ZhaWwAY21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABfX2Jz',
     'c19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRh',
     'YgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAECJQA',
-    'AABwHwAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAAgAAAASgBAgEIAAAaAoA',
-    'AAAAAAAAAAAABAAAAAAAAAApAAAACAAAAAMAAACAugQIgCoAAGggAAAAAAAA',
-    'AAAAACAAAAAAAAAALgAAAAEAAAAwAAAAAAAAAGwqAAAtAAAAAAAAAAAAAAAB',
-    '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',
-    'bG9ja2VkAHB0eS51bmxvY2sAcHR5Lm9wZW5fc2xhdmUAcHR5LndpbnNpemUA',
-    'aGVsbG8KAHB0eS5tYXN0ZXJfdG9fc2xhdmUAaGVsbG8NCgBwdHkuZWNobwBv',
-    'dXQKAG91dA0KAHB0eS5zbGF2ZV90b19tYXN0ZXIAcHR5LnJhdwBwdHkucG9s',
-    'bF9lbXB0eQB6AHB0eS5wb2xsX2luAHB0eS5odXBfZW9mAHB0eS5zbGF2ZV9n',
-    'b25lAHB0eS5yZW9wZW4AR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4y',
-    'NC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAA',
-    'AAQA8f8LAAAAxoQECCAAAAACAAEAEgAAAOaEBAggAAAAAgABABcAAAAGhQQI',
-    'RAAAAAIAAQAdAAAAlJYECAQAAAABAAMAJQAAAJCWBAgEAAAAAQADAC0AAABK',
-    'hQQIKQAAABIAAQAzAAAAsoQECAAAAAAQAAEARQAAALmEBAgAAAAAEAABAEAA',
-    'AACQlgQIAAAAABAAAwAuAAAAlIAECB4EAAASAAEATAAAAJCWBAgAAAAAEAAD',
-    'AFMAAACYlgQIAAAAABAAAwAAcHR5dGVzdC5jAHN0cmNtcABwdXRzAGt0ZXN0',
-    'AGt1X3Bhc3MAa3VfZmFpbABjbWFpbgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3Rh',
-    'cnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRl',
-    'eHQALnJvZGF0YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAECJQAAADfBAAA',
-    'AAAAAAAAAAABAAAAAAAAACEAAAABAAAAMgAAAHOFBAhzBQAAHQEAAAAAAAAA',
-    'AAAAAQAAAAEAAAApAAAACAAAAAMAAACQlgQIkAYAAAgAAAAAAAAAAAAAAAQA',
-    'AAAAAAAALgAAAAEAAAAwAAAAAAAAAJAGAAAtAAAAAAAAAAAAAAABAAAAAQAA',
-    'AAEAAAACAAAAAAAAAAAAAADABgAA4AAAAAYAAAAHAAAABAAAABAAAAAJAAAA',
-    'AwAAAAAAAAAAAAAAoAcAAFgAAAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAA',
-    'AAAAAAAAAPgHAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==');
+    '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',
+    'AInzzYAx0oXAuIGHBAgPlMLoxgAAAFCLRdCNXeBqAAUAIAAA/3XUagFqAVBq',
+    'AGjAAAAA6EkAAACDxCDB6B+JwriLhwQI6JIAAAC4nYcECOhoAAAAMdLHReAE',
+    'AAAAMcmJVeS4ogAAAM2AuAYAAACLXdTNgI1l8DHAWVteX12NYfzDVVdWU4tE',
+    'JBSLXCQYi0wkHItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADNgDHtieCD',
+    '5PBQ6GQAAABVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJ',
+    'xrhuhgQIU4nT6M3///+J8OjG////hdu4Z4YECLpihgQID0XC6LL///+F23QI',
+    '/wUEuQQI6wb/BQC5BAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBRUuhA+v//',
+    'icO4AQAAAM2Ag8QQ6/4gT0sKACBGQUlMCgBLVEVTVDogAC9kZXYvZmIwACAg',
+    'KHBhcyBkZSAvZGV2L2ZiMCA6IHRlc3RzIGZyYW1lYnVmZmVyIGlnbm9yZXMp',
+    'CgBmYi52c2NyZWVuaW5mbwBmYi5nZW9tZXRyeQBCT0NIUwBmYi5mc2NyZWVu',
+    'aW5mbwBmYi5pb2N0bF9iYWQAZmIud3JpdGVfcm93cwBmYi5sc2Vla19waXhl',
+    'bABmYi53cml0ZV9waXhlbABmYi5yZWFkX2JhY2sAZmIucmVhZF9yb3cAZmIu',
+    'c2Vla19lbmQAZmIuc2Vla19iYWQAZmIubW1hcABmYi5tbWFwX3JlYWQAZmIu',
+    'bW1hcF93cml0ZQBmYi5tbWFwX2Zvcmtfc2hhcmVkAGZiLm11bm1hcABmYi5t',
+    'bWFwX2JhZF9yYW5nZQBmYiBEUkFXTgoAR0NDOiAoVWJ1bnR1IDEzLjMuMC02',
+    'dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAEAAAAA',
+    'AAAAAAAAAAQA8f8KAAAA1YUECCAAAAACAAEADwAAAPWFBAhEAAAAAgABABUA',
+    'AAAEuQQIBAAAAAEAAwAdAAAAALkECAQAAAABAAMAJQAAAGCQBAigAAAAAQAD',
+    'ACgAAAAAkAQIRAAAAAEAAwArAAAAAJEECAAoAAABAAMALwAAADmGBAgpAAAA',
+    'EgABADUAAACahQQIAAAAABAAAQA8AAAAwYUECAAAAAAQAAEATgAAAMiFBAgA',
+    'AAAAEAABAEkAAAAAkAQIAAAAABAAAwAwAAAAlIAECAYFAAASAAEAVQAAAACQ',
+    'BAgAAAAAEAADAFwAAAAIuQQIAAAAABAAAwAAZmJ0ZXN0LmMAcHV0cwBrdGVz',
+    'dABrdV9wYXNzAGt1X2ZhaWwAdmkAZmkAcm93AGNtYWluAGt1X3NjNgBfX3Jl',
+    'c3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0',
+    'cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNzAC5jb21tZW50AAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAA',
+    'AAYAAACUgAQIlAAAAM4FAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAA',
+    'YoYECGIGAABFAQAAAAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAAACQBAgA',
+    'EAAACCkAAAAAAAAAAAAAIAAAAAAAAAAuAAAAAQAAADAAAAAAAAAApwcAAC0A',
+    'AAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAANQHAAAQAQAABgAA',
+    'AAkAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAADkCAAAYQAAAAAAAAAAAAAA',
+    'AQAAAAAAAAARAAAAAwAAAAAAAAAAAAAARQkAADcAAAAAAAAAAAAAAAEAAAAA',
+    'AAAA',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAPoQECDQAAAAQCQAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAghBwAAIQcAAAUAAAAAEAAAAQAAAEAH',
+    'AABAlwQIQJcECAAAAAAIBAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAI1MJASD5PC434UECP9x/FWJ5VdWU1GD7CjomQMAAIXA',
+    'fwq46oUECOk2AwAAice4FoYECOh/AwAABQAYAADB4AqJRdBSagBq/2oiagNQ',
+    'agBowAAAAOgjAwAAMdKDxCCFwInGuB+GBAgPn8LoTQQAAIX2D470AgAAi0XQ',
+    'uQAQAACJdcwx25n3+YlF1Inwi03UOct0IGnTsXk3noiY/w8AAEMFABAAAIHy',
+    'NBIAAImQAPD//+vZuCmGBAjo+gIAAIn6KcK4M4YECIH6/wcAAA+fwg+20ujl',
+    'AwAAidqJ8Oh4AwAAicK4QoYECOjQAwAAidqJ8OhjAwAAicK4UIYECOi7AwAA',
+    'uAIAAADNgIlFyIXAD4W6AAAAidqJ8Og8AwAAhcB1C7gBAAAAicPNgOv+ifIx',
+    'wIt91I0MQDn5cxtpyBNtptqBwgAwAABAgfHL7f//iYoA0P//69uJ8jHAi33U',
+    'jQxAOflzJ2nIE22m2osaQIHCADAAAIHxy+3//znLdN24AQAAALsCAAAAzYDr',
+    '/jHJuwMAAACLRdQ5wXQricgx0vfzhdJ0HmnBsXk3nonKweIMNTQSAAA5BDJ0',
+    'CbgBAAAAzYDr/kHrzrgBAAAAMdvNgOv+i13IjU3kuAcAAAAx0s2AMdKDfeQA',
+    'uF6GBAi7gYYECA+UwujIAgAAi1XUifDoWgIAAInCuG6GBAjosgIAALhzAAAA',
+    'zYAx0oP49LiKhgQID5TC6JkCAACLVdSJ8OgrAgAAicKFwHQRuN+FBAjoegEA',
+    'ADHSOfgPlMK4noYECOhuAgAAMcBr0AeLTdQ5ynMbadDXU4RTi03MQIFFzABw',
+    'AACB8jQSAACJEevbicqJ8Inz6NgBAACJwrivhgQI6DACAACLTdC4WwAAAM2A',
+    'MdKFwLi8hgQIu4GGBAgPlMLoEAIAALgphgQI6AEBAACJ+inCuMiGBAiD+kAP',
+    'nsIPttLo7wEAALhzAAAAzYAx0oXAdRG434UECOjTAAAAMdKFwA+UwrjZhgQI',
+    'u4GGBAjowgEAALhzAAAAzYAx0oP46rjmhgQID5TC6KkBAAC4VwAAADHJzYAx',
+    '0oXAdRG434UECOiLAAAAMdI5+A+Uwrj5hgQIu4GGBAjoegEAALhXAAAAMcnN',
+    'gDHSg/jwuAWHBAgPlMLoXwEAALgWhwQI6DUBAAAxwOsFuAEAAACNZfBZW15f',
+    'XY1h/MNVV1ZTi0QkFItcJBiLTCQci1QkIIt0JCSLfCQoi2wkLM2AW15fXcO4',
+    'rQAAAM2AMe2J4IPk8FDoSQEAAFUx0onlV1a+BQAAAFO7vYUECFGJ0YlF8Inw',
+    'zYCFwHh4ica/AwAAALlAlwQIuv8DAACJ+InzzYCJx7gGAAAAzYCF/35UxodA',
+    'lwQIADHSi3XwidAp1ooMBoqYQJcECITJdQSJwesHQDjZdOrrJ4C5QJcECCB1',
+    'A0Hr9DHAD76ZQJcECI1T0ID6CXcSa9AKQY1EGtDr50I5+nW1g8j/WlteX13D',
+    'idEx0jnKdQa4AQAAAMNVieVWU2nasXk3nonGgfM0EgAAORh1GQUAEAAAOJb/',
+    'DwAAdQxCOcp13LgBAAAA6wIxwFteXcNVicEx0onlU4A8EQB0A0Lr97gEAAAA',
+    'uwEAAADNgFtdw1WJ5VaJxrjXhQQIU4nT6M3///+J8OjG////hdu40IUECLrL',
+    'hQQID0XC6LL///+F23QI/wVEmwQI6wb/BUCbBAhbXl3DVYnlU4PsCItFCIsQ',
+    'jUgEjUSQCFBRUujl+v//icO4AQAAAM2Ag8QQ6/4vcHJvYy9tZW1pbmZvACBP',
+    'SwoAIEZBSUwKAEtURVNUOiAAU3dhcFRvdGFsOgAgIChwYXMgZGUgc3dhcCBh',
+    'Y3RpZiA6IHRlc3RzIHN3YXAgaWdub3JlcykKAE1lbUZyZWU6AHN3YXAubW1h',
+    'cABTd2FwRnJlZToAc3dhcC5wYWdlZF9vdXQAc3dhcC52ZXJpZnlfMQBzd2Fw',
+    'LnZlcmlmeV8yAHN3YXAuZm9ya19jaGlsZABzd2FwLnBhcmVudF9pbnRhY3QA',
+    'L2Rldi9oZGIAc3dhcC5zd2Fwb2ZmX2Vub21lbQBzd2FwLnN0aWxsX3dvcmtz',
+    'AHN3YXAucmV3cml0ZQBzd2FwLm11bm1hcABzd2FwLnNsb3RzX2ZyZWVkAHN3',
+    'YXAuc3dhcG9mZgBzd2FwLnN3YXBvZmZfdHdpY2UAc3dhcC5zd2Fwb24Ac3dh',
+    'cC5zd2Fwb25fYnVzeQBzd2FwIERPTkUKAEdDQzogKFVidW50dSAxMy4zLjAt',
+    'NnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAAEA',
+    'AAAAAAAAAAAAAAQA8f8MAAAAS4QECKEAAAACAAEAFAAAAECXBAgABAAAAQAD',
+    'ABcAAADshAQIRAAAAAIAAQAqAAAAMIUECCAAAAACAAEALwAAAFCFBAhEAAAA',
+    'AgABADUAAABEmwQIBAAAAAEAAwA9AAAAQJsECAQAAAABAAMARQAAAJSFBAgp',
+    'AAAAEgABAEsAAAAQhAQIAAAAABAAAQBSAAAAN4QECAAAAAAQAAEAZAAAAD6E',
+    'BAgAAAAAEAABAF8AAABAlwQIAAAAABAAAwBGAAAAlIAECHwDAAASAAEAawAA',
+    'ACGXBAgAAAAAEAADAHIAAABImwQIAAAAABAAAwAAc3dhcHRlc3QuYwBtZW1p',
+    'bmZvAG1pAHZlcmlmeS5jb25zdHByb3AuMABwdXRzAGt0ZXN0AGt1X3Bhc3MA',
+    'a3VfZmFpbABjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0',
+    'AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0',
+    'AC5yb2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAACkFAAAA',
+    'AAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAAvYUECL0FAABkAQAAAAAAAAAA',
+    'AAABAAAAAQAAACkAAAAIAAAAAwAAAECXBAhABwAACAQAAAAAAAAAAAAAIAAA',
+    'AAAAAAAuAAAAAQAAADAAAAAAAAAAIQcAAC0AAAAAAAAAAAAAAAEAAAABAAAA',
+    'AQAAAAIAAAAAAAAAAAAAAFAHAAAQAQAABgAAAAkAAAAEAAAAEAAAAAkAAAAD',
+    'AAAAAAAAAAAAAABgCAAAdwAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAA',
+    'AAAAAAAA1wgAADcAAAAAAAAAAAAAAAEAAAAAAAAA');
 
 { END-EMBED }
 { Installer les programmes embarques dans le tmpfs racine }
@@ -17493,15 +27284,23 @@ Begin
   InitVfs;
   InitTmpfs;
   InitExt2;
+  InitIso;
+  InitFat;
   InitProc;
   InitDevices;
+  InitSockets;
+  InitEvents;
+  NetInit;
+  FbInit;
   MountRoot;
+  InitPts;
   MakeTree;
   InitTty;
   KLog('disque IDE : ' + IntStr(Ord(DiskPresent[0]) + Ord(DiskPresent[1])
       + Ord(DiskPresent[2]) + Ord(DiskPresent[3])) +
        ' lecteur(s), ramdisk ' + IntStr(RamSizeKb) + ' Ko');
   If Not TryRealRoot Then InstallEmbedded;
+  If CmdGet('swap') <> '' Then SwapOnDev(CmdGet('swap'));
   FpuDetect;
   InitFpu;
   T := KernelThread(LongInt(@InitThread));

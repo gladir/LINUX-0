@@ -85,8 +85,12 @@ static inline long sc2(long n,long a,long b){long r;__asm__ volatile("int $0x80"
 static inline long sc3(long n,long a,long b,long c){long r;__asm__ volatile("int $0x80":"=a"(r):"0"(n),"b"(a),"c"(b),"d"(c):"memory");return r;}
 static inline long sc4(long n,long a,long b,long c,long d){long r;__asm__ volatile("int $0x80":"=a"(r):"0"(n),"b"(a),"c"(b),"d"(c),"S"(d):"memory");return r;}
 static inline long sc5(long n,long a,long b,long c,long d,long e){long r;__asm__ volatile("int $0x80":"=a"(r):"0"(n),"b"(a),"c"(b),"d"(c),"S"(d),"D"(e):"memory");return r;}
-static inline long sc6(long n,long a,long b,long c,long d,long e,long f){
-  long r;__asm__ volatile("push %%ebp\n\tmov %7,%%ebp\n\tint $0x80\n\tpop %%ebp":"=a"(r):"0"(n),"b"(a),"c"(b),"d"(c),"S"(d),"D"(e),"m"(f):"memory");return r;}
+long ku_sc6(long n,long a,long b,long c,long d,long e,long f);
+__asm__(".text\n.global ku_sc6\nku_sc6:\n\tpush %ebp\n\tpush %edi\n\tpush %esi\n\tpush %ebx\n"
+  "\tmov 20(%esp),%eax\n\tmov 24(%esp),%ebx\n\tmov 28(%esp),%ecx\n\tmov 32(%esp),%edx\n"
+  "\tmov 36(%esp),%esi\n\tmov 40(%esp),%edi\n\tmov 44(%esp),%ebp\n\tint $0x80\n"
+  "\tpop %ebx\n\tpop %esi\n\tpop %edi\n\tpop %ebp\n\tret\n");
+static inline long sc6(long n,long a,long b,long c,long d,long e,long f){return ku_sc6(n,a,b,c,d,e,f);}
 
 #define O_RDONLY 0
 #define O_WRONLY 1

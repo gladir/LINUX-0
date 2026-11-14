@@ -1,0 +1,201 @@
+COMMANDES DE LINUX-0 SOUS KERNEL32 (compilees par LPC -3X)
+==============================================================
+
+Banc d'essai : KERNEL32/TESTS/U/cmdbench.py. Chaque commande de la table
+reçoit un essai fonctionnel (sortie comparee a la commande GNU de l'hote, a un
+texte, ou presence d'un texte) sur l'hote (ELF32 statique execute directement)
+puis, avec USR/ROOTFS/usr/share/bench/run.sh, sous le noyau KERNEL32 amorce
+sous QEMU depuis IMAGE/LINUX32-HD.IMG (ext2). Les autres commandes recoivent
+l'essai "aide /?" (demarre, affiche son aide, code de sortie < 128). Les
+commandes sont des programmes de style DOS (Uses Dos, Crt) : leur syntaxe est
+la leur (voir leur aide), pas celle de GNU ; seuls les resultats de meme
+syntaxe sont compares a GNU.
+
+ETAT : marche = fonctionne conformement a son aide pour les essais faits ;
+       reserves = fonctionne avec une limite (voir REMARQUE) ;
+       echoue = ne fonctionne pas (cause dans REMARQUE).
+QEMU : ok = meme resultat sous KERNEL32 ; KO = difference ; aide = seul l'essai
+       d'aide a ete fait (tous passent : 186 sur 186) ; - = non essaye.
+
+Resume (hote) : 168 marchent, 1 avec reserves, 9 echouent (sur 178 programmes)
+
+COMMANDE     ETAT      QEMU  ESSAI                                        REMARQUE
+----------   --------  ----  ------------------------------------------   --------------------
+a2p          marche    aide  aide /?                                      demarre et affiche son aide
+ac           marche    aide  aide /?                                      demarre et affiche son aide
+access       marche    aide  aide /?                                      demarre et affiche son aide
+aclocal      marche    aide  aide /?                                      demarre et affiche son aide
+addftinfo    marche    aide  aide /?                                      demarre et affiche son aide
+addr2line    marche    aide  aide /?                                      demarre et affiche son aide
+afmtodit     marche    aide  aide /?                                      demarre et affiche son aide
+ansi2knr     marche    aide  aide /?                                      demarre et affiche son aide
+anytopnm     marche    aide  aide /?                                      demarre et affiche son aide
+ar           marche    aide  aide /?                                      demarre et affiche son aide
+asciitopgm   marche    aide  aide /?                                      demarre et affiche son aide
+atktopbm     marche    aide  aide /?                                      demarre et affiche son aide
+awk          echoue    KO    awk {print $2}; awk {s+=$1} END {print s} nu dialecte reduit : print $N, -f prog ; le shell est restitue en 'apostrophes' (LINUX0) ; resultat dif
+banner       marche    ok    banner OK                                    
+base64       marche    ok    base64 a.txt                                 
+basename     marche    ok    basename /a/b/c.txt; basename a.txt .txt     
+bash         marche    aide  aide /?                                      demarre et affiche son aide
+bc           marche    ok    bc -q                                        
+bdiff        marche    aide  aide /?                                      demarre et affiche son aide
+bfs          marche    aide  aide /?                                      demarre et affiche son aide
+bzip2        echoue    aide  bzip2 -c a.txt                               aller-retour impossible (a revoir)
+cal          marche    ok    cal 2 2026                                   
+cat          marche    ok    cat in.txt; cat -n a.txt b.txt               
+checkeq      marche    aide  aide /?                                      demarre et affiche son aide
+checknr      marche    aide  aide /?                                      demarre et affiche son aide
+chmod        marche    ok    chmod 644 /tmp/linux0-cmdbench/ls/f1         
+chsh         marche    aide  aide /?                                      demarre et affiche son aide
+cksum        marche    ok    cksum a.txt                                  
+clear        marche    ok    clear                                        
+cmp          marche    ok    cmp a.txt a.txt; cmp a.txt b.txt             
+column       marche    ok    column -t j1.txt                             
+comm         marche    ok    comm a.txt b.txt                             
+compress     echoue    aide  compress -c a.txt                            aller-retour impossible (a revoir)
+cp           marche    ok    cp a.txt /tmp/linux0-cmdbench/cp.out         
+cpp          marche    aide  aide /?                                      demarre et affiche son aide
+crontab      marche    aide  aide /?                                      demarre et affiche son aide
+csh          marche    aide  aide /?                                      demarre et affiche son aide
+csplit       marche    ok    csplit a.txt 2                               
+ctags        marche    aide  aide /?                                      demarre et affiche son aide
+cut          marche    ok    cut in.txt -b 1-3                            
+cvs          marche    aide  aide /?                                      demarre et affiche son aide
+date         marche    ok    date                                         
+dc           marche    ok    dc                                           
+dd           marche    ok    dd if=a.txt of=/tmp/linux0-cmdbench/dd.out   
+df           marche    ok    df                                           
+diff         marche    ok    diff a.txt b.txt                             
+dircmp       marche    aide  aide /?                                      demarre et affiche son aide
+dircolors    marche    aide  aide /?                                      demarre et affiche son aide
+dirname      marche    ok    dirname /a/b/c.txt                           
+dos2unix     marche    aide  aide /?                                      demarre et affiche son aide
+dpost        marche    aide  aide /?                                      demarre et affiche son aide
+dsplit       marche    aide  aide /?                                      demarre et affiche son aide
+du           marche    ok    du /tmp/linux0-cmdbench/ls                   
+echo         marche    ok    echo a b                                     
+ed           marche    ok    ed a.txt                                     
+egrep        marche    ok    egrep al|ze in.txt                           
+emacs        marche    aide  aide /?                                      demarre et affiche son aide
+env          marche    ok    env                                          
+eqn          marche    aide  aide /?                                      demarre et affiche son aide
+etags        marche    aide  aide /?                                      demarre et affiche son aide
+expand       marche    ok    expand tab.txt                               
+expr         marche    ok    expr 2 + 3                                   
+factor       marche    ok    factor 60                                    
+fallocate    marche    aide  aide /?                                      demarre et affiche son aide
+false        marche    ok    false                                        
+fgrep        marche    ok    fgrep alpha in.txt                           
+fmt          marche    ok    fmt --width=30 long.txt                      
+fold         echoue    KO    fold --width=20 long.txt                     coupe apres la largeur puis un caractere par ligne (defaut du programme)
+format       marche    aide  aide /?                                      demarre et affiche son aide
+free         marche    aide  aide /?                                      demarre et affiche son aide
+fromdos      marche    aide  aide /?                                      demarre et affiche son aide
+gcal         marche    aide  aide /?                                      demarre et affiche son aide
+geqn         marche    aide  aide /?                                      demarre et affiche son aide
+getent       marche    aide  aide /?                                      demarre et affiche son aide
+getopt       marche    aide  aide /?                                      demarre et affiche son aide
+gettext      marche    aide  aide /?                                      demarre et affiche son aide
+glookbib     marche    aide  aide /?                                      demarre et affiche son aide
+gperf        marche    aide  aide /?                                      demarre et affiche son aide
+gpic         marche    aide  aide /?                                      demarre et affiche son aide
+grefer       marche    aide  aide /?                                      demarre et affiche son aide
+grep         marche    ok    grep alpha in.txt; grep LIGNE in.txt /I      
+grodvi       marche    aide  aide /?                                      demarre et affiche son aide
+groff        marche    aide  aide /?                                      demarre et affiche son aide
+groupdel     marche    aide  aide /?                                      demarre et affiche son aide
+groups       marche    ok    groups                                       
+gsoelim      marche    aide  aide /?                                      demarre et affiche son aide
+gunzip       marche    aide  aide /?                                      demarre et affiche son aide
+gzexe        marche    aide  aide /?                                      demarre et affiche son aide
+gzip         echoue    aide  gzip -c a.txt                                aller-retour -c / -dc impossible (a revoir)
+h2ph         marche    aide  aide /?                                      demarre et affiche son aide
+hd           marche    ok    hd a.txt                                     
+head         marche    ok    head -n 3 in.txt                             
+hexdump      marche    ok    hexdump -C a.txt                             
+htdigest     marche    aide  aide /?                                      demarre et affiche son aide
+htpasswd     marche    aide  aide /?                                      demarre et affiche son aide
+iconv        marche    aide  aide /?                                      demarre et affiche son aide
+id           marche    ok    id                                           
+ifconfig     marche    aide  aide /?                                      demarre et affiche son aide
+ispell       marche    aide  aide /?                                      demarre et affiche son aide
+join         marche    ok    join j1.txt j2.txt                           
+ksh          reserves  -     aide /?                                      interactif : l'essai d'aide attend l'entree
+lastlog      marche    aide  aide /?                                      demarre et affiche son aide
+ldd          marche    aide  aide /?                                      demarre et affiche son aide
+less         marche    aide  aide /?                                      demarre et affiche son aide
+lex          marche    aide  aide /?                                      demarre et affiche son aide
+lispmtopgm   marche    aide  aide /?                                      demarre et affiche son aide
+lkbib        marche    aide  aide /?                                      demarre et affiche son aide
+logname      marche    aide  aide /?                                      demarre et affiche son aide
+look         marche    ok    look ap a.txt                                
+lp           marche    aide  aide /?                                      demarre et affiche son aide
+ls           marche    ok    ls /tmp/linux0-cmdbench/ls; ls -l /tmp/linux 
+macptopbm    marche    aide  aide /?                                      demarre et affiche son aide
+make         marche    aide  aide /?                                      demarre et affiche son aide
+md5sum       marche    ok    md5sum a.txt                                 
+merge        marche    aide  aide /?                                      demarre et affiche son aide
+mkdirhier    marche    aide  aide /?                                      demarre et affiche son aide
+mkmanifest   marche    aide  aide /?                                      demarre et affiche son aide
+mktemp       marche    ok    mktemp                                       
+more         marche    aide  aide /?                                      demarre et affiche son aide
+mtest        marche    aide  aide /?                                      demarre et affiche son aide
+mtvtoppm     marche    aide  aide /?                                      demarre et affiche son aide
+mv           marche    ok    mv /tmp/linux0-cmdbench/cp.out /tmp/linux0-c 
+myisamchk    marche    aide  aide /?                                      demarre et affiche son aide
+nano         marche    aide  aide /?                                      demarre et affiche son aide
+neqn         marche    aide  aide /?                                      demarre et affiche son aide
+nl           marche    ok    nl a.txt                                     
+nroff        marche    aide  aide /?                                      demarre et affiche son aide
+od           marche    ok    od -c a.txt                                  
+paste        marche    ok    paste a.txt b.txt                            
+pcat         marche    aide  aide /?                                      demarre et affiche son aide
+perl         marche    aide  aide /?                                      demarre et affiche son aide
+pico         marche    aide  aide /?                                      demarre et affiche son aide
+pr           marche    aide  aide /?                                      demarre et affiche son aide
+printf       echoue    KO    printf x %s %d\n abc 5                       ne traite pas %s/%d (programme minimal)
+pwd          marche    KO    pwd                                          
+python       marche    aide  aide /?                                      demarre et affiche son aide
+readelf      marche    aide  aide /?                                      demarre et affiche son aide
+red          marche    aide  aide /?                                      demarre et affiche son aide
+ref          marche    aide  aide /?                                      demarre et affiche son aide
+repeat       marche    ok    repeat 2 /bin/echo hi                        
+replace      marche    aide  aide /?                                      demarre et affiche son aide
+rev          marche    ok    rev in.txt                                   
+rm           marche    KO    rm /tmp/linux0-cmdbench/mv.out               
+rmdir        marche    ok    rmdir /tmp/linux0-cmdbench/dd/ee             
+s2p          marche    aide  aide /?                                      demarre et affiche son aide
+sdiff        marche    ok    sdiff a.txt b.txt                            
+sed          marche    ok    sed s/a/A/g a.txt; sed -e s/a/A/ a.txt       
+seq          marche    ok    seq 1 5; seq 3                               
+sh           marche    aide  aide /?                                      demarre et affiche son aide
+sleep        marche    ok    sleep 0                                      
+sort         marche    ok    sort in.txt                                  
+split        marche    ok    split -l 1 a.txt /tmp/linux0-cmdbench/sp_    
+stat         marche    ok    stat a.txt                                   
+strings_     marche    aide  aide /?                                      demarre et affiche son aide
+sum          marche    ok    sum a.txt                                    
+tac          marche    ok    tac in.txt                                   
+tail         marche    ok    tail --lines 2 in.txt                        
+tee          marche    ok    tee /tmp/linux0-cmdbench/tee.out             
+todos        marche    aide  aide /?                                      demarre et affiche son aide
+touch        marche    ok    touch /tmp/linux0-cmdbench/touched           
+tr           echoue    KO    tr l L                                       intervalles a-z non developpes ('tr l L' : defaut du programme)
+tree         echoue    KO    tree /tmp/linux0-cmdbench                    n'affiche que les repertoires (comme sous DOS)
+true         marche    ok    true                                         
+umask        marche    aide  aide /?                                      demarre et affiche son aide
+uname        marche    KO    uname -s                                     sysname LINUX-0 (et non Linux) sous KERNEL32
+unexpand     marche    ok    unexpand a.txt                               
+uniq         marche    ok    uniq in.txt                                  
+unlink       marche    ok    unlink /tmp/linux0-cmdbench/touched          
+useradd      marche    aide  aide /?                                      demarre et affiche son aide
+userdel      marche    aide  aide /?                                      demarre et affiche son aide
+uudecode     marche    aide  aide /?                                      demarre et affiche son aide
+uuencode     marche    ok    uuencode a.txt /tmp/linux0-cmdbench/uu.out   
+vi           marche    aide  aide /?                                      demarre et affiche son aide
+wc           marche    ok    wc a.txt -l                                  
+which        marche    ok    which ls                                     
+yes          echoue    -     yes                                          boucle infinie : essai par tube vers head
+zcat         marche    aide  aide /?                                      demarre et affiche son aide
+zforce       marche    aide  aide /?                                      demarre et affiche son aide

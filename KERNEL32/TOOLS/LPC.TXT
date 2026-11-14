@@ -24,6 +24,10 @@ Options
             programme (WriteLn, ReadLn, fichiers, unites Dos et Crt...).
  -3B<hexa> adresse de liaison (defaut -3K : C0100000h ; -3X : 08048000h).
  -asm       ecrit aussi le listing assembleur (fichier .asm)
+ -nogc      -3K/-3X : garde tout le code et les donnees (par defaut le
+            code mort est elimine, voir "Elimination du code mort")
+ -g         -3K/-3X : table des symboles complete (par defaut : procedures
+            et points d'entree seulement)
  -v, -q     bavard / silencieux (par defaut : une ligne de resume)
 Les symboles conditionnels LPC, LINUX0, KERNEL32, VER70, CPU386 sont
 definis (pas FPC, WINDOWS ni WIN32 : les sources suivent la branche TP7),
@@ -117,6 +121,62 @@ Cible -3X
   Lst (unite Printer) : variable Text declaree, non ouverte.
 - Commandes du depot (racine, Uses Dos/Crt) : 178 sur 180 compilent et leur
   aide s'execute ; HALT et REBOOT (BIOS, Seg0040) ne sont pas portables.
+  Etat de chacune (hote et sous KERNEL32/QEMU) : TOOLS/COMMANDES.TXT.
+- Entree standard : la variable Text Input (ReadLn, Read, Eof, Eoln, SeekEof)
+  lit le descripteur 0 par blocs : tubes et redirections corrects. Input et
+  Output peuvent etre passes en parametre (Var F : Text). Ecrire #0 (Write de
+  Chr(0), ou d'une chaine) ecrit bien un octet nul.
+- Ligne de commande : jusqu'a 4096 parametres et 128 Ko (ParamStr, ParamCount).
+- Erreurs d'execution : "Runtime error N at 0x..." sur stderr (code 200+N).
+- Reels (Real, Double) : Write(x:0:2), Str, Val, formats % de sprintf et
+  strtod ecrits en Pascal (L32API.PAS), calculs par le coprocesseur x87.
+- Fichiers : variables de type fichier dans des tableaux ou des champs
+  (Assign(T[i], ..), Reset(R.F), Eof(R.F), ReadLn(T[i], S)...), Read/ReadLn
+  vers un element de tableau, un champ ou un pointeur (Read(A[i]), ReadLn(P^)).
+- Le programme peut definir une procedure ou une fonction de meme nom qu'une
+  predefinie (NewStr, ReadKey...) ou qu'une procedure de la couche API
+  (Sprintf...) : elle est renommee en interne (suffixe _U), le programme
+  garde son sens.
+- Parametres Const de type chaine : copies dans le cadre de l'appele (un
+  temporaire de l'anneau de 256 tampons STRRING aurait pu etre ecrase).
+- Unite Unix (L32API.PAS, Sys*) : SysFork, SysExecve, SysWaitPid, SysPipe,
+  SysDup/Dup2/Fcntl, SysKill, SysSigAction/SysSignal/SysSigProcMask,
+  SysOpen/Creat/Close/Read/Write/LSeek/Ioctl, SysStat/LStat/FStat, SysMkdir,
+  SysRmdir, SysUnlink, SysLink/Symlink/Readlink, SysRename, SysChmod/Chown,
+  SysChdir/Chroot/GetCwd, SysOpenDir/ReadDir/CloseDir, SysMount/Umount,
+  SysSync/Reboot, SysTime, SysSleep/Alarm/Pause, SysGetUid/Gid/Pid/PPid,
+  SysSetSid/SetPgid/TcGetPgrp/TcSetPgrp, SysTcGetAttr/SetAttr/GetWinSize,
+  SysUname, SysGetEnv/Argv/Envp, SysArgReset/ArgAdd/ArgExec (execve avec
+  tableaux), SysGetPw/GetPwNam/GetPwUid (/etc/passwd), SysCrypt (hachage de
+  type V7), SysLang/SysLangOf/SysSetLang (FR EN GR SP IT), SysErrorText.
+  Les noms de constantes O_*, SIG*, TTY_*, S_IF*, MS_*, LINUX_REBOOT_* sont
+  predefinis.
+
+Elimination du code mort (-3K, -3X)
+-----------------------------------
+Apres la compilation, LPC32 decoupe le code en morceaux (un par label de
+code) et les donnees en blocs (un par label) ; il ne garde que ce qui est
+atteignable depuis le point d'entree et le programme principal (aretes :
+appels, adresses, procedures rangees dans les donnees, API importees). Les
+blocs de donnees nuls passent en fin de segment (BSS : absents du fichier),
+les imports et symboles sont renumerotes. Resultat : un programme minimal
+passe de 180 Ko a 13 Ko, une commande type fait 20 a 60 Ko (tout le depot :
+178 programmes, 7,3 Mo ; le shell, 6000 lignes : 220 Ko). Un label de fin de
+donnees (chaine vide...) reserve un mot propre. -nogc desactive l'elimination
+(utile pour localiser un defaut du compilateur).
+
+Pieges du langage connus (Pascal est insensible a la casse)
+-----------------------------------------------------------
+- Un type et une constante qui ne different que par la casse (TWord/tWord)
+  se confondent. Une variable locale du nom d'une fonction du programme la
+  masque (Num(X) n'est plus l'appel).
+- Un "}" dans un commentaire { } le termine ; Until n'est pas un nom de
+  parametre ; ne pas lire les parametres d'une procedure englobante depuis une
+  procedure imbriquee (preferer une procedure de premier niveau).
+- Comparer deux chaines temporaires (A + B = C + D) peut ecraser un tampon.
+- String[n] occupe 256 octets quelle que soit n ; Integer fait 16 bits.
+- Une boucle FOR garde sa limite dans le cadre de la procedure (recursivite
+  sure : rm -r, sort...).
 
 Tests : TESTS/C/RUN.SH (TK1-TK3 noyaux sous QEMU, UX1-UX3 programmes sur
 l'hote) et TESTS/C/RUN16.SH (non-regression des cibles 16 bits).

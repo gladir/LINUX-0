@@ -57,7 +57,7 @@ Begin
 End;
 
 Procedure Remove(Const P : String);
-Var St : TSysStat; D, Ino, K, C : LongInt; Nm : String; L : Array[0..199] Of String[100];
+Var St : TSysStat; D, Ino, K, C : LongInt; Nm : String; L : Array[0..199] Of String;
 Begin
   If SysLStat(P, St) < 0 Then
   Begin

@@ -8,7 +8,7 @@ src, dst = sys.argv[1], sys.argv[2]
 progs = [('/sbin/init', 'init'), ('/bin/hello', 'hello'), ('/bin/forkwait', 'forkwait'),
          ('/bin/pipetest', 'pipetest'), ('/bin/sigtest', 'sigtest'),
          ('/bin/mmaptest', 'mmaptest'), ('/bin/dirtest', 'dirtest'),
-         ('/bin/ttytest', 'ttytest'), ('/bin/schedtest', 'schedtest'), ('/bin/blktest', 'blktest'), ('/bin/misctest', 'misctest'), ('/bin/proctest', 'proctest'), ('/bin/stress', 'stress'), ('/bin/kbdtest', 'kbdtest'), ('/bin/ext2test', 'ext2test'), ('/bin/ptytest', 'ptytest')]
+         ('/bin/ttytest', 'ttytest'), ('/bin/schedtest', 'schedtest'), ('/bin/blktest', 'blktest'), ('/bin/misctest', 'misctest'), ('/bin/proctest', 'proctest'), ('/bin/stress', 'stress'), ('/bin/kbdtest', 'kbdtest'), ('/bin/ext2test', 'ext2test'), ('/bin/ptytest', 'ptytest'), ('/bin/mounttest', 'mounttest'), ('/bin/socktest', 'socktest'), ('/bin/shmtest', 'shmtest'), ('/bin/limtest', 'limtest'), ('/bin/evttest', 'evttest'), ('/bin/devtest', 'devtest'), ('/bin/mousetest', 'mousetest'), ('/bin/nettest', 'nettest'), ('/bin/isotest', 'isotest'), ('/bin/fattest', 'fattest'), ('/bin/fbtest', 'fbtest'), ('/bin/swaptest', 'swaptest')]
 lines = []; starts = []; sizes = []
 for path, name in progs:
     d = open(os.path.join(src, name), 'rb').read()

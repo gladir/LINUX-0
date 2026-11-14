@@ -48,6 +48,9 @@ End;
 Function MoveFile(Source,Target:String):Boolean;
 Var
  F:File;
+{$IFDEF LINUX0}
+ SR:SearchRec;
+{$ENDIF}
 Begin
  If(Source='')or(Target='')Then Begin
   MoveFile:=False;
@@ -67,7 +70,16 @@ Begin
  Begin
   {$I-}
   Assign(F,Source);
+{$IFDEF LINUX0}
+  { Unix : si la destination n'est pas un repertoire, c'est le nouveau nom }
+  FindFirst(Target,Directory,SR);
+  If(DosError=0)and((SR.Attr and Directory)=Directory)Then
+   Rename(F,Target+'/'+SplitFileName(Source))
+  Else
+   Rename(F,Target);
+{$ELSE}
   Rename(F,Target+'\'+SplitFileName(Source));
+{$ENDIF}
   MoveFile:=IOResult=0;
   {$I+}
  End;

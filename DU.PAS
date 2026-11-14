@@ -8,6 +8,8 @@ Program DU;
 
 Uses DOS;
 
+Const PathSep={$IFDEF LINUX0}'/'{$ELSE}'\'{$ENDIF};
+
 Var
  OptionParam:Set Of (Count,Bytes,Summarize,HumanReadable);
  TotalSize:LongInt;
@@ -96,17 +98,17 @@ Begin
  If Path=''Then Exit;
  FSplit(Path,D,N,E);
  If E=''Then Begin
-  If D[Length(D)]<>'\'Then D:=D+'\';
+  If D[Length(D)]<>PathSep Then D:=D+PathSep;
   D:=D+E;
  End;
  If D=''Then Path2Dir:='' Else
- If D[Length(D)]<>'\'Then D:=D+'\';
+ If D[Length(D)]<>PathSep Then D:=D+PathSep;
  Path2Dir:=D;
 End;
 
 Function SetPath4AddFile(Path:String):String;Begin
  If Path=''Then GetDir(0,Path);
- If Path[Length(Path)]<>'\'Then Path:=Path+'\';
+ If Path[Length(Path)]<>PathSep Then Path:=Path+PathSep;
  SetPath4AddFile:=Path;
 End;
 

@@ -22,7 +22,7 @@
 #  Usage : KERNEL32/BUILD.SH [boot]       ("boot" : etape 2 seulement)
 #  Variables : W (dossier de travail, defaut /tmp/linux32-build), FPC, NASM,
 #              LPC (compilateur deja construit), TESTKERNEL=1, MB (taille du
-#              disque en Mo, defaut 64), BS (blocs ext2, defaut 1024), INODE
+#              disque en Mo, KSRC (source du noyau), defaut 64), BS (blocs ext2, defaut 1024), INODE
 #              (taille d'inode, defaut 128), CMDLINE (ligne de commande du
 #              noyau, defaut : root=/dev/hda1 rw console=ttyS0), NOCMDS=1 (sans les 178
 #              commandes du depot : systeme minimal).
@@ -67,9 +67,10 @@ echo "   MBR.BIN 512 octets ; STAGE2.BIN $(stat -c %s "$B/STAGE2.BIN") octets"
 
 echo "== Noyau"
 KERNEL=
-if [ -z "$TESTKERNEL" ] && [ -f "$HERE/KERNEL32.PAS" ]; then
+KSRC=${KSRC:-$HERE/KERNEL32.PAS}     # source du noyau (KSRC=... pour un autre)
+if [ -z "$TESTKERNEL" ] && [ -f "$KSRC" ]; then
   mkdir -p "$W/src"
-  cp "$HERE/KERNEL32.PAS" "$W/src/"
+  cp "$KSRC" "$W/src/KERNEL32.PAS"
   ( cd "$W/src" && "$LPC" -3K -q KERNEL32.PAS ) || exit 1
   KERNEL="$W/src/KERNEL32"
 else
@@ -104,7 +105,7 @@ for f in "$HERE"/USR/*.PAS; do
   n=$(basename "$f" .PAS); l=$(echo "$n" | tr A-Z a-z)
   case $n in
     INIT) build_one "$f" sbin/init ;;
-    GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKFS_EXT2|MKPASSWD)
+    GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKPASSWD)
       build_one "$f" sbin/$l ;;
     *) build_one "$f" bin/$l ;;
   esac
@@ -120,6 +121,14 @@ if [ -z "$NOCMDS" ]; then
   done
 fi
 ln -sf sh "$W/root/bin/ash" 2>/dev/null || true
+# commandes dont le nom de fichier se termine par _ (STRINGS_.PAS : mot reserve)
+for f in "$W"/root/bin/*_; do
+  [ -f "$f" ] && ln -sf "$(basename "$f")" "${f%_}" 2>/dev/null || true
+done
+# mkfs.ext2 = INSTALL sous un autre nom ; l'installateur copie / sur un disque
+ln -sf install "$W/root/sbin/mkfs.ext2" 2>/dev/null || true
+mkdir -p "$W/root/usr/share/boot"
+cp "$B/MBR.BIN" "$B/STAGE2.BIN" "$W/root/usr/share/boot/"
 echo "   $N programme(s)"
 # fichiers de configuration
 cp -a "$HERE/USR/ROOTFS"/. "$W/root"/

@@ -63,6 +63,14 @@ Parties ajoutees en phase 2 (placees physiquement avant la partie 14) :
 | Partie | Contenu |
 |---|---|
 | 18 | ext2 : superbloc, descripteurs de groupes epingles dans le cache de tampons, bitmaps, allocation de blocs et d'inodes avec regroupement, inodes de 128/256 octets, revisions 0 et 1, blocs de 1/2/4 Ko, `sparse_super`, `filetype`, indirections simple/double/triple, repertoires lineaires (ajout, fusion a la suppression, agrandissement), liens durs, liens symboliques rapides et lents, `mknod` (tty, bloc, fifo, socket), `rename` (entre repertoires, remplacement), troncature, `chmod/chown/utimes`, `statfs`, `s_state` propre/sale, remontage. ext3 (journal propre) monte comme ext2 ; journal a rejouer ou sommes de controle : lecture seule ; ext4 (extents, 64bit...) : refuse |
+| 19 | sockets : `AF_UNIX` (stream, dgram, socketpair, noms dans le VFS ou abstraits, `SCM_RIGHTS`), `AF_INET` en bouclage et reel (appels directs 359-373 et `socketcall`), `bind/listen/accept/connect/send/recv/sendmsg/recvmsg/shutdown/getsockopt...`, `poll` |
+| 20 | cache de pages des mappages partages (`MAP_SHARED` de fichiers : pages partagees entre processus, ecritures recopiees dans le fichier, `msync`) |
+| 21 | `epoll` (LT, ET, ONESHOT), `eventfd`, `timerfd`, `inotify` (create, open, modify, close, move, delete, attrib) |
+| 22 | reseau : pilote RTL8139 (PCI, DMA, IRQ), ARP, IPv4, ICMP (echo), UDP, TCP reel (poignee de mains, retransmission, fenetre, MSS 1400, fermeture), `SIOCGIFADDR/SIOCSIFADDR/SIOCGIFFLAGS...`, `/proc/net/dev` et `route`, `ip=A.B.C.D` sur la ligne de commande |
+| 23 | iso9660 (CD-ROM, lecture seule, Rock Ridge : `NM`, `PX`, `SL`) sur ATAPI (commande PACKET en PIO, partie 11) |
+| 26 | swap : `swapon`/`swapoff` (87/115) sur un peripherique `mkswap` (SWAPSPACE2 v1, 128 Mo au plus) ou `swap=/dev/hdXN` au demarrage ; `SwapReclaim` (appele par `AllocPages` sous 96 pages libres) ecrit sur disque les pages anonymes privees a une seule reference (seconde chance par bit "accede"), PTE non present portant la case (bit 9), page-in dans la faute de page (aussi en mode noyau), cases comptees pour `fork`, `/proc/meminfo` SwapTotal/SwapFree |
+| 25 | framebuffer Bochs/QEMU VGA : `fb=LxH` sur la ligne de commande programme le mode 32 bits (registres VBE 1CEh/1CFh), memoire video (BAR 0 PCI) mappee en F8000000h, `/dev/fb0` (29:0) : read, write, lseek, `FBIOGET_FSCREENINFO/VSCREENINFO`, `mmap` partage (VMA `VmPhys`, PTE hors comptage) |
+| 24 | FAT12/16/32 et vfat (noms longs UTF-8/UCS-2, noms courts `~N`, indicateurs de casse NT), lecture/ecriture, repertoires qui grandissent, renommage, troncature, attribut lecture seule, dates, `statfs`, FSInfo FAT32 ; options `ro`, `rw`, `umask=`, `uid=`, `gid=` ; types `vfat`, `msdos`, `fat` |
 | ... | `/sys` (`PopulateSys`), pseudo-terminaux (maitre `PtmxXxx`, esclaves `Ttys[PtyBase+N]`, devpts = tmpfs a la partie 14), FPU/SSE (`FpuDetect`, FXSAVE), bind mounts / `pivot_root` / `MS_MOVE` (partie 12), racine reelle `TryRealRoot` (partie 17) |
 
 ## Carte memoire
@@ -122,11 +130,11 @@ exit 1, fork 2, read 3, write 4, open 5, ... getrandom 355). Non implementes :
   cree `/dev` (tmpfs "devtmpfs" avec `null`, `zero`, `full`, `random`,
   `urandom`, `console`, `tty`, `ptmx`, `tty0..4`, `ttyS0`, `ram0`, `hda..hdd`
   et leurs partitions detectees), `/dev/pts`, `/proc` et `/sys`.
-* `mount(2)` : types `ext2`, `ext3`, `tmpfs`, `ramfs`, `devtmpfs`, `proc`,
-  `sysfs`, `devpts`.
+* `mount(2)` : types `ext2`, `ext3`, `vfat`, `msdos`, `fat`, `iso9660`, `tmpfs`,
+  `ramfs`, `devtmpfs`, `proc`, `sysfs`, `devpts`.
 * `/proc` : `version`, `meminfo`, `uptime`, `mounts`, `cpuinfo`, `stat`,
-  `loadavg`, `filesystems`, `cmdline`, `self`, `N/stat`, `N/status`,
-  `N/cmdline`, `N/maps`.
+  `loadavg`, `filesystems`, `cmdline`, `self`, `net/dev`, `net/route`, `N/stat`,
+  `N/status`, `N/cmdline`, `N/maps`.
 * Terminaux : `termios` complet (canonique, brut, `VMIN/VTIME`, `ISIG`, `ICRNL`,
   `ONLCR`, `ECHOE/K/CTL`), `TCGETS/TCSETS*`, `TIOCGWINSZ/SWINSZ`, `TIOCGPGRP/SPGRP`,
   `TIOCSCTTY`, `FIONREAD`, controle de travaux (`SIGTTIN`, `SIGTTOU`, `SIGTSTP`,
@@ -213,9 +221,161 @@ sont pas coherents avec un ext2 de blocs de 2 ou 4 Ko monte sur le meme disque.
 * Le noyau lance avec `k32power` sur la ligne de commande fait un poweroff
   propre apres la suite (utilise par `RUNEXT2.SH`).
 
+### Peripheriques et fonctions ajoutes ensuite (phase 2)
+
+* **Sockets** (partie 19) : `AF_UNIX` et `AF_INET` ; `RUNK.SH` (`socktest`) les
+  verifie en bouclage (flux, datagrammes, `socketpair`, `SCM_RIGHTS`, `poll`,
+  `getsockname`, `SO_REUSEADDR`...).
+* **Reseau reel** (partie 22) : carte RTL8139 de QEMU (reseau utilisateur
+  10.0.2.15 / passerelle 10.0.2.2) ; `ping`, `wget`, `nc` de busybox, TCP
+  500 Ko dans les deux sens, serveur entrant par `hostfwd` : `RUNNET.SH`.
+  Limites : pas de DHCP ni de DNS dans le noyau (adresse par `ip=` ou
+  `SIOCSIFADDR`), pas de fragmentation IP, TCP sans SACK ni echelle de fenetre.
+* **Cache de pages / `MAP_SHARED`** (partie 20) : `shmtest`.
+* **Limites de ressources** : `RLIMIT_AS` (`mmap`, `brk`), `RLIMIT_CPU`
+  (`SIGXCPU`/`SIGKILL`), `RLIMIT_FSIZE` (`SIGXFSZ`) : `limtest`.
+* **Evenements** (partie 21) : `evttest`.
+* **Noeuds** : `/dev/mem`, `/dev/kmem`, `/dev/port`, `/dev/kmsg`, `/dev/rtc`
+  (`RTC_RD_TIME`, `RTC_SET_TIME`), `/dev/cdrom` : `devtest`.
+* **Souris PS/2** (`/dev/input/mice`, `/dev/psaux`) : `mousetest`, `RUNMOUSE.SH`
+  (evenements injectes par le moniteur QEMU).
+* **ATAPI + iso9660** (parties 11 et 23) : `isotest`, `RUNISO.SH` (CD de
+  `genisoimage -R`, liens symboliques Rock Ridge, 300 Ko, 10 verifications).
+* **Disquette** (partie 11) : controleur FDC 82077 + DMA ISA canal 2, lecteur 0
+  (`/dev/fd0`, 2:0), geometries 360 Ko a 2,88 Mo selon la CMOS, un secteur par
+  commande avec 3 essais et remise a zero ; verifie par `fattest` sur une
+  disquette FAT12 de 1,44 Mo (`RUNFAT.SH fd`). Un seul lecteur, moteur laisse
+  allume, geometrie de la CMOS (pas de detection du format du disque).
+* **Swap** (partie 26) : `swaptest`, `RUNSWAP.SH` (24 Mo de RAM, disque de 32 Mo
+  `mkswap` : remplit plus de memoire que la RAM, verifie le contenu apres
+  page-out/page-in, `fork` avec cases partagees, `swapoff` refuse faute de RAM
+  puis accepte, `swapon`). Limites : pas de swap de pages partagees par copie
+  sur ecriture, de mappages de fichiers ni de memoire du noyau ; un seul
+  peripherique ; pas de fichier de swap ; pas d'entree `/proc/swaps`.
+* **Framebuffer** (partie 25) : `fbtest`, `RUNFB.SH` (capture de l'ecran par le
+  moniteur QEMU et controle des pixels dessines par `write` et par `mmap`).
+* **FAT** (partie 24) : `fattest` (85 verifications) sur FAT12, FAT16 et FAT32
+  par `RUNFAT.SH` ; `fsck.vfat -n` propre apres les ecritures du noyau et
+  relecture du contenu par mtools ; verifie aussi avec busybox (`cp -r`, `mv`,
+  `rm -rf`, `find`, `du`, `df`). Pas de lien dur ni de lien symbolique
+  (`EPERM`, comme Linux), pas de `mknod`, fichiers de 2 Go au plus, `chmod`
+  n'agit que sur l'attribut lecture seule, le bit "sale" du volume n'est pas
+  gere, FAT n'est pas utilisable comme racine (`root=` : ext2 seulement).
+
+### Tests (suite)
+
+* `RUNK.SH` : 26 programmes embarques, 318 verifications (`fattest` et `fbtest`
+  s'ignorent sans disque FAT ni `fb=`).
+* `RUNEXT2.SH`, `RUNNET.SH`, `RUNMOUSE.SH`, `RUNISO.SH`, `RUNFAT.SH [12|16|32|fd]`, `RUNFB.SH`, `RUNSWAP.SH` :
+  chacun fabrique son disque ou son reseau, lance QEMU et conclut par
+  `RESULTAT : SUCCES` (ou `ECHEC` avec le dossier des traces). Avec `-n`, ils
+  ne regenerent pas les programmes embarques.
+
 ### Plan restant
 
-Sockets AF_UNIX et AF_INET (bouclage), cache de pages et `MAP_SHARED` de
-fichiers, swap, `RLIMIT_AS/CPU/FSIZE`, epoll/eventfd/timerfd/inotify, pilote
-reseau (NE2000/RTL8139), souris PS/2, framebuffer VESA, disquette, CD-ROM
-(ATAPI + iso9660), FAT/vfat, noyau preemptible, SMP, modules.
+Noyau preemptible (le noyau reste non preemptif : IF=0 en mode noyau, les
+processus sont preemptes au retour en mode utilisateur), SMP,
+modules, journal ext3/ext4, FAT comme racine, DHCP/DNS dans le noyau.
+
+---
+
+## Systeme utilisateur (agent E) : `USR/`, `TOOLS/LPC32.PAS`, `TESTS/U/`
+
+Tout le systeme utilisateur est ecrit en Pascal et compile par `lpc -3X`
+(ELF32 i386 statiques, sans bibliotheque C) : init, getty, login, un shell
+POSIX, les outils de base, les 178 commandes du depot, un installateur.
+`BUILD.SH` fabrique la racine (`$W/root`) puis l'image disque ; la racine
+type est dans `USR/ROOTFS/` (`etc/passwd`, `shadow`, `group`, `profile`,
+`inittab`, `rc`, `fstab`, `issue`, `motd`, `hostname`, `usr/share/bench/`).
+`NOCMDS=1` ne construit que le systeme minimal (USR/*), `KSRC=fichier.PAS`
+choisit une autre source de noyau.
+
+### Demarrage
+
+`chargeur (BOOT/)` -> `/boot/linux0` -> `/sbin/init` -> `/etc/inittab` ->
+`/etc/rc` -> `getty` (affiche `/etc/issue`) -> `login` (`/etc/passwd` +
+`/etc/shadow`, hachage crypt de type V7 sur 13 caracteres) -> `$SHELL`
+(`/bin/sh`, invite `# ` pour root, `$ ` sinon, `/etc/motd`).
+Comptes de l'image : `root` / `root`, `linux` / `linux` (a changer avec
+`passwd`). `init` suit `/etc/inittab` (`id:niveaux:action:[VAR=val] cmd`,
+actions `sysinit wait once respawn ctrlaltdel shutdown`) et, sans inittab,
+`/etc/ttys` ; limitation du rythme des relances ; signaux : `USR1` arret,
+`USR2` extinction, `TERM` redemarrage, `INT` Ctrl-Alt-Suppr, `HUP` relecture.
+
+### Programmes (`USR/`)
+
+| Fichier | Installe | Role |
+|---|---|---|
+| `INIT.PAS` | `/sbin/init` | processus 1 |
+| `GETTY.PAS`, `LOGIN.PAS` | `/sbin/getty`, `/bin/login` | terminal, connexion |
+| `SH.PAS` | `/bin/sh` (`ash`) | shell POSIX : listes, `&&` `\|\|`, tubes, redirections, here-documents, `$(..)`, `$((..))`, `${..}` (`:- := :? :+ # % ## %%`), fonctions, `case`, `for`, `while`, `until`, `if`, `trap`, `exec`, `eval`, `read`, `getopts`, `set`, `shift`, `wait`, `jobs`/`fg`/`bg`/Ctrl-Z (groupes de processus), historique et edition de ligne, completion par Tab |
+| `PASSWD.PAS`, `MKPASSWD.PAS` | `/bin/passwd`, `/sbin/mkpasswd` | mots de passe (shadow) |
+| `ID`, `KILL`, `PS`, `MKDIR`, `RMDIR`, `RM`, `SYNC`, `HOSTNAME` | `/bin` | outils de base (`/proc` pour `ps`) |
+| `MOUNT`, `UMOUNT`, `HALT`, `REBOOT`, `POWEROFF` | `/sbin` | montages, arret (`reboot(2)`) |
+| `INSTALL.PAS` | `/sbin/install`, `/sbin/mkfs.ext2` | installateur et mkfs.ext2 (voir ci-dessous) |
+
+Cinq langues : `FR` (defaut), `EN`, `GR` (allemand), `SP`, `IT`. La langue vient
+de la variable `LANGUAGE` (`/etc/profile`, ou `/etc/default/locale`), que
+`init` lit et transmet a ses fils ; messages systeme (`SysErrorText`,
+init, getty, login, passwd, installateur...) traduits.
+
+### Installateur et mkfs.ext2 (`USR/INSTALL.PAS`)
+
+`install [-d disque] [-l FR|EN|GR|SP|IT] [-s Mo] [-r racine] [-y] [-q]` :
+1. partitionne le disque cible : MBR (`/usr/share/boot/MBR.BIN`), chargeur
+   `STAGE2.BIN` (52 secteurs apres le MBR, parametres LBA/nombre de secteurs
+   ecrits dans le MBR), une partition Linux `83h` active au secteur 2048 ;
+2. cree un ext2 equivalent a `mke2fs -t ext2 -b 1024 -I 128
+   -O none,filetype,sparse_super` (groupes de 8192 blocs, sauvegardes du
+   superbloc/GDT aux groupes 0, 1, 3, 5, 7, 9...), `lost+found` de 12 blocs ;
+3. copie `/` (sans le contenu de `/proc /sys /dev /tmp /mnt /var/tmp`) :
+   modes, proprietaires, dates, liens symboliques (courts dans l'inode),
+   fichiers speciaux, indirections simple et double ; `/etc/profile` recoit
+   `LANGUAGE=XX` (langue choisie) ;
+4. le disque installe s'amorce seul (chargeur de B + noyau copie de `/boot`).
+`mkfs.ext2 [-s Mo] peripherique` (meme programme, autre nom) formate sans
+partitionner. Verification : `e2fsck -fn` propre (1 Mo a 300 Mo essayes ;
+fichiers de 40 Mo, 300 entrees de repertoire, liens, tubes). Limites : un
+seul groupe de parametres (blocs de 1 Ko, inodes de 128 octets), disque de
+2 Go au plus, 4000 entrees par repertoire, un seul disque source (`/` en
+cours d'execution ou `-r dossier`). Essai : `TESTS/U/RUNU.SH install`
+(deux disques sous QEMU : `install -d /dev/hdb`, e2fsck, amorce du disque
+installe, LANGUAGE=IT).
+
+### Commandes du depot
+
+Les 178 commandes du depot (hors `HALT`, `REBOOT` du BIOS, remplaces par
+`USR/`) sont compilees dans `/bin`. Chacune est un programme de style DOS
+(`Uses Dos, Crt`) : sa syntaxe est la sienne, voir son aide (`cmd /?`). L'etat
+de chaque commande (marche / reserves / echoue), mesure sur l'hote et sous
+KERNEL32/QEMU, est dans `TOOLS/COMMANDES.TXT`. Corrections de commandes sous
+`{$IFDEF LINUX0}` (separateur `/`, fins de ligne LF, ligne de commande brute
+d'`awk`, `mktemp`, `repeat`...) pour rester compatibles avec DOS.
+
+### Tests (`TESTS/U/`)
+
+| Fichier | Contenu |
+|---|---|
+| `RUNU.SH [sh\|host\|qemu\|install]` | orchestre tous les essais ci-dessous |
+| `shtest.sh`, `sh/*.sh` | le shell contre `dash` (5 scripts, sortie identique) |
+| `cmdbench.py` | essai fonctionnel de chaque commande (hote), `--gen DIR` fabrique `run.sh` pour QEMU |
+
+### Regles de l'API Unix de `L32API.PAS` utiles aux programmes
+
+Fonctions `Sys*` (`SysFork`, `SysExecve`, `SysWaitPid`, `SysPipe`, `SysDup2`,
+`SysOpen/Read/Write/Close`, `SysStat/LStat`, `SysOpenDir/ReadDir`,
+`SysMount`, `SysReboot`, `SysTc*`, `SysSigAction`, `SysGetPw*`, `SysCrypt`,
+`SysLang`...). Pieges du langage (Pascal insensible a la casse) : ne pas
+nommer un type et une constante pareil a la casse pres (`TWord`/`tWord`) ; une
+procedure du programme homonyme d'une predefinie ou de l'API est renommee
+automatiquement (`NewStr`, `ReadKey`, `Sprintf`...) ; `}` dans un
+commentaire `{ }` le termine ; `Until` n'est pas un nom de parametre ;
+eviter les procedures imbriquees qui lisent les parametres de l'englobante.
+Les parametres `Const` de type chaine sont copies dans le cadre de l'appele
+(sinon un temporaire de l'anneau `STRRING` pouvait etre ecrase apres 256
+chaines temporaires).
+
+### Demandes au noyau (agent D)
+
+Voir `/tmp/claude-0/work/k32/BUGS_NOYAU.md` : disque IDE esclave (`index=1`)
+bloque l'amorce avec le noyau du 13:22 (sans effet avec celui du 13:14).

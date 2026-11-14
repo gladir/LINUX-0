@@ -57,7 +57,7 @@ Begin
 End;
 
 Procedure Show(Pid : LongInt);
-Var Fd, Ppid, U, Sz, N, X : LongInt; L, Nm, St, Cmd, Num, P2 : String;
+Var Fd, Ppid, U, Sz, N, X : LongInt; L, Nm, St, Cmd, P2 : String;
     Q : TSysPasswd; B : Array[0..255] Of Char; K : LongInt;
 Begin
   Fd := SysOpen('/proc/' + Num(Pid) + '/status', O_RDONLY, 0);

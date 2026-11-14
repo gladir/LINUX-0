@@ -110,9 +110,14 @@ Begin
   If RepeatCount<0 Then UsageError;
   BuildCommand;
   If CommandText=''Then UsageError;
+{$IFDEF LINUX0}
+  CommandShell:='/bin/sh';
+  ShellParameters:='-c "'+CommandText+'"';
+{$ELSE}
   CommandShell:=GetEnv('COMSPEC');
   If CommandShell=''Then CommandShell:='COMMAND.COM';
   ShellParameters:='/C '+CommandText;
+{$ENDIF}
   LastCommandStatus:=0;
   For RunIndex:=1 to RepeatCount Do Begin
     SwapVectors;

@@ -285,7 +285,8 @@ Begin
  End;
  For I:=1 to Length(SourceRang)do Begin
   If C=SourceRang[I]Then Begin
-   ReplaceRang:=TargetRang[I];
+   If I>Length(TargetRang)Then I:=Length(TargetRang);
+   If I>0 Then ReplaceRang:=TargetRang[I];
    Exit;
   End;
  End;
@@ -416,14 +417,13 @@ BEGIN
    ReadLn(CurrLine);
    If PosParam=3 Then Begin
     For I:=1 to Length(CurrLine)do Begin
-     If(SetParam[1]=_Rang_)Then Begin
+     If(SetParam[1]=_Rang_)or(SetParam[1]=_string_)Then Begin
       C:=CurrLine[I];
       If InRang(C,SetParamStr[1])Then Begin
        Case SetParam[2]of
         _lower_:Write(LoCase(C));
         _upper_:Write(UpCase(C));
-        _string_:Write(SPrintF(SetParamStr[2]));
-        _rang_:Write(ReplaceRang(C,SetParamStr[1],SetParamStr[2]));
+        _string_,_rang_:Write(ReplaceRang(C,SetParamStr[1],SetParamStr[2]));
         Else Write(C);
        End;
       End

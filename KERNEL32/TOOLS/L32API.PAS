@@ -27,7 +27,7 @@ Var
   LnxHeapLo  : LongInt;       { debut du tas (brk initial) }
   LnxHeapTop : LongInt;       { fin courante du tas }
   LnxFree    : LongInt;       { liste des blocs libres }
-  LnxCmdLine : Array[0..1023] Of Char;
+  LnxCmdLine : Array[0..131071] Of Char;
   LnxCmdDone : LongInt;
   LnxEnvBlk  : LongInt;       { bloc d'environnement style Win32 }
   LnxStat    : Array[0..31] Of LongInt;   { struct stat (128 octets) }
@@ -279,7 +279,7 @@ Var
 Begin
   HeapAlloc := 0;
   If Size < 0 Then Exit;
-  Need := (Size + 7) And LongInt($FFFFFFF8);
+  Need := (Size + 8) And LongInt($FFFFFFF8);   { +1 : NUL des chaines Pascal }
   If Need < 8 Then Need := 8;
   { premier bloc libre assez grand }
   Prev := 0;
@@ -437,7 +437,7 @@ Begin
         Inc(Len);
       End;
       If (Len = 0) Then Q := True;
-      If K + Len + 4 >= 1023 Then Break;
+      If K + Len + 4 >= 131071 Then Break;
       If I > 0 Then Begin LnxCmdLine[K] := ' '; Inc(K); End;
       If Q Then Begin LnxCmdLine[K] := '"'; Inc(K); End;
       For J := 0 To Len - 1 Do
@@ -1840,6 +1840,7 @@ End;
 { ---------- compatibilite DOS : PrefixSeg, Lst ---------- }
 
 Var
+  Input, Output : Text;
   PrefixSeg  : LongInt;       { Ptr(PrefixSeg, 80h)
       : queue de la ligne de commande }
   LnxTail    : Array[0..319] Of Byte;
@@ -1850,6 +1851,15 @@ Var
 Procedure LnxInitTail;
 Var A, I, J, K, L, N : LongInt;
 Begin
+  { fichiers texte standard utilisables comme parametres : Input, Output }
+  LnxFill(LongInt(@Input), SizeOf(Input), 0);
+  MemL[0:LongInt(@Input)] := 0;
+  MemL[0:LongInt(@Input) + 20] := 1;
+  MemL[0:LongInt(@Input) + 24] := 1;
+  LnxFill(LongInt(@Output), SizeOf(Output), 0);
+  MemL[0:LongInt(@Output)] := 1;
+  MemL[0:LongInt(@Output) + 20] := 2;
+  MemL[0:LongInt(@Output) + 24] := 1;
   A := (LongInt(@LnxTail) + 15) And LongInt($FFFFFFF0);
   PrefixSeg := (A - $80) Shr 4;
   Mem[0:A] := 0;
@@ -1869,6 +1879,214 @@ Begin
   End;
   Mem[0:A] := N;
   Mem[0:A + 1 + N] := 13;
+End;
+
+
+{ ---------- nombres reels : sprintf et strtod du runtime ---------- }
+
+Var
+  LnxFmtPos : LongInt;
+
+Procedure LnxFmtPut(Buf, C : LongInt);
+Begin
+  Mem[0:Buf + LnxFmtPos] := C;
+  Inc(LnxFmtPos);
+End;
+
+{ chiffres decimaux de l'entier positif V (Double) dans Buf }
+Procedure LnxFmtInt(Buf : LongInt; V : Double);
+Var N, K, D : LongInt; Tmp : Array[0..39] Of Byte; X : Double;
+Begin
+  If V < 1.0 Then
+  Begin
+    LnxFmtPut(Buf, 48);
+    Exit;
+  End;
+  N := 0;
+  X := V;
+  While (X >= 1.0) And (N < 39) Do
+  Begin
+    D := Trunc(X - Int(X / 10.0) * 10.0);
+    If D < 0 Then D := 0;
+    If D > 9 Then D := 9;
+    Tmp[N] := 48 + D;
+    Inc(N);
+    X := Int(X / 10.0);
+  End;
+  For K := N - 1 DownTo 0 Do LnxFmtPut(Buf, Tmp[K]);
+End;
+
+{ "%*.*f" : largeur, decimales, valeur (deux mots) }
+Function LnxFmtFixed(Buf, Width, Prec, Lo, Hi : LongInt) : LongInt;
+Var V : Double; Neg : Boolean; Ip, Fr, Rnd : Double; I, D, Start, Len, Pad : LongInt;
+    W : Array[0..1] Of LongInt;
+Begin
+  W[0] := Lo;
+  W[1] := Hi;
+  LnxMove(LongInt(@W), LongInt(@V), 8);
+  LnxFmtPos := 0;
+  Neg := V < 0.0;
+  If Neg Then V := -V;
+  If Prec < 0 Then Prec := 0;
+  If Prec > 20 Then Prec := 20;
+  Rnd := 0.5;
+  For I := 1 To Prec Do Rnd := Rnd / 10.0;
+  V := V + Rnd;
+  Ip := Int(V);
+  Fr := V - Ip;
+  { le resultat est ecrit apres le remplissage ; on calcule dans Buf + 256 }
+  LnxFmtPos := 256;
+  If Neg Then LnxFmtPut(Buf, 45);
+  LnxFmtInt(Buf, Ip);
+  If Prec > 0 Then
+  Begin
+    LnxFmtPut(Buf, 46);
+    For I := 1 To Prec Do
+    Begin
+      Fr := Fr * 10.0;
+      D := Trunc(Fr);
+      If D > 9 Then D := 9;
+      If D < 0 Then D := 0;
+      LnxFmtPut(Buf, 48 + D);
+      Fr := Fr - D;
+    End;
+  End;
+  Len := LnxFmtPos - 256;
+  Pad := 0;
+  If Width > Len Then Pad := Width - Len;
+  For I := 1 To Pad Do Mem[0:Buf + I - 1] := 32;
+  LnxMove(Buf + 256, Buf + Pad, Len);
+  Mem[0:Buf + Pad + Len] := 0;
+  LnxFmtFixed := Pad + Len;
+End;
+
+{ "% .*E" : decimales, valeur ; mantisse d.ddd puis E+nnn }
+Function LnxFmtSci(Buf, Prec, Lo, Hi : LongInt) : LongInt;
+Var V, Rnd : Double; Neg : Boolean; E10, I, D : LongInt; W : Array[0..1] Of LongInt;
+Begin
+  W[0] := Lo;
+  W[1] := Hi;
+  LnxMove(LongInt(@W), LongInt(@V), 8);
+  LnxFmtPos := 0;
+  Neg := V < 0.0;
+  If Neg Then V := -V;
+  If Prec < 0 Then Prec := 0;
+  If Prec > 20 Then Prec := 20;
+  E10 := 0;
+  If V > 0.0 Then
+  Begin
+    While V >= 10.0 Do Begin V := V / 10.0; Inc(E10); End;
+    While V < 1.0 Do Begin V := V * 10.0; Dec(E10); End;
+  End;
+  Rnd := 0.5;
+  For I := 1 To Prec Do Rnd := Rnd / 10.0;
+  V := V + Rnd;
+  If V >= 10.0 Then Begin V := V / 10.0; Inc(E10); End;
+  If Neg Then LnxFmtPut(Buf, 45) Else LnxFmtPut(Buf, 32);
+  D := Trunc(V);
+  LnxFmtPut(Buf, 48 + D);
+  V := V - D;
+  If Prec > 0 Then
+  Begin
+    LnxFmtPut(Buf, 46);
+    For I := 1 To Prec Do
+    Begin
+      V := V * 10.0;
+      D := Trunc(V);
+      If D > 9 Then D := 9;
+      LnxFmtPut(Buf, 48 + D);
+      V := V - D;
+    End;
+  End;
+  LnxFmtPut(Buf, 69);
+  If E10 < 0 Then
+  Begin
+    LnxFmtPut(Buf, 45);
+    E10 := -E10;
+  End
+  Else LnxFmtPut(Buf, 43);
+  If E10 >= 100 Then LnxFmtPut(Buf, 48 + E10 Div 100);
+  LnxFmtPut(Buf, 48 + (E10 Div 10) Mod 10);
+  LnxFmtPut(Buf, 48 + E10 Mod 10);
+  Mem[0:Buf + LnxFmtPos] := 0;
+  LnxFmtSci := LnxFmtPos;
+End;
+
+{ sprintf : formats "%*.*f" (largeur, decimales, valeur) et "% .*E" }
+Function sprintf(Buf, Fmt, P1, P2, P3, P4 : LongInt) : LongInt;
+Begin
+  If Mem[0:Fmt + 1] = 42 Then sprintf := LnxFmtFixed(Buf, P1, P2, P3, P4)
+  Else sprintf := LnxFmtSci(Buf, P1, P2, P3);
+End;
+
+{ strtod : texte -> reel (ST0), EndP recoit l'adresse du premier octet
+  non converti }
+Function strtod(P, EndP : LongInt) : Double;
+Var S, Cur, C, E, Digits, ESign, Any : LongInt; V, Scale : Double; Neg, EN : Boolean;
+Begin
+  S := P;
+  Cur := P;
+  While (Mem[0:Cur] = 32) Or (Mem[0:Cur] = 9) Do Inc(Cur);
+  Neg := False;
+  If Mem[0:Cur] = 45 Then Begin Neg := True; Inc(Cur); End
+  Else If Mem[0:Cur] = 43 Then Inc(Cur);
+  V := 0.0;
+  E := 0;
+  Any := 0;
+  While (Mem[0:Cur] >= 48) And (Mem[0:Cur] <= 57) Do
+  Begin
+    V := V * 10.0 + (Mem[0:Cur] - 48);
+    Inc(Cur);
+    Any := 1;
+  End;
+  If Mem[0:Cur] = 46 Then
+  Begin
+    Inc(Cur);
+    While (Mem[0:Cur] >= 48) And (Mem[0:Cur] <= 57) Do
+    Begin
+      V := V * 10.0 + (Mem[0:Cur] - 48);
+      Dec(E);
+      Inc(Cur);
+      Any := 1;
+    End;
+  End;
+  If Any = 0 Then
+  Begin
+    MemL[0:EndP] := S;
+    strtod := 0.0;
+    Exit;
+  End;
+  If (Mem[0:Cur] = 69) Or (Mem[0:Cur] = 101) Then
+  Begin
+    C := Cur + 1;
+    EN := False;
+    If Mem[0:C] = 45 Then Begin EN := True; Inc(C); End
+    Else If Mem[0:C] = 43 Then Inc(C);
+    If (Mem[0:C] >= 48) And (Mem[0:C] <= 57) Then
+    Begin
+      Digits := 0;
+      While (Mem[0:C] >= 48) And (Mem[0:C] <= 57) Do
+      Begin
+        Digits := Digits * 10 + Mem[0:C] - 48;
+        If Digits > 4000 Then Digits := 4000;
+        Inc(C);
+      End;
+      If EN Then E := E - Digits Else E := E + Digits;
+      Cur := C;
+    End;
+  End;
+  Scale := 1.0;
+  ESign := E;
+  If ESign < 0 Then ESign := -ESign;
+  While ESign > 0 Do
+  Begin
+    Scale := Scale * 10.0;
+    Dec(ESign);
+  End;
+  If E < 0 Then V := V / Scale Else V := V * Scale;
+  If Neg Then V := -V;
+  MemL[0:EndP] := Cur;
+  strtod := V;
 End;
 
 { ---------- interface systeme Linux (unite Unix des programmes) ---------- }

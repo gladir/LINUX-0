@@ -8,13 +8,15 @@ Program Tree;
 
 Uses DOS;
 
+Const PathSep={$IFDEF LINUX0}'/'{$ELSE}'\'{$ENDIF};
+
 Var
  LevelState:Array[0..255]of Boolean;
  I:Byte;
 
 Function SetPath4AddFile(Path:String):String;Begin
  If Path=''Then GetDir(0,Path);
- If Path[Length(Path)]<>'\'Then Path:=Path+'\';
+ If Path[Length(Path)]<>PathSep Then Path:=Path+PathSep;
  SetPath4AddFile:=Path;
 End;
 
@@ -28,11 +30,11 @@ Begin
  If Path=''Then Exit;
  FSplit(Path,D,N,E);
  If E=''Then Begin
-  If D[Length(D)]<>'\'Then D:=D+'\';
+  If D[Length(D)]<>PathSep Then D:=D+PathSep;
   D:=D+E;
  End;
  If D=''Then Path2Dir:='' Else
- If D[Length(D)]<>'\'Then D:=D+'\';
+ If D[Length(D)]<>PathSep Then D:=D+PathSep;
  Path2Dir:=D;
 End;
 
@@ -94,7 +96,7 @@ BEGIN
   If ParamCount>1Then WriteLn('Trop de parametre')Else
   If ParamCount=1Then Begin
    WriteLn(FExpand(ParamStr(1)));
-   ShowTree(1,FExpand(ParamStr(1)+'*.*'));
+   ShowTree(1,SetPath4AddFile(FExpand(ParamStr(1)))+'*.*');
   End
    Else
   Begin

@@ -1,7 +1,7 @@
 /* init : lance la suite de tests (banc d'essai) puis un petit interpreteur de
    commandes sur /dev/console. */
 #include "ku.h"
-static const char*tests[]={"/bin/hello","/bin/forkwait","/bin/pipetest","/bin/sigtest","/bin/mmaptest","/bin/dirtest","/bin/ttytest","/bin/schedtest","/bin/blktest","/bin/misctest","/bin/proctest","/bin/stress","/bin/ext2test","/bin/ptytest",0};
+static const char*tests[]={"/bin/hello","/bin/forkwait","/bin/pipetest","/bin/sigtest","/bin/mmaptest","/bin/dirtest","/bin/ttytest","/bin/schedtest","/bin/blktest","/bin/misctest","/bin/proctest","/bin/stress","/bin/ext2test","/bin/ptytest","/bin/mounttest","/bin/socktest","/bin/shmtest","/bin/limtest","/bin/evttest","/bin/devtest","/bin/mousetest","/bin/nettest","/bin/isotest","/bin/fattest","/bin/fbtest","/bin/swaptest",0};
 static int run(const char*prog,char*const argv[]){
   int p=fork(),st;
   if(p==0){char*e[]={"PATH=/bin:/sbin:/usr/bin","HOME=/root","TERM=linux",0};execve(prog,argv,e);puts_fd(2,"execve: ");puts_fd(2,prog);puts_fd(2," : echec\n");_exit(127);}

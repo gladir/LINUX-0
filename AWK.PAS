@@ -127,12 +127,29 @@ Function GetRawCommandLine:String;
   {$ENDIF}
  {$ENDIF}
 {$ELSE}
+{$IFDEF LINUX0}
+ Var
+  S,P:String;
+  I:Integer;
+ Begin
+  { le shell a deja retire les guillemets : on les restitue }
+  S:=ParamStr(0);
+  For I:=1 to ParamCount do Begin
+   P:=ParamStr(I);
+   If(Pos(' ',P)>0)or(Pos('{',P)>0)or(Pos('"',P)>0)or(Pos(#9,P)>0)Then
+    S:=S+' '''+P+''''
+   Else S:=S+' '+P;
+  End;
+  GetRawCommandLine:=S;
+ End;
+{$ELSE}
  Var
   PtrStr:^String;
  Begin
   PtrStr:=Ptr(PrefixSeg,$80);
   GetRawCommandLine:=PtrStr^;
  End;
+{$ENDIF}
 {$ENDIF}
 
 Function IsDelimiter(C:Char):Boolean;Begin
