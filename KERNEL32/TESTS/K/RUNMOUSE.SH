@@ -18,7 +18,7 @@ fi
 cp "$K32/KERNEL32.PAS" "$W/"
 (cd "$W" && "$LPC" -3K -q KERNEL32.PAS) || exit 1
 timeout 120 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.txt" -display none \
-  -m 64 -no-reboot -append "console=ttyS0 k32mouse k32power" \
+  -m 64 -no-reboot -append "console=ttyS0 k32mouse k32power $KARGS" \
   -monitor "unix:$W/mon.sock,server,nowait" 2>/dev/null &
 QP=$!
 python3 - "$W" <<'PY'

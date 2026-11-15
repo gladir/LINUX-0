@@ -19,7 +19,7 @@ fi
 cp "$K32/KERNEL32.PAS" "$W/"
 (cd "$W" && "$LPC" -3K -q KERNEL32.PAS) || exit 1
 timeout 120 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.txt" \
-  -display none -vga std -m 64 -no-reboot -append "console=ttyS0 fb=1024x768 k32power" \
+  -display none -vga std -m 64 -no-reboot -append "console=ttyS0 fb=1024x768 k32power $KARGS" \
   -monitor "unix:$W/mon,server,nowait" 2>/dev/null &
 QP=$!
 for i in $(seq 1 100); do

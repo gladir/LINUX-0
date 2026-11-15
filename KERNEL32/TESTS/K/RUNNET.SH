@@ -78,7 +78,7 @@ python3 "$W/srv.py" "$W" > "$W/srv.log" 2>&1 &
 SP=$!
 sleep 1
 timeout 120 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.txt" -display none \
-  -m 64 -no-reboot -append "console=ttyS0 k32net k32power" \
+  -m 64 -no-reboot -append "console=ttyS0 k32net k32power $KARGS" \
   -nic user,model=rtl8139,hostfwd=tcp:127.0.0.1:5556-:7777 2>/dev/null
 kill $SP 2>/dev/null
 tr -d '\r' < "$W/out.txt" | grep "KTEST: net\|NET-\|KPROG: /bin/nettest\|reseau"

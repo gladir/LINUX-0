@@ -6,6 +6,7 @@
 #   KERNEL32 sous QEMU (multiboot direct, disque IDE, console COM1), laisse
 #   tourner la suite embarquee dont /bin/ext2test, arrete par poweroff
 #   (demontage propre) puis verifie le disque avec e2fsck -fn.
+# (KARGS="preempt=1" ajoute des parametres a la ligne de commande du noyau)
 #     RUNEXT2.SH [-n] [-b taille_bloc] [-i taille_inode] [-m Mo] [-t secondes]
 #   -n : ne pas regenerer les programmes embarques ni recompiler
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -24,7 +25,7 @@ cp "$K32/KERNEL32.PAS" "$W/"
 (cd "$W" && "$LPC" -3K -q KERNEL32.PAS) || exit 1
 "$HERE/MKEXT2.SH" "$W/d.img" "$MB" "$BS" "$ISZ" || exit 1
 timeout "$TMO" qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.txt" \
-  -display none -m 64 -no-reboot -append "console=ttyS0 k32power" \
+  -display none -m 64 -no-reboot -append "console=ttyS0 k32power $KARGS" \
   -drive "file=$W/d.img,format=raw,if=ide" 2>/dev/null
 tr -d '\r' < "$W/out.txt" > "$W/o2.txt"; mv "$W/o2.txt" "$W/out.txt"
 grep "KTEST: ext2\|KPROG: /bin/ext2test\|Oops\|panique" "$W/out.txt"

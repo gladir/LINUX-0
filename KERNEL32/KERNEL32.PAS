@@ -2764,6 +2764,7 @@ Type
     SigSender          : Array[0..64] Of LongInt;   { pid de l'emetteur }
     SigStk             : Array[0..2] Of LongInt;    { sigaltstack }
     ReapPending        : LongInt;
+    NeedBkl, Preempted, PreemptCount, CpuDue, Cr2 : LongInt;   { partie 27 }
     ExeLen             : LongInt;
     ExeBuf             : Array[0..127] Of Byte;     { chemin de l'executable }
     Fpu                : Array[0..131] Of LongInt;  { FXSAVE ou FNSAVE }
@@ -2780,6 +2781,15 @@ Var
   InitTask     : PTask;
   RetTrapEntry : LongInt;
   TickUser     : Boolean;
+  PreemptOn    : Boolean;       { noyau preemptible (preempt=1) : partie 27 }
+  BklOwner     : PTask;         { tache qui detient le verrou du noyau }
+  KStackMax    : LongInt;       { profondeur maximale de pile noyau a une IRQ }
+  SwTrace      : Array[0..255] Of LongInt;   { journal des commutations }
+  SwTraceN     : LongInt;
+  IdleDump     : LongInt;       { dernier rapport d'inactivite }
+  NrPreempts   : LongInt;       { preemptions dans le noyau }
+  PendIrq      : LongInt;       { IRQ recues dans le noyau, traitement differe }
+  TickPend     : LongInt;       { ticks dont le traitement est differe }
 
 { ---- Procedures anticipees ---- }
 Procedure FilePut(F : LongInt); Forward;
@@ -2961,19 +2971,66 @@ Begin
   SliceFor := (20 - Nice) Div 3 + 1;
 End;
 
-{ Choisir la tache suivante et basculer (appele avec IF = 0) }
-Procedure Schedule;
-Var I, Best, G, BestG : LongInt; Prev, Nx : PTask; Again : Boolean;
+{ ---- Noyau preemptible (partie 27) : drapeaux, verrou du noyau ---- }
+
+{ Lit EFLAGS puis masque les interruptions }
+Function SaveFlagsCli : LongInt;
+Var R : LongInt;
 Begin
+  asm
+    pushfd
+    pop eax
+    mov R,eax
+    cli
+  end;
+  SaveFlagsCli := R;
+End;
+
+Procedure RestoreFlags(F : LongInt);
+Begin
+  asm
+    push F
+    popfd
+  end;
+End;
+
+Procedure PreemptDisable;
+Begin
+  Inc(Cur^.PreemptCount);
+End;
+
+Procedure PreemptEnable;
+Begin
+  If Cur^.PreemptCount > 0 Then Dec(Cur^.PreemptCount);
+End;
+
+Procedure RunBH; Forward;
+
+{ Choisir la tache suivante et basculer (IF masque pendant le choix) }
+Procedure Schedule;
+Var I, Best, G, BestG, Fl : LongInt; Prev, Nx : PTask; Again : Boolean;
+Begin
+  Fl := SaveFlagsCli;
   NeedResched := False;
   Prev := Cur;
   If MemL[0:Prev^.KStack] <> StackMagic Then
     KPanic('pile du noyau debordee (pid ' + IntStr(Prev^.Pid) + ')');
+  { preemptible : un ceder volontaire (sommeil, yield) rend le verrou du
+    noyau ; une preemption (Preempted) le garde }
+  If PreemptOn And (BklOwner = Prev)
+     And ((Prev^.State <> TsRunnable) Or (Prev^.Preempted = 0)) Then
+  Begin
+    RunBH;
+    BklOwner := Nil;
+    Prev^.NeedBkl := 1;
+  End;
   Repeat
     Again := False;
     Best := 0; BestG := -1;
     For I := 1 To MaxTasks - 1 Do
-      If Tasks[I].State = TsRunnable Then
+      If (Tasks[I].State = TsRunnable) And ((Not PreemptOn)
+         Or (Tasks[I].NeedBkl = 0) Or (BklOwner = Nil)
+         Or (BklOwner = @Tasks[I])) Then
       Begin
         G := Goodness(@Tasks[I]);
         If G > BestG Then
@@ -2993,7 +3050,16 @@ Begin
     End;
   Until Not Again;
   If Best = 0 Then Nx := IdleTask Else Nx := @Tasks[Best];
-  If Nx = Prev Then Exit;
+  If PreemptOn And (Nx <> IdleTask) And (Nx^.NeedBkl <> 0) Then
+  Begin
+    BklOwner := Nx;
+    Nx^.NeedBkl := 0;
+  End;
+  If Nx = Prev Then
+  Begin
+    RestoreFlags(Fl);
+    Exit;
+  End;
   Inc(NrSwitches);
   Cur := Nx;
   SetKernelStack(Nx^.KStack + KStackSize);
@@ -3010,7 +3076,42 @@ Begin
   LoadTls(Nx);
   SaveFpu(LongInt(@Prev^.Fpu[0]));
   LoadFpu(LongInt(@Nx^.Fpu[0]));
+  If PreemptOn Then
+  Begin
+    SwTrace[(SwTraceN And 63) * 4] := Prev^.Pid;
+    SwTrace[(SwTraceN And 63) * 4 + 1] := Nx^.Pid;
+    SwTrace[(SwTraceN And 63) * 4 + 2] := Nx^.KEsp;
+    SwTrace[(SwTraceN And 63) * 4 + 3] := Prev^.Preempted * 16
+        + Prev^.State;
+    Inc(SwTraceN);
+    If (Nx^.KEsp < Nx^.KStack) Or (Nx^.KEsp >= Nx^.KStack + KStackSize) Then
+      KPanic('commutation vers une pile invalide : pid ' + IntStr(Nx^.Pid)
+          + ' esp ' + HexStr(Nx^.KEsp, 8) + ' pile ' + HexStr(Nx^.KStack, 8));
+  End;
   SwitchStack(LongInt(@Prev^.KEsp), Nx^.KEsp);
+  RestoreFlags(Fl);
+End;
+
+{ Prendre le verrou du noyau pour la tache courante (entree depuis le mode
+  utilisateur) ; s'il est detenu par une autre tache, Schedule ne rend la
+  main qu'une fois le verrou transmis }
+Procedure BklAcquire;
+Begin
+  If BklOwner = Cur Then Exit;
+  If BklOwner = Nil Then BklOwner := Cur
+  Else
+  Begin
+    Cur^.NeedBkl := 1;
+    Schedule;
+  End;
+End;
+
+{ Rendre le verrou : les traitements differes des IRQ passent d'abord }
+Procedure BklRelease;
+Begin
+  If BklOwner <> Cur Then Exit;
+  RunBH;
+  BklOwner := Nil;
 End;
 
 { ---- Sommeil et reveil ---- }
@@ -3075,34 +3176,57 @@ Begin
   If R = WakeTimeout Then SleepTicks := 0 Else SleepTicks := R;
 End;
 
-{ Tick de la minuterie (appele par l'IRQ 0) }
-Procedure TimerTick(FromUser : Boolean);
-Var I : LongInt;
+{ Tick de la minuterie : comptabilite de la tache courante (dans l'IRQ), puis
+  reveils, minuteries et reseau (partie differable). Defer : la limite
+  CPU est signalee plus tard (CpuDue) }
+Procedure TimerAccount(FromUser, Defer : Boolean);
+Var Sg : LongInt;
 Begin
-  Inc(Jiffies);
-  TickUser := FromUser;
-  For I := 1 To MaxTasks - 1 Do
-    If ((Tasks[I].State = TsSleeping) Or (Tasks[I].State = TsSleepUn)) And
-       (Tasks[I].WakeAt <> 0) And (Jiffies - Tasks[I].WakeAt >= 0) Then
-      WakeTask(@Tasks[I], WakeTimeout);
-  TimerSignals;
-  NetTick;
   If Cur <> IdleTask Then
   Begin
     If FromUser Then Inc(Cur^.Utime) Else Inc(Cur^.Stime);
     If (Cur^.RlimCur[RLIM_CPU] <> RLIM_INFINITY)
        And (((Cur^.Utime + Cur^.Stime) Mod HZ) = 0) Then
     Begin
+      Sg := 0;
       If ((Cur^.Utime + Cur^.Stime) Div HZ) >= Cur^.RlimMax[RLIM_CPU] Then
-        SendSig(Cur, 9)
+        Sg := 9
       Else If ((Cur^.Utime + Cur^.Stime) Div HZ) >= Cur^.RlimCur[RLIM_CPU] Then
-        SendSig(Cur, 24);
+        Sg := 24;
+      If Sg <> 0 Then
+        If Defer Then Cur^.CpuDue := Sg Else SendSig(Cur, Sg);
     End;
     Dec(Cur^.Counter);
     If Cur^.Counter <= 0 Then NeedResched := True;
   End;
   { l'inactivite n'a pas de tranche : tout reveil est pris en compte }
   If Cur = IdleTask Then NeedResched := True;
+End;
+
+Procedure TimerBottom;
+Var I : LongInt;
+Begin
+  For I := 1 To MaxTasks - 1 Do
+  Begin
+    If ((Tasks[I].State = TsSleeping) Or (Tasks[I].State = TsSleepUn)) And
+       (Tasks[I].WakeAt <> 0) And (Jiffies - Tasks[I].WakeAt >= 0) Then
+      WakeTask(@Tasks[I], WakeTimeout);
+    If (Tasks[I].CpuDue <> 0) And (Tasks[I].State <> TsFree) Then
+    Begin
+      SendSig(@Tasks[I], Tasks[I].CpuDue);
+      Tasks[I].CpuDue := 0;
+    End;
+  End;
+  TimerSignals;
+  NetTick;
+End;
+
+Procedure TimerTick(FromUser : Boolean);
+Begin
+  Inc(Jiffies);
+  TickUser := FromUser;
+  TimerBottom;
+  TimerAccount(FromUser, False);
 End;
 
 { ---- Creation de taches ---- }
@@ -3156,6 +3280,12 @@ Procedure ThreadEntry;
 Var Fn : LongInt;
 Begin
   Fn := Cur^.ThreadFn;
+  If PreemptOn Then
+  Begin
+    asm
+      sti
+    end;
+  End;
   Call0(Fn);
   { le thread revient : l'arreter }
   Cur^.State := TsSleepUn;
@@ -3169,8 +3299,12 @@ Begin
   KernelThread := Nil;
   T := NewTaskSlot;
   If T = Nil Then Exit;
+  { la copie de Cur est ordonnable jusqu'a l'affectation de l'etat : pas de
+    preemption pendant ce court intervalle }
+  PreemptDisable;
   MemCopy(LongInt(T), LongInt(Cur), SizeOf(TTask));
   T^.State := TsSleepUn;
+  PreemptEnable;
   T^.Pid := AllocPid;
   T^.Tgid := T^.Pid;
   T^.Parent := Cur;
@@ -3182,6 +3316,7 @@ Begin
   End;
   MemL[0:T^.KStack] := StackMagic;
   T^.ThreadFn := Fn;
+  T^.NeedBkl := 1; T^.Preempted := 0; T^.PreemptCount := 0; T^.CpuDue := 0;
   T^.Mm := Nil;
   T^.Files := Nil; T^.Fs := Nil; T^.Sig := Nil;
   T^.Pend[0] := 0; T^.Pend[1] := 0;
@@ -3308,9 +3443,11 @@ Begin
   If T = Nil Then Exit;
   SaveFpu(LongInt(@Cur^.Fpu[0]));
   LoadFpu(LongInt(@Cur^.Fpu[0]));
+  PreemptDisable;
   MemCopy(LongInt(T), LongInt(Cur), SizeOf(TTask));
   MemCopy(FpuAlign(LongInt(@T^.Fpu[0])), FpuAlign(LongInt(@Cur^.Fpu[0])), 512);
   T^.State := TsSleepUn;                 { pas encore ordonnable }
+  PreemptEnable;
   T^.KStack := AllocPages(KStackOrder);
   If T^.KStack = 0 Then
   Begin
@@ -3333,6 +3470,7 @@ Begin
   T^.ExitSignal := Flags And $FF;
   T^.ClearTid := 0;
   T^.ThreadFn := 0;
+  T^.NeedBkl := 0; T^.Preempted := 0; T^.PreemptCount := 0; T^.CpuDue := 0;
   T^.VforkParent := Nil;
   T^.WaitChan := 0; T^.WakeAt := 0;
   T^.Counter := (Cur^.Counter + 1) Shr 1;
@@ -3633,6 +3771,10 @@ Var H : LongInt;
 Begin
   If (T = Nil) Or (Sig <= 0) Or (Sig > 64) Then Exit;
   If (T^.State = TsFree) Or (T^.State = TsZombie) Then Exit;
+  { un thread du noyau (bdflush...) n'a ni espace utilisateur ni gestionnaire
+    de signaux : un signal en attente ferait revenir SleepTicks aussitot et
+    le thread tournerait sans fin }
+  If (T^.Mm = Nil) And (T^.ThreadFn <> 0) And (T^.Pid > 1) Then Exit;
   If T^.Sig <> Nil Then H := T^.Sig^.Handler[Sig] Else H := SIG_DFL;
   If Sig = SIGCONT Then
   Begin
@@ -4901,6 +5043,8 @@ Begin
   While True Do
   Begin
     SleepTicks(5 * HZ);
+    Cur^.Pend[0] := 0;
+    Cur^.Pend[1] := 0;
     If BDirtyCount > 0 Then BSync(0);
   End;
 End;
@@ -8596,6 +8740,8 @@ Begin
             PAddLn('cpu  ' + IntStr(Tot) + ' 0 0 ' + IntStr(Jiffies)
                 + ' 0 0 0 0');
             PAddLn('ctxt ' + IntStr(NrSwitches));
+            PAddLn('kpreempt ' + IntStr(NrPreempts) + ' '
+                + IntStr(Ord(PreemptOn)) + ' ' + IntStr(KStackMax));
             PAddLn('btime ' + IntStr(BootTime));
             PAddLn('processes ' + IntStr(NextPid));
             PAddLn('procs_running 1');
@@ -22807,6 +22953,7 @@ Begin
       If ((Pid = 0) And (T^.Pgid = Cur^.Pgid)) Or ((Pid < -1) And (T^.Pgid
           = -Pid)) Or
          ((Pid = -1) And (T^.Pid > 1) And (T <> Cur)) Then
+        If (T^.Mm <> Nil) Or (T^.ThreadFn = 0) Then
         If Allowed(T) Then
         Begin
           If Sig <> 0 Then SendSig(T, Sig);
@@ -24415,6 +24562,19 @@ Begin
   End;
 End;
 
+Procedure DumpSwitches;
+Var I, K : LongInt;
+Begin
+  KLog('--- dernieres commutations (de, vers, esp, etat+16*preempt) ---');
+  For I := 15 DownTo 0 Do
+  Begin
+    K := ((SwTraceN - 1 - I) And 63) * 4;
+    KLog('  ' + IntStr(SwTrace[K]) + ' -> ' + IntStr(SwTrace[K + 1]) + ' '
+        + HexStr(SwTrace[K + 2], 8) + ' ' + IntStr(SwTrace[K + 3]));
+  End;
+  DumpTasks;
+End;
+
 Procedure KernelOops(F : PFrame; Const Why : String);
 Begin
   LogToVc := True;
@@ -24422,6 +24582,7 @@ Begin
   KLog('Oops : ' + Why + ' (pid ' + IntStr(Cur^.Pid) + ')');
   DumpFrame(F, ReadCr2);
   Backtrace(F^.Ebp);
+  If PreemptOn Then DumpSwitches;
   KPanic('exception dans le noyau');
 End;
 
@@ -24432,7 +24593,7 @@ Begin
   FromUser := (F^.Cs And 3) = 3;
   If V = 14 Then
   Begin
-    Addr := ReadCr2;
+    Addr := Cur^.Cr2;
     Write := (F^.Err And 2) <> 0;
     If FromUser Then Esp := F^.UserEsp Else Esp := 0;
     If (CurMm <> Nil) And ULt(Addr, UserTop) And ((F^.Err And 1 = 0)
@@ -24479,17 +24640,23 @@ End;
 Procedure DumpTasks;
 Var I : LongInt;
 Begin
-  KLog('--- taches (cur=' + IntStr(Cur^.Pid) + ') ---');
+  If BklOwner <> Nil Then
+    KLog('--- taches (cur=' + IntStr(Cur^.Pid) + ', verrou noyau : pid '
+        + IntStr(BklOwner^.Pid) + ') ---')
+  Else KLog('--- taches (cur=' + IntStr(Cur^.Pid)
+        + ', verrou noyau libre) ---');
   For I := 0 To MaxTasks - 1 Do
     If Tasks[I].State <> TsFree Then
       KLog('  pid ' + IntStr(Tasks[I].Pid) + ' etat ' + IntStr(Tasks[I].State)
           + ' chan ' +
-           HexStr(Tasks[I].WaitChan, 8) + ' cnt ' + IntStr(Tasks[I].Counter));
+           HexStr(Tasks[I].WaitChan, 8) + ' cnt ' + IntStr(Tasks[I].Counter)
+          + ' bkl ' + IntStr(Tasks[I].NeedBkl) + ' pre '
+          + IntStr(Tasks[I].Preempted) + '/' + IntStr(Tasks[I].PreemptCount));
 End;
 
-Procedure DoIrq(N : LongInt; FromUser : Boolean);
+{ Traitement d'une IRQ (apres l'accuse de reception) }
+Procedure IrqBody(N : LongInt; FromUser : Boolean);
 Begin
-  IrqAck(N);
   If NetPresent And (N = NicIrq) Then NicIrqHandler;
   Case N Of
     0 : Begin
@@ -24502,6 +24669,65 @@ Begin
   End;
 End;
 
+{ Traitements differes (noyau preemptible) : les IRQ survenues alors qu'une
+  tache preemptee detient le verrou du noyau n'ont fait que compter le tick
+  ou masquer la ligne ; elles sont traitees ici, par le detenteur du verrou
+  qui le rend ou par la tache d'inactivite, avec IF masque }
+Procedure RunBH;
+Var Fl, Tp, Pi, K, N : LongInt;
+Begin
+  If (PendIrq = 0) And (TickPend = 0) Then Exit;
+  Fl := SaveFlagsCli;
+  While (PendIrq <> 0) Or (TickPend > 0) Do
+  Begin
+    Tp := TickPend; TickPend := 0;
+    Pi := PendIrq; PendIrq := 0;
+    If Tp > 20 Then Tp := 20;
+    For K := 1 To Tp Do TimerBottom;
+    For N := 1 To 15 Do
+      If (Pi And (1 Shl N)) <> 0 Then
+      Begin
+        IrqBody(N, False);
+        IrqEnable(N);
+      End;
+  End;
+  RestoreFlags(Fl);
+End;
+
+{ Partie de l'IRQ executee immediatement quand le traitement est differe }
+Procedure IrqTop(N : LongInt; FromUser : Boolean);
+Begin
+  If N = 0 Then
+  Begin
+    Inc(Jiffies);
+    IrqAck(0);
+    Inc(TickPend);
+    TickUser := FromUser;
+    TimerAccount(FromUser, True);
+  End
+  Else
+  Begin
+    IrqDisable(N);
+    IrqAck(N);
+    PendIrq := PendIrq Or (1 Shl N);
+  End;
+End;
+
+Procedure DoIrq(N : LongInt; FromUser : Boolean);
+Begin
+  If PreemptOn Then
+  Begin
+    If (Cur <> IdleTask) And ((Not FromUser) Or (BklOwner <> Nil)) Then
+    Begin
+      IrqTop(N, FromUser);
+      Exit;
+    End;
+    RunBH;
+  End;
+  IrqAck(N);
+  IrqBody(N, FromUser);
+End;
+
 Procedure ReboutDummy;
 Begin
 End;
@@ -24509,6 +24735,33 @@ End;
 { Fin du traitement d'une entree depuis le mode utilisateur }
 Procedure ReturnToUser(F : PFrame);
 Begin
+  If PreemptOn Then
+  Begin
+    If CtrlAltDel Then
+    Begin
+      BklAcquire;
+      CtrlAltDel := False;
+      VfsShutdown;
+      RebootCpu;
+    End;
+    Repeat
+      If NeedResched Then
+      Begin
+        BklRelease;
+        Schedule;
+      End;
+      If SigPendingUnblocked(Cur) Then
+      Begin
+        BklAcquire;
+        HandleSignals(F);
+      End;
+      BklRelease;
+    Until (Not NeedResched) And (Not SigPendingUnblocked(Cur));
+    asm
+      cli
+    end;
+    Exit;
+  End;
   If CtrlAltDel Then
   Begin
     CtrlAltDel := False;
@@ -24524,6 +24777,25 @@ Begin
   End;
 End;
 
+{ Preemption dans le noyau : retour d'IRQ vers du code noyau qui tourne
+  avec IF = 1, sans section critique, en tenant le verrou du noyau }
+Procedure KPreemptCheck(F : PFrame);
+Begin
+  { seulement si la tache est ordonnable : une tache qui a deja pris l'etat
+    zombie, endormi ou arrete va ceder elle-meme (la preemption la
+    retirerait de l'ordonnancement avant la fin de sa sortie : reveil du
+    pere perdu) }
+  If NeedResched And (Cur <> IdleTask) And (BklOwner = Cur)
+     And (Cur^.State = TsRunnable)
+     And (Cur^.PreemptCount = 0) And ((F^.Eflags And $200) <> 0) Then
+  Begin
+    Cur^.Preempted := 1;
+    Inc(NrPreempts);
+    Schedule;
+    Cur^.Preempted := 0;
+  End;
+End;
+
 { Point d'entree commun appele par le code genere (voir partie 4) }
 Procedure KTrap(Fp : LongInt);
 Var F : PFrame; V : LongInt; FromUser : Boolean;
@@ -24531,10 +24803,26 @@ Begin
   F := Pointer(Fp);
   V := F^.Vec;
   FromUser := (F^.Cs And 3) = 3;
-  If FromUser Then Cur^.Frame := Fp;
+  { CR2 avant de rouvrir les interruptions (une preemption le changerait) }
+  If V = 14 Then Cur^.Cr2 := ReadCr2;
+  If FromUser Then Cur^.Frame := Fp
+  Else If PreemptOn And (Cur <> IdleTask)
+      And (Cur^.KStack + KStackSize - Fp > KStackMax) Then
+    KStackMax := Cur^.KStack + KStackSize - Fp;
+  If PreemptOn And FromUser And ((V = VecSyscall) Or (V < 32)) Then
+  Begin
+    BklAcquire;
+    asm
+      sti
+    end;
+  End;
   If V = VecSyscall Then DoSyscall(F)
   Else If V < 32 Then DoException(F)
-  Else If V < 48 Then DoIrq(V - 32, FromUser)
+  Else If V < 48 Then
+  Begin
+    DoIrq(V - 32, FromUser);
+    If PreemptOn And (Not FromUser) Then KPreemptCheck(F);
+  End
   Else KernelOops(F, 'vecteur inconnu');
   If FromUser Then ReturnToUser(F);
 End;
@@ -24803,8 +25091,8 @@ End;
   encodes en base64, ecrits dans le tmpfs racine au demarrage. }
 
 Const
-  EmbCount = 28;
-  EmbPath : Array[0..27] Of String[20] = (
+  EmbCount = 32;
+  EmbPath : Array[0..31] Of String[20] = (
     '/sbin/init',
     '/bin/hello',
     '/bin/forkwait',
@@ -24832,21 +25120,25 @@ Const
     '/bin/isotest',
     '/bin/fattest',
     '/bin/fbtest',
-    '/bin/swaptest');
-  EmbSize : Array[0..27] Of LongInt = (
-    3428, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
+    '/bin/swaptest',
+    '/bin/killtest',
+    '/bin/idetest',
+    '/bin/preempttest',
+    '/bin/pstress');
+  EmbSize : Array[0..31] Of LongInt = (
+    3508, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
     2320, 1104, 11936, 2476, 3268, 8720, 2376, 2004, 5100, 3248, 1712, 3568,
-    2812, 10656, 2748, 2640);
-  EmbStart : Array[0..28] Of LongInt = (
-    0, 77, 115, 159, 210, 261, 311, 399, 437, 474, 526, 627, 688, 740, 765,
-    1031, 1087, 1160, 1354, 1407, 1452, 1566, 1639, 1678, 1758, 1821, 2058,
-    2120, 2179);
-  EmbData : Array[0..2178] Of String[60] = (
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAABMDAAAAAAAADQAIAAC',
-    'ACgABwAGAAEAAAAAAAAAAIAECACABAiMCgAAjAoAAAUAAAAAEAAAUeV0ZAAA',
+    2812, 10656, 2748, 2640, 2196, 2560, 2552, 4028);
+  EmbStart : Array[0..32] Of LongInt = (
+    0, 78, 116, 160, 211, 262, 312, 400, 438, 475, 527, 628, 689, 741, 766,
+    1032, 1088, 1161, 1355, 1408, 1453, 1567, 1640, 1679, 1759, 1822, 2059,
+    2121, 2180, 2229, 2286, 2343, 2433);
+  EmbData : Array[0..2432] Of String[60] = (
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAACcDAAAAAAAADQAIAAC',
+    'ACgABwAGAAEAAAAAAAAAAIAECACABAjcCgAA3AoAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuBQAAACJ5VdWU4Pk8IHskAUA',
     'AM2ASHQUuFiHBAjoRQUAALgBAAAA6bsEAAC4QgAAAM2AuHiHBAgx/zHb6CYF',
-    'AACLDJ0gigQIhcl0XzHSiYwkkAEAAInIQ4mUJJQBAACNlCSQAQAAiUwkDOgB',
+    'AACLDJ1gigQIhcl0XzHSiYwkkAEAAInIQ4mUJJQBAACNlCSQAQAAiUwkDOgB',
     'BQAAica4qYcECOjsBAAAi0QkDOjjBAAAuLGHBAiF9nQXuLaHBAhH6M8EAACJ',
     '8OhjBQAAuFaHBAjovgQAAOuWuMSHBAjosgQAAInY6EYFAAC414cECOihBAAA',
     'ifjoNQUAALhWhwQI6JAEAACDfQgBfjOLRQy63ocECItABOg9BAAAicaFwHUd',
@@ -24876,7 +25168,7 @@ Const
     'HItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADNgDHtieCD5PBQ6DUBAABV',
     'ieVWicZTMdsPtgQeD7YMGoTAdAVDOMh071spyF5dw1WJ0THSieVTicOAPBEA',
     'dANC6/e4BAAAAM2AW13DicK4AQAAAOvaVYnlV1ZTg+wsiUXUuAIAAACJVdDN',
-    'gIXAdViNfdi+AIoECLkEAAAAi13U86WNVdi4CwAAAItN0M2AugCHBAi4AgAA',
+    'gIXAdViNfdi+QIoECLkEAAAAi13U86WNVdi4CwAAAItN0M2AugCHBAi4AgAA',
     'ALt/AAAA6I3///+LVdS4AgAAAOiA////ugmHBAi4AgAAAOhx////uAEAAADN',
     'gOv+icO4/////3gPjU3YuAcAAAAx0s2Ai0XYg8QsW15fXcNVieVWU4nDg+ww',
     'xkX3AIXAeQ732LkhAAAAvgoAAADrDXXyxkX2MLkgAAAA6x+FwHQRMdJJ9/aK',
@@ -24898,27 +25190,28 @@ Const
     'AC9iaW4vcHR5dGVzdAAvYmluL21vdW50dGVzdAAvYmluL3NvY2t0ZXN0AC9i',
     'aW4vc2htdGVzdAAvYmluL2xpbXRlc3QAL2Jpbi9ldnR0ZXN0AC9iaW4vZGV2',
     'dGVzdAAvYmluL21vdXNldGVzdAAvYmluL25ldHRlc3QAL2Jpbi9pc290ZXN0',
-    'AC9iaW4vZmF0dGVzdAAvYmluL2ZidGVzdAAvYmluL3N3YXB0ZXN0ABOHBAgs',
-    'hwQIN4cECAAAAAAAAAAAAAAAAAAAAAAAAAAApIgECK+IBAi9iAQIy4gECNiI',
-    'BAjmiAQI84gECACJBAgPiQQIHIkECCqJBAg4iQQIRIkECFKJBAhfiQQIbokE',
-    'CHyJBAiJiQQIlokECKOJBAiwiQQIv4kECMyJBAjZiQQI5okECPKJBAgAAAAA',
-    'R0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8IAAAAn4UECCAA',
-    'AAACAAEADwAAAL+FBAgdAAAAAgABABcAAADchQQICQAAAAIAAQAcAAAA5YUE',
-    'CJIAAAACAAEAIAAAAHeGBAhdAAAAAgABACUAAAAgigQIbAAAAAEAAgArAAAA',
-    '1IYECCkAAAASAAEAMQAAAGSFBAgAAAAAEAABADgAAACLhQQIAAAAABAAAQBK',
-    'AAAAkoUECAAAAAAQAAEARQAAAIyaBAgAAAAAEAACACwAAAB0gAQI8AQAABIA',
-    'AQBRAAAAjJoECAAAAAAQAAIAWAAAAIyaBAgAAAAAEAACAABpbml0LmMAc3Ry',
-    'Y21wAHB1dHNfZmQAcHV0cwBydW4AcHV0ZAB0ZXN0cwBjbWFpbgBrdV9zYzYA',
-    'X19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFi',
-    'AC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmNvbW1lbnQAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAA',
-    'AAYAAAB0gAQIdAAAAIkGAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAACAAAA',
-    'AIcECAAHAACMAwAAAAAAAAAAAAAgAAAAAAAAACkAAAABAAAAMAAAAAAAAACM',
-    'CgAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAAvAoAAAAB',
-    'AAAFAAAACAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAALwLAABdAAAAAAAA',
-    'AAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAAZDAAAMgAAAAAAAAAAAAAA',
-    'AQAAAAAAAAA=',
+    'AC9iaW4vZmF0dGVzdAAvYmluL2ZidGVzdAAvYmluL3N3YXB0ZXN0AC9iaW4v',
+    'a2lsbHRlc3QAL2Jpbi9pZGV0ZXN0AC9iaW4vcHJlZW1wdHRlc3QAL2Jpbi9w',
+    'c3RyZXNzAAAAAAAAAAAThwQILIcECDeHBAgAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AKSIBAiviAQIvYgECMuIBAjYiAQI5ogECPOIBAgAiQQID4kECByJBAgqiQQI',
+    'OIkECESJBAhSiQQIX4kECG6JBAh8iQQIiYkECJaJBAijiQQIsIkECL+JBAjM',
+    'iQQI2YkECOaJBAjyiQQIAIoECA6KBAgbigQILIoECAAAAABHQ0M6IChVYnVu',
+    'dHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/wgAAACfhQQIIAAAAAIAAQAPAAAA',
+    'v4UECB0AAAACAAEAFwAAANyFBAgJAAAAAgABABwAAADlhQQIkgAAAAIAAQAg',
+    'AAAAd4YECF0AAAACAAEAJQAAAGCKBAh8AAAAAQACACsAAADUhgQIKQAAABIA',
+    'AQAxAAAAZIUECAAAAAAQAAEAOAAAAIuFBAgAAAAAEAABAEoAAACShQQIAAAA',
+    'ABAAAQBFAAAA3JoECAAAAAAQAAIALAAAAHSABAjwBAAAEgABAFEAAADcmgQI',
+    'AAAAABAAAgBYAAAA3JoECAAAAAAQAAIAAGluaXQuYwBzdHJjbXAAcHV0c19m',
+    'ZABwdXRzAHJ1bgBwdXRkAHRlc3RzAGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVf',
+    'cnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAu',
+    'c2hzdHJ0YWIALnRleHQALnJvZGF0YQAuY29tbWVudAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAHSABAh0',
+    'AAAAiQYAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAAAIAAAAAhwQIAAcAANwD',
+    'AAAAAAAAAAAAACAAAAAAAAAAKQAAAAEAAAAwAAAAAAAAANwKAAAtAAAAAAAA',
+    'AAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAAAMCwAAAAEAAAUAAAAIAAAA',
+    'BAAAABAAAAAJAAAAAwAAAAAAAAAAAAAADAwAAF0AAAAAAAAAAAAAAAEAAAAA',
+    'AAAAEQAAAAMAAAAAAAAAAAAAAGkMAAAyAAAAAAAAAAAAAAABAAAAAAAAAA==',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAOYIECDQAAABYBQAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAinAwAApwMAAAUAAAAAEAAAAQAAAKgD',
     'AACokwQIqJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -27020,7 +27313,260 @@ Const
     'AAAAAAAuAAAAAQAAADAAAAAAAAAAIQcAAC0AAAAAAAAAAAAAAAEAAAABAAAA',
     'AQAAAAIAAAAAAAAAAAAAAFAHAAAQAQAABgAAAAkAAAAEAAAAEAAAAAkAAAAD',
     'AAAAAAAAAAAAAABgCAAAdwAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAA',
-    'AAAAAAAA1wgAADcAAAAAAAAAAAAAAAEAAAAAAAAA');
+    'AAAAAAAA1wgAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAnoMECDQAAABUBwAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAiJBQAAiQUAAAUAAAAAEAAAAQAAAIwF',
+    'AACMlQQIjJUECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFW4FAAAAInlV1ZTg+Twg+wwzYCJRCQIMcCNXCQc6GAD',
+    'AACJRCQMMcDoVQMAAIlEJAS4AQAAAOhHAwAAx0QkIAAtMQExyYnGMcCJRCQc',
+    'uKIAAADNgL8lAAAAi1wkDIn4zYAx0oXAdRa4QQAAAM2A99iJw4n4zYAx0oXA',
+    'D5TCuPeEBAi/JQAAALufhgEA6FEDAACJ+DHJzYAx0oP4/bgBhQQID5TC997o',
+    'NwMAAInzuQ8AAACJ+M2AicaFwHQEMdLrLrgBAAAA6E0CAABIde+LXCQMifiJ',
+    '8c2AicKFwHXfifiLXCQEidHNgDHShcAPlMK4DIUECL4IAAAAuw8AAADo4AIA',
+    'ADHAjUwkHDHSiUQkLIlEJCi4rgAAAMdEJBwBAAAAx0QkIAQAAATHRCQkl4ME',
+    'CM2AvyUAAACJ07kPAAAAifjNgDHShcC4FoUECLsPAAAAD5TC6IsCAAAxwI1M',
+    'JBwx0olEJBwxwIlEJCyJRCQouK4AAADHRCQgBAAABMdEJCSXgwQIzYC4AgAA',
+    'AI1cJBzohQEAADHSg/gCuCGFBAgPlMLoPgIAADHA6NcBAAC4AQAAAOjNAQAA',
+    'McDHRCQgAC0xATHJiUQkHLiiAAAAzYCDy/+J+LkPAAAAzYAx0oXAuDOFBAgP',
+    'lMLo+QEAALgCAAAA6CQBAAAx0oP4Arg8hQQID5TC6N0BAACLXCQIifgxyc2A',
+    'MdKFwHUQifi7AQAAAM2AMdKFwA+UwrhMhQQIMfaNXCQc6K0BAAAx0sdEJCCA',
+    '8PoCifGJVCQcuqIAAACJ0M2AuJ4AAADNgDH/x0QkIIDw+gKJ0Il8JBzNgLgU',
+    'AAAAzYAx0jlEJAi4W4UECA+UwuhhAQAAuAIAAADNgInDhcB1DrgBAAAAuwcA',
+    'AADNgOv+McCNTCQcifKJRCQcuAcAAADNgItEJBwx0sH4CIP4B7huhQQID5TC',
+    '6BoBAAC4foUECOjwAAAAjWX0McBbXl9dw1VXVlOLRCQUi1wkGItMJByLVCQg',
+    'i3QkJIt8JCiLbCQszYBbXl9dw7itAAAAzYAx7Yngg+TwUOgPAQAAVYnlVzH/',
+    'VjH2U4PsFIlF4I1N6LgHAAAAugEAAACDy//NgIXAfg6LReiD4H+D+A91LUbr',
+    'GDHAx0XwQEtMAI1d7DHJiUXsuKIAAADNgEeB/8cAAAB/DItF4DnGfLTrA4PO',
+    '/4PEFInwW15fXcNVicK4AgAAAInlU82AicGFwHUYhdJ0Cbg5AAAAicvNgLod',
+    'AAAAidDNgOv6fg6A4gF0Cbg5AAAAicvNgInIW13DVYnBMdKJ5VOAPBEAdANC',
+    '6/e4BAAAALsBAAAAzYBbXcNVieVWica474QECFOJ0+jN////ifDoxv///4Xb',
+    'uOiEBAi644QECA9Fwuiy////hdt0CP8FkJUECOsG/wWMlQQIW15dw1WJ5VOD',
+    '7AiLRQiLEI1IBI1EkAhQUVLov/v//4nDuAEAAADNgIPEEOv+IE9LCgAgRkFJ',
+    'TAoAS1RFU1Q6IABraWxsLnNpZzAAa2lsbC5lc3JjaABraWxsLnBncnAAa2ls',
+    'bC5wZ3JwMABraWxsLnBncnAwX3JlYXBlZABraWxsLmFsbABraWxsLmFsbF9y',
+    'ZWFwZWQAa2lsbC5hbGxfYWxpdmUAa2lsbC5zdGlsbF9ydW5uaW5nAGtpbGwu',
+    'Zm9ya19hZnRlcgBraWxsIERPTkUKAEdDQzogKFVidW50dSAxMy4zLjAtNnVi',
+    'dW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAA',
+    'AAAAAAAAAAQA8f8MAAAAq4MECGsAAAACAAEAEQAAABaEBAhAAAAAAgABABcA',
+    'AABWhAQIIAAAAAIAAQAcAAAAdoQECEQAAAACAAEAIgAAAJCVBAgEAAAAAQAD',
+    'ACoAAACMlQQIBAAAAAEAAwAyAAAAuoQECCkAAAASAAEAOAAAAHCDBAgAAAAA',
+    'EAABAD8AAACXgwQIAAAAABAAAQBRAAAAnoMECAAAAAAQAAEATAAAAIyVBAgA',
+    'AAAAEAADADMAAACUgAQI3AIAABIAAQBYAAAAiZUECAAAAAAQAAMAXwAAAJSV',
+    'BAgAAAAAEAADAABraWxsdGVzdC5jAHJlYXAAc3Bhd24AcHV0cwBrdGVzdABr',
+    'dV9wYXNzAGt1X2ZhaWwAY21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABfX2Jz',
+    'c19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRh',
+    'YgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAA',
+    'AE8EAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAA44QECOMEAACmAAAA',
+    'AAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAAIyVBAiMBQAACAAAAAAAAAAA',
+    'AAAABAAAAAAAAAAuAAAAAQAAADAAAAAAAAAAiQUAAC0AAAAAAAAAAAAAAAEA',
+    'AAABAAAAAQAAAAIAAAAAAAAAAAAAALgFAAAAAQAABgAAAAgAAAAEAAAAEAAA',
+    'AAkAAAADAAAAAAAAAAAAAAC4BgAAZAAAAAAAAAAAAAAAAQAAAAAAAAARAAAA',
+    'AwAAAAAAAAAAAAAAHAcAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAADYUECDQAAADACAAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAjYBgAA2AYAAAUAAAAAEAAAAQAAAOAG',
+    'AADglgQI4JYECAAAAAAIEAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFUx0onlV1ZTg+TwgezQAAAAiVQkEIlUJByLRCQcMdKJ',
+    '0YschciGBAi4BQAAAM2AicaFwA+IfQMAALgTAAAAuTgEAACJ882AvwMAAAC6',
+    'AgAAAI2MJJAAAACJ+M2Aice4BgAAAM2Ag/8CD4VIAwAAgLwkkAAAAFMPhToD',
+    'AACAvCSRAAAA7w+FLAMAAIpEJBz/RCQQx0QkIGlkZS5mx0QkJGhkg8BhxkQk',
+    'JwCIRCQMiEQkJjHAilQEIITSdAeIVARAQOvxjXwkQLrQhQQIAfgx/4lEJBSJ',
+    '/ugQBAAAi0QkHLrchQQIudeFBAiLHIXIhgQIuBUAAADNgDHShcC+BQAAALvh',
+    'hQQID5TCjUQkQOiWAwAAifCJ+Yn6zYCDz/+JxoXAeB64AwAAALpAAAAAifON',
+    'jCSQAAAAzYCJx7gGAAAAzYCLRCQUuvCFBAjonQMAADHSg/8QdSYPtoQUkAAA',
+    'AA+2ivaFBAg4yHQEKcjrCEKD+hB14zHAMdKFwA+Uwo1EJEC7B4YECOgeAwAA',
+    'MdK4BQAAAInRzYCJxolEJBgx//fWwe4fgf8rAQAAf1L3xgEAAAB0SotcJBi4',
+    'AwAAALroAwAAueCWBAjNgD3oAwAAdSxpz+gDAAAx0r4BAAAAMduwBw+vwQDo',
+    'OILglgQID0XzQkGB+ugDAAB15kfrqDH2g3wkGAB4C7gGAAAAi1wkGM2Ai0Qk',
+    'FLoUhgQIux2GBAjoywIAAI1EJECJ8uh8AgAAuCcAAAC57QEAAM2AjVwkaLoq',
+    'hgQIidjopAIAAIpEJAy6PIYECMZEJHoAiEQkeY1EJHroiQIAALlCAgAAuqQB',
+    'AAC4BQAAAM2AiUQkGPfQMfbB6B+Jx4P+Y39Thf8PhMwAAACLRCQcifEx0sHh',
+    'CgHBsA2Jy0IPr8HB6wdBjUQYAYiC35YECIH6AAQAAHXii1wkGLgEAAAAueCW',
+    'BAjNgD0ABAAAD5TARg+2wInH66iF/3R9MdK4EwAAAItcJBiJ0c2AMcCJRCQM',
+    'i1wkGLgDAAAAugAEAAC54JYECM2APQAEAAB1TItUJAyLRCQcif4xycHiCgHC',
+    'sA2J0w+vwsHrB41EGAE4geCWBAi4AAAAAA9F8EFCgfkABAAAddr/RCQMg3wk',
+    'DGN/DPfGAQAAAHWa6wIx9oN8JBgAeAu4BgAAAItcJBjNgItEJBS6QYYECOhw',
+    'AQAAjUQkQIny6CEBAAC4JAAAAM2Ai0QkFLpIhgQIu9eFBAjoSwEAALgWAAAA',
+    'zYAx0oXAjUQkQA+UwujwAAAA/0QkHIN8JBwED4VU/P//g3wkEAC4UIYECHRr',
+    'uIOGBAjoqwAAAItcJBC5IQAAAMaEJLEAAAAA99sPSFwkEInYvwoAAAAx0vf3',
+    'ic5JipKNhgQIiJQMkAAAAInaicOD+gl33IN8JBAAeQvGhDSOAAAALY1O/o2E',
+    'JJAAAAAByOhPAAAAuIGGBAjoRQAAAI1l9DHAW15fXcNVV1ZTi0QkFItcJBiL',
+    'TCQci1QkIIt0JCSLfCQoi2wkLM2AW15fXcO4rQAAAM2AMe2J4IPk8FDoeAAA',
+    'AFWJwTHSieVTgDwRAHQDQuv3uAQAAAC7AQAAAM2AW13DVYnlVonGuMiFBAhT',
+    'idPozf///4nw6Mb///+F27jBhQQIuryFBAgPRcLosv///4XbdAj/BeSmBAjr',
+    'Bv8F4KYECFteXcNVMcmJ5VOKHAqIHAhBhNt19Vtdw1WJ5VOD7AiLRQiLEI1I',
+    'BI1EkAhQUVLo5/r//4nDuAEAAADNgIPEEOv+ACBPSwoAIEZBSUwKAEtURVNU',
+    'OiAALm1vdW50AC9tbnQAZXh0MgAvbW50L2hlbGxvLnR4dAAucmVhZABoZWxs',
+    'byBmcm9tIGV4dDIKAC9tbnQvYmlnLmJpbgAucmVhZGJpZwAvbW50L2Zyb21r',
+    'MzIAL21udC9mcm9tazMyL3dfaGQALmRhdAAud3JpdGUALnVtb3VudAAgIChh',
+    'dWN1biBleHQyIHN1ciBoZGExLi5oZGQxIDogdGVzdHMgSURFIGlnbm9yZXMp',
+    'CgBpZGUgRE9ORSAAMDEyMzQ1Njc4OWFiY2RlZgAvZGV2L2hkYTEAL2Rldi9o',
+    'ZGIxAC9kZXYvaGRjMQAvZGV2L2hkZDEAAACehgQIqIYECLKGBAi8hgQIR0ND',
+    'OiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8LAAAAGoUECCAAAAAC',
+    'AAEAEAAAADqFBAhEAAAAAgABABYAAADkpgQIBAAAAAEAAwAeAAAA4KYECAQA',
+    'AAABAAMAJgAAAH6FBAgUAAAAAgABADUAAADIhgQIEAAAAAEAAgA8AAAA4JYE',
+    'CAAQAAABAAMAPwAAAJKFBAgpAAAAEgABAEUAAADfhAQIAAAAABAAAQBMAAAA',
+    'BoUECAAAAAAQAAEAXgAAAA2FBAgAAAAAEAABAFkAAADglgQIAAAAABAAAwBA',
+    'AAAAlIAECEsEAAASAAEAZQAAANiWBAgAAAAAEAADAGwAAADopgQIAAAAABAA',
+    'AwAAaWRldGVzdC5jAHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAHN0cmNw',
+    'eV8uaXNyYS4wAGRldnMuMAB3YgBjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0',
+    'AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNo',
+    'c3RydGFiAC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAAlIAE',
+    'CJQAAAAnBQAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAAgAAALyFBAi8BQAA',
+    'HAEAAAAAAAAAAAAABAAAAAAAAAApAAAACAAAAAMAAADglgQI4AYAAAgQAAAA',
+    'AAAAAAAAACAAAAAAAAAALgAAAAEAAAAwAAAAAAAAANgGAAAtAAAAAAAAAAAA',
+    'AAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAAAIBwAAEAEAAAYAAAAJAAAABAAA',
+    'ABAAAAAJAAAAAwAAAAAAAAAAAAAAGAgAAHEAAAAAAAAAAAAAAAEAAAAAAAAA',
+    'EQAAAAMAAAAAAAAAAAAAAIkIAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAA8IMECDQAAAC4CAAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAizBgAAswYAAAUAAAAAEAAAAQAAAMAG',
+    'AADAlgQIwJYECAAAAAAICAEABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAI1MJASD5PD/cfxVieVXVo1F4FNRg+xI6DEEAADoSAMA',
+    'AInDDzGJxug9AwAAKdg9n4YBAH7y6C8DAACJRdQPMSnwvugDAADHRcQBAAAA',
+    'icGLRdQp2Jn3/jHSicOJyPfzicE95wMAAHYHMdL39olFxGnJ0AcAADHbx0Ww',
+    'AwAAAIldzIlNyI1F4OjBAwAAiUXAuAIAAADNgInDhcAPhUsBAAC5QgIAALqk',
+    'AQAAuAUAAAC7C4YECM2AiUXU6KsCAACJRdDoowIAAIt90Cn4PZ8lJgAPj/4A',
+    'AAC+FAAAAItd1LgEAAAAucCWBAi6AAABAM2AvxMAAAAxyYtd1In4icrNgLgD',
+    'AAAAi13UucCWBAi6AAABAM2AMcmLXdSJ+InKzYBOdbpRagBq/2oiagNoAAAQ',
+    'AGoAaMAAAADo8wEAAIPEIInDhcB+Ho2QAAAQAMYAAQUAEAAAOdB19LhbAAAA',
+    'uQAAEADNgDHSvgUAAAC7GIYECInwidHNgFKJxmoAav9qImoDaAAAgAFqAGjA',
+    'AAAA6J4BAACDxCCJx4XAfiWF9g+IIP///7oAAIABuAMAAACJ84n5zYC4WwAA',
+    'AIn7idHNgOsIhfYPiPv+//+4BgAAAInzzYDp7f7//7gKAAAAuwuGBAjNgLgB',
+    'AAAAMdvNgOv+DzGJRbiLRbiJVbyJRbQxwIlF0IlF1A8xi03IicYrRbgbVbw5',
+    'yInQG0XMcxmLVbSJ8Il1tCnQOUXUD0NF1P9F0IlF1OvRjU3kuAcAAAAx0s2A',
+    'jUXg6AkCAACLdeA5RcAPnMGJw4X2D5TACMh1C/9NsA+FI/7//zHJi0XUMdKI',
+    'Tcj3dcQx0oF90OgDAAAPn8KJx7gihgQI6CYBAAAx0oN95AC4OIYECA+UwugT',
+    'AQAAhfaKTch0Ig+20bhJhgQI6P8AAAAx0oH/Pw0DALhihgQID57C6OoAAAC4',
+    'eoYECOjAAAAAifDoHQEAALiGhgQI6K8AAACJ+OgMAQAAuJKGBAjongAAAIt9',
+    'wInYKfjo9gAAALidhgQI6IgAAACLRdDo5AAAALixhgQI6HYAAAC4pYYECOhs',
+    'AAAAjWXwMcBZW15fXY1h/MNVV1ZTi0QkFItcJBiLTCQci1QkIIt0JCSLfCQo',
+    'i2wkLM2AW15fXcO4rQAAAM2AMe2J4IPk8FDoqwEAAFW4TgAAADHJieVTjV30',
+    'g+wQzYBpRfRAQg8AA0X4g8QQW13DVYnBMdKJ5VOAPBEAdANC6/e4BAAAALsB',
+    'AAAAzYBbXcNVieVWica43YUECFOJ0+jN////ifDoxv///4XbuNaFBAi60YUE',
+    'CA9Fwuiy////hdt0CP8FxJ4FCOsG/wXAngUIW15dw1WJ5VZTicOD7DDGRfcA',
+    'hcB5DvfYuSEAAAC+CgAAAOsNdfLGRfYwuSAAAADrH4XAdBEx0kn39oqS5YUE',
+    'CIhUDdbr64XbeQbGRA3VLUmNRdYByOhG////g8QwW15dw1Ux0onlV4nHuAUA',
+    'AABWU7v2hQQIUYnRzYAx24lF8IkfhcB5CIPK/+mTAAAAvgMAAACLXfC5wJYF',
+    'CLr/BwAAifDNgInGi13wuAYAAADNgIX2ftLGhsCWBQgAMcCAuMCWBQhrdVGN',
+    'iMCWBQgx0oqaAYYECDgcEXU+QoP6CXXvg8AJMdIPvojAlgUIjVnQgPsJdwpr',
+    '0gpAjVQK0OvniojAlgUIgPkgdQNA6/IxwID5MQ+UwIkH6wpAOfB1oell////',
+    'idBaW15fXcNVieVTg+wIi0UIixCNSASNRJAIUFFS6NH6//+Jw7gBAAAAzYCD',
+    'xBDr/iBPSwoAIEZBSUwKAEtURVNUOiAAMDEyMzQ1Njc4OWFiY2RlZgAvcHJv',
+    'Yy9zdGF0AGtwcmVlbXB0IAAvdG1wL3ByZS5kYXQAL2Rldi96ZXJvAHByZWVt',
+    'cHQudXNlcl9sb29wX3JhbgBwcmVlbXB0LmNoaWxkX29rAHByZWVtcHQua2Vy',
+    'bmVsX3ByZWVtcHRlZABwcmVlbXB0Lm1heF9nYXBfYm91bmRlZABwcmVlbXB0',
+    'IG9uPQAgbWF4Z2FwX3VzPQAga3ByZWVtcHQ9ACBsb29wcz0AcHJlZW1wdCBE',
+    'T05FCgBHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEz',
+    'LjMuMAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/w8AAAD9gwQI',
+    'IwAAAAIAAQASAAAAIIQECCAAAAACAAEAFwAAAECEBAhEAAAAAgABAB0AAADE',
+    'ngUIBAAAAAEAAwAlAAAAwJ4FCAQAAAABAAMALQAAAISEBAhdAAAAAgABADIA',
+    'AADhhAQIxwAAAAIAAQA1AAAAwJYFCAAIAAABAAMAOAAAAMCWBAgAAAEAAQAD',
+    'AD4AAACohQQIKQAAABIAAQBEAAAAwoMECAAAAAAQAAEASwAAAOmDBAgAAAAA',
+    'EAABAF0AAADwgwQIAAAAABAAAQBYAAAAwJYECAAAAAAQAAMAPwAAAJSABAgu',
+    'AwAAEgABAGQAAACzlgQIAAAAABAAAwBrAAAAyJ4FCAAAAAAQAAMAAHByZWVt',
+    'cHR0ZXN0LmMAdXMAcHV0cwBrdGVzdABrdV9wYXNzAGt1X2ZhaWwAcHV0ZABr',
+    'cABzYgBiaWcuMABjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9fYnNzX3N0',
+    'YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFiAC50',
+    'ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiUAAAAPQUA',
+    'AAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAADIAAADRhQQI0QUAAOIAAAAAAAAA',
+    'AAAAAAEAAAABAAAAKQAAAAgAAAADAAAAwJYECMAGAAAICAEAAAAAAAAAAAAg',
+    'AAAAAAAAAC4AAAABAAAAMAAAAAAAAACzBgAALQAAAAAAAAAAAAAAAQAAAAEA',
+    'AAABAAAAAgAAAAAAAAAAAAAA4AYAADABAAAGAAAACwAAAAQAAAAQAAAACQAA',
+    'AAMAAAAAAAAAAAAAABAIAABwAAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAA',
+    'AAAAAAAAAACACAAANwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAB4sECDQAAAB8DgAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAh9DAAAfQwAAAUAAAAAEAAAAQAAAIAM',
+    'AACAnAQIgJwECAAAAAAIQAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAI1MJASD5PC4BQAAAP9x/FWJ5Vcx/1aJ+lO7DowECFGJ',
+    '+YHseAgAAM2AhcB4YonGuTgEAAC4EwAAAInzzYC4AwAAAI2NuPf//7oCAAAA',
+    'zYCD+AK4BgAAAHUygL249///U3UpgL259///73UgzYC4FQAAALkYjAQIuh2M',
+    'BAiJ/rsOjAQIzYCFwHQV6wSJ882AMfa6BYwECIm1oPf//+sguCcAAAC7IowE',
+    'CLntAQAAzYDHhaD3//8BAAAAuvuLBAgx24mdpPf//7sCAAAAidjNgInBi4Wk',
+    '9///iYyF0Pf//4XJD4UYCAAAjZ3o9///uE4AAADNgGmF6Pf//0BCDwADhez3',
+    '//+JhYD3//8xwIocAoTbdAqInAXo9///QOvvg72k9///AHQIipXA9///6wey',
+    'MLkBAAAAg72k9///AIiVwPf//3QRi72k9///jVcwiJQNwPf//0GNvej3//+J',
+    'yo00B4XSdA5KRoqcFcD3//+IXv/r7gHBjYXo9///jRQIMcCKiCqMBAiIDAJA',
+    'hMl18mmFpPf//+gDAAAxyTH/iY2U9///iYWI9///a4Wk9///BwUgTgAAiYWE',
+    '9///uE4AAACNncD3//8xyc2AaYXA9///QEIPAIu1gPf//wOFxPf//ynwPf8I',
+    'PQAPjwQHAACLhZT3//+5BQAAAJn3+YuFlPf//4mVkPf//4nWi5WI9///AdCJ',
+    'haD3//+F9g+F+wAAAImNnPf//42d6Pf//7lCAgAAuqQBAAC4BQAAAM2AMdKJ',
+    'hZz3//+JlZj3//+FwA+IpgQAAIuFkPf//4u1oPf//40UMLgAIAAA6DcIAACL',
+    'jZj3//+6ACAAALiAvAQI6AMIAACLnZz3//+5gLwECImFmPf//7gEAAAAzYA9',
+    'ACAAAHQBR/+FkPf//4O9kPf//xh1ozHSuBMAAACLnZz3//+J0c2Ax4Wg9///',
+    'GAAAADH2i52c9///uAMAAAC6ACAAALmAnAQIzYA9ACAAAHQDR+sbifG6ACAA',
+    'ALiAnAQI6IUHAAD/jaD3//+JxnXEi52c9///uAYAAADNgOlsAwAAg/4BD4VD',
+    'AQAAuCoAAACNncD3///NgLgCAAAAzYCJxomFkPf//7gGAAAAhfZ1Q4udwPf/',
+    '/82Ai4Wg9///jRQGuAAQAADoPwcAAIudxPf//7gEAAAAuYC8BAi6ABAAAM2A',
+    'RoP+CHXQuAEAAAAx282A6/6LncT3///NgDH2MduJtZz3//+LhaD3//+NFAO4',
+    'ABAAAEPo8QYAAIuNnPf//7oAEAAAuIC8BAjovQYAAImFnPf//4P7CHXMMdsx',
+    '9omdoPf//4udwPf//7oAEAAAuAMAAAC5gJwECM2AiYWY9///hcB+MouVmPf/',
+    '/4nxuICcBAjodQYAAAGVoPf//4G9oPf///9/AACJxn65gb2g9///AIAAAHQB',
+    'R4udwPf//7gGAAAAzYC4BwAAAIudkPf//42NtPf//zHSzYCDvbT3//8AdAFH',
+    'ObWc9///6SYCAACD/gIPhakAAABRagBq/2oiagNoAAAEAGoAaMAAAADovwUA',
+    'AIPEIInDhcAPjmICAACKlaT3//+LtaD3//+JhZz3//+JwTHAiJWY9///ipWg',
+    '9///gcEAEAAAAcKIkQDw//+KlaT3//8xwkCIUf+D+EB12zHAi5Wc9///jQwG',
+    'OAp1EIqNmPf//zHBOIr/DwAAdAFHgYWc9///ABAAAECD+EB10rhbAAAAuQAA',
+    'BADNgOnOAwAAg/4DD4V3AQAAuQEAAAC4aAEAADHSicuNtcD3///NgIXAD4W5',
+    'AQAAuAIAAADNgIXAiYWM9///uAYAAAB1Q4udwPf//82AuYCcBAi/AwAAAIud',
+    'xPf//7oAIAAAifjNgInGhcB+EYudxPf//7gEAAAAifLNgOvauAEAAAAx282A',
+    '6/6LncT3///NgDHSiZWc9///iZWQ9///iZWY9///i4Wc9///i7Wg9///jRQw',
+    'uNAHAADo1QQAAIuNmPf//7rQBwAAuIC8BAjooQQAAIudwPf//7mAvAQIiYWY',
+    '9///uAQAAADNgDH2utAHAACLncD3//+NjoCcBAi4AwAAACnyzYCFwH4SAcaB',
+    '/s8HAAB+2IH+0AcAAHQDR+sbi42Q9///utAHAAC4gJwECOg/BAAAiYWQ9///',
+    '/4Wc9///g72c9///Bg+FV////4uFnPf//4udwPf//82AuAcAAACNjbT3//8x',
+    '0oudjPf//82Ai7WQ9///ObWY9///D4RUAgAAR+lOAgAAuwIAAAC5AQAAALhn',
+    'AQAAMdLNgImFnPf//4uFhPf//42V0Pf//wHGjYXA9///icFAxgEAOdB19mbH',
+    'hcD3//8CAMHmCMeFxPf//38AAAGDzk6DvZz3//8AZom1wvf//3kGR+m9+v//',
+    'i52c9///uGkBAACNjcD3//+6EAAAAM2AhcB0E4udnPf//0e4BgAAAM2A6Y76',
+    '//+LnZz3//+4awEAALkCAAAAzYCJwoXAddW4AgAAAM2AiYWY9///hcB1aIuN',
+    'mPf//4udnPf//7hsAQAAicqJzs2AiceLnZz3//+4BgAAAM2AuYCcBAiF/3kL',
+    'uAEAAACJw82A6/6+AwAAALoAIAAAifuJ8M2AicaFwH4NuAQAAACJ+4nyzYDr',
+    '3bgBAAAAMdvNgOv+vgYAAACLnZz3//+J8M2Au2cBAAC5AQAAAInYuwIAAADN',
+    'gInDhcAPiOYAAAC4agEAAI2NwPf//7oQAAAAzYCFwHQKR4nwzYDpxwAAADHA',
+    'iYWQ9///iYWM9///iYWc9///i4WQ9///i7Wg9///jRQwuLgLAADoawIAAIuN',
+    'nPf//7q4CwAAuIC8BAjoNwIAALmAvAQIiYWc9///uAQAAADNgDH2urgLAACN',
+    'joCcBAi4AwAAACnyzYCFwH4SAcaB/rcLAAB+3oH+uAsAAHQDR+sbi42M9///',
+    'urgLAAC4gJwECOjhAQAAiYWM9////4WQ9///g72Q9///BA+FY////7gGAAAA',
+    'zYCLtYz3//85tZz3//90AUeNjbT3//+4BwAAADHSi52Y9///zYD/hZT3///p',
+    'yvj//zHbhf+4AQAAAA+fw82A6/7/haT3//+DvaT3//8GD4W69///Mf8x9o2N',
+    'wPf//4uctdD3//+4BwAAADHSzYCDvcD3//8AdAFHRoP+BnXgMdKF/7gvjAQI',
+    'D5TC6JoBAACDvaD3//8AdCS4JAAAAM2AuBYAAAC7GIwECM2AMdKFwLhCjAQI',
+    'D5TC6G0BAAAx0r8FAAAAu1GMBAiJ+InRzYCJx4XAD4iYAAAAvgMAAACNjej3',
+    '//+6/wcAAIn7ifDNgInGuAYAAADNgIX2fnXGhDXo9///ADHAgDwBa3VgjTwB',
+    'MduKFB+IlaT3//+Kk1yMBAg4laT3//90CjqVpPf//3U86w5Dg/sJddnrBoD6',
+    'CnQIQIoUAYTSdfPGhAXo9///ALhmjAQI6LEAAACJ+OiqAAAAuHuMBAjooAAA',
+    'AOsFQDnwdZW4b4wECOiPAAAAjWXwMcBZW15fXY1h/MNVV1ZTi0QkFItcJBiL',
+    'TCQci1QkIIt0JCSLfCQoi2wkLM2AW15fXcO4rQAAAM2AMe2J4IPk8FDoqgAA',
+    'AFWJ5VZTicOJyDHJOdF9DGvAHw+2NAtBAfDr8FteXcNVicExwInlU2nSbU7G',
+    'QUCBwjkwAACJ08HrEIiYf7wECDnIdeRbXcNVicEx0onlU4A8EQB0A0Lr97gE',
+    'AAAAuwEAAADNgFtdw1WJ5VaJxrjziwQIU4nT6M3///+J8OjG////hdu47IsE',
+    'CLrniwQID0XC6LL///+F23QI/wWE3AQI6wb/BYDcBAhbXl3DVYnlU4PsCItF',
+    'CIsQjUgEjUSQCFBRUui79P//icO4AQAAAM2Ag8QQ6/4gT0sKACBGQUlMCgBL',
+    'VEVTVDogAC9tbnQvcHMvdwAvdG1wL3BzXwAvZGV2L2hkYTEAL21udABleHQy',
+    'AC9tbnQvcHMALmRhdABwc3RyZXNzLndvcmtlcnNfb2sAcHN0cmVzcy51bW91',
+    'bnQAL3Byb2Mvc3RhdABrcHJlZW1wdCAAcHN0cmVzcyAAcHN0cmVzcyBET05F',
+    'CgBHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMu',
+    'MAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAEAPH/CwAAABSLBAgf',
+    'AAAAAgABAA8AAAAziwQIJwAAAAIAAQAgAAAAgLwECAAgAAABAAMAJAAAAFqL',
+    'BAggAAAAAgABACkAAAB6iwQIRAAAAAIAAQAvAAAAhNwECAQAAAABAAMANwAA',
+    'AIDcBAgEAAAAAQADAD8AAACAnAQIACAAAAEAAwBEAAAAvosECCkAAAASAAEA',
+    'SgAAANmKBAgAAAAAEAABAFEAAAAAiwQIAAAAABAAAQBjAAAAB4sECAAAAAAQ',
+    'AAEAXgAAAICcBAgAAAAAEAADAEUAAACUgAQIRQoAABIAAQBqAAAAfZwECAAA',
+    'AAAQAAMAcQAAAIjcBAgAAAAAEAADAABwc3RyZXNzLmMAc3VtAGZpbGwuY29u',
+    'c3Rwcm9wLjAAYnVmAHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGJ1ZjIA',
+    'Y21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEA',
+    'X2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRh',
+    'AC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiUAAAAUwsAAAAAAAAAAAAA',
+    'AQAAAAAAAAAhAAAAAQAAADIAAADniwQI5wsAAJYAAAAAAAAAAAAAAAEAAAAB',
+    'AAAAKQAAAAgAAAADAAAAgJwECIAMAAAIQAAAAAAAAAAAAAAgAAAAAAAAAC4A',
+    'AAABAAAAMAAAAAAAAAB9DAAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAA',
+    'AAAAAAAAAAAArAwAACABAAAGAAAACgAAAAQAAAAQAAAACQAAAAMAAAAAAAAA',
+    'AAAAAMwNAAB2AAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAABC',
+    'DgAANwAAAAAAAAAAAAAAAQAAAAAAAAA=');
 
 { END-EMBED }
 { Installer les programmes embarques dans le tmpfs racine }
@@ -27231,6 +27777,7 @@ Begin
   If R <> 0 Then KPanic('Pas de programme init : ' + IntStr(R));
   I := 0;
   If Tried Then I := 1;
+  If PreemptOn Then BklRelease;
   JumpToUser(Cur^.Frame);
 End;
 
@@ -27303,6 +27850,8 @@ Begin
   If CmdGet('swap') <> '' Then SwapOnDev(CmdGet('swap'));
   FpuDetect;
   InitFpu;
+  PreemptOn := CmdGet('preempt') <> '0';
+  If PreemptOn Then KLog('noyau preemptible (preempt=0 pour le desactiver)');
   T := KernelThread(LongInt(@InitThread));
   If T = Nil Then KPanic('creation de init impossible');
   InitTask := T;
@@ -27327,6 +27876,12 @@ Begin
       hlt
       cli
     end;
+    If PreemptOn And (BklOwner = Nil) Then RunBH;
+    If PreemptOn And (Jiffies - IdleDump > 3000) Then
+    Begin
+      IdleDump := Jiffies;
+      If NrTasks > 3 Then DumpTasks;
+    End;
   End;
   I := 0;
 End;

@@ -262,10 +262,87 @@ sont pas coherents avec un ext2 de blocs de 2 ou 4 Ko monte sur le meme disque.
   n'agit que sur l'attribut lecture seule, le bit "sale" du volume n'est pas
   gere, FAT n'est pas utilisable comme racine (`root=` : ext2 seulement).
 
+### Noyau preemptible (partie 27)
+
+Le noyau est preemptible comme `CONFIG_PREEMPT` : une tache qui execute du
+code noyau (appel systeme, faute de page, thread noyau) est retiree du
+processeur par l'interruption du minuteur quand sa tranche est finie, meme
+au milieu d'un long traitement (copie de 24 Mo, ecriture de fichiers,
+`bdflush`...). Parametre de la ligne de commande : `preempt=0` desactive
+(comportement de la phase 2 : IF masque en mode noyau) ; par defaut le
+noyau est preemptible.
+
+Principe (un seul verrou, pas de verrous fins) :
+
+* **Verrou du noyau (`BklOwner`)** : un verrou dormant unique protege tout le
+  code noyau des taches (VFS, ext2, FAT, iso9660, reseau, swap, ordonnanceur,
+  caches...). Une tache le prend a l'entree en mode noyau (`BklAcquire` dans
+  `KTrap` pour un appel systeme ou une exception venant du mode utilisateur ;
+  si une autre tache le detient, elle attend sans etre ordonnable) et le rend
+  au retour en mode utilisateur (`ReturnToUser`) ou quand elle cede
+  volontairement le processeur (sommeil, `yield`, sortie) : `Schedule` le rend
+  alors et la tache le reprendra, par transmission au moment du choix de
+  l'ordonnanceur (champ `NeedBkl`). Une **preemption** (`KPreemptCheck`) garde
+  le verrou. Invariant : le code noyau de deux taches ne s'entrelace jamais ;
+  il ne s'entrelace qu'aux points ou le noyau non preemptible cedait deja
+  (appels de `Schedule`). Il n'y a donc qu'un verrou : pas d'ordre de
+  verrous. En revanche les processus en mode utilisateur pur (et les
+  processus non bloques sur le verrou) tournent pendant qu'une tache noyau
+  est preemptee.
+* **IRQ** : les gestionnaires (clavier, serie, souris, reseau, minuteur) ne
+  sont pas reentrants. Quand l'IRQ arrive alors qu'une tache detient le
+  verrou (ou que la tache courante est en mode noyau), `IrqTop` ne fait que
+  compter le tick (`Jiffies`, comptabilite et tranche de la tache courante,
+  `TickPend`) ou masquer la ligne et noter l'IRQ (`PendIrq`) ; le travail
+  complet (reveils, minuteries, reseau, `KbdIrq`...) est execute plus tard par
+  `RunBH`, avec IF masque, par la tache qui rend le verrou, par `Schedule`, ou
+  par la tache d'inactivite. Quand le verrou est libre et que l'IRQ interrompt
+  du code utilisateur ou l'inactivite, le gestionnaire s'execute tout de
+  suite (comme avant). Les sections critiques en IF=0 ne sont donc pas
+  converties en spinlocks : il n'y a pas de donnee partagee avec une IRQ
+  hormis `Jiffies`, `NeedResched`, `TickPend`, `PendIrq` et le masque du PIC.
+* **Compteur `PreemptCount`** par tache (`PreemptDisable/Enable`) : interdit la
+  preemption (utilise pendant la copie de la structure de tache dans `fork`
+  et `KernelThread`, ou la copie est ordonnable un instant).
+* **Preemption** : au retour d'une IRQ vers du code noyau (`KTrap` ->
+  `KPreemptCheck`) si `NeedResched`, tache courante ordonnable
+  (`TsRunnable` : une tache deja zombie/endormie va ceder elle-meme), detentrice
+  du verrou, `PreemptCount` = 0 et IF=1 dans le code interrompu.
+* Regles pour le code noyau futur : lire `CR2` avant d'autoriser les
+  interruptions (fait dans `KTrap`, copie dans `Cur^.Cr2`) ; n'affecter un
+  etat non ordonnable (`TsSleeping`, `TsZombie`...) qu'immediatement avant
+  `Schedule` ; ne rien supposer de la tache d'inactivite ; ne pas appeler
+  `Schedule` depuis un gestionnaire d'IRQ ; tout nouveau champ de la
+  structure de tache copie par `fork` doit etre reinitialise a la creation.
+* Diagnostic : `/proc/stat` ligne `kpreempt N P D` (preemptions dans le noyau,
+  noyau preemptible 0/1, profondeur maximale de pile noyau vue par une IRQ) ;
+  la tache d'inactivite imprime l'etat des taches et du verrou toutes les 30 s
+  d'inactivite ; un oops en mode preemptible affiche les 16 dernieres
+  commutations.
+* Bugs trouves par les essais de charge : (1) preemption d'une tache deja
+  zombie (reveil du pere perdu) ; (2) preemption entre la copie de la tache
+  et son passage a l'etat non ordonnable dans `fork` (commutation vers une
+  pile invalide) ; (3) `CR2` lu apres `STI`. Chaque correction a ete validee
+  par des centaines d'executions de la suite (`RUNPREEMPT.SH`).
+* Ce que ce n'est pas : pas de SMP, pas de verrous fins (le code noyau de deux
+  taches ne s'execute jamais en parallele), pas de preemption pendant une
+  section qui detient `PreemptCount`. La latence d'une tache en mode noyau est
+  bornee par la tranche (environ 70 ms), pas par un point de preemption fin.
+
 ### Tests (suite)
 
-* `RUNK.SH` : 26 programmes embarques, 318 verifications (`fattest` et `fbtest`
-  s'ignorent sans disque FAT ni `fb=`).
+* `RUNK.SH` : 30 programmes embarques, 333 verifications (`fattest`, `fbtest`,
+  `swaptest`, `idetest` s'ignorent sans le materiel voulu ; `killtest` :
+  `kill(pid, 0, -pgrp, -1)` ; `preempttest` : latence d'un processus en mode
+  utilisateur pendant de longs appels systeme d'un autre (trou maximal
+  mesure par `rdtsc`, 370 ms avec `preempt=0`, 70-90 ms avec le noyau
+  preemptible) ; `pstress` : 6 processus en parallele (fichiers avec sommes de
+  controle sur ext2 ou tmpfs, tubes + fork, mmap, socketpair, TCP en
+  bouclage)). `KARGS="preempt=0" RUNK.SH` rejoue sans preemption ; tous les
+  `RUN*.SH` acceptent `KARGS` (parametres ajoutes a la ligne de commande).
+* `RUNIDE.SH` : ext2 sur hda..hdd (index QEMU 0..3, jeux "2 3", "0 1 2 3", "3",
+  "0 2", "1 3"), e2fsck propre. `RUNPREEMPT.SH [-r N] [-p 0|1]` : la suite
+  complete avec disque ext2, N fois, puis e2fsck.
 * `RUNEXT2.SH`, `RUNNET.SH`, `RUNMOUSE.SH`, `RUNISO.SH`, `RUNFAT.SH [12|16|32|fd]`, `RUNFB.SH`, `RUNSWAP.SH` :
   chacun fabrique son disque ou son reseau, lance QEMU et conclut par
   `RESULTAT : SUCCES` (ou `ECHEC` avec le dossier des traces). Avec `-n`, ils
@@ -273,9 +350,9 @@ sont pas coherents avec un ext2 de blocs de 2 ou 4 Ko monte sur le meme disque.
 
 ### Plan restant
 
-Noyau preemptible (le noyau reste non preemptif : IF=0 en mode noyau, les
-processus sont preemptes au retour en mode utilisateur), SMP,
-modules, journal ext3/ext4, FAT comme racine, DHCP/DNS dans le noyau.
+Verrous fins a la place du verrou unique du noyau (ext2/FAT/reseau/VFS
+independants), SMP, modules, journal ext3/ext4, FAT comme racine, DHCP/DNS dans
+le noyau.
 
 ---
 

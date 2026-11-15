@@ -21,7 +21,7 @@ cp "$K32/KERNEL32.PAS" "$W/"
 dd if=/dev/zero of="$W/swap.img" bs=1M count=32 status=none
 mkswap "$W/swap.img" >/dev/null 2>&1 || { echo "mkswap indisponible"; exit 1; }
 timeout 300 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.txt" \
-  -display none -m 24 -no-reboot -append "console=ttyS0 swap=/dev/hdb k32power" \
+  -display none -m 24 -no-reboot -append "console=ttyS0 swap=/dev/hdb k32power $KARGS" \
   -drive "file=$W/swap.img,format=raw,if=ide,index=1" 2>/dev/null
 tr -d '\r' < "$W/out.txt" > "$W/o2.txt"; mv "$W/o2.txt" "$W/out.txt"
 grep "swap :\|KTEST: DONE\|KPROG:.*FAIL\|KTEST: swap\|KPROG: /bin/swaptest\|Oops\|panique\|memoire insuffisante" "$W/out.txt"

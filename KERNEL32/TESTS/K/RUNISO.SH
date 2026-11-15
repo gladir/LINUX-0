@@ -26,7 +26,7 @@ echo deep > "$R/sub/deep/file.txt"
 ln -s hello.txt "$R/link"; ln -s ../hello.txt "$R/sub/up"
 genisoimage -quiet -R -V TESTISO -o "$W/t.iso" "$R" 2>/dev/null
 timeout 100 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.txt" -display none \
-  -m 64 -no-reboot -append "console=ttyS0 k32iso k32power" -cdrom "$W/t.iso" 2>/dev/null
+  -m 64 -no-reboot -append "console=ttyS0 k32iso k32power $KARGS" -cdrom "$W/t.iso" 2>/dev/null
 tr -d '\r' < "$W/out.txt" | grep "KTEST: iso\|KPROG: /bin/isotest"
 if grep -q "KTEST: iso.umount OK" "$W/out.txt" && ! grep -q "KTEST: iso.* FAIL" "$W/out.txt"; then
   echo "RESULTAT : SUCCES"; rm -rf "$W"; exit 0

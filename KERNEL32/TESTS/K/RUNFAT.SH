@@ -27,7 +27,7 @@ for T in $TYPES; do
   if [ "$T" = fd ]; then DRV="-drive file=$W/f$T.img,format=raw,if=floppy"
   else DRV="-drive file=$W/f$T.img,format=raw,if=ide,index=1"; fi
   timeout 300 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out$T.txt" \
-    -display none -m 64 -no-reboot -append "console=ttyS0 k32power" \
+    -display none -m 64 -no-reboot -append "console=ttyS0 k32power $KARGS" \
     $DRV 2>/dev/null
   tr -d '\r' < "$W/out$T.txt" > "$W/o2.txt"; mv "$W/o2.txt" "$W/out$T.txt"
   grep "KTEST: fat.* FAIL\|Oops\|panique\|fat DONE" "$W/out$T.txt"
