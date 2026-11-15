@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/xargs : construit des lignes de commande a partir de l entree standard (xargs [-n N] [-0] [-t] [-I repl] [commande [args]]).
+  @description: /bin/xargs : construit des lignes de commande a partir de l
+      entree standard (xargs [-n N] [-0] [-t] [-I repl] [commande [args]]).
 }
 
 Program XARGS;

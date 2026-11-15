@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/free : memoire libre et utilisee (/proc/meminfo) ; -m en Mo, -b en octets.
+  @description: /bin/free : memoire libre et utilisee (/proc/meminfo) ; -m en
+      Mo, -b en octets.
 }
 
 Program FREE;
@@ -111,7 +112,8 @@ BEGIN
     Tot := Tot * 1024; Fre := Fre * 1024; Buf := Buf * 1024;
     Cac := Cac * 1024; SwT := SwT * 1024; SwF := SwF * 1024;
   End;
-  SysPut(1, '              total        used        free      buffers      cached' + #10);
+  SysPut(1, '              total        used        free      buffers' +
+    '      cached' + #10);
   SysPut(1, 'Mem:     ' + Cell(Tot) + Cell(Tot - Fre) + Cell(Fre) + Cell(Buf) +
     Cell(Cac) + #10);
   SysPut(1, 'Swap:    ' + Cell(SwT) + Cell(SwT - SwF) + Cell(SwF) + #10);

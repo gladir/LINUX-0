@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/timeout : lance une commande et l arrete apres un delai (timeout [-s sig] secondes commande...).
+  @description: /bin/timeout : lance une commande et l arrete apres un delai
+      (timeout [-s sig] secondes commande...).
 }
 
 Program TIMEOUT;
@@ -98,7 +99,8 @@ BEGIN
     Val(SysArgStr(2), Sig, Code);
     I := 3;
   End;
-  If I + 1 >= SysArgCount Then Usage('timeout [-s signal] seconds command [args...]');
+  If I + 1 >= SysArgCount Then
+    Usage('timeout [-s signal] seconds command [args...]');
   Val(SysArgStr(I), Secs, Code);
   Inc(I);
   Pid := SysFork;

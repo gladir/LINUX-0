@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/nice : lance une commande avec une priorite modifiee (nice [-n N] commande...).
+  @description: /bin/nice : lance une commande avec une priorite modifiee
+      (nice [-n N] commande...).
 }
 
 Program NICE;
@@ -92,7 +93,8 @@ End;
 BEGIN
   N := 10;
   I := 1;
-  If (SysArgCount > 2) And ((SysArgStr(1) = '-n') Or (SysArgStr(1) = '--adjustment')) Then
+  If (SysArgCount > 2) And ((SysArgStr(1) = '-n') Or (SysArgStr(1) =
+    '--adjustment')) Then
   Begin
     Val(SysArgStr(2), N, Code);
     I := 3;

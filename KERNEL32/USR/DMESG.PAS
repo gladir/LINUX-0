@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/dmesg : affiche le journal du noyau (syslog(2) ; -c vide le journal).
+  @description: /bin/dmesg : affiche le journal du noyau (syslog(2) ; -c vide
+      le journal).
 }
 
 Program DMESG;

@@ -3,7 +3,7 @@
 # @created: 2026
 # @website(https://www.gladir.com/linux-0)
 # @description: Banc d'essai rejouable du systeme utilisateur de KERNEL32
-#   (agent E). RUNU.SH [etapes...]   etapes : sh host qemu power install
+#   (agent E). RUNU.SH [etapes...]   etapes : sh host qemu power net install
 #   (defaut : toutes)
 #     sh       shell USR/SH.PAS contre dash (TESTS/U/shtest.sh)
 #     host     compile les commandes du depot (LPC -3X) et lance cmdbench.py
@@ -14,6 +14,8 @@
 #              (install -d /dev/hdb), e2fsck -fn, puis amorce le disque installe
 #     power    halt, poweroff et reboot par init (QEMU doit se terminer pour
 #              poweroff et reboot)
+#     net      reseau sous QEMU (-nic user,model=rtl8139) : ifconfig, route,
+#              ping 127.0.0.1, wget d'un serveur http de l'hote (10.0.2.2)
 #     build    (automatique avant qemu/install) fabrique l'image avec BUILD.SH
 #              dans $W (pas dans IMAGE/, partage) ; KSRC=... choisit le noyau
 #   Variables : LPC (compilateur), W (travail, defaut /tmp/linux0-u-tests),
@@ -26,7 +28,7 @@ W=${W:-/tmp/linux0-u-tests}
 QT=${QEMU_T:-240}
 export LPC W
 mkdir -p "$W/bin" "$W/src"
-STEPS=${*:-sh host qemu power install}
+STEPS=${*:-sh host qemu power net install}
 FAIL=0
 build() {
   [ -n "$IMAGE" ] && return 0
@@ -65,6 +67,27 @@ for st in $STEPS; do
       if [ $((t1 - t0)) -lt 40 ] && grep -q 'init : ' "$W/$c.txt"; then
         echo "ok    $c ($((t1 - t0)) s)"
       else echo "ECHEC $c"; tail -3 "$W/$c.txt"; FAIL=1; fi
+    done ;;
+  net)
+    build
+    [ -f "$IMAGE" ] || { FAIL=1; continue; }
+    PORT=$((20000 + $$ % 20000))
+    mkdir -p "$W/web"; echo "linux0-net-ok" > "$W/web/index.html"
+    ( cd "$W/web" && exec python3 -m http.server $PORT --bind 127.0.0.1 \
+        > /dev/null 2>&1 ) &
+    WEBPID=$!
+    sleep 1
+    cp "$IMAGE" "$W/n.img"
+    python3 "$K32/TESTS/QEMU.PY" run "$W/n.img" -m 64 -t 90 \
+      -x=-nic -x=user,model=rtl8139 \
+      -c 'login: =root' -c 'Mot de passe : =root' \
+      -c '=ifconfig eth0; route; ping -c 2 127.0.0.1' \
+      -c "=wget -q -O /tmp/w.html http://10.0.2.2:$PORT/index.html; cat /tmp/w.html" \
+      -c '=echo NFIN' -s 'NFIN$' > "$W/net.txt" 2>&1
+    kill $WEBPID 2>/dev/null
+    for pat in 'inet addr:10.0.2.15' '2 received' 'linux0-net-ok'; do
+      if grep -q "$pat" "$W/net.txt"; then echo "ok    net : $pat"
+      else echo "ECHEC net : $pat (voir $W/net.txt)"; FAIL=$((FAIL+1)); fi
     done ;;
   install)
     build

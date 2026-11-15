@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/tar : archives ustar (tar c|x|t [v] [z] [f archive] [-C dir] [fichier...]) ; z passe par gzip.
+  @description: /bin/tar : archives ustar (tar c|x|t [v] [z] [f archive] [-C
+      dir] [fichier...]) ; z passe par gzip.
 }
 
 Program TAR;
@@ -70,7 +71,8 @@ Procedure PutStr(Off, Len : LongInt; Const S : String);
 Var K : LongInt;
 Begin
   For K := 1 To Len Do
-    If K <= Length(S) Then Blk[Off + K - 1] := Ord(S[K]) Else Blk[Off + K - 1] := 0;
+    If K <= Length(S) Then Blk[Off + K - 1] := Ord(S[K]) Else Blk[Off + K - 1]
+      := 0;
 End;
 
 Procedure PutOct(Off, Len, V : LongInt);

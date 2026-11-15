@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/mknod : cree un fichier special (mknod [-m mode] nom b|c|p [majeur mineur]).
+  @description: /bin/mknod : cree un fichier special (mknod [-m mode] nom
+      b|c|p [majeur mineur]).
 }
 
 Program MKNOD;

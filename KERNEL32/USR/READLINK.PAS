@@ -2,7 +2,9 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/readlink, /bin/realpath : affiche la cible d un lien ; -f (et realpath) : chemin absolu canonique.
+  @description: /bin/readlink,
+      /bin/realpath : affiche la cible d un lien ; -f (et realpath) : chemin
+      absolu canonique.
 }
 
 Program READLINK;

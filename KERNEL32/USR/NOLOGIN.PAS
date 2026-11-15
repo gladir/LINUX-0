@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/nologin : refuse une connexion (shell des comptes systeme).
+  @description: /sbin/nologin : refuse une connexion (shell des comptes
+      systeme).
 }
 
 Program NOLOGIN;

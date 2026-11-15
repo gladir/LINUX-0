@@ -3337,3 +3337,315 @@ Begin
   End;
   SysCrypt := T;
 End;
+
+{ ---------- reseau : sockets (appels directs 359-373), adresses IPv4,
+  resolveur (/etc/hosts, /etc/resolv.conf, DNS par UDP), services ---------- }
+Type
+  TSockAddrIn = Record
+    Family, Port : Word;
+    Addr : LongInt;
+    Zero : Array[0..7] Of Byte;
+  End;
+
+Function SysSocket(Dom, Typ, Proto : LongInt) : LongInt;
+Begin
+  SysSocket := LnxRes(LnxSys3(359, Dom, Typ, Proto));
+End;
+
+Function SysConnect(Fd, Addr, Len : LongInt) : LongInt;
+Begin
+  SysConnect := LnxRes(LnxSys3(362, Fd, Addr, Len));
+End;
+
+Function SysBind(Fd, Addr, Len : LongInt) : LongInt;
+Begin
+  SysBind := LnxRes(LnxSys3(361, Fd, Addr, Len));
+End;
+
+Function SysListen(Fd, Backlog : LongInt) : LongInt;
+Begin
+  SysListen := LnxRes(LnxSys3(363, Fd, Backlog, 0));
+End;
+
+Function SysAccept(Fd, Addr, LenP : LongInt) : LongInt;
+Begin
+  SysAccept := LnxRes(LnxSys6(364, Fd, Addr, LenP, 0, 0, 0));
+End;
+
+Function SysSendTo(Fd, Buf, Len, Flags, Addr, AddrLen : LongInt) : LongInt;
+Begin
+  SysSendTo := LnxRes(LnxSys6(369, Fd, Buf, Len, Flags, Addr, AddrLen));
+End;
+
+Function SysRecvFrom(Fd, Buf, Len, Flags, Addr, AddrLenP : LongInt) : LongInt;
+Begin
+  SysRecvFrom := LnxRes(LnxSys6(371, Fd, Buf, Len, Flags, Addr, AddrLenP));
+End;
+
+Function SysSetSockOpt(Fd, Level, Name, Val, Len : LongInt) : LongInt;
+Begin
+  SysSetSockOpt := LnxRes(LnxSys6(366, Fd, Level, Name, Val, Len, 0));
+End;
+
+Function SysShutdown(Fd, How : LongInt) : LongInt;
+Begin
+  SysShutdown := LnxRes(LnxSys3(373, Fd, How, 0));
+End;
+
+{ poll : Fds = adresse de N structures (fd, events, revents) de 8 octets ;
+  rend le nombre de descripteurs prets, 0 au delai (millisecondes) }
+Function SysPoll(Fds, N, Ms : LongInt) : LongInt;
+Begin
+  SysPoll := LnxRes(LnxSys3(168, Fds, N, Ms));
+End;
+
+{ adresse IPv4 : octets A.B.C.D rangees dans un LongInt (A = octet de poids
+  faible, comme en memoire reseau) }
+Function SysIp(A, B, C, D : LongInt) : LongInt;
+Begin
+  SysIp := A Or (B Shl 8) Or (C Shl 16) Or (D Shl 24);
+End;
+
+Function SysIpStr(Ip : LongInt) : String;
+Var S, T : String;
+Begin
+  Str(Ip And 255, S);
+  Str((Ip Shr 8) And 255, T);
+  S := S + '.' + T;
+  Str((Ip Shr 16) And 255, T);
+  S := S + '.' + T;
+  Str((Ip Shr 24) And 255, T);
+  SysIpStr := S + '.' + T;
+End;
+
+Function SysParseIp(Const S : String; Var Ip : LongInt) : Boolean;
+Var K, N, V, Dots : LongInt;
+Begin
+  SysParseIp := False;
+  Ip := 0;
+  V := -1;
+  N := 0;
+  Dots := 0;
+  For K := 1 To Length(S) + 1 Do
+  Begin
+    If (K <= Length(S)) And (S[K] >= '0') And (S[K] <= '9') Then
+    Begin
+      If V < 0 Then V := 0;
+      V := V * 10 + Ord(S[K]) - 48;
+      If V > 255 Then Exit;
+    End
+    Else If (K > Length(S)) Or (S[K] = '.') Then
+    Begin
+      If V < 0 Then Exit;
+      Ip := Ip Or (V Shl (8 * N));
+      Inc(N);
+      V := -1;
+      If K <= Length(S) Then Inc(Dots);
+    End
+    Else Exit;
+  End;
+  SysParseIp := (N = 4) And (Dots = 3);
+End;
+
+Procedure SysSockAddr(Var A : TSockAddrIn; Ip, Port : LongInt);
+Var K : LongInt;
+Begin
+  A.Family := 2;
+  A.Port := ((Port And 255) Shl 8) Or ((Port Shr 8) And 255);
+  A.Addr := Ip;
+  For K := 0 To 7 Do A.Zero[K] := 0;
+End;
+
+Function SysSwap16(V : LongInt) : LongInt;
+Begin
+  SysSwap16 := ((V And 255) Shl 8) Or ((V Shr 8) And 255);
+End;
+
+{ nom de service -> numero de port (/etc/services), 0 si inconnu }
+Function SysServPort(Const Name, Proto : String) : LongInt;
+Var Fd, K, P, Code, V : LongInt; L, F1, F2 : String;
+Begin
+  SysServPort := 0;
+  Fd := SysOpen('/etc/services', 0, 0);
+  If Fd < 0 Then Exit;
+  While SysReadLine(Fd, L) Do
+  Begin
+    K := 1;
+    While (K <= Length(L)) And (L[K] <> '#') Do Inc(K);
+    L := Copy(L, 1, K - 1);
+    F1 := '';
+    F2 := '';
+    K := 1;
+    While (K <= Length(L)) And (L[K] > ' ') Do
+    Begin
+      F1 := F1 + L[K];
+      Inc(K);
+    End;
+    While (K <= Length(L)) And (L[K] <= ' ') Do Inc(K);
+    While (K <= Length(L)) And (L[K] > ' ') Do
+    Begin
+      F2 := F2 + L[K];
+      Inc(K);
+    End;
+    If F1 = Name Then
+    Begin
+      P := Pos('/', F2);
+      If (P > 0) And ((Proto = '') Or (Copy(F2, P + 1, 10) = Proto)) Then
+      Begin
+        Val(Copy(F2, 1, P - 1), V, Code);
+        SysServPort := V;
+        Break;
+      End;
+    End;
+  End;
+  SysClose(Fd);
+End;
+
+{ nom -> adresse : adresse numerique, /etc/hosts, puis requete DNS (UDP 53)
+  vers les "nameserver" de /etc/resolv.conf }
+Function SysResolve(Const Name : String; Var Ip : LongInt) : Boolean;
+Var
+  Fd, K, N, Srv, Id, Try, Cnt, Q, Pos1, Len, Typ, Rd, R : LongInt;
+  L, F1, F2, Ns : String;
+  Buf : Array[0..511] Of Byte;
+  Sa : TSockAddrIn;
+  Pf : Array[0..1] Of LongInt;
+  Tm : Array[0..1] Of LongInt;
+  Done : Boolean;
+Begin
+  SysResolve := False;
+  If SysParseIp(Name, Ip) Then
+  Begin
+    SysResolve := True;
+    Exit;
+  End;
+  Fd := SysOpen('/etc/hosts', 0, 0);
+  If Fd >= 0 Then
+  Begin
+    While SysReadLine(Fd, L) Do
+    Begin
+      K := 1;
+      While (K <= Length(L)) And (L[K] <> '#') Do Inc(K);
+      L := Copy(L, 1, K - 1);
+      K := 1;
+      While (K <= Length(L)) And (L[K] > ' ') Do Inc(K);
+      F1 := Copy(L, 1, K - 1);
+      L := Copy(L, K, 255);
+      While L <> '' Do
+      Begin
+        While (L <> '') And (L[1] <= ' ') Do L := Copy(L, 2, 255);
+        K := 1;
+        While (K <= Length(L)) And (L[K] > ' ') Do Inc(K);
+        F2 := Copy(L, 1, K - 1);
+        L := Copy(L, K, 255);
+        If (F2 = Name) And SysParseIp(F1, Ip) Then
+        Begin
+          SysClose(Fd);
+          SysResolve := True;
+          Exit;
+        End;
+      End;
+    End;
+    SysClose(Fd);
+  End;
+  { serveur DNS }
+  Srv := 0;
+  Fd := SysOpen('/etc/resolv.conf', 0, 0);
+  If Fd >= 0 Then
+  Begin
+    While (Srv = 0) And SysReadLine(Fd, L) Do
+      If Copy(L, 1, 10) = 'nameserver' Then
+      Begin
+        Ns := Copy(L, 11, 100);
+        While (Ns <> '') And (Ns[1] <= ' ') Do Ns := Copy(Ns, 2, 100);
+        If Not SysParseIp(Ns, Srv) Then Srv := 0;
+      End;
+    SysClose(Fd);
+  End;
+  If Srv = 0 Then Exit;
+  { requete : en-tete 12 octets, nom, type A, classe IN }
+  FillChar(Buf, SizeOf(Buf), 0);
+  Id := (SysTime And $FFFF);
+  Buf[0] := Id Shr 8;
+  Buf[1] := Id And 255;
+  Buf[2] := 1;
+  Buf[5] := 1;
+  Q := 12;
+  K := 1;
+  While K <= Length(Name) Do
+  Begin
+    Len := 0;
+    While (K + Len <= Length(Name)) And (Name[K + Len] <> '.') Do Inc(Len);
+    If (Len = 0) Or (Len > 63) Or (Q + Len + 6 > 500) Then Exit;
+    Buf[Q] := Len;
+    Inc(Q);
+    For N := 0 To Len - 1 Do
+    Begin
+      Buf[Q] := Ord(Name[K + N]);
+      Inc(Q);
+    End;
+    K := K + Len + 1;
+  End;
+  Buf[Q] := 0;
+  Buf[Q + 1] := 0;
+  Buf[Q + 2] := 1;
+  Buf[Q + 3] := 0;
+  Buf[Q + 4] := 1;
+  Q := Q + 5;
+  Fd := SysSocket(2, 2, 0);
+  If Fd < 0 Then Exit;
+  SysSockAddr(Sa, Srv, 53);
+  Done := False;
+  For Try := 1 To 3 Do
+  Begin
+    If Done Then Break;
+    If SysSendTo(Fd, LongInt(@Buf), Q, 0, LongInt(@Sa), 16) < 0 Then Break;
+    Pf[0] := Fd;
+    Pf[1] := 1;
+    If SysPoll(LongInt(@Pf), 1, 3000) <= 0 Then Continue;
+    R := SysRecvFrom(Fd, LongInt(@Buf), 512, 0, 0, 0);
+    If (R < 12) Or (Buf[0] <> (Id Shr 8)) Or (Buf[1] <> (Id And 255)) Then
+      Continue;
+    If (Buf[3] And 15) <> 0 Then Break;
+    Cnt := (Buf[6] Shl 8) Or Buf[7];
+    Pos1 := 12;
+    { sauter la question }
+    While (Pos1 < R) And (Buf[Pos1] <> 0) Do
+    Begin
+      If (Buf[Pos1] And $C0) = $C0 Then
+      Begin
+        Inc(Pos1);
+        Break;
+      End;
+      Pos1 := Pos1 + Buf[Pos1] + 1;
+    End;
+    Pos1 := Pos1 + 5;
+    While (Cnt > 0) And (Pos1 + 10 < R) Do
+    Begin
+      While (Pos1 < R) And (Buf[Pos1] <> 0) Do
+      Begin
+        If (Buf[Pos1] And $C0) = $C0 Then
+        Begin
+          Inc(Pos1);
+          Break;
+        End;
+        Pos1 := Pos1 + Buf[Pos1] + 1;
+      End;
+      Inc(Pos1);
+      Typ := (Buf[Pos1] Shl 8) Or Buf[Pos1 + 1];
+      Rd := (Buf[Pos1 + 8] Shl 8) Or Buf[Pos1 + 9];
+      Pos1 := Pos1 + 10;
+      If (Typ = 1) And (Rd = 4) And (Pos1 + 4 <= R) Then
+      Begin
+        Ip := Buf[Pos1] Or (Buf[Pos1 + 1] Shl 8) Or (Buf[Pos1 + 2] Shl 16) Or
+              (Buf[Pos1 + 3] Shl 24);
+        SysResolve := True;
+        Done := True;
+        Break;
+      End;
+      Pos1 := Pos1 + Rd;
+      Dec(Cnt);
+    End;
+  End;
+  SysClose(Fd);
+End;

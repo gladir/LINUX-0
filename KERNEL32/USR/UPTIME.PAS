@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/uptime : heure, duree de fonctionnement et charge (/proc/uptime, /proc/loadavg).
+  @description: /bin/uptime : heure,
+      duree de fonctionnement et charge (/proc/uptime, /proc/loadavg).
 }
 
 Program UPTIME;

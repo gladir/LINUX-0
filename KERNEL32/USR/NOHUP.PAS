@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/nohup : lance une commande insensible a SIGHUP (sortie vers nohup.out si terminal).
+  @description: /bin/nohup : lance une commande insensible a SIGHUP (sortie
+      vers nohup.out si terminal).
 }
 
 Program NOHUP;
@@ -97,7 +98,8 @@ BEGIN
     Fd := SysOpen('nohup.out', O_WRONLY Or O_CREAT Or O_APPEND, 384);
     If Fd >= 0 Then
     Begin
-      SysPut(2, 'nohup: ignoring input and appending output to nohup.out' + #10);
+      SysPut(2, 'nohup: ignoring input and appending output to nohup.out' +
+        #10);
       SysDup2(Fd, 1);
       If SysIsATty(2) Then SysDup2(Fd, 2);
       SysClose(Fd);

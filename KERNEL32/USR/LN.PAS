@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/ln : cree des liens (ln [-sf] cible [lien] ; ln [-sf] cible... repertoire).
+  @description: /bin/ln : cree des liens (ln [-sf] cible [lien] ; ln [-sf]
+      cible... repertoire).
 }
 
 Program LN;

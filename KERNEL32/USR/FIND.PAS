@@ -2,7 +2,10 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/find : parcourt des arborescences (find [chemin...] [-name p] [-iname p] [-type f|d|l] [-maxdepth n] [-mindepth n] [-empty] [-size [+-]n[ck]] [-mtime [+-]n] [-newer f] [-not] [-print] [-print0] [-delete] [-exec cmd {} ;]).
+  @description: /bin/find : parcourt des arborescences (find [chemin...]
+      [-name p] [-iname p] [-type f|d|l] [-maxdepth n] [-mindepth n] [-empty]
+      [-size [+-]n[ck]] [-mtime [+-]n] [-newer f] [-not] [-print] [-print0]
+      [-delete] [-exec cmd {} ;]).
 }
 
 Program FIND;
@@ -85,7 +88,8 @@ Begin
 End;
 
 { motif * ? [..] }
-Function Match(Const P : String; PI : LongInt; Const S : String; SI : LongInt) : Boolean;
+Function Match(Const P : String; PI : LongInt; Const S : String; SI : LongInt)
+  : Boolean;
 Var Ok, Neg : Boolean; C : Char; K : LongInt;
 Begin
   While PI <= Length(P) Do
@@ -126,7 +130,8 @@ Begin
       Ok := False;
       While (PI <= Length(P)) And (P[PI] <> ']') Do
       Begin
-        If (PI + 2 <= Length(P)) And (P[PI + 1] = '-') And (P[PI + 2] <> ']') Then
+        If (PI + 2 <= Length(P)) And (P[PI + 1] = '-') And (P[PI + 2] <> ']')
+          Then
         Begin
           If (C >= P[PI]) And (C <= P[PI + 2]) Then Ok := True;
           Inc(PI, 3);
@@ -178,7 +183,8 @@ Begin
   Else CmpNum := V = N;
 End;
 
-Function Test(I : LongInt; Const Path, Name : String; Var St : TSysStat) : Boolean;
+Function Test(I : LongInt; Const Path,
+  Name : String; Var St : TSysStat) : Boolean;
 Var R : Boolean; T : LongInt; St2 : TSysStat;
 Begin
   R := True;
@@ -277,7 +283,8 @@ Begin
       Case Action Of
         0, 1 : SysPut(1, Path + #10);
         2 : SysPut(1, Path + #0);
-        3 : If (St.Mode And $F000) = $4000 Then SysRmdir(Path) Else SysUnlink(Path);
+        3 : If (St.Mode And $F000) = $4000 Then SysRmdir(Path) Else
+          SysUnlink(Path);
         4 : RunExec(Path);
       End;
   End;
@@ -300,7 +307,8 @@ Begin
   End;
 End;
 
-Procedure AddTest(K : LongInt; Const S : String; N, Cmp : LongInt; Neg : Boolean);
+Procedure AddTest(K : LongInt; Const S : String; N,
+  Cmp : LongInt; Neg : Boolean);
 Begin
   If NTests >= MAXT Then Exit;
   Inc(NTests);

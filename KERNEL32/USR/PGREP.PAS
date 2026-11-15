@@ -2,7 +2,9 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/pgrep, pkill, pidof, killall : recherche de processus par nom (/proc) ; pkill et killall envoient un signal (-s sig | -sig).
+  @description: /bin/pgrep, pkill, pidof,
+      killall : recherche de processus par nom (/proc) ; pkill et killall
+      envoient un signal (-s sig | -sig).
 }
 
 Program PGREP;
@@ -92,7 +94,8 @@ Begin
       If Copy(L, 1, 5) = 'Name:' Then
       Begin
         Nm := Copy(L, 6, 80);
-        While (Nm <> '') And ((Nm[1] = ' ') Or (Nm[1] = #9)) Do Nm := Copy(Nm, 2, 80);
+        While (Nm <> '') And ((Nm[1] = ' ') Or (Nm[1] = #9)) Do Nm := Copy(Nm,
+          2, 80);
         Break;
       End;
     SysClose(Fd);
@@ -118,7 +121,8 @@ Begin
     For K := 1 To Length(Nm) Do
       If (Nm[K] >= '0') And (Nm[K] <= '9') Then V := V * 10 + Ord(Nm[K]) - 48
       Else Ok := False;
-    If (Not Ok) Or (V = Me) Or (V <= 2) Then Continue;
+    If (Not Ok) Or (V = Me) Then Continue;
+    If ((Mode = 2) Or (Mode = 4)) And (V <= 2) Then Continue;
     Pn := ProcName(V, Cmd);
     If Full Then Hit := Pos(Pat, Cmd) > 0
     Else If Exact Then Hit := Pn = Pat
@@ -160,7 +164,8 @@ BEGIN
     Else Pat := A;
     Inc(I);
   End;
-  If Pat = '' Then Usage('pgrep|pkill [-f] [-x] [-sig] pattern  |  pidof|killall name');
+  If Pat = '' Then
+    Usage('pgrep|pkill [-f] [-x] [-sig] pattern | pidof|killall name');
   Scan;
   If Hits = 0 Then SysExit(1);
 END.

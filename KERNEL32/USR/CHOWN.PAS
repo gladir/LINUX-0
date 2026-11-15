@@ -2,7 +2,9 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/chown, /bin/chgrp : change le proprietaire et le groupe (-R recursif, -h ignore) ; chgrp est ce programme sous un autre nom.
+  @description: /bin/chown,
+      /bin/chgrp : change le proprietaire et le groupe (-R recursif,
+      -h ignore) ; chgrp est ce programme sous un autre nom.
 }
 
 Program CHOWN;
@@ -195,6 +197,8 @@ BEGIN
       Apply(A);
     End;
   End;
-  If N < 2 Then Usage('chown [-R] owner[:group] file... | chgrp [-R] group file...');
+  If N < 2 Then
+    Usage('chown [-R] owner[:group] file... | ' +
+          'chgrp [-R] group file...');
   SysExit(Rc);
 END.
