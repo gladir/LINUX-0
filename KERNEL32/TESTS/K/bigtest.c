@@ -163,7 +163,7 @@ static int test_ext2(void){
   ktest("big.grow_zero",pread64_(fd,sx,6,(ll)5*G+1)==6&&sx[0]==0&&sx[5]==0);
   ktest("big.ftruncate32_neg",ftruncate_(fd,-1)==-22);
   ktest("big.truncate64",truncate64_("/mnt/sp",(ll)3*G+16)==0&&fsize(fd)==(ull)3*G+16);
-  ktest("big.ftruncate_efbig",ftruncate64_(fd,(ll)3000*G)==-27&&fsize(fd)==(ull)3*G+16);
+  ktest("big.ftruncate_efbig",ftruncate64_(fd,(ll)9000*G)==-27&&fsize(fd)==(ull)3*G+16);
   /* fallocate */
   ktest("big.fallocate",fallocate_(fd,0,(ll)3*G,8192)==0&&fsize(fd)==(ull)3*G+8192);
   ktest("big.fallocate_keep",fallocate_(fd,1,(ll)8*G,4096)==0&&fsize(fd)==(ull)3*G+8192);

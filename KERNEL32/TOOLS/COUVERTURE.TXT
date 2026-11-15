@@ -60,7 +60,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
   49  geteuid                reel     
   50  getegid                reel     
   51  acct                   enosys   
-  52  umount2                reel     ext2test.c,fattest.c,mounttest.c
+  52  umount2                reel     ext2test.c,ext4test.c,fattest.c,mounttest.c
   53  lock                   enosys   
   54  ioctl                  reel     ku.h
   55  fcntl                  reel     ku.h,sigrttest.c
@@ -100,14 +100,14 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
   89  readdir                enosys   
   90  mmap                   reel     
   91  munmap                 reel     ku.h
-  92  truncate               reel     ext2test.c,fattest.c,misctest.c
-  93  ftruncate              reel     bigtest.c,dirtest.c,ext2test.c,fattest.c,ku.h
+  92  truncate               reel     ext2test.c,ext4test.c,fattest.c,jrntest.c,misctest.c
+  93  ftruncate              reel     bigtest.c,dirtest.c,ext2test.c,ext4test.c,fattest.c,ku.h
   94  fchmod                 reel     ext2test.c,fattest.c
   95  fchown                 reel     
   96  getpriority            reel     ku.h
   97  setpriority            reel     
   98  profil                 enosys   
-  99  statfs                 reel     bigtest.c,ext2test.c,fattest.c,isotest.c,misctest.c,stress.c
+  99  statfs                 reel     bigtest.c,ext2test.c,ext4test.c,fattest.c,isotest.c,misctest.c,stress.c
  100  fstatfs                reel     
  101  ioperm                 reel     syscalltest.c
  102  socketcall             reel     
@@ -126,7 +126,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  115  swapoff                reel     swaptest.c
  116  sysinfo                reel     ku.h,misctest.c
  117  ipc                    reel     ipctest.c
- 118  fsync                  reel     ext2test.c,fattest.c
+ 118  fsync                  reel     ext2test.c,ext4test.c,fattest.c,jrntest.c
  119  sigreturn              reel     
  120  clone                  reel     ku.h,nstest.c
  121  setdomainname          reel     
@@ -203,9 +203,9 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  192  mmap2                  reel     ku.h,mqfutextest.c
  193  truncate64             reel     bigtest.c
  194  ftruncate64            reel     bigtest.c
- 195  stat64                 reel     bigtest.c,dirtest.c,ext2test.c,fattest.c,ku.h,misctest.c,modtest.c,socktest.c,syscalltest.c,xattrtest.c
+ 195  stat64                 reel     bigtest.c,dirtest.c,ext2test.c,ext4test.c,fattest.c,jrntest.c,ku.h,misctest.c,modtest.c,socktest.c,syscalltest.c,xattrtest.c
  196  lstat64                reel     dirtest.c,ext2test.c,ku.h
- 197  fstat64                reel     bigtest.c,dirtest.c,ext2test.c,fattest.c,ku.h
+ 197  fstat64                reel     bigtest.c,dirtest.c,ext2test.c,ext4test.c,fattest.c,ku.h
  198  lchown32               reel     
  199  getuid32               reel     
  200  getgid32               reel     
@@ -228,7 +228,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  217  pivot_root             reel     mounttest.c
  218  mincore                reel     syscalltest.c
  219  madvise                reel     syscalltest.c
- 220  getdents64             reel     ext2test.c,fattest.c,ku.h
+ 220  getdents64             reel     ext2test.c,ext4test.c,fattest.c,ku.h
  221  fcntl64                reel     bigtest.c
  224  gettid                 reel     ku.h,seccomptest.c
  225  readahead              reel     syscalltest.c
@@ -387,7 +387,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  380  pkey_mprotect          enosys   
  381  pkey_alloc             enosys   
  382  pkey_free              enosys   
- 383  statx                  reel     bigtest.c,syscalltest.c
+ 383  statx                  reel     bigtest.c,ext4test.c,syscalltest.c
  384  arch_prctl             enosys   
  385  io_pgetevents          enosys   
  386  rseq                   enosys   
@@ -490,8 +490,8 @@ B1. FAMILLES D'IOCTL
 
 B2. SYSTEMES DE FICHIERS
    ext2                               present  
-   ext3 (journal rejoue)              present  monte comme ext2 sinon
-   ext4 (extents)                     absent   
+   ext3 (journal rejoue)              present  jbd/jbd2 : rejeu + ecriture ordered/writeback ; pas data=journal, journal externe, fast_commit
+   ext4 (extents)                     present  extents, flex_bg, meta_bg, 64bit, metadata_csum, uninit_bg, orphelins ; bigalloc/quota ro ; pas inline_data, chiffrement, htree en creation
    tmpfs/ramfs                        present  
    devtmpfs                           present  
    proc                               present  
@@ -509,7 +509,7 @@ B2. SYSTEMES DE FICHIERS
    9p / nfs                           absent   hors perimetre
    cgroup                             absent   
    debugfs/tracefs                    absent   ENOSYS honnete
-   -> 10 / 20
+   -> 11 / 20
 
 B3. PILOTES ET PERIPHERIQUES
    IDE/ATA PIO (hda..hdd)             present  
@@ -593,4 +593,4 @@ B6. DRAPEAUX mmap / clone / open
 
 C. SYNTHESE
    appels reels : 357 / 451 (79.2 %) ; stubs 2 ; ENOSYS explicites 81 ; absents 11
-   familles B1-B6 presentes : 64 / 111 (57.7 %)
+   familles B1-B6 presentes : 65 / 111 (58.6 %)

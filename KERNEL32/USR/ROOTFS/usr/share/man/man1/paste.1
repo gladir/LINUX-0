@@ -1,0 +1,18 @@
+.TH PASTE 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+paste \- fusionne les lignes de fichiers / merge lines of files
+.SH SYNOPSIS
+.B paste
+[-s] [-d list] file...
+.br
+.SH DESCRIPTION
+Writes lines of each file side by side separated by tabs. With -s pastes each file on one line.
+.SH OPTIONS
+.TP
+.B -d list
+Delimiters used in turn.
+.TP
+.B -s
+One file per line.
+.SH SEE ALSO
+cut(1)

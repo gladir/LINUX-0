@@ -30,8 +30,13 @@ with open(r+'/host.big','wb') as f:
     f.truncate(3*(1<<30))
 PY
   FSB=$(( (SZ-1048576)/1024 ))
-  mke2fs -q -t ext2 -b "$BS" -I 128 -r 1 -N 32768 -O none,filetype,sparse_super,large_file \
-    -E offset=1048576 -d "$W/root" "$OUT" $FSB >/dev/null 2>"$W/mke2fs.err" || { cat "$W/mke2fs.err"; rm -rf "$W"; exit 1; }
+  if [ "$BIGT" = ext4 ]; then   # BIGT=ext4 : ext4 par defaut (extents, journal, 64bit...)
+    mke2fs -q -F -t ext4 -b "$BS" -N 32768 \
+      -E offset=1048576 -d "$W/root" "$OUT" $FSB >/dev/null 2>"$W/mke2fs.err" || { cat "$W/mke2fs.err"; rm -rf "$W"; exit 1; }
+  else
+    mke2fs -q -t ext2 -b "$BS" -I 128 -r 1 -N 32768 -O none,filetype,sparse_super,large_file \
+      -E offset=1048576 -d "$W/root" "$OUT" $FSB >/dev/null 2>"$W/mke2fs.err" || { cat "$W/mke2fs.err"; rm -rf "$W"; exit 1; }
+  fi
   PTYPE=0x83
 else
   SZ=$((3*1024*1024*1024))

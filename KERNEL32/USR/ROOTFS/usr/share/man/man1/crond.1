@@ -1,0 +1,15 @@
+.TH CROND 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+crond \- demon d'execution planifiee / daemon to execute scheduled commands
+.SH SYNOPSIS
+.B crond
+[-f]
+.br
+.B cron
+[-f]
+.br
+.SH DESCRIPTION
+Runs every minute the entries of /etc/crontab and /etc/cron.d/* (which carry a user field before the command) and of /var/spool/cron/crontabs/*. Job output is
+appended to /var/log/cron.out. With -f stays in the foreground.
+.SH SEE ALSO
+crontab(1)

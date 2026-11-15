@@ -108,8 +108,8 @@ S.append(section('B1. FAMILLES D\'IOCTL', [
     ('FS_IOC_GETFLAGS (chattr)', r'FS_IOC|\$80046601', ''), ('FIFREEZE/FITRIM', r'FIFREEZE|FITRIM', ''),
 ]))
 S.append(section('B2. SYSTEMES DE FICHIERS', [
-    ('ext2', r"RegisterFs\('ext2'", ''), ('ext3 (journal rejoue)', r'jbd|Journal.*Replay|JbdReplay', 'monte comme ext2 sinon'),
-    ('ext4 (extents)', r'ExtentTree|ExExtent', ''), ('tmpfs/ramfs', r"RegisterFs\('tmpfs'", ''),
+    ('ext2', r"RegisterFs\('ext2'", ''), ('ext3 (journal rejoue)', r'jbd|Journal.*Replay|JbdReplay', 'jbd/jbd2 : rejeu + ecriture ordered/writeback ; pas data=journal, journal externe, fast_commit'),
+    ('ext4 (extents)', r'ExtentTree|ExExtent', 'extents, flex_bg, meta_bg, 64bit, metadata_csum, uninit_bg, orphelins ; bigalloc/quota ro ; pas inline_data, chiffrement, htree en creation'), ('tmpfs/ramfs', r"RegisterFs\('tmpfs'", ''),
     ('devtmpfs', r"RegisterFs\('devtmpfs'", ''), ('proc', r"RegisterFs\('proc'", ''),
     ('sysfs', r"RegisterFs\('sysfs'", ''), ('devpts', r"RegisterFs\('devpts'", ''),
     ('iso9660', r"RegisterFs\('iso9660'", ''), ('vfat/msdos', r"RegisterFs\('vfat'", ''),

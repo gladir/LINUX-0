@@ -7,20 +7,25 @@
    autre disque, un CD ou une image) sert de source. L'installateur :
      1. partitionne le disque cible (MBR, une partition Linux 83h active
         commencant au secteur 2048),
-     2. y cree un systeme de fichiers ext2 (blocs de 1 Ko, inodes de 128
-        octets, groupes de 8192 blocs, revision 1, fonctions filetype et
-        sparse_super : l'equivalent de mke2fs -t ext2 -b 1024 -I 128
-        -O none,filetype,sparse_super) ecrit directement sur le peripherique,
+     2. y cree un systeme de fichiers ext2 (par defaut blocs de 1 Ko, inodes
+        de 128 octets, groupes de 8*bloc blocs, revision 1, fonctions
+        filetype et sparse_super : l'equivalent de mke2fs -t ext2 -b 1024
+        -I 128 -O none,filetype,sparse_super ; -b 2048|4096 et -I 256 admis)
+        ecrit directement sur le peripherique,
      3. y copie l'arborescence de / (sans le contenu de /proc, /sys, /dev,
         /tmp, /mnt) avec modes, proprietaires, dates, liens symboliques et
         fichiers speciaux ; /etc/profile recoit la langue choisie
         (LANGUAGE=XX),
      4. installe le MBR et le chargeur stage2 (52 secteurs apres le MBR) tires
         de /usr/share/boot/MBR.BIN et STAGE2.BIN.
-   Usage : install [-d disque] [-l langue] [-s Mo] [-r racine] [-y] [-q]
+   Usage : install [-d disque] [-l langue] [-s Mo] [-r racine] [-b taille]
+           [-I inode] [-N inodes] [-y] [-q]   (mkfs.ext2 : memes options)
      -d  disque cible (defaut : demande ; ex. /dev/hdb)
      -l  langue du systeme installe : FR, EN, GR (allemand), SP, IT
      -s  taille de la partition en Mo (defaut : tout le disque)
+     -b  taille des blocs : 1024 (defaut), 2048, 4096 ; -I  taille d'inode :
+         128 (defaut) ou 256 ; -N  nombre total d'inodes (defaut : un par
+         4 blocs de groupe ; arrondi a un bloc de table par groupe)
      -r  racine source (defaut /) ; -y  ne rien demander (essais automatiques)
        -q  silencieux
    Messages en cinq langues (LANGUAGE ou choix au debut).
@@ -29,11 +34,6 @@
 Program Install;
 
 Const
-  BS = 1024;
-  BPG = 8192;                 { blocs par groupe }
-  IPG = 2048;                 { inodes par groupe }
-  ISZ = 128;
-  ITB = 256;                  { blocs de la table des inodes par groupe }
   MAXGRP = 256;
   MAXBLK = 2097152;           { 2 Go }
   MAXDIRENT = 4000;
@@ -113,15 +113,17 @@ Var
   Fd : LongInt;                        { peripherique cible }
   PartStart : LongInt;                 { secteur de debut de la partition }
   NBlocks, NGroups, GdtBlocks : LongInt;
+  { geometrie : -b (1024, 2048, 4096), -I (128, 256), -N (nombre d'inodes) }
+  BS, LogBs, BPG, IPG, ISZ, ITB, FirstData, WantInodes : LongInt;
   BlkBm : Array[0..MAXBLK Div 8 - 1] Of Byte;
-  InoBm : Array[0..MAXGRP * IPG Div 8 - 1] Of Byte;
+  InoBm : Array[0..1048575] Of Byte;   { jusqu'a 8 M inodes }
   GrpFreeBlk, GrpFreeIno, GrpDirs : Array[0..MAXGRP - 1] Of LongInt;
   GrpBBm, GrpIBm, GrpITab : Array[0..MAXGRP - 1] Of LongInt;
   FreeBlocks, FreeInodes : LongInt;
   Cursor : LongInt;                    { prochain bloc a essayer }
   NextIno : LongInt;
-  Buf : Array[0..1023] Of Byte;
-  Zero : Array[0..1023] Of Byte;
+  Buf : Array[0..4095] Of Byte;
+  Zero : Array[0..4095] Of Byte;
   Now : LongInt;
   Quiet, Yes : Boolean;
   Lang : LongInt;
@@ -198,7 +200,7 @@ End;
 
 Function GroupBase(G : LongInt) : LongInt;
 Begin
-  GroupBase := 1 + G * BPG;
+  GroupBase := FirstData + G * BPG;
 End;
 
 Function IsPow(G, B : LongInt) : Boolean;
@@ -233,7 +235,19 @@ End;
 Procedure Layout;
 Var G, Base, B, Fixed, Last, K : LongInt;
 Begin
-  NGroups := (NBlocks - 1 + BPG - 1) Div BPG;
+  NGroups := (NBlocks - FirstData + BPG - 1) Div BPG;
+  { inodes par groupe : BPG / 4 (1 Ko : 2048), ou -N ; multiple d'un bloc de
+    table }
+  IPG := BPG Div 4;
+  If WantInodes > 0 Then
+  Begin
+    IPG := (WantInodes + NGroups - 1) Div NGroups;
+    K := BS Div ISZ;
+    IPG := ((IPG + K - 1) Div K) * K;
+    If IPG < K Then IPG := K;
+    If IPG > BS * 8 Then IPG := BS * 8;
+  End;
+  ITB := IPG * ISZ Div BS;
   GdtBlocks := (NGroups * 32 + BS - 1) Div BS;
   FreeBlocks := 0;
   FreeInodes := NGroups * IPG - 10;
@@ -278,7 +292,7 @@ Begin
   End;
   SetBlkBit(B);
   Cursor := B + 1;
-  G := (B - 1) Div BPG;
+  G := (B - FirstData) Div BPG;
   Dec(GrpFreeBlk[G]);
   Dec(FreeBlocks);
   AllocBlock := B;
@@ -304,7 +318,7 @@ Type
 
 Procedure PutInode(Ino : LongInt; Mode, Uid, Gid, Size, ATime, CTime, MTime,
     Links, Sectors : LongInt; Var Blocks : TBlk15);
-Var Off, G, Idx, K : LongInt; I128 : Array[0..127] Of Byte;
+Var Off, G, Idx, K : LongInt; I128 : Array[0..255] Of Byte;
 Begin
   FillChar(I128, SizeOf(I128), 0);
   PutW(LongInt(@I128), 0, Mode);
@@ -331,7 +345,7 @@ Var
   FSect : LongInt;           { secteurs de 512 octets (indirects compris) }
   Ind1 : LongInt;            { bloc d'indirection simple courant }
   Ind2 : LongInt;            { bloc de double indirection }
-  Ind1Buf, Ind2Buf : Array[0..1023] Of Byte;
+  Ind1Buf, Ind2Buf : Array[0..4095] Of Byte;
   Ind1Cnt, Ind2Cnt : LongInt;
 
 Procedure FileBegin;
@@ -360,44 +374,44 @@ Var N : LongInt;
 Begin
   N := FNBlk;
   Inc(FNBlk);
-  Inc(FSect, 2);
+  Inc(FSect, BS Div 512);
   If N < 12 Then
   Begin
     FBlocks[N] := B;
     Exit;
   End;
   N := N - 12;
-  If N < 256 Then
+  If N < BS Div 4 Then
   Begin
     If N = 0 Then
     Begin
       FBlocks[12] := AllocBlock;
-      Inc(FSect, 2);
+      Inc(FSect, BS Div 512);
       FillChar(Ind1Buf, BS, 0);
     End;
     PutD(LongInt(@Ind1Buf), N * 4, B);
     WriteBlk(FBlocks[12], LongInt(@Ind1Buf));
     Exit;
   End;
-  N := N - 256;
-  { double indirection : N / 256 selectionne l'indirect, N mod 256 l'element }
+  N := N - BS Div 4;
+  { double indirection : N / (BS/4) selectionne l'indirect }
   If N = 0 Then
   Begin
     FBlocks[13] := AllocBlock;
-    Inc(FSect, 2);
+    Inc(FSect, BS Div 512);
     FillChar(Ind2Buf, BS, 0);
     Ind1 := 0;
   End;
-  If N Mod 256 = 0 Then
+  If N Mod (BS Div 4) = 0 Then
   Begin
     If Ind1 <> 0 Then WriteBlk(Ind1, LongInt(@Ind1Buf));
     Ind1 := AllocBlock;
-    Inc(FSect, 2);
+    Inc(FSect, BS Div 512);
     FillChar(Ind1Buf, BS, 0);
-    PutD(LongInt(@Ind2Buf), (N Div 256) * 4, Ind1);
+    PutD(LongInt(@Ind2Buf), (N Div (BS Div 4)) * 4, Ind1);
     WriteBlk(FBlocks[13], LongInt(@Ind2Buf));
   End;
-  PutD(LongInt(@Ind1Buf), (N Mod 256) * 4, B);
+  PutD(LongInt(@Ind1Buf), (N Mod (BS Div 4)) * 4, B);
   WriteBlk(Ind1, LongInt(@Ind1Buf));
 End;
 
@@ -512,7 +526,7 @@ End;
 
 Procedure CopyFileData(Const Src : String; Var St : TSysStat; Ino : LongInt);
 Var In1, N, Blk,
-  Total : LongInt; Chunk : Array[0..1023] Of Byte; Blocks : TBlk15;
+  Total : LongInt; Chunk : Array[0..4095] Of Byte; Blocks : TBlk15;
 Begin
   FileBegin;
   In1 := SysOpen(Src, O_RDONLY, 0);
@@ -542,7 +556,7 @@ End;
 Procedure CopyProfile(Ino : LongInt; Var St : TSysStat);
 { /etc/profile avec LANGUAGE=XX }
 Var In1, K : LongInt; L, Out1 : String; Text : String; Have : Boolean;
-    Chunk : Array[0..1023] Of Byte; Blk, Len : LongInt;
+    Chunk : Array[0..4095] Of Byte; Blk, Len : LongInt;
 Begin
   Text := '';
   Have := False;
@@ -682,53 +696,55 @@ End;
 { ---------- structures du systeme de fichiers ---------- }
 
 Procedure WriteSuper(G : LongInt);
-Var Sb : Array[0..1023] Of Byte; K : LongInt; Base : LongInt;
+Var Sb : Array[0..4095] Of Byte; K : LongInt; Base : LongInt; SbA : LongInt;
 Begin
   FillChar(Sb, BS, 0);
-  PutD(LongInt(@Sb), 0, NGroups * IPG);
-  PutD(LongInt(@Sb), 4, NBlocks);
-  PutD(LongInt(@Sb), 8, 0);
-  PutD(LongInt(@Sb), 12, FreeBlocks);
-  PutD(LongInt(@Sb), 16, FreeInodes);
-  PutD(LongInt(@Sb), 20, 1);
-  PutD(LongInt(@Sb), 24, 0);
-  PutD(LongInt(@Sb), 28, 0);
-  PutD(LongInt(@Sb), 32, BPG);
-  PutD(LongInt(@Sb), 36, BPG);
-  PutD(LongInt(@Sb), 40, IPG);
-  PutD(LongInt(@Sb), 44, 0);
-  PutD(LongInt(@Sb), 48, Now);
-  PutW(LongInt(@Sb), 52, 0);
-  PutW(LongInt(@Sb), 54, $FFFF);
-  PutW(LongInt(@Sb), 56, $EF53);
-  PutW(LongInt(@Sb), 58, 1);
-  PutW(LongInt(@Sb), 60, 1);
-  PutW(LongInt(@Sb), 62, 0);
-  PutD(LongInt(@Sb), 64, Now);
-  PutD(LongInt(@Sb), 68, 0);
-  PutD(LongInt(@Sb), 72, 0);
-  PutD(LongInt(@Sb), 76, 1);
-  PutW(LongInt(@Sb), 80, 0);
-  PutW(LongInt(@Sb), 82, 0);
-  PutD(LongInt(@Sb), 84, 11);
-  PutW(LongInt(@Sb), 88, ISZ);
-  PutW(LongInt(@Sb), 90, G);
-  PutD(LongInt(@Sb), 92, 0);
-  PutD(LongInt(@Sb), 96, 2);
-  PutD(LongInt(@Sb), 100, 1);
-  For K := 0 To 15 Do PutB(LongInt(@Sb), 104 + K, (Now Shr (K And 3)) + K * 17);
-  PutB(LongInt(@Sb), 120, Ord('L'));
-  PutB(LongInt(@Sb), 121, Ord('I'));
-  PutB(LongInt(@Sb), 122, Ord('N'));
-  PutB(LongInt(@Sb), 123, Ord('U'));
-  PutB(LongInt(@Sb), 124, Ord('X'));
-  PutB(LongInt(@Sb), 125, Ord('0'));
+  SbA := LongInt(@Sb);
+  If (G = 0) And (BS > 1024) Then SbA := SbA + 1024;
+  PutD(SbA, 0, NGroups * IPG);
+  PutD(SbA, 4, NBlocks);
+  PutD(SbA, 8, 0);
+  PutD(SbA, 12, FreeBlocks);
+  PutD(SbA, 16, FreeInodes);
+  PutD(SbA, 20, FirstData);
+  PutD(SbA, 24, LogBs - 10);
+  PutD(SbA, 28, LogBs - 10);
+  PutD(SbA, 32, BPG);
+  PutD(SbA, 36, BPG);
+  PutD(SbA, 40, IPG);
+  PutD(SbA, 44, 0);
+  PutD(SbA, 48, Now);
+  PutW(SbA, 52, 0);
+  PutW(SbA, 54, $FFFF);
+  PutW(SbA, 56, $EF53);
+  PutW(SbA, 58, 1);
+  PutW(SbA, 60, 1);
+  PutW(SbA, 62, 0);
+  PutD(SbA, 64, Now);
+  PutD(SbA, 68, 0);
+  PutD(SbA, 72, 0);
+  PutD(SbA, 76, 1);
+  PutW(SbA, 80, 0);
+  PutW(SbA, 82, 0);
+  PutD(SbA, 84, 11);
+  PutW(SbA, 88, ISZ);
+  PutW(SbA, 90, G);
+  PutD(SbA, 92, 0);
+  PutD(SbA, 96, 2);
+  PutD(SbA, 100, 1);
+  For K := 0 To 15 Do PutB(SbA, 104 + K, (Now Shr (K And 3)) + K * 17);
+  PutB(SbA, 120, Ord('L'));
+  PutB(SbA, 121, Ord('I'));
+  PutB(SbA, 122, Ord('N'));
+  PutB(SbA, 123, Ord('U'));
+  PutB(SbA, 124, Ord('X'));
+  PutB(SbA, 125, Ord('0'));
   Base := GroupBase(G);
   WriteBlk(Base, LongInt(@Sb));
 End;
 
 Procedure WriteMeta;
-Var G, K, B : LongInt; Gd : Array[0..1023] Of Byte; Bb : Array[0..1023] Of Byte;
+Var G, K, B : LongInt; Gd : Array[0..4095] Of Byte; Bb : Array[0..4095] Of Byte;
     Gdt : Array[0..8191] Of Byte;
 Begin
   FillChar(Gdt, SizeOf(Gdt), 0);
@@ -886,6 +902,9 @@ BEGIN
   Dev := '';
   NewLang := '';
   SrcRoot := '';
+  BS := 1024;
+  ISZ := 128;
+  WantInodes := 0;
   A := SysArgStr(0);
   MkfsOnly := Pos('mkfs', A) > 0;
   Mb := 0;
@@ -919,6 +938,25 @@ BEGIN
       While (Length(SrcRoot) > 0) And (SrcRoot[Length(SrcRoot)] = '/') Do
         Delete(SrcRoot, Length(SrcRoot), 1);
     End
+    Else If (A = '-b') And (I + 1 < SysArgCount) Then
+    Begin
+      Inc(I);
+      Val(SysArgStr(I), BS, K2);
+      If (BS <> 1024) And (BS <> 2048) And (BS <> 4096) Then
+        Die('-b : 1024, 2048 ou 4096');
+    End
+    Else If (A = '-I') And (I + 1 < SysArgCount) Then
+    Begin
+      Inc(I);
+      Val(SysArgStr(I), ISZ, K2);
+      If (ISZ <> 128) And (ISZ <> 256) Then Die('-I : 128 ou 256');
+    End
+    Else If (A = '-N') And (I + 1 < SysArgCount) Then
+    Begin
+      Inc(I);
+      Val(SysArgStr(I), WantInodes, K2);
+    End
+    Else If (A = '-t') And (I + 1 < SysArgCount) Then Inc(I)
     Else If A = '-y' Then Yes := True
     Else If A = '-q' Then Quiet := True
     Else If MkfsOnly And (A <> '') And (A[1] <> '-') Then Dev := A
@@ -930,6 +968,11 @@ BEGIN
     Inc(I);
   End;
   If MkfsOnly Then Yes := True;
+  LogBs := 10;
+  While (1 Shl LogBs) < BS Do Inc(LogBs);
+  BPG := BS * 8;
+  FirstData := 0;
+  If BS = 1024 Then FirstData := 1;
   If NewLang = '' Then
   Begin
     If Yes Then NewLang := LangCode[Lang]
@@ -963,7 +1006,7 @@ BEGIN
       If Mb * 2048 < Sectors Then Sectors := Mb * 2048;
     If Sectors > 4000000 Then Sectors := 4000000;
     PartStart := 0;
-    NBlocks := Sectors Div 2;
+    NBlocks := Sectors Div (BS Div 512);
     If NBlocks < 400 Then Die(Msg(12));
     Layout;
     FormatFs;
@@ -988,7 +1031,7 @@ BEGIN
   If Sectors > 4000000 Then Sectors := 4000000;
   PartStart := 2048;
   PartSectors := Sectors - PartStart;
-  NBlocks := PartSectors Div 2;
+  NBlocks := PartSectors Div (BS Div 512);
   If NBlocks > MAXBLK - 8 Then NBlocks := MAXBLK - 8;
   Say(Msg(6));
   InstallBoot(Sectors);

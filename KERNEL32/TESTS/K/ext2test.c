@@ -120,6 +120,7 @@ static unsigned freeinodes(void){unsigned long s[16];statfs("/mnt",s);return s[6
 
 int main(void){
   if(ku_cmdline_has("bigtest"))return 0;
+  if(ku_cmdline_has("jrntest"))return 0;
   int fd,n,i,r;
   char b[512],c[300];
   unsigned fb0,fbs,fis,bsz;
@@ -207,7 +208,7 @@ int main(void){
   lseek(fd,70*1024*1024,0);r&=write(fd,"D",1)==1;
   ktest("ext2.sparse_write",r);
   fstat64(fd,sb_);
-  ktest("ext2.sparse_size",ST_SIZE(sb_)==70*1024*1024+1&&ST_BLOCKS(sb_)<200);
+  ktest("ext2.sparse_size",ST_SIZE(sb_)==70*1024*1024+1&&ST_BLOCKS(sb_)<200*(bsz>1024?bsz/1024:1));
   lseek(fd,5,0);read(fd,b,1);r=b[0]=='A';
   lseek(fd,20000,0);read(fd,b,1);r&=b[0]=='B';
   lseek(fd,5000000,0);read(fd,b,1);r&=b[0]=='C';
@@ -364,7 +365,7 @@ int main(void){
   ktest("ext2.ro_mkdir",mkdir("/mnt/zz",0755)==-30);
   ktest("ext2.ro_unlink",unlink("/mnt/hello.txt")==-30);
   ktest("ext2.ro_rename",rename("/mnt/hello.txt","/mnt/h2")==-30);
-  {unsigned long s[16];statfs("/mnt",s);ktest("ext2.statfs_magic",s[0]==0xEF53&&(s[1]==1024||s[1]==2048||s[1]==4096));}
+  {unsigned long s[16];statfs("/mnt",s);ktest("ext2.statfs_magic",s[0]==0xEF53&&s[1]>=1024&&s[1]<=65536&&(s[1]&(s[1]-1))==0);}
   ktest("ext2.umount_ro",umount("/mnt")==0);
   /* laisser le contenu rw pour la suite de la verification hote */
   r=mount("/dev/hda1","/mnt","ext2",0,0);

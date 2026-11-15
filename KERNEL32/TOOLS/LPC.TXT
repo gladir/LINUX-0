@@ -116,6 +116,35 @@ restent a 256 octets. Insert dans une String[n], et un sous-programme qui
 ecrit dans un parametre Var S : String recu d'une String[n] plus courte, ne
 tronquent pas (depassement possible, comme Turbo Pascal sans {$V+}).
 
+Ajouts du lot E3 (non-regression : TESTS/C/UX5, UX6, ER1, ER2)
+---------------------------------------------------------------
+- Tableaux ouverts : `Function F(Const A : Array Of T) : ...`, `Var A :
+  Array Of T`, `A : Array Of T` (passage par adresse). Le parametre devient
+  deux parametres (adresse, HIGH$nom) ; Low(A) = 0, High(A), A[i], transmission
+  a un autre parametre ouvert, procedures imbriquees. Arguments admis : tableau
+  quelconque (High = Hi - Lo de son type), constructeur [a, b, c] (elements
+  de 1, 2 ou 4 octets, tableau temporaire sur la pile), parametre ouvert de
+  l'appelant. Tableaux ouverts de chaines : tableau de String.
+- Pointeurs de procedures et de fonctions : types `Procedure`, `Function(X :
+  T) : R`, variables, champs de record, tableaux (`T[i](args)`), parametres
+  (`Calc(Add, 5)` : le nom de fonction donne son adresse), comparaison a Nil,
+  Assigned, appel indirect avec conversion des arguments selon la signature
+  (chaines Const copiees, Double sur la pile, adresse pour Var) et resultat
+  reel renvoye dans ST(0).
+- Packed Record (taille sans alignement : SizeOf = somme des champs).
+- Reels : Write(x) sans largeur au format Turbo Pascal (` 1.2345678900E+02`,
+  10 decimales, exposant sur 2 chiffres, signe ou espace), Write(x:n) : n - 7
+  decimales (au moins 1), Write(x:n:m), Str(x:n:m), Val.
+- Insert(S, T, p) dans une String[n] tronque a n (le tampon de travail est
+  maintenant sur la pile : 255 caracteres au plus apres Insert).
+- Move('abc', B, 3) copie la chaine Pascal (octet de longueur en tete) comme
+  Move(S, ...) et comme Turbo Pascal ; Move(S[1], ...) copie les caracteres.
+- FillChar(B, n, '.') : le litteral caractere est un code (avant : octet
+  de poids faible de l'adresse du litteral).
+- -3M : `Procedure ... ModuleInit;` rend EAX = 0 (le noyau lit EAX comme code
+  d'erreur) ; le nom du module (.modinfo name=) est le nom du fichier en
+  minuscules (rmmod hello).
+
 Cible -3X
 ---------
 - Entree : _start (L32API.PAS) lit argc/argv/envp sur la pile, appelle le
@@ -152,8 +181,9 @@ Cible -3X
   Chr(0), ou d'une chaine) ecrit bien un octet nul.
 - Ligne de commande : jusqu'a 4096 parametres et 128 Ko (ParamStr, ParamCount).
 - Erreurs d'execution : "Runtime error N at 0x..." sur stderr (code 200+N).
-- Reels (Real, Double) : Write(x:0:2), Str, Val, formats % de sprintf et
-  strtod ecrits en Pascal (L32API.PAS), calculs par le coprocesseur x87.
+- Reels (Real, Double) : Write(x), Write(x:n), Write(x:n:m), Str, Val,
+  formats % de sprintf et strtod ecrits en Pascal (L32API.PAS), calculs par
+  le coprocesseur x87 (voir les ajouts du lot E3 pour le format de Write).
 - Fichiers : variables de type fichier dans des tableaux ou des champs
   (Assign(T[i], ..), Reset(R.F), Eof(R.F), ReadLn(T[i], S)...), Read/ReadLn
   vers un element de tableau, un champ ou un pointeur (Read(A[i]), ReadLn(P^)).
@@ -213,20 +243,37 @@ SysLLSeek (llseek) : decalages 64 bits.
 
 Pieges du langage connus (Pascal est insensible a la casse)
 -----------------------------------------------------------
-- Non detectes par le compilateur (a surveiller) : passer le nom d'une
-  fonction comme parametre Var, un parametre `Var X : Array Of T` (tableaux
-  ouverts non geres : declarer un type de tableau), Move d'un litteral chaine
-  (la source est l'octet de longueur), Mem[0:adr] passe comme parametre Var
-  (utiliser SysCall ou un tableau), un cast PType(x)^.champ en debut
-  d'instruction ou en argument (le cast ne marche que dans une expression :
-  utiliser une variable pointeur typee ou des tableaux), des noms de variables
-  globales identiques (a la casse pres) a ceux d'une procedure du programme
-  (Ev/EV).
-- Detectes : affecter une chaine a un nombre (erreur "types incompatibles").
-- Auto-hebergement (compiler LPC32.PAS avec LPC -3X) : impossible pour
-  l'instant ; LPC32 est une unite FPC (Uses/Unit non geres entre fichiers) et
-  LPC.PAS/LPC32.PAS partagent des centaines de noms (erreur "identificateur
-  deja declare" une fois fusionnes).
+- Non detectes par le compilateur (a surveiller) : Mem[0:adr] passe comme
+  parametre Var (utiliser SysCall ou un tableau), un cast PType(x)^.champ en
+  debut d'instruction ou en argument (le cast ne marche que dans une
+  expression : utiliser une variable pointeur typee ou des tableaux), des
+  noms de variables globales identiques (a la casse pres) a ceux d'une
+  procedure du programme sont maintenant une erreur (voir ci-dessous).
+- Detectes : affecter une chaine a un nombre (erreur "types incompatibles"),
+  passer le nom d'une fonction en parametre Var (erreur "une fonction ne peut
+  pas etre passee en parametre Var"), declarer une variable ou constante
+  globale du meme nom qu'une procedure ou fonction du programme (erreur
+  "identificateur deja declare" ; c'etait la cause des collisions Ev/EV et,
+  vraisemblablement, NPre/PwL : le symbole le plus recent masquait l'autre).
+- Auto-hebergement : (1) LPC32.PAS (unite FPC) ne peut pas etre compile par
+  LPC -3X : Uses/Unit non geres entre fichiers et des centaines de noms
+  communs avec LPC.PAS. (2) Le LPC 16 bits de KERNEL16UNIX/TOOLS/LPC.PAS (19700
+  lignes, un seul fichier) SE COMPILE avec `lpc -3X` sans erreur (binaire de
+  2 Mo, ELF32 statique, demarre et compile un programme trivial en .EXE DOS).
+  Obstacle : `Int64` y est un entier de 32 bits ; ReadNumber teste
+  `N > ($FFFFFFFF - Digit) Div 16` (litteral 4294967295 en 64 bits sous FPC,
+  -1 ici), d'ou "Constante hors limites" dans l'unite DOS integree. Avec une
+  copie ou N est un Double (N: Double; N:=N*Base+Digit; comparaisons avec
+  4294967295.0 et 2147483647.0 ; ReadNumber:=Trunc(N)) le compilateur
+  s'auto-heberge : LS, CAT, GREP, WC, SORT du depot se compilent. Limite : le
+  code produit est 25 % plus gros que celui du LPC compile par FPC (WC :
+  12764 octets de code au lieu de 10033 ; donnees identiques), les
+  executables ne sont pas identiques octet pour octet et n'ont pas ete
+  executes (pas de DOS sous cette machine). Correction durable a faire : un
+  vrai Int64 dans LPC32 (litteraux hexa > $7FFFFFFF, arithmetique 64 bits) ou
+  la modification de ReadNumber dans LPC.PAS (hors perimetre de l'agent E).
+  Sous KERNEL32, ce binaire s'appellerait lpc16 (non installe dans l'image :
+  2 Mo, aucune cible 32 bits).
 - Un type et une constante qui ne different que par la casse (TWord/tWord)
   se confondent. Une variable locale du nom d'une fonction du programme la
   masque (Num(X) n'est plus l'appel).

@@ -36,6 +36,7 @@ Const
  GdBuf=$7000;     { bloc des descripteurs de groupes }
  ZeroBuf=$8000;   { 4 Ko de zeros }
  TmpBuf=$9000;    { divers }
+ RootBuf=$A000;   { i_block (60 octets) d'un inode a extents }
  { structure Multiboot : 7E00:0000 }
  MbiSeg=$7E00;
  MbiPhys=$7E000;
@@ -56,6 +57,7 @@ Var
  G87:Array[0..47] Of Byte;
  { ext2 }
  BlkSize:Word;
+ GdSz:Word;       { taille d'un descripteur de groupe : 32 ou 64 (64bit) }
  SecPerBlk:Word;
  Ppb:LongInt;
  InoSize:Word;
@@ -316,10 +318,61 @@ Begin
  Ind:=MemL[BufSeg:Slot+Idx*4];
 End;
 
+{ noeud d'extents (bloc Blk) de profondeur D dans son tampon }
+Function NodeBuf(D:Word;Blk:LongInt):Word;
+Begin
+ If D=0 Then Begin
+  If C1<>Blk Then Begin ReadBlock(Blk,I1Buf); C1:=Blk; End;
+  NodeBuf:=I1Buf;
+ End Else If D=1 Then Begin
+  If C2<>Blk Then Begin ReadBlock(Blk,I2Buf); C2:=Blk; End;
+  NodeBuf:=I2Buf;
+ End Else Begin
+  If C3<>Blk Then Begin ReadBlock(Blk,I3Buf); C3:=Blk; End;
+  NodeBuf:=I3Buf;
+ End;
+End;
+
+{ bloc physique du bloc logique N d'un fichier a extents (ext4), 0 : trou }
+Function ExtMap(N:LongInt):LongInt;
+Var Dp,K,Cnt:Word; Base:Word; Idx:Integer; Key,Blk,Start:LongInt; Len:Word;
+Begin
+ ExtMap:=0;
+ Base:=RootBuf;
+ If MemW[BufSeg:Base]<>$F30A Then Die('arbre d''extents invalide');
+ Dp:=MemW[BufSeg:Base+6];
+ If Dp>3 Then Die('arbre d''extents trop profond');
+ While Dp>0 Do Begin
+  Cnt:=MemW[BufSeg:Base+2]; Idx:=-1;
+  For K:=0 To Cnt-1 Do Begin
+   Key:=MemL[BufSeg:Base+12+K*12];
+   If (Key>=0) And (Key<=N) Then Idx:=K;
+  End;
+  If Idx<0 Then Exit;
+  Blk:=MemL[BufSeg:Base+12+Idx*12+4];
+  Dec(Dp);
+  Base:=NodeBuf(Dp,Blk);
+  If (MemW[BufSeg:Base]<>$F30A) Or (MemW[BufSeg:Base+6]<>Dp) Then
+   Die('noeud d''extents invalide');
+ End;
+ Cnt:=MemW[BufSeg:Base+2]; Idx:=-1;
+ For K:=0 To Cnt-1 Do Begin
+  Key:=MemL[BufSeg:Base+12+K*12];
+  If (Key>=0) And (Key<=N) Then Idx:=K;
+ End;
+ If Idx<0 Then Exit;
+ Key:=MemL[BufSeg:Base+12+Idx*12];
+ Len:=MemW[BufSeg:Base+12+Idx*12+4];
+ If Len>32768 Then Exit;     { extension non initialisee : lit des zeros }
+ Start:=MemL[BufSeg:Base+12+Idx*12+8];
+ If N-Key<Len Then ExtMap:=Start+(N-Key);
+End;
+
 { numero (physique) du bloc N du fichier courant }
 Function Bmap(N:LongInt):LongInt;
 Var X,Y:LongInt;
 Begin
+ If (IFlags And $80000)<>0 Then Begin Bmap:=ExtMap(N); Exit; End;
  If N<12 Then Begin Bmap:=IBlk[N]; Exit; End;
  Dec(N,12);
  If N<Ppb Then Begin
@@ -341,9 +394,9 @@ Var Grp,Idx,Tbl,Pos,Blk:LongInt; O:Word; I:Integer;
 Begin
  If (N<1) Or (N>$7FFFFF) Then Die('numero d''inode invalide');
  Dec(N); Grp:=N Div Ipg; Idx:=N Mod Ipg;
- Blk:=GdtBlk+(Grp*32) Div BlkSize;
+ Blk:=GdtBlk+(Grp*GdSz) Div BlkSize;
  If GdCur<>Blk Then Begin ReadBlock(Blk,GdBuf); GdCur:=Blk; End;
- Tbl:=MemL[BufSeg:GdBuf+Word((Grp*32) Mod BlkSize)+8];
+ Tbl:=MemL[BufSeg:GdBuf+Word((Grp*GdSz) Mod BlkSize)+8];
  Pos:=Idx*InoSize;
  Blk:=Tbl+Pos Div BlkSize;
  If InoCur<>Blk Then Begin ReadBlock(Blk,InoBuf); InoCur:=Blk; End;
@@ -354,8 +407,9 @@ Begin
  Move(Raw[28],IBlocks,4);
  Move(Raw[32],IFlags,4);
  Move(Raw[40],IBlk,60);
- If (IFlags And $80000)<>0 Then
-  Die('fichier a extents (ext4) non supporte');
+ If (IFlags And $10000000)<>0 Then
+  Die('fichier ext4 inline_data non supporte');
+ If (IFlags And $80000)<>0 Then Move(IBlk,Mem[BufSeg:RootBuf],60);
 End;
 
 { octets du fichier courant [Off,Off+Len) -> memoire basse Seg:Ofs }
@@ -448,9 +502,9 @@ Begin
  ReadSec(PartLba+2,2,BufSeg,SbBuf);
  Magic:=MemW[BufSeg:SbBuf+56];
  If Magic<>$EF53 Then
-  Die('pas de systeme de fichiers ext2 sur la partition active');
+  Die('pas de systeme de fichiers ext2/ext3/ext4 sur la partition active');
  Sh:=Word(MemL[BufSeg:SbBuf+24]);
- If Sh>2 Then Die('taille de bloc ext2 non supportee (> 4096)');
+ If Sh>2 Then Die('taille de bloc ext2/3/4 non supportee par le chargeur (> 4096)');
  BlkSize:=1024 Shl Sh; SecPerBlk:=BlkSize Shr 9;
  Ppb:=BlkSize Div 4;
  FirstData:=MemL[BufSeg:SbBuf+20];
@@ -458,13 +512,19 @@ Begin
  Bpg:=MemL[BufSeg:SbBuf+32];
  Ipg:=MemL[BufSeg:SbBuf+40];
  Rev:=MemL[BufSeg:SbBuf+76];
- InoSize:=128;
+ InoSize:=128; GdSz:=32;
  If Rev>=1 Then Begin
   InoSize:=MemW[BufSeg:SbBuf+88];
   Inc2:=MemL[BufSeg:SbBuf+96];
-  { FILETYPE (2) et FLEX_BG (200h) : lisibles ; le reste non }
-  If (Inc2 And Not($202))<>0 Then
+  { lisibles : FILETYPE 2, RECOVER 4 (journal non rejoue), EXTENTS 40h,
+    64BIT 80h, FLEX_BG 200h, CSUM_SEED 2000h, LARGEDIR 4000h }
+  If (Inc2 And $10)<>0 Then
+   Die('ext4 meta_bg non supporte par le chargeur');
+  If (Inc2 And Not($62C6))<>0 Then
    Die('fonction ext2 incompatible non supportee ('+Hex(Inc2,8)+'h)');
+  If (Inc2 And 4)<>0 Then
+   PrintLn('Attention : journal ext3/4 non rejoue (lecture seule)');
+  If (Inc2 And $80)<>0 Then GdSz:=MemW[BufSeg:SbBuf+254];
  End;
  If (InoSize<128) Or (InoSize>BlkSize) Or ((InoSize And (InoSize-1))<>0) Then
   Die('taille d''inode ext2 invalide');

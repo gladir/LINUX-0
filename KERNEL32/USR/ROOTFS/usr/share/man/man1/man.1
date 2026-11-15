@@ -1,0 +1,34 @@
+.TH MAN 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+man \- lecteur de manuel / manual pager
+.SH SYNOPSIS
+.B man
+[-k word | -f name | -w] [section] page...
+.br
+.B info
+name
+.br
+.B apropos
+word
+.br
+.B whatis
+name
+.br
+.SH DESCRIPTION
+Formats and displays manual pages found in /usr/share/man/LANG/manN and /usr/share/man/manN (or in the directories listed in MANPATH), where LANG is fr, en, de,
+es or it according to the LANGUAGE setting. The roff macros TH SH SS B I BR RB IR RI BI IB P PP LP TP IP RS RE nf fi br sp and the fonts \\fB \\fI \\fR are
+understood. When the output is a terminal the text goes through $PAGER (default less).
+.SH OPTIONS
+.TP
+.B -k word
+Search page names and descriptions (apropos).
+.TP
+.B -f name
+Show the one line description of name (whatis).
+.TP
+.B -w
+Print the path of the page instead of displaying it.
+.SH FILES
+/usr/share/man/man1/*.1, /usr/share/info/*
+.SH SEE ALSO
+less(1)

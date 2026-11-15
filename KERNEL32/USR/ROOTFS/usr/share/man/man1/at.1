@@ -1,0 +1,22 @@
+.TH AT 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+at \- planifie un travail unique / queue jobs for later execution
+.SH SYNOPSIS
+.B at
+[-f file] [-m] time [date] [+ N units]
+.br
+.B batch
+
+.br
+.B atq
+
+.br
+.B atrm
+job...
+.br
+.SH DESCRIPTION
+Reads commands from the standard input (or -f file) and runs them once at the given time through atd. Time: HH:MM, HHMM, now, noon, midnight, teatime, with
+am/pm; date: today, tomorrow, Month DD [YYYY], DD.MM.YYYY, MM/DD/YYYY; increments: + N minutes|hours|days|weeks. batch runs the job when the load average drops
+below 1.5. atq lists the pending jobs and atrm removes them. Jobs are stored in /var/spool/cron/atjobs.
+.SH SEE ALSO
+crontab(1), crond(1)

@@ -106,7 +106,9 @@ for f in "$HERE"/USR/*.PAS; do
   n=$(basename "$f" .PAS); l=$(echo "$n" | tr A-Z a-z)
   case $n in
     INIT) build_one "$f" sbin/init ;;
-    GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKPASSWD|NOLOGIN|IFCONFIG|ROUTE|MKSWAP|SWAPON|SYSCTL|HWCLOCK|LSMOD|USERMGR|TELINIT|SYSLOGD|MODTOOL)
+    GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKPASSWD|NOLOGIN|IFCONFIG|\
+    ROUTE|MKSWAP|SWAPON|SYSCTL|HWCLOCK|LSMOD|USERMGR|TELINIT|SYSLOGD|MODTOOL|\
+    E2FSCK|UDHCPC)
       build_one "$f" sbin/$l ;;
     *) build_one "$f" bin/$l ;;
   esac
@@ -120,7 +122,9 @@ if [ -z "$NOCMDS" ]; then
   for f in "$HERE"/../*.PAS; do
     [ -f "$f" ] || continue
     n=$(basename "$f" .PAS); l=$(echo "$n" | tr A-Z a-z)
-    case $n in HALT|REBOOT|HSWD) continue ;; esac
+    # remplaces par des programmes de USR/ (noms multiples via liens)
+    case $n in HALT|REBOOT|HSWD|WC|HEAD|TAIL|CUT|PASTE|MORE|VI|CRONTAB)
+      continue ;; esac
     [ -f "$W/root/bin/$l" ] || [ -f "$W/root/sbin/$l" ] && continue
     build_one "$f" bin/$l
   done
@@ -150,7 +154,21 @@ for l in "chgrp chown bin" "realpath readlink bin" "pkill pgrep bin" \
          "chpasswd usermgr sbin" "runlevel telinit sbin" \
          "shutdown telinit sbin" "users who bin" "w who bin" \
          "last who bin" "logger syslogd sbin" "vmstat top bin" "modinfo modtool sbin" \
-         "modprobe modtool sbin" "depmod modtool sbin"; do
+         "modprobe modtool sbin" "depmod modtool sbin" \
+         "wc textutil bin" "head textutil bin" "tail textutil bin" \
+         "cut textutil bin" "paste textutil bin" \
+         "view vi bin" "vim vi bin" "more less bin" \
+         "apropos man bin" "whatis man bin" "info man bin" \
+         "crond cron bin" "atd cron bin" "crontab cron bin" "at cron bin" \
+         "batch cron bin" "atq cron bin" "atrm cron bin" \
+         "zip ziptool bin" "unzip ziptool bin" "zipinfo ziptool bin" \
+         "fsck e2fsck sbin" "fsck.ext2 e2fsck sbin" "fsck.ext3 e2fsck sbin" \
+         "fsck.ext4 e2fsck sbin" \
+         "lsof procinfo bin" "fuser procinfo bin" "netstat procinfo bin" \
+         "ss procinfo bin" "lspci procinfo bin" "lsusb procinfo bin" \
+         "losetup procinfo bin" "telnet netutil bin" "ftp netutil bin" \
+         "httpd netutil bin" "traceroute netutil bin" \
+         "dhclient udhcpc sbin" "ip iptool bin"; do
   set -- $l
   [ -f "$W/root/$3/$2" ] && ln -sf "$2" "$W/root/$3/$1" 2>/dev/null || true
 done

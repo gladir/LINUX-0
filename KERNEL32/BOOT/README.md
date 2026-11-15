@@ -1,7 +1,7 @@
 # KERNEL32 / BOOT : amorce sur disque dur (MBR + partition ext2)
 
 KERNEL32 s'amorce depuis une **partition Linux** (type `83h`, active) d'un
-disque dur MBR, formatée en **ext2**, sans GRUB ni LILO : le MBR charge un
+disque dur MBR, formatée en **ext2, ext3 ou ext4**, sans GRUB ni LILO : le MBR charge un
 chargeur (*stage2*) placé juste après lui, qui lit l'ext2, charge le fichier
 ELF32 `/boot/linux0` en mémoire haute et saute dans le noyau en mode protégé,
 par le protocole **Multiboot 1**.
@@ -112,20 +112,31 @@ cmdline=root=/dev/hda1 rw init=/sbin/init
 chs=1          # essais : lire le noyau en CHS au lieu de LBA
 ```
 
-## Système de fichiers ext2 supporté
+## Systèmes de fichiers supportés : ext2, ext3, ext4
 
-* blocs de **1024, 2048, 4096** octets ; inodes de **128 ou plus** (256) ;
-  révisions **0 et 1** ; l'unique fonction incompatible tolérée est
-  `filetype` (et `flex_bg` qui ne change rien à la lecture) ;
-* **pas** d'extents (ext4 : refusé avec un message), pas de `meta_bg`,
-  `64bit`, compression, journal externe ni de récupération du journal ;
-* répertoires linéaires (un répertoire `dir_index` se lit aussi : ses
-  blocs d'index sont des entrées vides) ;
-* fichiers : blocs directs, indirects simples, doubles et **triples** ; les
-  trous (blocs 0) lisent des zéros ; liens symboliques (courts et longs,
-  profondeur 8) dans le chemin du noyau ;
-* la ligne exacte de `mke2fs` utilisée est documentée dans
-  `TOOLS/MKIMAGE.SH` : `-t ext2 -b 1024 -I 128 -r 1 -O none,filetype,sparse_super`.
+* blocs de **1024, 2048, 4096** octets (plus grand : refusé) ; inodes de **128
+  à 1024** octets ; révisions **0 et 1** ;
+* fonctions incompatibles lisibles : `filetype`, `extents` (ext4 : arbre de
+  profondeur 3 au plus ; les extensions non initialisées se lisent comme des
+  trous), `64bit` (descripteurs de groupes de 64 octets), `flex_bg`,
+  `csum_seed`, `large_dir` ; `recover` (journal ext3/ext4 non rejoué : le
+  chargeur affiche un avertissement et lit les blocs tels quels sur le
+  disque, le noyau rejouera le journal au montage) ;
+* refusées avec un message : `meta_bg`, `inline_data`, compression, chiffrement,
+  journal externe..., blocs de plus de 4 Ko ; les fonctions `ro_compat`
+  (sommes de contrôle, `huge_file`...) sont sans effet sur la lecture ;
+* répertoires linéaires et indexés (`dir_index` : les noeuds d'index sont des
+  entrées vides, les blocs se lisent à la suite ; les répertoires de
+  plusieurs milliers d'entrées sont lus linéairement) ;
+* fichiers : blocs directs, indirects simples, doubles et **triples**, ou
+  extents ; les trous (blocs 0) lisent des zéros ; liens symboliques (courts et
+  longs, profondeur 8) dans le chemin du noyau ;
+* essais : `TESTS/K/RUNBOOT4.SH [-o "options mke2fs"] [-N entrées]` (ext4 par
+  défaut avec `metadata_csum`, `64bit`, `flex_bg`, journal, `/boot` de 300
+  entrées indexé, noyau creux donc à extensions multiples) ; la ligne
+  `mke2fs` historique (ext2 simple) reste documentée dans `TOOLS/MKIMAGE.SH` :
+  `-t ext2 -b 1024 -I 128 -r 1 -O none,filetype,sparse_super`. L'installateur
+  (`USR/INSTALL.PAS`) et `mkfs.ext2` fabriquent toujours de l'ext2 sans journal.
 
 ## Noyau chargé
 

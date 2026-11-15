@@ -1,0 +1,21 @@
+.TH TAIL 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+tail \- affiche la fin des fichiers / output the last part of files
+.SH SYNOPSIS
+.B tail
+[-n [+]N] [-c [+]N] [-fqv] [file...]
+.br
+.SH DESCRIPTION
+Prints the last 10 lines of each file; works on pipes. +N starts at line N. -f keeps polling the files for appended data.
+.SH OPTIONS
+.TP
+.B -n N
+Last N lines.
+.TP
+.B -c N
+Last N bytes.
+.TP
+.B -f
+Follow appended data.
+.SH SEE ALSO
+head(1)

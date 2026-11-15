@@ -57,6 +57,9 @@ ETAT : marche = fonctionne conformement a son aide pour les essais faits ;
        echoue = ne fonctionne pas (cause dans REMARQUE).
 QEMU : ok = meme resultat sous KERNEL32 ; KO = difference ; aide = seul l'essai
        d'aide a ete fait ; - = non essaye.
+(programmes de USR/ : suite = essais dedies, RUNU.SH utils sur l'hote -- vi sur
+pty, textutil contre coreutils, patch, e2fsck contre e2fsck -fn, zip contre
+Info-ZIP -- et RUNU.SH tools sous QEMU ; sess = verifie en session QEMU)
 
 Resume : %d marchent, %d avec reserves, %d echouent (sur %d programmes)
 
@@ -70,6 +73,9 @@ for f in sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)
                                        '..', '..', 'USR', '*.PAS'))):
     n = os.path.basename(f)[:-4].lower()
     if re.search(r'BENCH-OK[^\n]*\b%s\b' % re.escape(n), okt): q = 'ok'
+    elif n in ('vi', 'less', 'man', 'textutil', 'cron', 'patch', 'ziptool',
+               'e2fsck', 'procinfo', 'netutil', 'iptool', 'cpio'):
+        q = 'suite'
     elif n in ('init', 'getty', 'login', 'sh', 'install', 'halt', 'reboot',
                'poweroff', 'passwd', 'mount', 'umount', 'mkpasswd', 'sync',
                'hostname', 'ps', 'id', 'kill', 'mkdir', 'rmdir', 'rm', 'modtool'):

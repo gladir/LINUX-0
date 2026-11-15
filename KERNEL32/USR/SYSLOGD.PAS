@@ -256,7 +256,7 @@ Begin
 End;
 
 Procedure RunSyslogd;
-Var Fd, N, Pid : LongInt; A : TSockUn; Un : Boolean;
+Var Fd, N, Pid : LongInt; A : TSockUn; Un : Boolean; StartMsg : String;
 Begin
   ReadConf;
   Fd := SysSocket(1, 2, 0);
@@ -283,7 +283,8 @@ Begin
     SysClose(2);
   End;
   { message de demarrage }
-  Move('<46>syslogd: started', Buf[0], 20);
+  StartMsg := '<46>syslogd: started';
+  Move(StartMsg[1], Buf[0], 20);
   Handle(20);
   While True Do
   Begin

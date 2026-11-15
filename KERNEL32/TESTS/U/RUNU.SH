@@ -5,6 +5,10 @@
 # @description: Banc d'essai rejouable du systeme utilisateur de KERNEL32
 #   (agent E). RUNU.SH [etapes...]   etapes : sh host qemu power net install
 #   (defaut : toutes)
+#     utils    (hote) vi sur pty, wc/head/tail/cut/paste contre coreutils, patch
+#              (714 diffs), e2fsck-lite contre e2fsck -fn, zip/unzip contre Info-ZIP
+#     tools    (QEMU) /usr/share/bench/tools.sh : filtres, man, patch, zip, cron, at,
+#              e2fsck sur le disque racine (TOOLS-FIN ok=.. ko=..)
 #     mod      modules du noyau : insmod/lsmod/rmmod de /lib/modules/hello.ko
 #              (SKIP si le noyau n'a pas encore le chargeur init_module)
 #     sh       shell USR/SH.PAS contre dash (TESTS/U/shtest.sh)
@@ -30,7 +34,7 @@ W=${W:-/tmp/linux0-u-tests}
 QT=${QEMU_T:-600}
 export LPC W
 mkdir -p "$W/bin" "$W/src"
-STEPS=${*:-sh host qemu power net install mod}
+STEPS=${*:-sh host utils qemu tools power net install mod}
 FAIL=0
 build() {
   [ -n "$IMAGE" ] && return 0
@@ -77,6 +81,46 @@ for st in $STEPS; do
         echo "ok    $c ($((t1 - t0)) s)"
       else echo "ECHEC $c"; tail -3 "$W/$c.txt"; FAIL=1; fi
     done ;;
+  utils)
+    mkdir -p "$W/ut"; cp "$K32"/USR/*.PAS "$K32"/USR/*.INC "$W/ut/"
+    for n in VI TEXTUTIL PATCH E2FSCK ZIPTOOL LESS MAN CRON INSTALL; do
+      ( cd "$W/ut" && $LPC -3X -q $n.PAS >/dev/null 2>"$W/ut/$n.err" ) ||
+        { echo "ECHEC compilation $n"; FAIL=1; }
+    done
+    python3 "$HERE/vitest.py" "$W/ut/VI" | tail -1 || FAIL=1
+    "$HERE/textutil.sh" "$W/ut/TEXTUTIL" | tail -1 || FAIL=1
+    python3 "$HERE/patchtest.py" "$W/ut/PATCH" | tail -1 || FAIL=1
+    W="$W/fs" "$HERE/e2fsckcmp.sh" "$W/ut/E2FSCK" | tail -1 | grep -q 'diff=0' &&
+      echo "ok    e2fsck-lite = e2fsck -fn" || { echo "ECHEC e2fsck-lite"; FAIL=1; }
+    # mkfs.ext2 / installateur : blocs 1/2/4 Ko, inodes 128/256, -N, sur l'hote
+    ( mkdir -p "$W/mk/rt/usr/share/boot" && cd "$W/mk" &&
+      cp "$K32"/BOOT/MBR.BIN "$K32"/BOOT/STAGE2.BIN rt/usr/share/boot/ &&
+      seq 1 20000 > rt/n.txt && head -c 3000000 /dev/urandom > rt/r.bin &&
+      cp "$W/ut/INSTALL" install && ln -sf install mkfs.ext2 && bad=0 &&
+      for cfg in "1024 128" "1024 256" "2048 128" "2048 256" "4096 128" "4096 256"
+      do set -- $cfg; truncate -s 100M p.img
+        ./install -y -q -d p.img -s 100 -r rt -l EN -b $1 -I $2 >/dev/null 2>&1
+        e2fsck -fn 'p.img?offset=1048576' >/dev/null 2>&1 || bad=1
+        "$W/ut/E2FSCK" -fn 'p.img?offset=1048576' >/dev/null 2>&1 || bad=1
+        truncate -s 40M m.img; ./mkfs.ext2 -q -b $1 -I $2 m.img >/dev/null 2>&1
+        e2fsck -fn m.img >/dev/null 2>&1 || bad=1
+      done; [ $bad = 0 ] ) && echo "ok    install/mkfs.ext2 -b 1024..4096 -I 128/256 : e2fsck propre" ||
+      { echo "ECHEC install -b/-I"; FAIL=1; }
+    ( mkdir -p "$W/zt/src" && cd "$W/zt" && cp "$W/ut/ZIPTOOL" zip &&
+      ln -sf zip unzip && seq 1 5000 > src/n.txt && head -c 100000 /dev/urandom > src/r.bin &&
+      ./zip -qr a.zip src && /usr/bin/unzip -tq a.zip >/dev/null &&
+      /usr/bin/zip -qr b.zip src && mkdir -p o && ./unzip -q -d o b.zip &&
+      diff -r src o/src ) && echo "ok    zip/unzip = Info-ZIP" ||
+      { echo "ECHEC zip/unzip"; FAIL=1; } ;;
+  tools)
+    build
+    [ -f "$IMAGE" ] || { FAIL=1; continue; }
+    cp "$IMAGE" "$W/t.img"
+    python3 "$K32/TESTS/QEMU.PY" run "$W/t.img" -m 64 -t "$QT" \
+      -c 'login: =root' -c 'Mot de passe : =root' \
+      -c '=sh /usr/share/bench/tools.sh' -c '=echo QFIN' -s 'QFIN$' > "$W/tools.txt" 2>&1
+    grep 'TOOLS-KO\|TOOLS-FIN' "$W/tools.txt"
+    grep -q 'TOOLS-FIN ok=[0-9]* ko=0' "$W/tools.txt" || FAIL=1 ;;
   net)
     build
     [ -f "$IMAGE" ] || { FAIL=1; continue; }
@@ -92,12 +136,20 @@ for st in $STEPS; do
       -c 'login: =root' -c 'Mot de passe : =root' \
       -c '=ifconfig eth0; route; ping -c 2 127.0.0.1' \
       -c "=wget -q -O /tmp/w.html http://10.0.2.2:$PORT/index.html; cat /tmp/w.html" \
+      -c '=ip addr show dev eth0; ip route; netstat -r' \
+      -c "=printf 'GET /index.html HTTP/1.0\\n\\n' | telnet 10.0.2.2 $PORT" \
+      -c '=udhcpc -i eth0 -t 1 -T 5' \
       -c '=echo NFIN' -s 'NFIN$' > "$W/net.txt" 2>&1
     kill $WEBPID 2>/dev/null
-    for pat in 'inet addr:10.0.2.15' '2 received' 'linux0-net-ok'; do
+    for pat in 'inet addr:10.0.2.15' '2 received' 'linux0-net-ok' \
+               'inet 10.0.2.15' 'Connected to 10.0.2.2'; do
       if grep -q "$pat" "$W/net.txt"; then echo "ok    net : $pat"
       else echo "ECHEC net : $pat (voir $W/net.txt)"; FAIL=$((FAIL+1)); fi
-    done ;;
+    done
+    # client DHCP : facultatif (diffusion UDP depuis 0.0.0.0 selon le noyau)
+    if grep -q 'udhcpc: lease of 10.0.2.15' "$W/net.txt"; then
+      echo "ok    net : udhcpc"
+    else echo "SKIP  net : udhcpc (pas de bail, voir BUGS_NOYAU.md [E3])"; fi ;;
   mod)
     build
     [ -f "$IMAGE" ] || { FAIL=1; continue; }

@@ -1,0 +1,15 @@
+.TH LSOF 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+lsof \- liste les fichiers ouverts / list open files
+.SH SYNOPSIS
+.B lsof
+[-p pid] [-u user] [-c cmd] [file...]
+.br
+.B fuser
+[-vks] file...
+.br
+.SH DESCRIPTION
+lsof prints, for every process of /proc, its working directory, executable and open descriptors with their type. fuser lists the processes using the given
+files; -v is verbose, -k kills them, -s is silent. Both read /proc/PID/{status,fd,cwd,exe}.
+.SH SEE ALSO
+ps(1), netstat(1)

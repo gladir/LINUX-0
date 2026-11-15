@@ -3508,6 +3508,8 @@ Begin
   SymFindInUnit := -1;
 End;
 
+Function UserProcNamed(Const N : TString) : Boolean; Forward;
+
 { ------------------------------------------------------------ }
 { SymAdd : ajouter un symbole dans la table                    }
 { Retourne l index du symbole ajoute, ou -1 si erreur          }
@@ -3558,6 +3560,18 @@ Begin
     End
     Else
     Begin
+      { LPC32 : variable/constante globale du meme nom qu une procedure ou
+        fonction du programme (Ev/EV) : l une masquait l autre en silence }
+      If (L32Mode <> L32_MODE_NONE) And (CurScopeLevel = 0) And
+         (((Kind In [SK_VAR, SK_CONST]) And
+           (SymTab[Dup].Kind In [SK_PROC, SK_FUNC])) Or
+          ((Kind In [SK_PROC, SK_FUNC]) And
+           (SymTab[Dup].Kind In [SK_VAR, SK_CONST]))) And
+         UserProcNamed(Up) Then
+      Begin
+        WriteLn(Opts.SrcFile, ' : erreur : identificateur deja declare : ', Up);
+        Halt(EXIT_ERROR);
+      End;
       WarnMsg('symbole deja defini dans ce scope: ' + Up);
       SymAdd := Dup;
       Exit;
@@ -6128,13 +6142,20 @@ End;
   (bit n = parametre n par adresse), calcule depuis la liste "(a, b : T; var c : U)" }
 Var
   PvMask : Array[0..MAX_TYPE - 1] Of LongInt;
+  { types des parametres (16 premiers) d un type procedure ; -1 = inconnu }
+  PvTy   : Array[0..MAX_TYPE - 1, 0..15] Of SmallInt;
+  PvCur  : Array[0..15] Of SmallInt;
+  { type de retour + 1 d un type procedure fonction (0 = procedure/inconnu) }
+  PvRetP1 : Array[0..MAX_TYPE - 1] Of SmallInt;
 
 Procedure PvCompute(Start : Integer; Var Mask : LongInt);
 Var
-  I, D, N : Integer;
+  I, D, N, GS, K, TT : Integer;
   IsVar, InType : Boolean;
 Begin
   Mask := 0; I := Start; D := 0; N := 0; IsVar := False; InType := False;
+  GS := 0;
+  For K := 0 To 15 Do PvCur[K] := -1;
   While I < TokenCount Do
   Begin
     If (TokenPool[I].Kind = TK_PUNCT) And (TokenPool[I].Val = '(') Then
@@ -6147,9 +6168,19 @@ Begin
     Else If D = 1 Then
     Begin
       If (TokenPool[I].Kind = TK_PUNCT) And (TokenPool[I].Val = ';') Then
-      Begin IsVar := False; InType := False; End
+      Begin IsVar := False; InType := False; GS := N; End
       Else If (TokenPool[I].Kind = TK_PUNCT) And (TokenPool[I].Val = ':') Then
-        InType := True
+      Begin
+        InType := True;
+        { type du groupe de noms GS..N-1 }
+        If (I + 1 < TokenCount) And
+           ((TokenPool[I + 1].Kind = TK_IDENT) Or
+            (TokenPool[I + 1].Kind = TK_KEYWORD)) Then
+        Begin
+          TT := TypeFindByName(StrUpperCase(TokenPool[I + 1].Val));
+          For K := GS To N - 1 Do If K < 16 Then PvCur[K] := TT;
+        End;
+      End
       Else If Not InType Then
       Begin
         If (TokenPool[I].Kind = TK_KEYWORD) And (StrUpperCase(TokenPool[I].Val) = 'VAR') Then
@@ -6163,6 +6194,13 @@ Begin
     End;
     Inc(I);
   End;
+End;
+
+Procedure PvSave(TI : Integer);
+Var K : Integer;
+Begin
+  If (TI >= 0) And (TI < MAX_TYPE) Then
+    For K := 0 To 15 Do PvTy[TI, K] := PvCur[K];
 End;
 
 Function ParseTypeExprAt(Var I : Integer) : Integer; Forward;
@@ -6729,6 +6767,9 @@ Begin
     End;
     TI := TypeAdd(TYK_PROCVAR, '', 4, 4, False, -1);
     If (TI >= 0) And (TI < MAX_TYPE) Then PvMask[TI] := PvM;
+    PvSave(TI);
+    If (TI >= 0) And (TI < MAX_TYPE) And (Up = 'FUNCTION') Then
+      PvRetP1[TI] := BT + 1;
     ParseTypeExprAt := TI;
     Exit;
   End;
@@ -7568,7 +7609,11 @@ Begin
             TIdx := TypeAdd(TYK_PROCVAR, '', 4, 4, False, -1);
             If (I < TokenCount) And (TokenPool[I].Kind = TK_PUNCT) And (TokenPool[I].Val = '(') Then
             Begin
-              If (TIdx >= 0) And (TIdx < MAX_TYPE) Then PvCompute(I, PvMask[TIdx]);
+              If (TIdx >= 0) And (TIdx < MAX_TYPE) Then
+              Begin
+                PvCompute(I, PvMask[TIdx]);
+                PvSave(TIdx);
+              End;
               J := 0;
               Repeat
                 If (TokenPool[I].Kind = TK_PUNCT) And (TokenPool[I].Val = '(') Then Inc(J)
@@ -7577,7 +7622,16 @@ Begin
               Until (J = 0) Or (I >= TokenCount);
             End;
             If (TName = 'FUNCTION') And (I < TokenCount) And (TokenPool[I].Kind = TK_PUNCT) And
-               (TokenPool[I].Val = ':') Then Begin Inc(I); If I < TokenCount Then Inc(I) End;
+               (TokenPool[I].Val = ':') Then
+            Begin
+              Inc(I);
+              If I < TokenCount Then
+              Begin
+                If (TIdx >= 0) And (TIdx < MAX_TYPE) Then
+                  PvRetP1[TIdx] := TypeFindByName(StrUpperCase(TokenPool[I].Val)) + 1;
+                Inc(I);
+              End;
+            End;
             TName := 'POINTER';
           End;
 
@@ -8127,6 +8181,18 @@ Begin
     EBPOfs := '[EBP+' + IntToStr_(Ofs) + ']'
   Else
     EBPOfs := '[EBP' + IntToStr_(Ofs) + ']';
+End;
+
+{ LPC32 : procedure ou fonction de premier niveau du programme (pas de la
+  couche API integree) portant ce nom }
+Function UserProcNamed(Const N : TString) : Boolean;
+Var J : Integer;
+Begin
+  UserProcNamed := False;
+  For J := 0 To ProcCount - 1 Do
+    If (ProcTab[J].Name = N) And (ProcTab[J].ParentIdx = -1) And
+       (ProcTab[J].BodyStart >= L32ApiEnd) Then
+      UserProcNamed := True;
 End;
 
 { ------------------------------------------------------------ }
@@ -9965,7 +10031,11 @@ Begin
             SIdx := SymAdd(TName, SK_TYPE, TIdx);
             If (I < TokenCount) And (TokenPool[I].Kind = TK_PUNCT) And (TokenPool[I].Val = '(') Then
             Begin
-              If (TIdx >= 0) And (TIdx < MAX_TYPE) Then PvCompute(I, PvMask[TIdx]);
+              If (TIdx >= 0) And (TIdx < MAX_TYPE) Then
+              Begin
+                PvCompute(I, PvMask[TIdx]);
+                PvSave(TIdx);
+              End;
               FC := 0;
               Repeat
                 If (TokenPool[I].Kind = TK_PUNCT) And (TokenPool[I].Val = '(') Then Inc(FC)
@@ -9973,6 +10043,10 @@ Begin
                 Inc(I);
               Until (FC = 0) Or (I >= TokenCount);
             End;
+            { LPC32 : type de retour d une fonction }
+            If (I + 1 < TokenCount) And (TokenPool[I].Kind = TK_PUNCT) And
+               (TokenPool[I].Val = ':') And (TIdx >= 0) And (TIdx < MAX_TYPE) Then
+              PvRetP1[TIdx] := TypeFindByName(StrUpperCase(TokenPool[I + 1].Val)) + 1;
             While (I < TokenCount) And
                   Not ((TokenPool[I].Kind = TK_PUNCT) And (TokenPool[I].Val = ';')) Do
               Inc(I);
@@ -10821,6 +10895,13 @@ End;
   destination de type T (String[n]) tronque a n caracteres }
 Var ReadStrT : Integer;
 
+Function InsertCap(T : Integer) : LongInt;
+Begin
+  InsertCap := 255;
+  If (T >= 0) And (T < TypeCount) Then
+    InsertCap := StrCapOf(TypeResolve(T));
+End;
+
 Procedure EmitStrAssignTo(Pascal : Boolean; T : Integer);
 Var Cap : LongInt;
 Begin
@@ -11453,10 +11534,17 @@ Var
   IsVarArg  : Boolean;
   ArgName   : TString;
   IsProcVarCall : Boolean;
+  PX        : Integer;     { LPC32 : index du parametre (tableau ouvert : 2) }
+  WasOpen   : Boolean;
+  PvTI      : Integer;     { LPC32 : type procedure de la variable appelee }
+  OpenHi    : LongInt;
+  OpenLbl   : TString;
+  OpenElem, OpenN, OpenSz, OpenK : Integer;
 Begin
   Up := StrUpperCase(ProcName);
   ArgCount := 0;
   ArgBytes := 0;
+  PX := 0;
 
   { Trouver le symbole de la procedure/fonction }
   SI := SymFind(Up);
@@ -11470,6 +11558,8 @@ Begin
   If (J >= 0) And (J < TypeCount) And (TypeTab[J].Kind = TYK_PROCVAR) And
      ((SI < 0) Or (SymTab[SI].Kind = SK_VAR)) Then
     IsProcVarCall := True;
+  PvTI := -1;
+  If IsProcVarCall Then PvTI := J;
 
   { Trouver l index dans ProcTab pour connaitre les params VAR }
   CalledPI := -1;
@@ -11489,10 +11579,103 @@ Begin
       Repeat
         { Determiner si le parametre courant est VAR }
         IsVarArg := False;
-        If (CalledPI >= 0) And (ArgCount < ProcTab[CalledPI].ParamCount) Then
-          IsVarArg := ProcTab[CalledPI].Params[ArgCount].IsVar;
+        If (CalledPI >= 0) And (PX < ProcTab[CalledPI].ParamCount) Then
+          IsVarArg := ProcTab[CalledPI].Params[PX].IsVar
+        Else If (PvTI >= 0) And (PvTI < MAX_TYPE) And (ArgCount < 31) Then
+          IsVarArg := (PvMask[PvTI] And (LongInt(1) Shl ArgCount)) <> 0;
 
-        If IsVarArg Then
+        WasOpen := IsVarArg And (CalledPI >= 0) And
+           ProcTab[CalledPI].Params[PX].IsOpen;
+        If WasOpen Then
+        Begin
+          { LPC32 : tableau ouvert : adresse puis indice maximal }
+          OpenElem := TypeTab[ProcTab[CalledPI].Params[PX].TypeIdx].BaseTypeIdx;
+          If TokIsPunct(EP, '[') Then
+          Begin
+            { constructeur [a, b, c] : tableau temporaire sur la pile }
+            Inc(EP);
+            OpenSz := TypeSizeofIdx(OpenElem);
+            If OpenSz < 1 Then OpenSz := 1;
+            OpenN := 0;
+            { compter les elements (niveau 0) }
+            OpenK := EP;
+            OpenHi := 0;
+            While (OpenK < EPEnd) And Not ((OpenHi = 0) And
+                  TokIsPunct(OpenK, ']')) Do
+            Begin
+              If TokIsPunct(OpenK, '(') Or TokIsPunct(OpenK, '[') Then
+                Inc(OpenHi)
+              Else If TokIsPunct(OpenK, ')') Or TokIsPunct(OpenK, ']') Then
+                Dec(OpenHi)
+              Else If (OpenHi = 0) And TokIsPunct(OpenK, ',') Then Inc(OpenN);
+              Inc(OpenK);
+            End;
+            If OpenK > EP Then Inc(OpenN);
+            If OpenN = 0 Then OpenN := 1;
+            OpenK := ((OpenN * OpenSz) + 3) And Not 3;
+            EmitInstr('SUB ESP,' + IntToStr_(OpenK));
+            ArgBytes := ArgBytes + OpenK;
+            OpenHi := 0;
+            While (Not EPAtEnd) And Not TokIsPunct(EP, ']') Do
+            Begin
+              ParseExpr(PI);
+              If OpenSz = 1 Then
+                EmitInstr('MOV BYTE PTR [ESP+' + IntToStr_(OpenHi * OpenSz) +
+                          '],AL')
+              Else If OpenSz = 2 Then
+                EmitInstr('MOV WORD PTR [ESP+' + IntToStr_(OpenHi * OpenSz) +
+                          '],AX')
+              Else
+                EmitInstr('MOV DWORD PTR [ESP+' + IntToStr_(OpenHi * OpenSz) +
+                          '],EAX');
+              Inc(OpenHi);
+              If Not EPMatch(',') Then Break;
+            End;
+            EPMatch(']');
+            EmitInstr('MOV EAX,ESP');
+            EmitInstr('PUSH EAX');
+            EmitInstr('PUSH ' + IntToStr_(OpenN - 1));
+            ArgBytes := ArgBytes + 8;
+          End
+          Else
+          Begin
+            OpenLbl := '';
+            If (Not EPAtEnd) And
+               ((TokenPool[EP].Kind = TK_IDENT) Or
+                (TokenPool[EP].Kind = TK_KEYWORD)) Then
+              OpenLbl := StrUpperCase(TokenPool[EP].Val);
+            OpenN := -1;
+            If OpenLbl <> '' Then OpenN := FindParam(PI, OpenLbl);
+            If (OpenN >= 0) And ProcTab[PI].Params[OpenN].IsOpen And
+               (EP + 1 < EPEnd) And
+               (TokIsPunct(EP + 1, ',') Or TokIsPunct(EP + 1, ')')) Then
+            Begin
+              { tableau ouvert transmis tel quel }
+              ParseLValueAddrW32(PI, J);
+              EmitInstr('PUSH EAX');
+              EmitInstr('PUSH DWORD PTR ' +
+                        EBPOfs(ProcTab[PI].Params[OpenN + 1].Offset));
+            End
+            Else
+            Begin
+              ParseLValueAddrW32(PI, J);
+              EmitInstr('PUSH EAX');
+              If (J >= 0) And (J < TypeCount) And
+                 (TypeTab[J].Kind = TYK_ARRAY) Then
+                EmitInstr('PUSH ' + IntToStr_(TypeTab[J].Hi - TypeTab[J].Lo))
+              Else
+              Begin
+                WriteLn(Opts.SrcFile, '(', TokenPool[EP - 1].Line,
+                  ') : erreur : tableau attendu pour le parametre ',
+                  ProcTab[CalledPI].Params[PX].Name);
+                Halt(EXIT_ERROR);
+              End;
+            End;
+            ArgBytes := ArgBytes + 8;
+          End;
+          Inc(PX, 2);
+        End
+        Else If IsVarArg Then
         Begin
           { Parametre VAR : pousser l adresse de la variable }
           If (Not EPAtEnd) And
@@ -11500,6 +11683,17 @@ Begin
               (TokenPool[EP].Kind = TK_KEYWORD)) Then
           Begin
             ArgName := TokenPool[EP].Val;
+            { LPC32 : un nom de fonction passe en parametre Var }
+            If (SymFind(StrUpperCase(ArgName)) >= 0) And
+               (SymTab[SymFind(StrUpperCase(ArgName))].Kind = SK_FUNC) And
+               (FindLocal(PI, ArgName) < 0) And (FindParam(PI, ArgName) < 0) And
+               (Not TokIsPunct(EP + 1, '[')) Then
+            Begin
+              WriteLn(Opts.SrcFile, '(', TokenPool[EP].Line,
+                ') : erreur : une fonction ne peut pas etre passee en ',
+                'parametre Var : ', StrUpperCase(ArgName));
+              Halt(EXIT_ERROR);
+            End;
             ParseLValueAddrW32(PI, J);    { adresse de la variable, element ou champ }
             EmitInstr('PUSH EAX');
           End
@@ -11515,15 +11709,20 @@ Begin
         Begin
           { Parametre normal : evaluer et pousser la valeur }
           PT := -1;
-          If (CalledPI >= 0) And (ArgCount < ProcTab[CalledPI].ParamCount) Then
-            PT := ProcTab[CalledPI].Params[ArgCount].TypeIdx;
+          If (CalledPI >= 0) And (PX < ProcTab[CalledPI].ParamCount) Then
+            PT := ProcTab[CalledPI].Params[PX].TypeIdx
+          Else If (PvTI >= 0) And (PvTI < MAX_TYPE) And (ArgCount < 16) Then
+            PT := PvTy[PvTI, ArgCount];
           WantCharLit := (PT = TY_IDX_CHAR);
+          WantProcAddr := (PT >= 0) And (PT < TypeCount) And
+                          (TypeTab[PT].Kind = TYK_PROCVAR);
           ParseExpr(PI);
+          WantProcAddr := False;
           WantCharLit := False;
           { parametre chaine : l appele attend une chaine Pascal }
-          If (CalledPI >= 0) And (ArgCount < ProcTab[CalledPI].ParamCount) And
-             TypeIsString(ProcTab[CalledPI].Params[ArgCount].TypeIdx) And
-             Not TypeIsPChar(ProcTab[CalledPI].Params[ArgCount].TypeIdx) And
+          If (PT >= 0) And
+             TypeIsString(PT) And
+             Not TypeIsPChar(PT) And
              (Not LastExprIsPascalStr) And (Not Is68kTarget) And
              (Opts.DestTarget <> DEST_CRAY1) And (Not Opts.Dos16Mode) Then
           Begin
@@ -11562,6 +11761,7 @@ Begin
             ArgBytes := ArgBytes + 4;
           End;
         End;
+        If Not WasOpen Then Inc(PX);
         Inc(ArgCount);
       Until Not EPMatch(',');
       If Not EPMatch(')') Then
@@ -11580,6 +11780,11 @@ Begin
   { Nettoyer la pile (convention cdecl/stdcall-like pour nos procs Pascal) }
   If ArgBytes > 0 Then
     EmitInstr('ADD ESP,' + IntToStr_(ArgBytes));
+  { LPC32 : variable procedure de type fonction reelle : resultat en ST(0) }
+  If IsProcVarCall And (PvTI >= 0) And (PvTI < MAX_TYPE) And
+     (PvRetP1[PvTI] > 0) And W32Fpu Then
+    If TypeIsReal(PvRetP1[PvTI] - 1) Then
+      LastVarTypeIdx := PvRetP1[PvTI] - 1;
 End;
 
 { ------------------------------------------------------------ }
@@ -11639,6 +11844,7 @@ Var
   WJ     : Integer;
   LblDone : TString;
   LblLoop : TString;
+  MvLit : Boolean;
 Begin
   LastPrimaryName := '';
   LastVarTypeIdx := -1;
@@ -12825,6 +13031,21 @@ Begin
         If Not EPAtEnd Then
         Begin
           Up := StrUpperCase(TokenPool[EP].Val);
+          { LPC32 : tableau ouvert (Array Of T) }
+          WI := FindParam(PI, Up);
+          If (WI >= 0) And ProcTab[PI].Params[WI].IsOpen And
+             TokIsPunct(EP + 1, ')') Then
+          Begin
+            Inc(EP);
+            If Lbl = 'HIGH' Then
+              EmitInstr('MOV EAX,DWORD PTR ' +
+                        EBPOfs(ProcTab[PI].Params[WI + 1].Offset))
+            Else
+              EmitInstr('XOR EAX,EAX');
+            LastVarTypeIdx := TY_IDX_INTEGER;
+            EPMatch(')');
+            Exit;
+          End;
           SI := TypeFindByName(Up);
           If SI < 0 Then SI := GetVarTypeIdx(PI, Up);
           Inc(EP);
@@ -13148,7 +13369,15 @@ Begin
           Else
           Begin
             { --- Intel 80386 (Win32) --- }
+            MvLit := (Not EPAtEnd) And (TokenPool[EP].Kind = TK_STRING);
             ParseVarArgAddr(PI);   { source : adresse dans EAX }
+            { LPC32 : litteral chaine : chaine Pascal (octet de longueur en
+              tete), comme une variable chaine et comme Turbo Pascal }
+            If MvLit And (Not LastExprIsPascalStr) And W32Fpu Then
+            Begin
+              GenStrSourceESI;
+              EmitInstr('CALL ' + TP_RT_PFX + 'STRRET');
+            End;
             EmitInstr('PUSH EAX');
             EPMatch(',');
             ParseVarArgAddr(PI);   { dest : adresse dans EAX }
@@ -13295,7 +13524,10 @@ Begin
             ParseExpr(PI);      { count dans EAX }
             EmitInstr('PUSH EAX');
             EPMatch(',');
+            { LPC32 : FillChar(.., '.') : le litteral est un code de caractere }
+            WantCharLit := CharLitArgFollows;
             ParseExpr(PI);      { value dans EAX }
+            WantCharLit := False;
             EmitInstr('POP ECX');   { count }
             EmitInstr('POP EDI');   { dest }
             EmitInstr('CLD');
@@ -19785,9 +20017,11 @@ End;
   masque de la signature) ; resultat dans EAX }
 Procedure GenProcVarCall(PI : Integer; TIdx : Integer);
 Var
-  N, ArgBytes, J : Integer;
+  N, ArgBytes, J, PT : Integer;
   Mask : LongInt;
+  RealArg : Boolean;
 Begin
+  RealArg := False;
   Mask := 0;
   If (TIdx >= 0) And (TIdx < MAX_TYPE) Then Mask := PvMask[TIdx];
   EmitInstr('PUSH EAX');
@@ -19801,9 +20035,29 @@ Begin
           ParseLValueAddrW32(PI, J)
         Else
         Begin
-          WantCharLit := False;
+          PT := -1;
+          If (TIdx >= 0) And (TIdx < MAX_TYPE) And (N < 16) Then
+            PT := PvTy[TIdx, N];
+          WantCharLit := (PT = TY_IDX_CHAR);
           ParseExpr(PI);
-          If TypeIsReal(LastVarTypeIdx) And W32Fpu Then
+          WantCharLit := False;
+          If (PT >= 0) And TypeIsString(PT) And Not TypeIsPChar(PT) And
+             (Not LastExprIsPascalStr) Then
+          Begin
+            GenStrSourceESI;
+            EmitInstr('CALL ' + TP_RT_PFX + 'STRRET');
+          End;
+          If (PT >= 0) And TypeIsReal(PT) And W32Fpu Then
+          Begin
+            { parametre reel : valeur sur la pile (4, 8 ou 12 octets) }
+            GenEnsureReal;
+            J := ParamStackSize(PT, False);
+            EmitInstr('SUB ESP,' + IntToStr_(J));
+            GenRealStore('[ESP]', PT);
+            ArgBytes := ArgBytes + J;
+            RealArg := True;
+          End
+          Else If TypeIsReal(LastVarTypeIdx) And W32Fpu Then
           Begin
             EmitInstr('SUB ESP,4');
             EmitInstr('FISTP DWORD PTR [ESP]');
@@ -19811,8 +20065,12 @@ Begin
             EmitInstr('ADD ESP,4');
           End;
         End;
-        EmitInstr('PUSH EAX');
-        ArgBytes := ArgBytes + 4;
+        If RealArg Then RealArg := False
+        Else
+        Begin
+          EmitInstr('PUSH EAX');
+          ArgBytes := ArgBytes + 4;
+        End;
         Inc(N);
       Until Not EPMatch(',');
       If Not EPMatch(')') Then Inc(EP);
@@ -19822,6 +20080,10 @@ Begin
   EmitInstr('CALL EAX');
   EmitInstr('ADD ESP,' + IntToStr_(ArgBytes + 4));
   LastVarTypeIdx := TY_IDX_INTEGER;
+  { LPC32 : fonction reelle : le resultat est dans ST(0) }
+  If (TIdx >= 0) And (TIdx < MAX_TYPE) And (PvRetP1[TIdx] > 0) Then
+    If TypeIsReal(PvRetP1[TIdx] - 1) And W32Fpu Then
+      LastVarTypeIdx := PvRetP1[TIdx] - 1;
   LastExprIsPascalStr := False;
 End;
 
@@ -19863,6 +20125,12 @@ Begin
       SavedTypeIdx := LastVarTypeIdx;
       ParseIndexW32(PI, SavedTypeIdx);
       GenLoadFromAddr(SavedTypeIdx);
+      { LPC32 : element d un tableau de procedures : T[i](args) }
+      If (SavedTypeIdx >= 0) And (SavedTypeIdx < TypeCount) And
+         (TypeTab[SavedTypeIdx].Kind = TYK_PROCVAR) And
+         (Not EPAtEnd) And (TokenPool[EP].Kind = TK_PUNCT) And
+         (TokenPool[EP].Val = '(') Then
+        GenProcVarCall(PI, SavedTypeIdx);
       Continue;
     End;
 
@@ -24124,6 +24392,8 @@ Begin
         EmitInstr('POP ESI');      { Src }
         EmitInstr('PUSH EDI');
         EmitInstr('INC EDI');
+        { LPC32 : longueur maximale de la destination (String[n]) }
+        EmitInstr('MOV EDX,' + IntToStr_(InsertCap(TIdx)));
         EmitInstr('CALL ' + TP_RT_PFX + 'INSERT');
         EmitInstr('POP EDI');
         EmitInstr('CALL ' + TP_RT_PFX + 'FIXLEN');
@@ -32754,46 +33024,61 @@ Begin
   { Utilise STRBUF2 comme buffer temporaire                     }
   EmitBlankLine;
   EmitLabel(TP_RT_PFX + 'INSERT');
+  { LPC32 : EDX = longueur maximale (String[n]) ; le resultat est construit
+    dans un tampon de pile puis tronque a EDX caracteres }
   EmitInstr('PUSHAD');
+  EmitInstr('MOV EBP,ESP');
+  EmitInstr('SUB ESP,640');
+  EmitInstr('PUSH EDX');                       { cap en [EBP-644] }
+  EmitInstr('XOR ECX,ECX');
+  EmitLabel(TP_RT_PFX + 'INS_L1');
+  EmitInstr('CMP BYTE PTR [EDI+ECX],0');
+  EmitInstr('JE ' + TP_RT_PFX + 'INS_L2');
+  EmitInstr('INC ECX');
+  EmitInstr('JMP ' + TP_RT_PFX + 'INS_L1');
+  EmitLabel(TP_RT_PFX + 'INS_L2');
   EmitInstr('DEC EBX');
-  { Copier destination dans STRBUF2 }
-  EmitInstr('PUSH ESI');
-  EmitInstr('PUSH EDI');
+  EmitInstr('JGE ' + TP_RT_PFX + 'INS_L3');
+  EmitInstr('XOR EBX,EBX');
+  EmitLabel(TP_RT_PFX + 'INS_L3');
+  EmitInstr('CMP EBX,ECX');
+  EmitInstr('JLE ' + TP_RT_PFX + 'INS_L4');
+  EmitInstr('MOV EBX,ECX');
+  EmitLabel(TP_RT_PFX + 'INS_L4');
+  EmitInstr('LEA EDX,[EBP-640]');
+  EmitInstr('PUSH EDI');                       { destination en [EBP-648] }
+  EmitInstr('MOV EAX,ESI');                    { source }
   EmitInstr('MOV ESI,EDI');
-  EmitInstr('LEA EDI,[STRBUF2]');
-  EmitInstr('CALL ' + TP_RT_PFX + 'STRASSIGN_PCHAR');
-  EmitInstr('POP EDI');
-  EmitInstr('POP ESI');
-  { EDI = debut du buffer destination }
-  { Copier les EBX premiers caracteres de STRBUF2 dans EDI }
-  EmitInstr('PUSH ESI');
-  EmitInstr('PUSH EBX');
-  EmitInstr('LEA ESI,[STRBUF2]');
+  EmitInstr('MOV EDI,EDX');
   EmitInstr('MOV ECX,EBX');
-  EmitInstr('TEST ECX,ECX');
-  EmitInstr('JZ ' + TP_RT_PFX + 'INS_P2');
-  EmitLabel(TP_RT_PFX + 'INS_P1');
-  EmitInstr('MOVSB');
-  EmitInstr('DEC ECX');
-  EmitInstr('JNZ ' + TP_RT_PFX + 'INS_P1');
-  EmitLabel(TP_RT_PFX + 'INS_P2');
-  { Copier la source (ESI original) dans EDI }
-  EmitInstr('POP EBX');
-  EmitInstr('POP ESI');
+  EmitInstr('REP MOVSB');                      { debut de la destination }
+  EmitInstr('PUSH ESI');
+  EmitInstr('MOV ESI,EAX');
   EmitLabel(TP_RT_PFX + 'INS_S1');
   EmitInstr('CMP BYTE PTR [ESI],0');
   EmitInstr('JE ' + TP_RT_PFX + 'INS_S2');
   EmitInstr('MOVSB');
   EmitInstr('JMP ' + TP_RT_PFX + 'INS_S1');
   EmitLabel(TP_RT_PFX + 'INS_S2');
-  { Copier le reste de STRBUF2 a partir de la position EBX }
-  EmitInstr('LEA ESI,[STRBUF2]');
-  EmitInstr('ADD ESI,EBX');
-  EmitLabel(TP_RT_PFX + 'INS_R1');
+  EmitInstr('POP ESI');
+  EmitLabel(TP_RT_PFX + 'INS_R1');             { reste de la destination }
   EmitInstr('LODSB');
   EmitInstr('STOSB');
   EmitInstr('TEST AL,AL');
   EmitInstr('JNZ ' + TP_RT_PFX + 'INS_R1');
+  EmitInstr('LEA ESI,[EBP-640]');
+  EmitInstr('MOV ECX,EDI');
+  EmitInstr('SUB ECX,ESI');
+  EmitInstr('DEC ECX');
+  EmitInstr('MOV EDI,DWORD PTR [EBP-648]');
+  EmitInstr('MOV EAX,DWORD PTR [EBP-644]');
+  EmitInstr('CMP ECX,EAX');
+  EmitInstr('JLE ' + TP_RT_PFX + 'INS_C1');
+  EmitInstr('MOV ECX,EAX');
+  EmitLabel(TP_RT_PFX + 'INS_C1');
+  EmitInstr('REP MOVSB');
+  EmitInstr('MOV BYTE PTR [EDI],0');
+  EmitInstr('MOV ESP,EBP');
   EmitInstr('POPAD');
   EmitInstr('RET');
 
@@ -36813,7 +37098,8 @@ Begin
   { ------ _TPRT_REALSTR : ST(0) = valeur, ECX = largeur (0 = aucune), EDX = decimales ---- }
   { (-1 = notation scientifique), EBX = taille du type (4/8/10) -> EAX = chaine Pascal       }
   { dans l anneau STRRING. Formatage par sprintf (msvcrt) : %*.*f ou % .*E, exposant ajuste  }
-  { a 2 / 3 / 4 chiffres (Single / Double / Extended) comme FPC.                            }
+  { a 2 chiffres : format Turbo Pascal, par defaut   }
+  { 10 decimales (1.2345678900E+02, precede d un espace pour le signe).                    }
   EmitBlankLine;
   EmitLabel(TP_RT_PFX + 'REALSTR');
   EmitInstr('PUSH EBP');
@@ -36842,15 +37128,7 @@ Begin
   EmitInstr('JMP ' + TP_RT_PFX + 'RS_DONE');
   EmitLabel(TP_RT_PFX + 'RS_SCI');
   { chiffres de l exposant : 2 (Single), 3 (Double), 4 (Extended) }
-  EmitInstr('MOV EAX,3');
-  EmitInstr('CMP EBX,4');
-  EmitInstr('JNE ' + TP_RT_PFX + 'RS_E1');
   EmitInstr('MOV EAX,2');
-  EmitLabel(TP_RT_PFX + 'RS_E1');
-  EmitInstr('CMP EBX,10');
-  EmitInstr('JNE ' + TP_RT_PFX + 'RS_E2');
-  EmitInstr('MOV EAX,4');
-  EmitLabel(TP_RT_PFX + 'RS_E2');
   EmitInstr('MOV DWORD PTR [EBP-16],EAX');
   { decimales maximales : 9 / 16 / 20 }
   EmitInstr('MOV EDX,16');
@@ -36864,7 +37142,10 @@ Begin
   EmitLabel(TP_RT_PFX + 'RS_D2');
   { avec largeur : decimales = largeur - (exposant + 5), au moins 1, au plus le maximum }
   EmitInstr('TEST ECX,ECX');
-  EmitInstr('JZ ' + TP_RT_PFX + 'RS_F');
+  EmitInstr('JNZ ' + TP_RT_PFX + 'RS_W');
+  EmitInstr('MOV EDX,10');                      { sans largeur : 10 decimales }
+  EmitInstr('JMP ' + TP_RT_PFX + 'RS_F');
+  EmitLabel(TP_RT_PFX + 'RS_W');
   EmitInstr('MOV EBX,ECX');
   EmitInstr('SUB EBX,EAX');
   EmitInstr('SUB EBX,5');
@@ -48584,6 +48865,10 @@ Begin
     End;
   If (Length(Base) > 3) And (Copy(Base, Length(Base) - 2, 3) = '.ko') Then
     Base := Copy(Base, 1, Length(Base) - 3);
+  { nom du module en minuscules (comme Linux : rmmod hello) }
+  For I := 1 To Length(Base) Do
+    If (Base[I] >= 'A') And (Base[I] <= 'Z') Then
+      Base[I] := Chr(Ord(Base[I]) + 32);
   MiStr := 'license=GPL'#0'name=' + Base + #0'author=LPC32'#0 +
            'vermagic=linux0-k32'#0;
   ShStr := #0'.text'#0'.data'#0'.bss'#0'.rel.text'#0'.rel.data'#0 +

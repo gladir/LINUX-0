@@ -68,6 +68,30 @@ for SRC in "$HERE"/TM*.PAS; do
   fi
   echo "ok    $N"; PASS=$((PASS+1))
 done
+# --- erreurs de compilation attendues : ERn.PAS ne doit pas compiler et le
+#     message doit contenir le texte de ERn.ERR ---
+for SRC in "$HERE"/ER*.PAS; do
+  N=$(basename "$SRC" .PAS)
+  [ -f "$HERE/$N.ERR" ] || continue
+  cp "$SRC" "$W/$N.PAS"
+  if "$LPC" -3X -q "$W/$N.PAS" >"$W/$N.log" 2>&1; then
+    echo "ECHEC $N : la compilation aurait du echouer"; FAIL=$((FAIL+1))
+  elif grep -qF "$(cat "$HERE/$N.ERR")" "$W/$N.log"; then
+    echo "ok    $N"; PASS=$((PASS+1))
+  else
+    echo "ECHEC $N : message different (voir $W/$N.log)"; FAIL=$((FAIL+1))
+  fi
+done
+# --- ModuleInit : Procedure ModuleInit doit rendre EAX = 0 (le noyau lit EAX
+#     comme code d'erreur) : XOR EAX,EAX avant le retour de TM1 ---
+if [ -f "$W/TM1.ko" ]; then
+  if objdump -d "$W/TM1.ko" | awk '/<_TPF_DOINIT>:/{f=1} f&&/xor +%eax,%eax/{ok=1}
+       /<_TPF_DOEXIT>:/{f=0} END{exit !ok}'; then
+    echo "ok    TM1 : ModuleInit rend EAX = 0"; PASS=$((PASS+1))
+  else
+    echo "ECHEC TM1 : ModuleInit sans XOR EAX,EAX"; FAIL=$((FAIL+1))
+  fi
+fi
 # --- programmes utilisateur -3X, executes sur l'hote ---
 if cp "$HERE/UX1.PAS" "$W/UXPROBE.PAS" && "$LPC" -3X -q "$W/UXPROBE.PAS" >/dev/null 2>&1 \
    && "$W/UXPROBE" >/dev/null 2>&1; then

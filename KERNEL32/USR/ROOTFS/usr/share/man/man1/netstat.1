@@ -1,0 +1,15 @@
+.TH NETSTAT 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+netstat \- etat du reseau / network status
+.SH SYNOPSIS
+.B netstat
+[-antulpr]
+.br
+.B ss
+[-antulp]
+.br
+.SH DESCRIPTION
+Reads /proc/net/tcp, /proc/net/udp, /proc/net/route and /proc/net/dev. -a all sockets, -l listening only, -t TCP, -u UDP, -r routing table, -i interfaces. ss
+prints the same tables in its own layout.
+.SH SEE ALSO
+ifconfig(1), route(1)

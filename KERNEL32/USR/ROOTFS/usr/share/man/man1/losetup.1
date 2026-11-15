@@ -1,0 +1,12 @@
+.TH LOSETUP 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+losetup \- peripheriques boucle / set up and control loop devices
+.SH SYNOPSIS
+.B losetup
+[-a | -f | -d dev | [-r] [-o offset] dev file]
+.br
+.SH DESCRIPTION
+Attaches a file to /dev/loopN with the LOOP_* ioctls (LOOP_SET_FD, LOOP_SET_STATUS64, LOOP_CLR_FD, LOOP_GET_STATUS64). -a lists, -f prints a free device, -d
+detaches, -r read-only, -o byte offset.
+.SH SEE ALSO
+mount(1)

@@ -62,7 +62,7 @@ Parties ajoutees en phase 2 (placees physiquement avant la partie 14) :
 
 | Partie | Contenu |
 |---|---|
-| 18 | ext2 : superbloc, descripteurs de groupes epingles dans le cache de tampons, bitmaps, allocation de blocs et d'inodes avec regroupement, inodes de 128/256 octets, revisions 0 et 1, blocs de 1/2/4 Ko, `sparse_super`, `filetype`, indirections simple/double/triple, repertoires lineaires (ajout, fusion a la suppression, agrandissement), liens durs, liens symboliques rapides et lents, `mknod` (tty, bloc, fifo, socket), `rename` (entre repertoires, remplacement), troncature, `chmod/chown/utimes`, `statfs`, `s_state` propre/sale, remontage. ext3 (journal propre) monte comme ext2 ; journal a rejouer ou sommes de controle : lecture seule ; ext4 (extents, 64bit...) : refuse |
+| 18 | ext2 (et ext3/ext4 depuis la partie 37) : superbloc, descripteurs de groupes epingles dans le cache de tampons, bitmaps, allocation de blocs et d'inodes avec regroupement, inodes de 128 a 1024 octets, revisions 0 et 1, blocs de 1 a 64 Ko, `sparse_super`, `filetype`, indirections simple/double/triple, repertoires lineaires (ajout, fusion a la suppression, agrandissement), liens durs, liens symboliques rapides et lents, `mknod` (tty, bloc, fifo, socket), `rename` (entre repertoires, remplacement), troncature, `chmod/chown/utimes`, `statfs`, `s_state` propre/sale, remontage, liste des orphelins. Extents, journal jbd/jbd2, sommes de controle, `flex_bg`, `64bit`... : voir la section "Partie 37" |
 | 19 | sockets : `AF_UNIX` (stream, dgram, socketpair, noms dans le VFS ou abstraits, `SCM_RIGHTS`), `AF_INET` en bouclage et reel (appels directs 359-373 et `socketcall`), `bind/listen/accept/connect/send/recv/sendmsg/recvmsg/shutdown/getsockopt...`, `poll` |
 | 20 | cache de pages des mappages partages (`MAP_SHARED` de fichiers : pages partagees entre processus, ecritures recopiees dans le fichier, `msync`) |
 | 21 | `epoll` (LT, ET, ONESHOT), `eventfd`, `timerfd`, `inotify` (create, open, modify, close, move, delete, attrib) |
@@ -80,6 +80,7 @@ Parties ajoutees en phase 2 (placees physiquement avant la partie 14) :
 | 24 | FAT12/16/32 et vfat (noms longs UTF-8/UCS-2, noms courts `~N`, indicateurs de casse NT), lecture/ecriture, repertoires qui grandissent, renommage, troncature, attribut lecture seule, dates, `statfs`, FSInfo FAT32 ; options `ro`, `rw`, `umask=`, `uid=`, `gid=` ; types `vfat`, `msdos`, `fat` |
 | 35 | fichiers de plus de 2 Go (physiquement apres la partie 2 pour l'arithmetique `U64*`, repartie dans le VFS, ext2, FAT, iso9660, le peripherique bloc, les verrous et les appels systeme) : voir la section "Partie 35" |
 | 36 | `/proc/sys` (sysctl en lecture et ecriture), `/proc/swaps`, swap sur fichier ordinaire, chargeur de modules (`init_module/delete_module/finit_module`, `.ko` de `lpc -3M`), `/proc/modules`, `/proc/kallsyms`, `request_irq` pour les modules : voir la section "Partie 36" |
+| 37 | ext3/ext4 (physiquement dans la partie 18, plus la couche bloc de la partie 11) : fonctionnalites compat/incompat/ro_compat reconnues et refusees proprement si inconnues, arbre d'extents en lecture/ecriture, journal jbd/jbd2 (rejeu au montage, ecriture journalisee `data=ordered`/`data=writeback`), `flex_bg`, `meta_bg`, `64bit`, `uninit_bg`/`GDT_CSUM` (crc16), `metadata_csum` (crc32c), `extra_isize`/`i_crtime`, `huge_file`, `dir_index` (lecture), blocs de 1 a 64 Ko, `sparse_super2`, orphelins, chargeur BOOT/ capable de lire ext3/ext4 : voir la section "Partie 37" |
 | ... | `/sys` (`PopulateSys`), pseudo-terminaux (maitre `PtmxXxx`, esclaves `Ttys[PtyBase+N]`, devpts = tmpfs a la partie 14), FPU/SSE (`FpuDetect`, FXSAVE), bind mounts / `pivot_root` / `MS_MOVE` (partie 12), racine reelle `TryRealRoot` (partie 17) |
 
 ## Carte memoire
@@ -210,14 +211,15 @@ lui qui doit etre prefere : voir `init=` et le plan ci-dessous.
 ### ext2 : limites
 
 Fichiers jusqu'a 16 Go (blocs de 1 Ko) ou 2 To (blocs de 4 Ko) depuis la
-partie 35 (`i_size_high`, `large_file`) ; pas d'extents, de journal (rejoue), d'attributs
-etendus ni d'ACL (le bloc d'EA d'un fichier supprime est libere), de `meta_bg`,
-`64bit`, ni de repertoires indexes (le drapeau `INDEX_FL` est efface a toute
-modification) ; les sommes de controle (`gdt_csum`, `metadata_csum`) imposent la
-lecture seule ; blocs de 8 Ko et plus refuses ; pas de quotas ; les copies de
-secours du superbloc et des descripteurs ne sont pas mises a jour (comme le
-noyau Linux). Les acces au peripherique brut `/dev/hdaN` (tampons de 1 Ko) ne
-sont pas coherents avec un ext2 de blocs de 2 ou 4 Ko monte sur le meme disque.
+partie 35 (`i_size_high`, `large_file`) ; les attributs etendus et les ACL
+sont geres (partie 33) ; ext3/ext4 (extents, journal, sommes de controle,
+`64bit`, `meta_bg`, blocs jusqu'a 64 Ko) depuis la partie 37 : voir la section
+correspondante pour les limites. Un repertoire indexe (`dir_index`) qu'on
+modifie perd son index (le drapeau `INDEX_FL` est efface, comme ext2) ; pas
+de quotas ; les copies de secours du superbloc et des descripteurs ne sont pas
+mises a jour (comme le noyau Linux). Les acces au peripherique brut
+`/dev/hdaN` (tampons de 1 Ko) ne sont pas coherents avec un ext2 de blocs de
+2 Ko ou plus monte sur le meme disque.
 
 ### Tests (phase 2)
 
@@ -360,7 +362,7 @@ reels depuis la partie 29. Correction au passage :
 
 ### Tests (suite)
 
-* `RUNK.SH` : 40 programmes embarques, 849 verifications (dont `bigtest` et `modtest` des parties 35 et 36, qui ne font leurs essais de disque que sous `RUNBIG.SH` ; `ptracetest`, `seccomptest`, `xattrtest`, `nstest` des lots A2c/A2d ; `xattrtest` est aussi execute sur ext2 par `ext2test`)
+* `RUNK.SH` : 41 programmes embarques (dont `ext4test` et `jrntest`, qui ne font leurs essais de disque que sous `RUNEXT4.SH` et `RUNJRN.SH`), 849 verifications (dont `bigtest` et `modtest` des parties 35 et 36, qui ne font leurs essais de disque que sous `RUNBIG.SH` ; `ptracetest`, `seccomptest`, `xattrtest`, `nstest` des lots A2c/A2d ; `xattrtest` est aussi execute sur ext2 par `ext2test`)
   ; avant ces lots : 34 programmes, 586 verifications (dont `syscalltest` : 94
   verifications du lot A1, `sigrttest` : 58 du lot A2a, `ipctest` et
   `mqfutextest` du lot A2b) (`fattest`, `fbtest`,
@@ -487,6 +489,117 @@ l'horloge CMOS ; 34 de sysctl et /proc/swaps) avec les modules `TESTS/K/hello.pa
 (swap sur fichier ext2 de 24 Mo sous pression memoire, blocs de 1 Ko et 4 Ko,
 `e2fsck` propre).
 
+### Partie 37 : ext3 et ext4 (lot C de D4)
+
+Le code est dans la partie 18 (physiquement avant la partie 14) ; la couche
+bloc (partie 11) ne change que pour les tampons de plus de 4 Ko
+(`AllocPages(ordre)`), l'ecriture differee (`BufWrite` ignore un tampon de la
+transaction du journal : drapeau `BvJrn`) et `BDirty`, qui fait entrer les
+tampons de metadonnees dans la transaction. `mount -t ext2|ext3|ext4` est le
+meme code.
+
+**Fonctionnalites** (`ExParseSb`) : *incompat* reconnues : `filetype`,
+`recover`, `meta_bg`, `extents`, `64bit`, `flex_bg`, `csum_seed`, `large_dir` ;
+toute autre (compression, journal externe, `mmp`, `ea_inode`, `dirdata`,
+`inline_data`, chiffrement, `casefold`) refuse le montage (`EINVAL`, message
+dans dmesg). *ro_compat* ecriture : `sparse_super`, `large_file`, `btree_dir`,
+`huge_file`, `gdt_csum`, `dir_nlink`, `extra_isize`, `metadata_csum`,
+`project` ; les autres (quota, `bigalloc`, `replica`, `snapshot`...) montent
+en lecture seule. *compat* : ignorees si inconnues (comme Linux). Une somme
+de controle de descripteur de groupe fausse monte en lecture seule.
+
+**Extents** : arbre de profondeur 0 a 5 dans l'inode (4 entrees) et dans des
+blocs ; lecture ; ecriture (fusion avec l'extension voisine, division d'une
+feuille, croissance de l'arbre quand la racine est pleine, index corriges
+quand la premiere cle change) ; troncature (liberation par plages, noeuds
+vides retires, profondeur ramenee a 0 si l'arbre est vide) ; extensions non
+initialisees (`fallocate` de l'hote) lues comme des zeros et converties a
+l'ecriture (division en trois). Valide par `e2fsck` sur des arbres de
+profondeur 2 (700 extensions de 1 bloc, blocs de 1 Ko).
+
+**Groupes** : descripteurs de 32 ou 64 octets (`64bit`, au plus 2^32 blocs),
+`flex_bg`, `meta_bg` (emplacement des descripteurs et groupes de
+sauvegarde), `sparse_super2`, `resize_inode` (conserve, pas de
+redimensionnement), `uninit_bg` (bitmaps `BLOCK_UNINIT`/`INODE_UNINIT`
+initialises au premier usage, `itable_unused` tenu a jour), blocs de 1 a 64 Ko
+(les tampons de plus de 4 Ko sont des pages contigues), inodes de 128 a 1024
+octets (256 octets conserves en memoire).
+
+**Sommes de controle** (ecriture ; la lecture ne les verifie pas, sauf celle
+des descripteurs au montage) : `GDT_CSUM` (crc16 du groupe) et `metadata_csum`
+(crc32c : superbloc, descripteurs, bitmaps de blocs et d'inodes, inodes,
+blocs de repertoire (queue de 12 octets), blocs d'extents, blocs d'attributs
+etendus). Les repertoires et le journal sont refaits en consequence.
+
+**Inodes etendus** : `i_extra_isize`, `i_crtime` pose a la creation (rendu par
+`statx` : `stx_btime`, masque `STATX_BTIME`), `huge_file` (i_blocks en blocs
+du systeme de fichiers), 16 bits de poids fort d'`uid`/`gid`.
+
+**Repertoires** : lecture lineaire (un repertoire `htree` se lit comme un
+repertoire ordinaire : ses noeuds d'index sont des entrees vides) ; la
+premiere modification d'un repertoire indexe le remet a l'etat lineaire
+(noeuds d'index reecrits en blocs vides, `INDEX_FL` efface) : `e2fsck`
+l'accepte. La creation de repertoires indexes n'est pas faite. Entrees de
+64 Ko (`rec_len` code sur 16 bits).
+
+**Liste des orphelins** : un inode sans nom est chaine dans `s_last_orphan`
+(par `i_dtime`) jusqu'a sa suppression ; au montage en ecriture, les inodes
+orphelins laisses par un arret brutal (par Linux ou par ce noyau) sont
+supprimes ou tronques.
+
+**Journal jbd/jbd2** (`ExJrnLoad`, `ExJrnPass`, `ExJrnCommit`) :
+* rejeu au montage (meme en lecture seule ; option `noload`/`norecovery`
+  pour s'en abstenir : lecture seule) : trois passes comme `do_one_pass` de
+  Linux (recherche de la fin, revocations, rejeu), blocs de description et de
+  validation, revocations (32 ou 64 bits), blocs echappes, journal circulaire,
+  etiquettes de 8, 10, 12, 14 et 16 octets (`64bit`, `CSUM_V2`, `CSUM_V3`),
+  sommes de controle crc32c des descriptions, des blocs et des validations ;
+  superbloc du journal v1 et v2 ; le rejeu refait lire le superbloc
+  (`ExParseSb`) puis efface `needs_recovery` ;
+* ecriture : tous les tampons de metadonnees modifies (bitmaps, descripteurs,
+  superbloc, inodes, repertoires, extents, indirections, attributs) sont
+  epingles dans la transaction courante et ne sont plus ecrits a leur place
+  tant qu'elle n'est pas validee. Validation (`ExJrnCommit`) : mode
+  `data=ordered` (defaut) : les tampons de donnees sont d'abord ecrits ;
+  puis description + blocs + validation dans le journal, superbloc du journal
+  (`s_start`), recopie des blocs a leur place (point de reprise), superbloc du
+  journal vide. Declenchee par `sync`, `fsync`, demontage, remontage,
+  `bdflush` (5 s), ou quand la transaction approche la moitie de la
+  capacite. `data=writeback` : pas d'ecriture des donnees avant la validation.
+  `data=journal` : refuse (`EINVAL`). `needs_recovery` est pose pendant le
+  montage et efface au demontage. Limites : pas de revocations ni de sommes de
+  controle ecrites (le journal est remis sans `CSUM_*` a la mise en service ;
+  il est vide a ce moment), une transaction a la fois, journal interne
+  seulement, pas de `fast_commit`, pas de journal circulaire reutilise (le
+  journal est vide apres chaque validation) ;
+* essais d'arret brutal : parametre `jcrash=N` (1 journal valide mais blocs
+  non recopies, 2 transaction incomplete, 3 recopie a moitie, 4 recopie
+  finie) : le noyau coupe la machine a cette etape.
+
+**Chargeur (`BOOT/LOADER.PAS`)** : lit ext2, ext3 et ext4 : extents (arbre de
+profondeur 3 au plus, extensions non initialisees lues comme des trous),
+`64bit` (descripteurs de 64 octets), `flex_bg`, repertoires `htree`, inodes de
+256 octets, blocs de 1 a 4 Ko ; un journal non rejoue est signale (le
+noyau est lu tel quel sur le disque). Refuse : `meta_bg`, `inline_data`,
+blocs de plus de 4 Ko, autres fonctionnalites incompatibles. L'installateur
+et `mkfs.ext2` (E2) restent en ext2 sans journal.
+
+**Essais** : `TESTS/K/RUNEXT4.SH [-n] [-b bloc] [-i inode] [-m Mo]` avec
+`MKE_OPTS` (options de `mke2fs`, defaut `-t ext4`) : `MKEXT4.SH` fabrique le
+disque (`/hdir` indexe par `e2fsck -D`, `/falloc.bin` a extensions non
+initialisees par `debugfs fallocate`), `ext2test` (97 verifications) et
+`ext4test` (37 a 40 : extensions non initialisees, arbre profond, troncature,
+repertoire indexe, liens longs, `ENOSPC`, `statx`), puis `e2fsck -fn`.
+Variantes validees : ext4 par defaut en 1/2/4/8/64 Ko, sans `metadata_csum`,
+sans `64bit`, sans `flex_bg`, `meta_bg`, `sparse_super2`, inodes de 128/512,
+ext3 (1 Ko et 4 Ko), ext4 sans journal, ext2 revision 0. Journal sale
+fabrique par `debugfs` (`IMG_HOOK=TESTS/K/JHOOK.SH`, `JOPT=-c` pour les
+sommes de controle) : quatre transactions dont une revocation.
+`TESTS/K/RUNJRN.SH [-s files|orphan] [-S "0 1 2 3 4"]` : arret brutal a chaque
+etape de la validation, nouveau demarrage (rejeu), verification de l'etat et
+`e2fsck`. `TESTS/K/RUNBOOT4.SH [-o "options mke2fs"] [-N entrees]` : amorce
+par le chargeur depuis une partition ext4.
+
 ### Lots A2c et A2d (ptrace, seccomp, xattr/ACL, clone3/espaces de noms)
 
 Limites connues : `PTRACE_SINGLEBLOCK` et `SET_THREAD_AREA` refusent (`EIO`) ;
@@ -501,7 +614,7 @@ isolation ; `/proc`, les groupes (`kill(0/-1/-pgrp)`, `getpgid`, `setsid`) et le
 ### Plan restant
 
 Verrous fins a la place du verrou unique du noyau (ext2/FAT/reseau/VFS
-independants), SMP, journal ext3/ext4, FAT comme racine, DHCP/DNS dans
+independants), SMP, FAT comme racine, creation de repertoires `htree`, DHCP/DNS dans
 le noyau, isolation reelle des montages et du reseau (fichiers de plus de 2 Go
 et modules : realises, parties 35 et 36).
 
@@ -567,7 +680,8 @@ resolv.conf, securetty, nsswitch.conf, protocols, services, login.defs.
 
 ### Installateur et mkfs.ext2 (`USR/INSTALL.PAS`)
 
-`install [-d disque] [-l FR|EN|GR|SP|IT] [-s Mo] [-r racine] [-y] [-q]` :
+`install [-d disque] [-l FR|EN|GR|SP|IT] [-s Mo] [-r racine] [-b 1024|2048|4096]
+[-I 128|256] [-N inodes] [-y] [-q]` :
 1. partitionne le disque cible : MBR (`/usr/share/boot/MBR.BIN`), chargeur
    `STAGE2.BIN` (52 secteurs apres le MBR, parametres LBA/nombre de secteurs
    ecrits dans le MBR), une partition Linux `83h` active au secteur 2048 ;
@@ -579,12 +693,20 @@ resolv.conf, securetty, nsswitch.conf, protocols, services, login.defs.
    fichiers speciaux, indirections simple et double ; `/etc/profile` recoit
    `LANGUAGE=XX` (langue choisie) ;
 4. le disque installe s'amorce seul (chargeur de B + noyau copie de `/boot`).
-`mkfs.ext2 [-s Mo] peripherique` (meme programme, autre nom) formate sans
-partitionner. Verification : `e2fsck -fn` propre (3 Mo a 300 Mo essayes ;
-fichiers de 40 Mo, 300 entrees de repertoire, liens, tubes). Limites : blocs
-de 1 Ko et inodes de 128 octets uniquement, disque de 2 Go au plus, 4000
-entrees par repertoire, une seule source (`/` en cours d'execution ou
-`-r dossier`), ext2 seulement (pas de journal). Essai : `TESTS/U/RUNU.SH install`
+`mkfs.ext2 [-b taille] [-I inode] [-N inodes] [-s Mo] peripherique` (meme
+programme, autre nom) formate sans partitionner. Lot E3 : `-b` (1 Ko par
+defaut, 2 Ko, 4 Ko : premier bloc de donnees 0 et superbloc dans le bloc 0 a
+partir de 2 Ko, i_blocks en secteurs de 512 octets, indirections a BS/4
+entrees), `-I 256`, `-N` (nombre total d'inodes, arrondi a un bloc de table
+par groupe) ; `e2fsck -fn` de l'hote propre pour les six combinaisons 1/2/4 Ko
+x 128/256 (mkfs sur 40 Mo, install d'une racine de 35 Mo sur 100 Mo,
+`TESTS/U/RUNU.SH utils`). Verification : `e2fsck -fn` propre (3 Mo a 300 Mo essayes ;
+fichiers de 40 Mo, 300 entrees de repertoire, liens, tubes). Limites : disque
+de 2 Go au plus (blocs de 1 Ko ; 8 Go a 4 Ko), 4000 entrees par repertoire,
+une seule source (`/` en cours d'execution ou `-r dossier`), ext2 seulement
+(pas de journal : mkfs.ext3 et mkfs.ext4 ne sont pas ecrits, le chargeur lit
+ext3/ext4 mais l'installateur ne les cree pas). Essai : `TESTS/U/RUNU.SH
+install`
 (deux disques sous QEMU : `install -d /dev/hdb`, e2fsck, amorce du disque
 installe, LANGUAGE=IT).
 
@@ -633,3 +755,40 @@ Details et cas minimaux : `/tmp/claude-0/work/k32/BUGS_NOYAU.md`.
    disque en `index=2` (secondaire maitre, hdc) n'est pas detecte.
 3. `uname -s` renvoie `LINUX-0` (les programmes Linux courants attendent
    `Linux` : le noyau garde-t-il `uname_release=` seulement pour la release ?).
+
+### Lot E3 : outils, compilateur, auto-hebergement (agent E3)
+
+`USR/` compte 77 programmes. Nouveaux (un programme peut servir plusieurs
+noms, lu dans `argv[0]` ; `BUILD.SH` cree les liens) :
+
+| Programme | Noms | Remarques |
+|-----------|------|-----------|
+| `VI.PAS` | vi view vim | editeur modal : hjkl w b e W B E 0 ^ $ f F t T ; , % { } G gg H M L, Ctrl-F/B/D/U, i a I A o O R r s S C cw cc, x X dd D d{mvt} y p P J ~ > <, `.`, u, / ? n N * (regex), `:w :q :wq :x :q! :e :r :N :d :y :m :t :j :s///g :g :v :set :!`, marques, objets iw aw. 95 essais sur pty (`TESTS/U/vitest.py`). Un registre, annulation a une etape, lignes de 255 octets |
+| `LESS.PAS` | less more | pagineur (fichiers ou tube, clavier sur /dev/tty), recherche regex avec mise en relief, -N -S -i, :n :p, v |
+| `MAN.PAS` | man info apropos whatis | formateur roff (macros man), pages dans `/usr/share/man/<langue>/manN` puis `manN`, pagineur `$PAGER`, -k -f -w ; pages `USR/ROOTFS/usr/share/man/man1` generees par un script |
+| `TEXTUTIL.PAS` | wc head tail cut paste | filtres compares a coreutils (47 cas) ; remplacent les versions du depot (qui ne lisaient pas un tube) |
+| `CRON.PAS` | crond cron crontab at atd batch atq atrm | crontab (listes, pas, noms, @reboot...), spool `/var/spool/cron/crontabs`, travaux at `/var/spool/cron/atjobs`, journal `/var/log/cron.out` ; crond et atd lances par `/etc/rc` |
+| `PATCH.PAS` | patch | formats unifie, contexte, normal ; decalage, fuzz 0-2, .rej, -R, -p, -b, --dry-run ; 714 essais contre `diff` (`TESTS/U/patchtest.py`) |
+| `CPIO.PAS` | cpio | newc et odc (-o -i -t -p), interoperable avec un lecteur/ecrivain newc independant ; liens physiques ecrits en copies |
+| `ZIPTOOL.PAS` | zip unzip zipinfo | ZIP stocke et deflate (inflate complet, deflate LZ77 + Huffman fixe), CRC-32 ; interoperable avec Info-ZIP dans les deux sens |
+| `E2FSCK.PAS` | e2fsck fsck fsck.ext2/3/4 | verification ext2/3/4 en lecture seule (blocs mappes et extents), sortie identique a `e2fsck -fn` sur 28 cas (images saines ext2 1 Ko et 4 Ko, corrompues par debugfs), `TESTS/U/e2fsckcmp.sh` ; fsck choisit fsck.TYPE d'apres /etc/fstab |
+| `PROCINFO.PAS` | lsof fuser netstat ss lspci lsusb losetup | lisent /proc, /sys, ioctl LOOP_* ; voir "Demandes au noyau" |
+| `NETUTIL.PAS` | telnet ftp httpd traceroute | telnet (IAC), ftp passif, httpd statique, traceroute UDP/ICMP ; essais sur l'hote (httpd/curl, ftp contre un serveur de test, traceroute 127.0.0.1) |
+| `UDHCPC.PAS` | udhcpc dhclient | DHCP par diffusion UDP (une negociation), configure ifconfig/route/resolv.conf ; non verifie sous QEMU si le noyau refuse la diffusion depuis 0.0.0.0 (etape net de RUNU : SKIP) |
+| `IPTOOL.PAS` | ip | `ip addr|link|route [show|add|del|set]` par ioctl (pas de netlink) |
+
+Essais : `TESTS/U/RUNU.SH` (etapes `utils` sur l'hote et `tools` sous QEMU :
+`/usr/share/bench/tools.sh`). Non faits : cron.daily/weekly, xz/lzma,
+ftp mget/mput, bash-isms (tableaux, `[[ ]]`, `{1..n}`,
+substitution de processus) dans `/bin/bash`, loadkeys/terminfo/zoneinfo,
+job control teste sur pty, mkfs.ext3/ext4. Le compilateur (voir
+`TOOLS/LPC.TXT`, "Ajouts du lot E3") gagne : tableaux ouverts, pointeurs de
+procedures complets, reels au format Turbo Pascal, Insert tronque, Move de
+litteral, ModuleInit (EAX := 0), noms de modules en minuscules, erreur sur
+homonymes variable/procedure.
+
+Demandes au noyau (D4) : `/proc/net/tcp`, `/proc/net/udp`, `/proc/net/unix`
+(netstat, ss, lsof -i), `/proc/PID/fd` avec liens `socket:[n]`, `/dev/loop*`
+et `/dev/loop-control` avec LOOP_* (losetup), `/sys/bus/pci/devices`,
+`/sys/bus/usb/devices` (lspci, lsusb), AF_NETLINK (ip natif), AF_PACKET
+(DHCP), `/proc/partitions`. Voir BUGS_NOYAU.md.

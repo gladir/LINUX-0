@@ -1,0 +1,28 @@
+.TH WC 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+wc \- compte lignes, mots, octets / count lines, words, bytes
+.SH SYNOPSIS
+.B wc
+[-clLmw] [file...]
+.br
+.SH DESCRIPTION
+Prints newline, word and byte counts for each file and a total when there are several. Reads standard input when no file is given. Part of the textutil program
+(wc, head, tail, cut, paste).
+.SH OPTIONS
+.TP
+.B -l
+Lines.
+.TP
+.B -w
+Words.
+.TP
+.B -c
+Bytes.
+.TP
+.B -m
+Characters.
+.TP
+.B -L
+Length of the longest line.
+.SH SEE ALSO
+head(1), tail(1)

@@ -1,0 +1,24 @@
+.TH CUT 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+cut \- extrait des colonnes / remove sections from lines
+.SH SYNOPSIS
+.B cut
+-b|-c|-f list [-d delim] [-s] [file...]
+.br
+.SH DESCRIPTION
+Selects bytes (-b), characters (-c) or delimited fields (-f). Lists are N, N-M, N-, -M separated by commas.
+.SH OPTIONS
+.TP
+.B -d delim
+Field delimiter (default tab).
+.TP
+.B -s
+Only lines containing the delimiter.
+.TP
+.B --complement
+Select the other fields.
+.TP
+.B --output-delimiter=S
+Output delimiter.
+.SH SEE ALSO
+paste(1)

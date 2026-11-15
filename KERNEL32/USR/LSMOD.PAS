@@ -59,6 +59,31 @@ Begin
   IsDir := (SysStat(P, St) = 0) And ((St.Mode And $F000) = $4000);
 End;
 
+{ ligne de /proc/modules "nom taille usage deps etat adresse" -> format de
+  lsmod : nom sur 19 colonnes, taille sur 8, usage, dependants }
+Procedure ShowMod(Const L : String);
+Var
+  F : Array[1..6] Of String;
+  K, N, P : LongInt;
+  R : String;
+Begin
+  For K := 1 To 6 Do F[K] := '';
+  N := 1;
+  For P := 1 To Length(L) Do
+    If L[P] = ' ' Then
+    Begin
+      If (F[N] <> '') And (N < 6) Then Inc(N);
+    End
+    Else F[N] := F[N] + L[P];
+  R := F[1];
+  While Length(R) < 19 Do R := R + ' ';
+  R := R + ' ';
+  For K := 1 To 8 - Length(F[2]) Do R := R + ' ';
+  R := R + F[2] + '  ' + F[3];
+  If (F[4] <> '') And (F[4] <> '-') Then R := R + ' ' + F[4];
+  SysPut(1, R + #10);
+End;
+
 Var
   Fd, N, I, Rc : LongInt;
   A, L, Params : String;
@@ -77,7 +102,7 @@ BEGIN
     SysPut(1, 'Module                  Size  Used by' + #10);
     Fd := SysOpen('/proc/modules', O_RDONLY, 0);
     If Fd < 0 Then SysExit(0);
-    While SysReadLine(Fd, L) Do SysPut(1, L + #10);
+    While SysReadLine(Fd, L) Do ShowMod(L);
     SysClose(Fd);
     SysExit(0);
   End;

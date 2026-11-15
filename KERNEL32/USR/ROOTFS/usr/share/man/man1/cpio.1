@@ -1,0 +1,18 @@
+.TH CPIO 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+cpio \- copie des fichiers vers et depuis des archives / copy files to and from archives
+.SH SYNOPSIS
+.B cpio
+-o [-H newc|odc] [-v] < list > archive
+.br
+.B cpio
+-i [-dmuvt] [pattern...] < archive
+.br
+.B cpio
+-p [-dmv] directory < list
+.br
+.SH DESCRIPTION
+Reads and writes newc (070701, and 070702 when reading) and odc (070707) archives: regular files, directories, symbolic links, devices and pipes. Hard links are
+stored as separate copies on output and rebuilt from GNU archives on input. -d creates leading directories, -u overwrites, -t lists, -v is verbose.
+.SH SEE ALSO
+tar(1), find(1)

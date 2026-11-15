@@ -1,0 +1,29 @@
+.TH PATCH 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+patch \- applique une difference a un fichier / apply a diff file to an original
+.SH SYNOPSIS
+.B patch
+[-pN] [-R] [-N] [-b] [-s] [-F N] [--dry-run] [-d dir] [-i patchfile] [-o out] [file]
+.br
+.SH DESCRIPTION
+Applies unified, context and normal diffs. Hunks are located by line offset with up to 2 lines of context tolerance (fuzz); rejected hunks go to file.rej. A
+file whose old name is /dev/null is created, one whose new name is /dev/null is removed. A patch that is already applied is detected and skipped (use -N to
+ignore this).
+.SH OPTIONS
+.TP
+.B -pN
+Strip N leading path components from file names.
+.TP
+.B -R
+Reverse the patch.
+.TP
+.B -b
+Keep the original as file.orig.
+.TP
+.B --dry-run
+Check without changing files.
+.TP
+.B -F N
+Maximum fuzz factor (default 2).
+.SH SEE ALSO
+diff(1)

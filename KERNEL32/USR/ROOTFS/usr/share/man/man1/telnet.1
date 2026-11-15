@@ -1,0 +1,23 @@
+.TH TELNET 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+telnet \- clients et serveur reseau / network clients and server
+.SH SYNOPSIS
+.B telnet
+host [port]
+.br
+.B ftp
+[-n] host [port]
+.br
+.B httpd
+[-p port] [-d root] [-f]
+.br
+.B traceroute
+[-m hops] [-w sec] host
+.br
+.SH DESCRIPTION
+telnet negotiates the IAC options (remote ECHO switches the local terminal echo off, SGA is accepted, others refused). ftp is an interactive passive-mode
+client: open user ls dir cd cdup pwd get put mkdir rmdir delete rename binary ascii lcd ! quote system size close quit; -n disables the automatic login. httpd
+serves static files over HTTP/1.0 (GET, HEAD, index.html, directory listings, 403 for .. paths) from /var/www or -d root. traceroute sends UDP probes with
+increasing TTL and reads ICMP replies on a raw socket.
+.SH SEE ALSO
+nc(1), wget(1), ping(1)

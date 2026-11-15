@@ -17,6 +17,9 @@ ETAT : marche = fonctionne conformement a son aide pour les essais faits ;
        echoue = ne fonctionne pas (cause dans REMARQUE).
 QEMU : ok = meme resultat sous KERNEL32 ; KO = difference ; aide = seul l'essai
        d'aide a ete fait ; - = non essaye.
+(programmes de USR/ : suite = essais dedies, RUNU.SH utils sur l'hote -- vi sur
+pty, textutil contre coreutils, patch, e2fsck contre e2fsck -fn, zip contre
+Info-ZIP -- et RUNU.SH tools sous QEMU ; sess = verifie en session QEMU)
 
 Resume : 178 marchent, 0 avec reserves, 0 echouent (sur 178 programmes)
 
@@ -208,7 +211,10 @@ QEMU : ok = essai fonctionnel dans run.sh ; sess = verifie par les sessions
 
 awk          ok
 chown        ok
+cpio         suite
+cron         suite
 dmesg        ok
+e2fsck       suite
 find         ok
 free         ok
 getty        sess
@@ -220,10 +226,13 @@ id           ok
 ifconfig     ok
 init         sess
 install      sess
+iptool       suite
 kill         sess
+less         suite
 ln           ok
 login        sess
 lsmod        ok
+man          suite
 mkdir        ok
 mknod        ok
 mkpasswd     sess
@@ -231,15 +240,18 @@ mkswap       ok
 modtool      sess
 mount        sess
 nc           aide
+netutil      suite
 nice         ok
 nohup        aide
 nologin      aide
 nslookup     ok
 passwd       sess
+patch        suite
 pgrep        ok
 ping         ok
 poweroff     sess
 printenv     ok
+procinfo     suite
 ps           sess
 readlink     ok
 reboot       sess
@@ -258,15 +270,19 @@ syslogd      aide
 tar          ok
 telinit      aide
 test         ok
+textutil     suite
 time         ok
 timeout      ok
 top          aide
 tty          aide
+udhcpc       aide
 umount       sess
 uptime       ok
 usermgr      aide
 usleep       ok
+vi           suite
 watch        aide
 wget         aide
 who          ok
 xargs        ok
+ziptool      suite
