@@ -63,7 +63,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
   52  umount2                reel     ext2test.c,fattest.c,mounttest.c
   53  lock                   enosys   
   54  ioctl                  reel     ku.h
-  55  fcntl                  reel     ku.h
+  55  fcntl                  reel     ku.h,sigrttest.c
   56  mpx                    enosys   
   57  setpgid                reel     ku.h
   58  ulimit                 enosys   
@@ -86,7 +86,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
   75  setrlimit              reel     limtest.c,syscalltest.c
   76  getrlimit              reel     misctest.c
   77  getrusage              reel     
-  78  gettimeofday           reel     devtest.c,ku.h,preempttest.c,pstress.c,schedtest.c
+  78  gettimeofday           reel     devtest.c,ku.h,preempttest.c,pstress.c,schedtest.c,sigrttest.c
   79  settimeofday           reel     
   80  getgroups              reel     
   81  setgroups              reel     
@@ -151,7 +151,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  140  _llseek                reel     
  141  getdents               reel     ku.h
  142  _newselect             reel     misctest.c
- 143  flock                  stub     
+ 143  flock                  reel     sigrttest.c
  144  msync                  reel     shmtest.c
  145  readv                  reel     misctest.c
  146  writev                 reel     misctest.c
@@ -176,17 +176,17 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  165  getresuid              reel     
  166  vm86                   enosys   
  167  query_module           enosys   
- 168  poll                   reel     evttest.c,ku.h,kusock.h,misctest.c,mousetest.c,ptytest.c
+ 168  poll                   reel     evttest.c,ku.h,kusock.h,misctest.c,mousetest.c,ptytest.c,sigrttest.c
  169  nfsservctl             enosys   
  170  setresgid              reel     
  171  getresgid              reel     
  172  prctl                  reel     
  173  rt_sigreturn           reel     
  174  rt_sigaction           reel     ku.h
- 175  rt_sigprocmask         reel     ku.h
+ 175  rt_sigprocmask         reel     ku.h,sigrttest.c
  176  rt_sigpending          reel     
- 177  rt_sigtimedwait        absent   
- 178  rt_sigqueueinfo        absent   
+ 177  rt_sigtimedwait        reel     sigrttest.c
+ 178  rt_sigqueueinfo        reel     sigrttest.c
  179  rt_sigsuspend          reel     
  180  pread64                reel     ext2test.c,misctest.c
  181  pwrite64               reel     ext2test.c,fattest.c
@@ -264,13 +264,13 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  256  epoll_wait             reel     evttest.c
  257  remap_file_pages       enosys   
  258  set_tid_address        reel     
- 259  timer_create           absent   
- 260  timer_settime          absent   
- 261  timer_gettime          absent   
- 262  timer_getoverrun       absent   
- 263  timer_delete           absent   
+ 259  timer_create           reel     sigrttest.c
+ 260  timer_settime          reel     sigrttest.c
+ 261  timer_gettime          reel     sigrttest.c
+ 262  timer_getoverrun       reel     sigrttest.c
+ 263  timer_delete           reel     sigrttest.c
  264  clock_settime          reel     syscalltest.c
- 265  clock_gettime          reel     ku.h,misctest.c,syscalltest.c
+ 265  clock_gettime          reel     ku.h,misctest.c,sigrttest.c,syscalltest.c
  266  clock_getres           reel     
  267  clock_nanosleep        reel     
  268  statfs64               reel     
@@ -289,7 +289,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  281  mq_notify              absent   
  282  mq_getsetattr          absent   
  283  kexec_load             enosys   
- 284  waitid                 reel     syscalltest.c
+ 284  waitid                 reel     sigrttest.c,syscalltest.c
  286  add_key                enosys   
  287  request_key            enosys   
  288  keyctl                 enosys   
@@ -325,13 +325,13 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  318  getcpu                 reel     syscalltest.c
  319  epoll_pwait            reel     
  320  utimensat              reel     
- 321  signalfd               absent   
+ 321  signalfd               reel     sigrttest.c
  322  timerfd_create         reel     evttest.c,syscalltest.c
  323  eventfd                reel     
  324  fallocate              reel     syscalltest.c
  325  timerfd_settime        reel     evttest.c
  326  timerfd_gettime        reel     evttest.c
- 327  signalfd4              absent   
+ 327  signalfd4              reel     sigrttest.c
  328  eventfd2               reel     evttest.c
  329  epoll_create1          reel     evttest.c,syscalltest.c
  330  dup3                   reel     
@@ -339,7 +339,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  332  inotify_init1          reel     evttest.c
  333  preadv                 reel     
  334  pwritev                reel     
- 335  rt_tgsigqueueinfo      absent   
+ 335  rt_tgsigqueueinfo      reel     
  336  perf_event_open        enosys   
  337  recvmmsg               absent   
  338  fanotify_init          enosys   
@@ -406,8 +406,8 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  405  clock_adjtime64        absent   
  406  clock_getres_time64    reel     syscalltest.c
  407  clock_nanosleep_time64 reel     syscalltest.c
- 408  timer_gettime64        absent   
- 409  timer_settime64        absent   
+ 408  timer_gettime64        reel     
+ 409  timer_settime64        reel     
  410  timerfd_gettime64      reel     syscalltest.c
  411  timerfd_settime64      reel     syscalltest.c
  412  utimensat_time64       reel     syscalltest.c
@@ -418,10 +418,10 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  418  mq_timedsend_time64    absent   
  419  mq_timedreceive_time64 absent   
  420  semtimedop_time64      absent   
- 421  rt_sigtimedwait_time64 absent   
+ 421  rt_sigtimedwait_time64 reel     
  422  futex_time64           reel     syscalltest.c
  423  sched_rr_get_interval_time64 absent   
- 424  pidfd_send_signal      absent   
+ 424  pidfd_send_signal      reel     sigrttest.c
  425  io_uring_setup         enosys   
  426  io_uring_enter         enosys   
  427  io_uring_register      enosys   
@@ -431,7 +431,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  431  fsconfig               enosys   
  432  fsmount                enosys   
  433  fspick                 enosys   
- 434  pidfd_open             absent   
+ 434  pidfd_open             reel     sigrttest.c
  435  clone3                 absent   
  436  close_range            reel     syscalltest.c
  437  openat2                reel     
@@ -460,7 +460,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  460  lsm_set_self_attr      enosys   
  461  lsm_list_modules       enosys   
 
-Total : 451 appels ; reels 293 (65.0 %), stubs 5, ENOSYS explicites 84, absents 69
+Total : 451 appels ; reels 309 (68.5 %), stubs 4, ENOSYS explicites 84, absents 54
 
 B1. FAMILLES D'IOCTL
    TCGETS/TCSETS (termios)            present  
@@ -589,5 +589,5 @@ B6. DRAPEAUX mmap / clone / open
    -> 8 / 12
 
 C. SYNTHESE
-   appels reels : 293 / 451 (65.0 %) ; stubs 5 ; ENOSYS explicites 84 ; absents 69
+   appels reels : 309 / 451 (68.5 %) ; stubs 4 ; ENOSYS explicites 84 ; absents 54
    familles B1-B6 presentes : 58 / 108 (53.7 %)

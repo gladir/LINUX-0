@@ -2771,6 +2771,8 @@ Type
     NeedBkl, Preempted, PreemptCount, CpuDue, Cr2 : LongInt;   { partie 27 }
     Persona, CapLastE, RobustList, RobustLen : LongInt;       { partie 28 }
     CapE0, CapE1, CapP0, CapP1, CapI0, CapI1 : LongInt;
+    SigQ               : Array[0..95] Of LongInt;   { file d'attente + infos }
+    SigQN, WaitLo, WaitHi : LongInt;                { rt_sigtimedwait }
     ExeLen             : LongInt;
     ExeBuf             : Array[0..127] Of Byte;     { chemin de l'executable }
     Fpu                : Array[0..131] Of LongInt;  { FXSAVE ou FNSAVE }
@@ -2787,6 +2789,8 @@ Var
   InitTask     : PTask;
   RetTrapEntry : LongInt;
   TickUser     : Boolean;
+  SigNoDefault : Boolean;       { SendSig : info deja en file }
+  LastSigInfo  : Array[0..5] Of LongInt;   { info du signal en remise }
   PreemptOn    : Boolean;       { noyau preemptible (preempt=1) : partie 27 }
   BklOwner     : PTask;         { tache qui detient le verrou du noyau }
   KStackMax    : LongInt;       { profondeur maximale de pile noyau a une IRQ }
@@ -2803,6 +2807,11 @@ Procedure FileGet(F : LongInt); Forward;
 Procedure DentryPut(D : LongInt); Forward;
 Procedure DentryGet(D : LongInt); Forward;
 Procedure SendSig(T : PTask; Sig : LongInt); Forward;
+Procedure PosixTimersTick; Forward;
+Procedure PosixTimersExec; Forward;
+Procedure LocksFileReleased(F : LongInt); Forward;
+Procedure LocksPosixClose(Tgid, Ino : LongInt); Forward;
+Procedure LocksProcExit(Tgid : LongInt); Forward;
 Procedure SendSigPgrp(Pgrp, Sig : LongInt); Forward;
 Procedure TtyDisassociate(T : PTask); Forward;
 Procedure TimerSignals; Forward;
@@ -3224,6 +3233,7 @@ Begin
     End;
   End;
   TimerSignals;
+  PosixTimersTick;
   NetTick;
 End;
 
@@ -3511,6 +3521,7 @@ Begin
   If (Flags And CLONE_PARENT) <> 0 Then T^.Parent := Cur^.Parent
       Else T^.Parent := Cur;
   T^.Pend[0] := 0; T^.Pend[1] := 0;
+  T^.SigQN := 0; T^.WaitLo := 0; T^.WaitHi := 0;
   T^.HasSaved := 0;
   T^.AlarmAt := 0; T^.ItInterval := 0; T^.ItVirt := 0; T^.ItProf := 0;
   T^.Utime := 0; T^.Stime := 0; T^.Cutime := 0; T^.Cstime := 0;
@@ -3609,6 +3620,7 @@ Begin
   { le dernier fil d'un groupe de tgid est le leader : terminaison du groupe
     non geree par exit(), voir exit_group }
   SignalsExitCleanup(T);
+  If T^.Tgid = T^.Pid Then LocksProcExit(T^.Tgid);
   If T^.ClearTid <> 0 Then
   Begin
     If EnsureUser(T^.ClearTid, 4, True) Then MemL[0:T^.ClearTid] := 0;
@@ -3814,6 +3826,65 @@ Begin
   End;
 End;
 
+{ File d'attente de siginfo : entree = sig, code, a (pid ou adresse), b (uid),
+  valeur, errno. Signaux < 32 : une seule entree ; temps reel : 16 au plus }
+Function SigEnqueue(T : PTask; Sig, Code, A, B, Val : LongInt) : Boolean;
+Var I, N : LongInt;
+Begin
+  SigEnqueue := False;
+  N := 0;
+  For I := 0 To T^.SigQN - 1 Do
+    If T^.SigQ[I * 6] = Sig Then Inc(N);
+  If (Sig < 32) And (N > 0) Then Exit;
+  If T^.SigQN >= 16 Then Exit;
+  I := T^.SigQN * 6;
+  T^.SigQ[I] := Sig; T^.SigQ[I + 1] := Code; T^.SigQ[I + 2] := A;
+  T^.SigQ[I + 3] := B; T^.SigQ[I + 4] := Val; T^.SigQ[I + 5] := 0;
+  Inc(T^.SigQN);
+  SigEnqueue := True;
+End;
+
+{ Retirer la premiere entree du signal Sig dans LastSigInfo ; retourne le
+  nombre d'entrees restantes pour Sig }
+Function SigPopInfo(T : PTask; Sig : LongInt) : LongInt;
+Var I, J, Left : LongInt; Got : Boolean; Pt : PTask;
+Begin
+  Got := False;
+  Left := 0;
+  I := 0;
+  While I < T^.SigQN Do
+  Begin
+    If T^.SigQ[I * 6] = Sig Then
+    Begin
+      If Not Got Then
+      Begin
+        For J := 0 To 5 Do LastSigInfo[J] := T^.SigQ[I * 6 + J];
+        Got := True;
+        For J := I * 6 To T^.SigQN * 6 - 7 Do T^.SigQ[J] := T^.SigQ[J + 6];
+        Dec(T^.SigQN);
+        Continue;
+      End
+      Else Inc(Left);
+    End;
+    Inc(I);
+  End;
+  If Not Got Then
+  Begin
+    LastSigInfo[0] := Sig; LastSigInfo[1] := 0;
+    LastSigInfo[2] := T^.SigSender[Sig]; LastSigInfo[3] := 0;
+    LastSigInfo[4] := 0; LastSigInfo[5] := 0;
+    Pt := PidTask(T^.SigSender[Sig]);
+    If Pt <> Nil Then LastSigInfo[3] := Pt^.Uid;
+  End;
+  SigPopInfo := Left;
+End;
+
+Function SigWaiting(T : PTask; Sig : LongInt) : Boolean;
+Begin
+  If Sig <= 32 Then SigWaiting := (T^.WaitLo And SigLoBit(Sig)) <> 0
+  Else SigWaiting := (T^.WaitHi And SigHiBit(Sig)) <> 0;
+End;
+
 { Envoyer le signal Sig a la tache T }
 Procedure SendSig(T : PTask; Sig : LongInt);
 Var H : LongInt;
@@ -3840,7 +3911,7 @@ Begin
       = SIGTTOU) Then
     T^.Pend[0] := T^.Pend[0] And Not SigLoBit(SIGCONT);
   { signal ignore : le jeter (sauf KILL et STOP) }
-  If (Sig <> SIGKILL) And (Sig <> SIGSTOP) Then
+  If (Sig <> SIGKILL) And (Sig <> SIGSTOP) And Not SigWaiting(T, Sig) Then
   Begin
     If H = SIG_IGN Then Exit;
     If (H = SIG_DFL) And (DefaultAction(Sig) = 0) Then Exit;
@@ -3850,9 +3921,12 @@ Begin
   T^.Pend[0] := T^.Pend[0] Or SigLoBit(Sig);
   T^.Pend[1] := T^.Pend[1] Or SigHiBit(Sig);
   T^.SigSender[Sig] := Cur^.Pid;
+  If (Sig >= 32) And Not SigNoDefault Then
+    SigEnqueue(T, Sig, 0, Cur^.Pid, Cur^.Uid, 0);
   If (T^.State = TsSleeping) Then
   Begin
-    If (Sig = SIGKILL) Or SigPendingUnblocked(T) Then WakeTask(T, WakeSignal);
+    If (Sig = SIGKILL) Or SigPendingUnblocked(T) Or SigWaiting(T, Sig) Then
+      WakeTask(T, WakeSignal);
   End
   Else If (T^.State = TsStopped) And (Sig = SIGKILL) Then
   Begin
@@ -3942,8 +4016,11 @@ Begin
     If ((I <= 32) And ((Lo And SigLoBit(I)) <> 0)) Or ((I > 32) And ((Hi
         And SigHiBit(I)) <> 0)) Then
     Begin
-      T^.Pend[0] := T^.Pend[0] And Not SigLoBit(I);
-      T^.Pend[1] := T^.Pend[1] And Not SigHiBit(I);
+      If SigPopInfo(T, I) = 0 Then
+      Begin
+        T^.Pend[0] := T^.Pend[0] And Not SigLoBit(I);
+        T^.Pend[1] := T^.Pend[1] And Not SigHiBit(I);
+      End;
       DequeueSignal := I;
       Exit;
     End;
@@ -3997,7 +4074,11 @@ Begin
     MemL[0:Fr + 8] := Fr + 16;                 { pinfo }
     MemL[0:Fr + 12] := Fr + 144;               { puc }
     MemL[0:Fr + 16] := Sig;                    { si_signo }
-    MemL[0:Fr + 28] := Cur^.SigSender[Sig];    { si_pid }
+    MemL[0:Fr + 20] := LastSigInfo[5];         { si_errno }
+    MemL[0:Fr + 24] := LastSigInfo[1];         { si_code }
+    MemL[0:Fr + 28] := LastSigInfo[2];         { si_pid ou si_addr }
+    MemL[0:Fr + 32] := LastSigInfo[3];         { si_uid }
+    MemL[0:Fr + 36] := LastSigInfo[4];         { si_value }
     MemL[0:Fr + 152] := Cur^.SigStk[0];
     MemL[0:Fr + 156] := Cur^.SigStk[1];
     MemL[0:Fr + 160] := Cur^.SigStk[2];
@@ -6061,6 +6142,7 @@ Begin
   P := Pointer(F);
   Dec(P^.Count);
   If P^.Count > 0 Then Exit;
+  LocksFileReleased(F);
   Fn := GetOp(P^.FOps, FoRelease);
   If Fn <> 0 Then Call1(Fn, F);
   If (InoWatches > 0) And (P^.Dentry <> Nil) Then
@@ -6101,7 +6183,7 @@ Begin
 End;
 
 Function FdClose(Fd : LongInt) : LongInt;
-Var F : LongInt;
+Var F : LongInt; Pf : PFile;
 Begin
   If (Fd < 0) Or (Fd >= MaxFd) Or (Cur^.Files^.Fd[Fd] = 0) Then
   Begin
@@ -6111,6 +6193,8 @@ Begin
   F := Cur^.Files^.Fd[Fd];
   Cur^.Files^.Fd[Fd] := 0;
   Cur^.Files^.CloseExec[Fd] := 0;
+  Pf := Pointer(F);
+  LocksPosixClose(Cur^.Tgid, LongInt(Pf^.Inode));
   FilePut(F);
   FdClose := 0;
 End;
@@ -13246,6 +13330,7 @@ Begin
   End;
   Cur^.Suid := Cur^.Euid; Cur^.Sgid := Cur^.Egid;
   CapExecFix;
+  PosixTimersExec;
   { nom du processus }
   Nm := Path;
   K := Length(Nm);
@@ -21174,6 +21259,8 @@ Begin
   SysLlseek := 0;
 End;
 
+Function DoFcntlLock(F : PFile; Cmd, Arg : LongInt) : LongInt; Forward;
+
 Function SysFcntl(Fd, Cmd, Arg : LongInt) : LongInt;
 Var F : PFile; R : LongInt;
 Begin
@@ -21206,7 +21293,9 @@ Begin
               And (O_APPEND Or O_NONBLOCK));
           SysFcntl := 0;
         End;
-    5, 6, 7, 12, 13, 14 : SysFcntl := 0;      { verrous : acceptes }
+    5, 6, 7, 12, 13, 14, 36, 37, 38 : SysFcntl := DoFcntlLock(F, Cmd, Arg);
+    1031, 1032 : SysFcntl := 65536;           { taille du tube }
+    1033, 1034 : SysFcntl := -EINVAL;         { scellements : non geres }
     8 : Begin F^.Owner := Arg; SysFcntl := 0; End;
     9 : SysFcntl := F^.Owner;
   Else
@@ -24694,6 +24783,7 @@ Begin
         + HexStr(Addr, 8) + ' ip ' + HexStr(F^.Eip, 8))
     Else KLog('pid ' + IntStr(Cur^.Pid) + ' violation de protection a '
         + HexStr(Addr, 8) + ' ip ' + HexStr(F^.Eip, 8));
+    SigEnqueue(Cur, SIGSEGV, R, Addr, 0, 0);
     ForceSig(Cur, SIGSEGV);
     Exit;
   End;
@@ -26172,9 +26262,22 @@ End;
 
 { ---- waitid ---- }
 
+Var
+  PidfdOps : Array[0..15] Of LongInt;
+
 Function DoWaitid(IdType, Id, Info, Options, Ru : LongInt) : LongInt;
 Var I, Found, Code, Stt : LongInt; T : PTask; Match : Boolean;
 Begin
+  If IdType = 3 Then
+  Begin
+    If (FdGet(Id) = Nil) Or (FdGet(Id)^.FOps <> LongInt(@PidfdOps[0])) Then
+    Begin
+      DoWaitid := -EBADF;
+      Exit;
+    End;
+    Id := FdGet(Id)^.Priv;
+    IdType := 1;
+  End;
   If ((Options And Not $0300000F) <> 0) Or ((Options And $E) = 0)
      Or (IdType < 0) Or (IdType > 2) Then
   Begin
@@ -27060,8 +27163,1006 @@ Begin
   SysReg(62, LongInt(@SysUstat), 2);
   SysReg(101, LongInt(@SysIoperm), 3);
   SysReg(110, LongInt(@SysIopl), 1);
+  InitSignalsRt;
   SysReg(138, LongInt(@SysSetfsuid16), 1);
   SysReg(139, LongInt(@SysSetfsgid16), 1);
+End;
+
+{ ==================================================================== }
+{ Partie 29 - Signaux temps reel, signalfd, minuteries POSIX, pidfd,     }
+{ verrous de fichiers (flock, POSIX, OFD)                                 }
+{ ==================================================================== }
+{ (placee apres la partie 28) }
+
+{ ---- rt_sigtimedwait, rt_sigqueueinfo ---- }
+
+Function SigMaskFirst(T : PTask; Lo, Hi : LongInt) : LongInt;
+Var I : LongInt;
+Begin
+  SigMaskFirst := 0;
+  Lo := Lo And T^.Pend[0];
+  Hi := Hi And T^.Pend[1];
+  If (Lo = 0) And (Hi = 0) Then Exit;
+  For I := 1 To 64 Do
+    If ((I <= 32) And ((Lo And SigLoBit(I)) <> 0))
+       Or ((I > 32) And ((Hi And SigHiBit(I)) <> 0)) Then
+    Begin
+      SigMaskFirst := I;
+      Exit;
+    End;
+End;
+
+{ Retirer le signal Sig en attente de T ; l'info est dans LastSigInfo }
+Procedure SigTake(T : PTask; Sig : LongInt);
+Begin
+  If SigPopInfo(T, Sig) = 0 Then
+  Begin
+    T^.Pend[0] := T^.Pend[0] And Not SigLoBit(Sig);
+    T^.Pend[1] := T^.Pend[1] And Not SigHiBit(Sig);
+  End;
+End;
+
+Procedure PutSiginfo(Info : LongInt);
+Begin
+  MemFill(Info, 0, 128);
+  MemL[0:Info] := LastSigInfo[0];
+  MemL[0:Info + 4] := LastSigInfo[5];
+  MemL[0:Info + 8] := LastSigInfo[1];
+  MemL[0:Info + 12] := LastSigInfo[2];
+  MemL[0:Info + 16] := LastSigInfo[3];
+  MemL[0:Info + 20] := LastSigInfo[4];
+End;
+
+Function DoSigtimedwait(SetA, Info, Ts, Sz : LongInt; Wide : Boolean) : LongInt;
+Var Lo, Hi, Sig, Ms, R, Dead, Left : LongInt;
+Begin
+  If Sz <> 8 Then
+  Begin
+    DoSigtimedwait := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(SetA, 8, False) Then
+  Begin
+    DoSigtimedwait := -EFAULT;
+    Exit;
+  End;
+  If (Info <> 0) And Not EnsureUser(Info, 128, True) Then
+  Begin
+    DoSigtimedwait := -EFAULT;
+    Exit;
+  End;
+  Lo := MemL[0:SetA] And Not UnblockableLo;
+  Hi := MemL[0:SetA + 4];
+  R := TsToMs(Ts, Wide, Ms);
+  If R <> 0 Then
+  Begin
+    DoSigtimedwait := R;
+    Exit;
+  End;
+  Dead := 0;
+  If Ms > 0 Then Dead := Jiffies + (Ms + 9) Div 10;
+  While True Do
+  Begin
+    Sig := SigMaskFirst(Cur, Lo, Hi);
+    If Sig <> 0 Then
+    Begin
+      SigTake(Cur, Sig);
+      If Info <> 0 Then PutSiginfo(Info);
+      DoSigtimedwait := Sig;
+      Exit;
+    End;
+    If Ms = 0 Then
+    Begin
+      DoSigtimedwait := -EAGAIN;
+      Exit;
+    End;
+    Left := 0;
+    If Ms > 0 Then
+    Begin
+      Left := Dead - Jiffies;
+      If Left <= 0 Then
+      Begin
+        DoSigtimedwait := -EAGAIN;
+        Exit;
+      End;
+    End;
+    Cur^.WaitLo := Lo; Cur^.WaitHi := Hi;
+    R := SleepOn(LongInt(Cur) + 1, Left, True);
+    Cur^.WaitLo := 0; Cur^.WaitHi := 0;
+    If R = WakeTimeout Then
+    Begin
+      DoSigtimedwait := -EAGAIN;
+      Exit;
+    End;
+    If (R = WakeSignal) And (SigMaskFirst(Cur, Lo, Hi) = 0) Then
+    Begin
+      DoSigtimedwait := -EINTR;
+      Exit;
+    End;
+  End;
+End;
+
+Function SysRtSigtimedwait(SetA, Info, Ts, Sz : LongInt) : LongInt;
+Begin
+  SysRtSigtimedwait := DoSigtimedwait(SetA, Info, Ts, Sz, False);
+End;
+
+Function SysRtSigtimedwait64(SetA, Info, Ts, Sz : LongInt) : LongInt;
+Begin
+  SysRtSigtimedwait64 := DoSigtimedwait(SetA, Info, Ts, Sz, True);
+End;
+
+Function SigAllowed(T : PTask) : Boolean;
+Begin
+  SigAllowed := Capable(5) Or (Cur^.Euid = T^.Uid) Or (Cur^.Euid = T^.Suid)
+      Or (Cur^.Uid = T^.Uid) Or (Cur^.Uid = T^.Suid);
+End;
+
+Function DoSigqueue(T : PTask; Sig, Info : LongInt) : LongInt;
+Var Code, Val : LongInt;
+Begin
+  If (Sig < 0) Or (Sig > 64) Then
+  Begin
+    DoSigqueue := -EINVAL;
+    Exit;
+  End;
+  If T = Nil Then
+  Begin
+    DoSigqueue := -ESRCH;
+    Exit;
+  End;
+  If Not EnsureUser(Info, 128, False) Then
+  Begin
+    DoSigqueue := -EFAULT;
+    Exit;
+  End;
+  Code := MemL[0:Info + 8];
+  If (Code >= 0) And (T^.Tgid <> Cur^.Tgid) Then
+  Begin
+    DoSigqueue := -EPERM;
+    Exit;
+  End;
+  If Not SigAllowed(T) Then
+  Begin
+    DoSigqueue := -EPERM;
+    Exit;
+  End;
+  If Sig = 0 Then
+  Begin
+    DoSigqueue := 0;
+    Exit;
+  End;
+  Val := MemL[0:Info + 20];
+  If (Sig >= 32) And Not SigEnqueue(T, Sig, Code, Cur^.Pid, Cur^.Uid, Val) Then
+  Begin
+    DoSigqueue := -EAGAIN;
+    Exit;
+  End;
+  If Sig < 32 Then SigEnqueue(T, Sig, Code, Cur^.Pid, Cur^.Uid, Val);
+  SigNoDefault := True;
+  SendSig(T, Sig);
+  SigNoDefault := False;
+  DoSigqueue := 0;
+End;
+
+Function ThreadLeader(Tgid : LongInt) : PTask;
+Var I : LongInt;
+Begin
+  ThreadLeader := Nil;
+  For I := 1 To MaxTasks - 1 Do
+    If (Tasks[I].State <> TsFree) And (Tasks[I].Tgid = Tgid)
+       And (Tasks[I].Pid = Tgid) Then ThreadLeader := @Tasks[I];
+End;
+
+Function SysRtSigqueueinfo(Tgid, Sig, Info : LongInt) : LongInt;
+Begin
+  SysRtSigqueueinfo := DoSigqueue(ThreadLeader(Tgid), Sig, Info);
+End;
+
+Function SysRtTgsigqueueinfo(Tgid, Tid, Sig, Info : LongInt) : LongInt;
+Var T : PTask;
+Begin
+  T := PidTask(Tid);
+  If (T <> Nil) And (T^.Tgid <> Tgid) Then T := Nil;
+  SysRtTgsigqueueinfo := DoSigqueue(T, Sig, Info);
+End;
+
+{ ---- signalfd ---- }
+
+Type
+  PSigfd = ^TSigfd;
+  TSigfd = Record
+    Lo, Hi : LongInt;
+  End;
+
+Var
+  SigfdOps : Array[0..15] Of LongInt;
+
+Function SigfdRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var S : PSigfd; Sig, N, R : LongInt;
+Begin
+  S := Pointer(F^.Priv);
+  If Cnt < 128 Then
+  Begin
+    SigfdRead := -EINVAL;
+    Exit;
+  End;
+  N := 0;
+  While (Cnt - N * 128) >= 128 Do
+  Begin
+    Sig := SigMaskFirst(Cur, S^.Lo, S^.Hi);
+    If Sig = 0 Then
+    Begin
+      If N > 0 Then Break;
+      If (F^.Flags And O_NONBLOCK) <> 0 Then
+      Begin
+        SigfdRead := -EAGAIN;
+        Exit;
+      End;
+      Cur^.WaitLo := S^.Lo; Cur^.WaitHi := S^.Hi;
+      R := SleepOn(LongInt(Cur) + 1, 0, True);
+      Cur^.WaitLo := 0; Cur^.WaitHi := 0;
+      If R = WakeSignal Then
+        If SigMaskFirst(Cur, S^.Lo, S^.Hi) = 0 Then
+        Begin
+          SigfdRead := -ERESTARTSYS;
+          Exit;
+        End;
+      Continue;
+    End;
+    SigTake(Cur, Sig);
+    R := Buf + N * 128;
+    MemFill(R, 0, 128);
+    MemL[0:R] := LastSigInfo[0];
+    MemL[0:R + 4] := LastSigInfo[5];
+    MemL[0:R + 8] := LastSigInfo[1];
+    MemL[0:R + 12] := LastSigInfo[2];
+    MemL[0:R + 16] := LastSigInfo[3];
+    MemL[0:R + 44] := LastSigInfo[4];
+    MemL[0:R + 48] := LastSigInfo[4];
+    Inc(N);
+  End;
+  SigfdRead := N * 128;
+End;
+
+Function SigfdPoll(F : PFile; Ev : LongInt) : LongInt;
+Var S : PSigfd;
+Begin
+  S := Pointer(F^.Priv);
+  If SigMaskFirst(Cur, S^.Lo, S^.Hi) <> 0 Then SigfdPoll := POLLIN
+  Else SigfdPoll := 0;
+End;
+
+Procedure SigfdRelease(F : PFile);
+Begin
+  KFree(F^.Priv);
+End;
+
+Function DoSignalfd(Fd, MaskA, Sz, Flags : LongInt) : LongInt;
+Var S : PSigfd; F : PFile; Lo, Hi : LongInt;
+Begin
+  If (Flags And Not (O_NONBLOCK Or O_CLOEXEC)) <> 0 Then
+  Begin
+    DoSignalfd := -EINVAL;
+    Exit;
+  End;
+  If Sz < 8 Then
+  Begin
+    DoSignalfd := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(MaskA, 8, False) Then
+  Begin
+    DoSignalfd := -EFAULT;
+    Exit;
+  End;
+  Lo := MemL[0:MaskA] And Not UnblockableLo;
+  Hi := MemL[0:MaskA + 4];
+  If Fd <> -1 Then
+  Begin
+    F := FdGet(Fd);
+    If F = Nil Then
+    Begin
+      DoSignalfd := -EBADF;
+      Exit;
+    End;
+    If F^.FOps <> LongInt(@SigfdOps[0]) Then
+    Begin
+      DoSignalfd := -EINVAL;
+      Exit;
+    End;
+    S := Pointer(F^.Priv);
+    S^.Lo := Lo; S^.Hi := Hi;
+    DoSignalfd := Fd;
+    Exit;
+  End;
+  S := Pointer(KMallocZ(SizeOf(TSigfd)));
+  If S = Nil Then
+  Begin
+    DoSignalfd := -ENOMEM;
+    Exit;
+  End;
+  S^.Lo := Lo; S^.Hi := Hi;
+  F := AnonFile(LongInt(@SigfdOps[0]), LongInt(S), Flags And O_NONBLOCK);
+  If F = Nil Then
+  Begin
+    KFree(LongInt(S));
+    DoSignalfd := -ENOMEM;
+    Exit;
+  End;
+  DoSignalfd := AnonFd(F, Flags);
+End;
+
+Function SysSignalfd(Fd, MaskA, Sz : LongInt) : LongInt;
+Begin
+  SysSignalfd := DoSignalfd(Fd, MaskA, Sz, 0);
+End;
+
+Function SysSignalfd4(Fd, MaskA, Sz, Flags : LongInt) : LongInt;
+Begin
+  SysSignalfd4 := DoSignalfd(Fd, MaskA, Sz, Flags);
+End;
+
+{ ---- Minuteries POSIX (timer_create ...) ---- }
+
+Const
+  MaxPTimers = 64;
+
+Var
+  PtUsed, PtTgid, PtTid, PtClk, PtSigno, PtVal, PtNotify, PtNext, PtInt,
+  PtOver, PtArmed : Array[0..MaxPTimers - 1] Of LongInt;
+
+Procedure PosixTimersExec;
+Var I : LongInt;
+Begin
+  For I := 0 To MaxPTimers - 1 Do
+    If (PtUsed[I] <> 0) And (PtTgid[I] = Cur^.Tgid) Then PtUsed[I] := 0;
+End;
+
+Procedure PosixTimersTick;
+Var I, Late, Ov : LongInt; T : PTask;
+Begin
+  For I := 0 To MaxPTimers - 1 Do
+    If (PtUsed[I] <> 0) And (PtArmed[I] <> 0)
+       And (Jiffies - PtNext[I] >= 0) Then
+    Begin
+      If PtTid[I] <> 0 Then T := PidTask(PtTid[I])
+      Else T := ThreadLeader(PtTgid[I]);
+      If (T = Nil) Or (T^.State = TsZombie) Or (T^.Tgid <> PtTgid[I]) Then
+      Begin
+        PtUsed[I] := 0;
+        Continue;
+      End;
+      Ov := 0;
+      If PtInt[I] > 0 Then
+      Begin
+        Late := Jiffies - PtNext[I];
+        Ov := Late Div PtInt[I];
+        PtNext[I] := PtNext[I] + PtInt[I] * (Ov + 1);
+      End
+      Else PtArmed[I] := 0;
+      PtOver[I] := Ov;
+      If (PtNotify[I] <> 1) And (PtSigno[I] > 0) Then
+      Begin
+        SigEnqueue(T, PtSigno[I], -2, I, Ov, PtVal[I]);
+        SigNoDefault := True;
+        SendSig(T, PtSigno[I]);
+        SigNoDefault := False;
+      End;
+    End;
+End;
+
+Function SysTimerCreate(Clk, Evp, IdA : LongInt) : LongInt;
+Var I, Sg, Nt, Tid, Val : LongInt; T : PTask;
+Begin
+  If (Clk < 0) Or (Clk > 9) Then
+  Begin
+    SysTimerCreate := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(IdA, 4, True) Then
+  Begin
+    SysTimerCreate := -EFAULT;
+    Exit;
+  End;
+  I := 0;
+  While (I < MaxPTimers) And (PtUsed[I] <> 0) Do Inc(I);
+  If I >= MaxPTimers Then
+  Begin
+    SysTimerCreate := -EAGAIN;
+    Exit;
+  End;
+  Sg := SIGALRM; Nt := 0; Tid := 0; Val := I;
+  If Evp <> 0 Then
+  Begin
+    If Not EnsureUser(Evp, 16, False) Then
+    Begin
+      SysTimerCreate := -EFAULT;
+      Exit;
+    End;
+    Val := MemL[0:Evp]; Sg := MemL[0:Evp + 4]; Nt := MemL[0:Evp + 8];
+    Tid := MemL[0:Evp + 12];
+    If (Nt <> 1) And ((Sg < 1) Or (Sg > 64)) Then
+    Begin
+      SysTimerCreate := -EINVAL;
+      Exit;
+    End;
+    If (Nt <> 0) And (Nt <> 1) And (Nt <> 2) And (Nt <> 4) Then
+    Begin
+      SysTimerCreate := -EINVAL;
+      Exit;
+    End;
+    If Nt = 4 Then
+    Begin
+      T := PidTask(Tid);
+      If (T = Nil) Or (T^.Tgid <> Cur^.Tgid) Then
+      Begin
+        SysTimerCreate := -EINVAL;
+        Exit;
+      End;
+    End
+    Else Tid := 0;
+  End;
+  PtUsed[I] := 1; PtTgid[I] := Cur^.Tgid; PtTid[I] := Tid; PtClk[I] := Clk;
+  PtSigno[I] := Sg; PtVal[I] := Val; PtNotify[I] := Nt; PtArmed[I] := 0;
+  PtInt[I] := 0; PtOver[I] := 0;
+  MemL[0:IdA] := I;
+  SysTimerCreate := 0;
+End;
+
+Function PtCheck(Id : LongInt) : Boolean;
+Begin
+  PtCheck := (Id >= 0) And (Id < MaxPTimers) And (PtUsed[Id] <> 0)
+      And (PtTgid[Id] = Cur^.Tgid);
+End;
+
+Function SecNsToTicks(Sec, Ns : LongInt) : LongInt;
+Begin
+  SecNsToTicks := Sec * HZ + (Ns + (1000000000 Div HZ) - 1)
+      Div (1000000000 Div HZ);
+End;
+
+Procedure PtLeft(Id : LongInt; Var Sec, Ns : LongInt);
+Var L : LongInt;
+Begin
+  Sec := 0; Ns := 0;
+  If PtArmed[Id] = 0 Then Exit;
+  L := PtNext[Id] - Jiffies;
+  If L < 1 Then L := 1;
+  Sec := L Div HZ;
+  Ns := (L Mod HZ) * (1000000000 Div HZ);
+End;
+
+Function SysTimerSettime(Id, Flags, NewP, OldP : LongInt) : LongInt;
+Var S, Ns, T, Sec, Nn, Now : LongInt;
+Begin
+  If Not PtCheck(Id) Then
+  Begin
+    SysTimerSettime := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(NewP, 16, False) Then
+  Begin
+    SysTimerSettime := -EFAULT;
+    Exit;
+  End;
+  If (OldP <> 0) And Not EnsureUser(OldP, 16, True) Then
+  Begin
+    SysTimerSettime := -EFAULT;
+    Exit;
+  End;
+  If (MemL[0:NewP + 4] < 0) Or (MemL[0:NewP + 4] >= 1000000000)
+     Or (MemL[0:NewP + 12] < 0) Or (MemL[0:NewP + 12] >= 1000000000)
+     Or (MemL[0:NewP] < 0) Or (MemL[0:NewP + 8] < 0) Then
+  Begin
+    SysTimerSettime := -EINVAL;
+    Exit;
+  End;
+  If OldP <> 0 Then
+  Begin
+    PtLeft(Id, Sec, Nn);
+    MemL[0:OldP + 8] := Sec; MemL[0:OldP + 12] := Nn;
+    MemL[0:OldP] := PtInt[Id] Div HZ;
+    MemL[0:OldP + 4] := (PtInt[Id] Mod HZ) * (1000000000 Div HZ);
+  End;
+  S := MemL[0:NewP + 8]; Ns := MemL[0:NewP + 12];
+  If (S = 0) And (Ns = 0) Then
+  Begin
+    PtArmed[Id] := 0;
+    PtInt[Id] := 0;
+    SysTimerSettime := 0;
+    Exit;
+  End;
+  If (Flags And 1) <> 0 Then
+  Begin
+    If PtClk[Id] = 0 Then Now := XTime Else Now := Jiffies Div HZ;
+    T := SecNsToTicks(S - Now, Ns - XUsec * 1000);
+    If T < 1 Then T := 1;
+  End
+  Else
+  Begin
+    T := SecNsToTicks(S, Ns);
+    If T < 1 Then T := 1;
+  End;
+  PtNext[Id] := Jiffies + T;
+  PtInt[Id] := SecNsToTicks(MemL[0:NewP], MemL[0:NewP + 4]);
+  PtArmed[Id] := 1;
+  SysTimerSettime := 0;
+End;
+
+Function SysTimerGettime(Id, CurP : LongInt) : LongInt;
+Var Sec, Ns : LongInt;
+Begin
+  If Not PtCheck(Id) Then
+  Begin
+    SysTimerGettime := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(CurP, 16, True) Then
+  Begin
+    SysTimerGettime := -EFAULT;
+    Exit;
+  End;
+  PtLeft(Id, Sec, Ns);
+  MemL[0:CurP + 8] := Sec; MemL[0:CurP + 12] := Ns;
+  MemL[0:CurP] := PtInt[Id] Div HZ;
+  MemL[0:CurP + 4] := (PtInt[Id] Mod HZ) * (1000000000 Div HZ);
+  SysTimerGettime := 0;
+End;
+
+Function SysTimerGetoverrun(Id : LongInt) : LongInt;
+Begin
+  If PtCheck(Id) Then SysTimerGetoverrun := PtOver[Id] Else
+    SysTimerGetoverrun := -EINVAL;
+End;
+
+Function SysTimerDelete(Id : LongInt) : LongInt;
+Begin
+  If Not PtCheck(Id) Then
+  Begin
+    SysTimerDelete := -EINVAL;
+    Exit;
+  End;
+  PtUsed[Id] := 0; PtArmed[Id] := 0;
+  SysTimerDelete := 0;
+End;
+
+Function SysTimerSettime64(Id, Flags, NewP, OldP : LongInt) : LongInt;
+Var S, R : LongInt;
+Begin
+  S := Scratch(32);
+  If (S = 0) Or Not EnsureUser(NewP, 32, False) Then
+  Begin
+    SysTimerSettime64 := -EFAULT;
+    Exit;
+  End;
+  Ts64To32(NewP, S);
+  Ts64To32(NewP + 16, S + 8);
+  R := SysTimerSettime(Id, Flags, S, S + 16);
+  If (R = 0) And (OldP <> 0) And EnsureUser(OldP, 32, True) Then
+  Begin
+    Ts32To64(S + 16, OldP);
+    Ts32To64(S + 24, OldP + 16);
+  End;
+  SysTimerSettime64 := R;
+End;
+
+Function SysTimerGettime64(Id, CurP : LongInt) : LongInt;
+Var S, R : LongInt;
+Begin
+  S := Scratch(16);
+  If (S = 0) Or Not EnsureUser(CurP, 32, True) Then
+  Begin
+    SysTimerGettime64 := -EFAULT;
+    Exit;
+  End;
+  R := SysTimerGettime(Id, S);
+  If R = 0 Then
+  Begin
+    Ts32To64(S, CurP);
+    Ts32To64(S + 8, CurP + 16);
+  End;
+  SysTimerGettime64 := R;
+End;
+
+{ ---- pidfd ---- }
+
+Function PidfdPoll(F : PFile; Ev : LongInt) : LongInt;
+Var T : PTask;
+Begin
+  T := PidTask(F^.Priv);
+  If (T = Nil) Or (T^.State = TsZombie) Or (T^.State = TsFree) Then
+    PidfdPoll := POLLIN
+  Else PidfdPoll := 0;
+End;
+
+Function SysPidfdOpen(Pid, Flags : LongInt) : LongInt;
+Var T : PTask; F : PFile;
+Begin
+  If (Flags And Not O_NONBLOCK) <> 0 Then
+  Begin
+    SysPidfdOpen := -EINVAL;
+    Exit;
+  End;
+  T := PidTask(Pid);
+  If (Pid <= 0) Or (T = Nil) Then
+  Begin
+    If Pid <= 0 Then SysPidfdOpen := -EINVAL Else SysPidfdOpen := -ESRCH;
+    Exit;
+  End;
+  If T^.Tgid <> T^.Pid Then
+  Begin
+    SysPidfdOpen := -EINVAL;
+    Exit;
+  End;
+  F := AnonFile(LongInt(@PidfdOps[0]), Pid, Flags);
+  If F = Nil Then
+  Begin
+    SysPidfdOpen := -ENOMEM;
+    Exit;
+  End;
+  SysPidfdOpen := AnonFd(F, O_CLOEXEC);
+End;
+
+Function SysPidfdSendSignal(Pfd, Sig, Info, Flags : LongInt) : LongInt;
+Var F : PFile; T : PTask;
+Begin
+  If Flags <> 0 Then
+  Begin
+    SysPidfdSendSignal := -EINVAL;
+    Exit;
+  End;
+  F := FdGet(Pfd);
+  If F = Nil Then
+  Begin
+    SysPidfdSendSignal := -EBADF;
+    Exit;
+  End;
+  If F^.FOps <> LongInt(@PidfdOps[0]) Then
+  Begin
+    SysPidfdSendSignal := -EBADF;
+    Exit;
+  End;
+  T := PidTask(F^.Priv);
+  If (T = Nil) Or (T^.State = TsZombie) Then
+  Begin
+    SysPidfdSendSignal := -ESRCH;
+    Exit;
+  End;
+  If Info <> 0 Then
+  Begin
+    SysPidfdSendSignal := DoSigqueue(T, Sig, Info);
+    Exit;
+  End;
+  If Not SigAllowed(T) Then
+  Begin
+    SysPidfdSendSignal := -EPERM;
+    Exit;
+  End;
+  If Sig <> 0 Then SendSig(T, Sig);
+  SysPidfdSendSignal := 0;
+End;
+
+{ ---- Verrous de fichiers : flock, fcntl POSIX, OFD ---- }
+
+Const
+  MaxLocks = 256;
+  LkEof = $7FFFFFFF;
+
+Var
+  LkUsed, LkIno, LkOwner, LkKind, LkType, LkStart, LkEnd, LkPid :
+      Array[0..MaxLocks - 1] Of LongInt;
+
+Function LkClass(K : LongInt) : LongInt;
+Begin
+  If K = 0 Then LkClass := 0 Else LkClass := 1;
+End;
+
+{ Verrou en conflit avec (Ino, Kind, Owner, Type, S, E) ; -1 si aucun }
+Function LkConflict(Ino, Kind, Owner, Typ, S, E : LongInt) : LongInt;
+Var I : LongInt;
+Begin
+  LkConflict := -1;
+  For I := 0 To MaxLocks - 1 Do
+    If (LkUsed[I] <> 0) And (LkIno[I] = Ino)
+       And (LkClass(LkKind[I]) = LkClass(Kind))
+       And ((LkOwner[I] <> Owner) Or (LkKind[I] <> Kind))
+       And ((LkType[I] = 1) Or (Typ = 1))
+       And (LkStart[I] <= E) And (LkEnd[I] >= S) Then
+    Begin
+      LkConflict := I;
+      Exit;
+    End;
+End;
+
+Function LkNew : LongInt;
+Var I : LongInt;
+Begin
+  For I := 0 To MaxLocks - 1 Do
+    If LkUsed[I] = 0 Then
+    Begin
+      LkUsed[I] := 1;
+      LkNew := I;
+      Exit;
+    End;
+  LkNew := -1;
+End;
+
+{ Retirer [S, E] des verrous du proprietaire (decoupe les verrous) }
+Function LkClear(Ino, Kind, Owner, S, E : LongInt) : Boolean;
+Var I, J, OldEnd : LongInt;
+Begin
+  LkClear := True;
+  For I := 0 To MaxLocks - 1 Do
+    If (LkUsed[I] <> 0) And (LkIno[I] = Ino) And (LkKind[I] = Kind)
+       And (LkOwner[I] = Owner) And (LkStart[I] <= E) And (LkEnd[I] >= S) Then
+    Begin
+      OldEnd := LkEnd[I];
+      If (LkStart[I] < S) And (OldEnd > E) Then
+      Begin
+        J := LkNew;
+        If J < 0 Then
+        Begin
+          LkClear := False;
+          Exit;
+        End;
+        LkIno[J] := Ino; LkKind[J] := Kind; LkOwner[J] := Owner;
+        LkType[J] := LkType[I]; LkPid[J] := LkPid[I];
+        LkStart[J] := E + 1; LkEnd[J] := OldEnd;
+        LkEnd[I] := S - 1;
+      End
+      Else If LkStart[I] < S Then LkEnd[I] := S - 1
+      Else If OldEnd > E Then LkStart[I] := E + 1
+      Else LkUsed[I] := 0;
+    End;
+End;
+
+Function LkSet(Ino, Kind, Owner, Pid, Typ, S, E : LongInt; Wait : Boolean)
+    : LongInt;
+Var C, J : LongInt;
+Begin
+  If Typ = 2 Then
+  Begin
+    LkClear(Ino, Kind, Owner, S, E);
+    WakeUp(LongInt(@LkUsed[0]));
+    LkSet := 0;
+    Exit;
+  End;
+  While True Do
+  Begin
+    C := LkConflict(Ino, Kind, Owner, Typ, S, E);
+    If C < 0 Then Break;
+    If Not Wait Then
+    Begin
+      LkSet := -EAGAIN;
+      Exit;
+    End;
+    If SleepOn(LongInt(@LkUsed[0]), 0, True) = WakeSignal Then
+    Begin
+      LkSet := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+  If Not LkClear(Ino, Kind, Owner, S, E) Then
+  Begin
+    LkSet := -ENOLCK;
+    Exit;
+  End;
+  J := LkNew;
+  If J < 0 Then
+  Begin
+    LkSet := -ENOLCK;
+    Exit;
+  End;
+  LkIno[J] := Ino; LkKind[J] := Kind; LkOwner[J] := Owner; LkType[J] := Typ;
+  LkStart[J] := S; LkEnd[J] := E; LkPid[J] := Pid;
+  WakeUp(LongInt(@LkUsed[0]));
+  LkSet := 0;
+End;
+
+Procedure LocksFileReleased(F : LongInt);
+Var I : LongInt; Any : Boolean;
+Begin
+  Any := False;
+  For I := 0 To MaxLocks - 1 Do
+    If (LkUsed[I] <> 0) And (LkOwner[I] = F) And (LkKind[I] <> 1) Then
+    Begin
+      LkUsed[I] := 0;
+      Any := True;
+    End;
+  If Any Then WakeUp(LongInt(@LkUsed[0]));
+End;
+
+Procedure LocksPosixClose(Tgid, Ino : LongInt);
+Var I : LongInt; Any : Boolean;
+Begin
+  Any := False;
+  For I := 0 To MaxLocks - 1 Do
+    If (LkUsed[I] <> 0) And (LkKind[I] = 1) And (LkOwner[I] = Tgid)
+       And (LkIno[I] = Ino) Then
+    Begin
+      LkUsed[I] := 0;
+      Any := True;
+    End;
+  If Any Then WakeUp(LongInt(@LkUsed[0]));
+End;
+
+Procedure LocksProcExit(Tgid : LongInt);
+Var I : LongInt; Any : Boolean;
+Begin
+  Any := False;
+  For I := 0 To MaxLocks - 1 Do
+    If (LkUsed[I] <> 0) And (LkKind[I] = 1) And (LkOwner[I] = Tgid) Then
+    Begin
+      LkUsed[I] := 0;
+      Any := True;
+    End;
+  If Any Then WakeUp(LongInt(@LkUsed[0]));
+End;
+
+Function SysFlock(Fd, Op : LongInt) : LongInt;
+Var F : PFile; Typ : LongInt;
+Begin
+  F := FdGet(Fd);
+  If F = Nil Then
+  Begin
+    SysFlock := -EBADF;
+    Exit;
+  End;
+  Case Op And 3 Of
+    1 : Typ := 0;
+    2 : Typ := 1;
+  Else
+    Typ := 2;
+  End;
+  If (Op And 8) <> 0 Then Typ := 2
+  Else If (Op And 3) = 0 Then
+  Begin
+    SysFlock := -EINVAL;
+    Exit;
+  End;
+  SysFlock := LkSet(LongInt(F^.Inode), 0, LongInt(F), Cur^.Tgid, Typ, 0, LkEof,
+      (Op And 4) = 0);
+End;
+
+{ fcntl : F_GETLK/SETLK/SETLKW (16 octets), F_GETLK64... (24 octets), OFD }
+Function DoFcntlLock(F : PFile; Cmd, Arg : LongInt) : LongInt;
+Var Wide, Ofd, Wait, Get : Boolean; Typ, Wh, S, L, E, C, Kind, Owner, Ino,
+    Sz : LongInt;
+Begin
+  Wide := (Cmd = 12) Or (Cmd = 13) Or (Cmd = 14) Or (Cmd >= 36);
+  Ofd := Cmd >= 36;
+  Get := (Cmd = 5) Or (Cmd = 12) Or (Cmd = 36);
+  Wait := (Cmd = 7) Or (Cmd = 14) Or (Cmd = 38);
+  If Cmd >= 36 Then
+  Begin
+    Get := Cmd = 36;
+    Wait := Cmd = 38;
+  End;
+  If Wide Then Sz := 24 Else Sz := 16;
+  If Not EnsureUser(Arg, Sz, True) Then
+  Begin
+    DoFcntlLock := -EFAULT;
+    Exit;
+  End;
+  Typ := MemW[0:Arg]; Wh := MemW[0:Arg + 2];
+  If Wide Then
+  Begin
+    S := MemL[0:Arg + 4]; L := MemL[0:Arg + 12];
+  End
+  Else
+  Begin
+    S := MemL[0:Arg + 4]; L := MemL[0:Arg + 8];
+  End;
+  If (Typ > 2) Then
+  Begin
+    DoFcntlLock := -EINVAL;
+    Exit;
+  End;
+  If Ofd And (MemL[0:Arg + Sz - 4] <> 0) Then
+  Begin
+    DoFcntlLock := -EINVAL;
+    Exit;
+  End;
+  Case Wh Of
+    0 : ;
+    1 : S := S + F^.Pos;
+    2 : S := S + F^.Inode^.Size;
+  Else
+    Begin
+      DoFcntlLock := -EINVAL;
+      Exit;
+    End;
+  End;
+  If L = 0 Then E := LkEof
+  Else If L > 0 Then E := S + L - 1
+  Else
+  Begin
+    E := S - 1;
+    S := S + L;
+  End;
+  If S < 0 Then
+  Begin
+    DoFcntlLock := -EINVAL;
+    Exit;
+  End;
+  If Ofd Then Kind := 2 Else Kind := 1;
+  If Ofd Then Owner := LongInt(F) Else Owner := Cur^.Tgid;
+  Ino := LongInt(F^.Inode);
+  If Get Then
+  Begin
+    If Typ = 2 Then
+    Begin
+      DoFcntlLock := -EINVAL;
+      Exit;
+    End;
+    C := LkConflict(Ino, Kind, Owner, Typ, S, E);
+    If C < 0 Then MemW[0:Arg] := 2
+    Else
+    Begin
+      MemW[0:Arg] := LkType[C];
+      MemW[0:Arg + 2] := 0;
+      If Wide Then
+      Begin
+        MemL[0:Arg + 4] := LkStart[C];
+        MemL[0:Arg + 8] := 0;
+        If LkEnd[C] = LkEof Then MemL[0:Arg + 12] := 0
+        Else MemL[0:Arg + 12] := LkEnd[C] - LkStart[C] + 1;
+        MemL[0:Arg + 16] := 0;
+        If LkKind[C] = 2 Then MemL[0:Arg + 20] := -1
+        Else MemL[0:Arg + 20] := LkPid[C];
+      End
+      Else
+      Begin
+        MemL[0:Arg + 4] := LkStart[C];
+        If LkEnd[C] = LkEof Then MemL[0:Arg + 8] := 0
+        Else MemL[0:Arg + 8] := LkEnd[C] - LkStart[C] + 1;
+        If LkKind[C] = 2 Then MemL[0:Arg + 12] := -1
+        Else MemL[0:Arg + 12] := LkPid[C];
+      End;
+    End;
+    DoFcntlLock := 0;
+    Exit;
+  End;
+  If (Typ = 0) And ((F^.Flags And O_ACCMODE) = O_WRONLY) Then
+  Begin
+    DoFcntlLock := -EBADF;
+    Exit;
+  End;
+  If (Typ = 1) And ((F^.Flags And O_ACCMODE) = O_RDONLY) Then
+  Begin
+    DoFcntlLock := -EBADF;
+    Exit;
+  End;
+  DoFcntlLock := LkSet(Ino, Kind, Owner, Cur^.Tgid, Typ, S, E, Wait);
+End;
+
+{ ---- Enregistrement ---- }
+
+Procedure InitSignalsRt;
+Begin
+  MemFill(LongInt(@SigfdOps[0]), 0, SizeOf(SigfdOps));
+  SigfdOps[FoRead] := LongInt(@SigfdRead);
+  SigfdOps[FoPoll] := LongInt(@SigfdPoll);
+  SigfdOps[FoRelease] := LongInt(@SigfdRelease);
+  MemFill(LongInt(@PidfdOps[0]), 0, SizeOf(PidfdOps));
+  PidfdOps[FoPoll] := LongInt(@PidfdPoll);
+  SysReg(177, LongInt(@SysRtSigtimedwait), 4);
+  SysReg(421, LongInt(@SysRtSigtimedwait64), 4);
+  SysReg(178, LongInt(@SysRtSigqueueinfo), 3);
+  SysReg(335, LongInt(@SysRtTgsigqueueinfo), 4);
+  SysReg(321, LongInt(@SysSignalfd), 3);
+  SysReg(327, LongInt(@SysSignalfd4), 4);
+  SysReg(259, LongInt(@SysTimerCreate), 3);
+  SysReg(260, LongInt(@SysTimerSettime), 4);
+  SysReg(261, LongInt(@SysTimerGettime), 2);
+  SysReg(262, LongInt(@SysTimerGetoverrun), 1);
+  SysReg(263, LongInt(@SysTimerDelete), 1);
+  SysReg(409, LongInt(@SysTimerSettime64), 4);
+  SysReg(408, LongInt(@SysTimerGettime64), 2);
+  SysReg(434, LongInt(@SysPidfdOpen), 2);
+  SysReg(424, LongInt(@SysPidfdSendSignal), 4);
+  SysReg(143, LongInt(@SysFlock), 2);
 End;
 
 { ==================================================================== }
@@ -27317,8 +28418,8 @@ End;
   encodes en base64, ecrits dans le tmpfs racine au demarrage. }
 
 Const
-  EmbCount = 33;
-  EmbPath : Array[0..32] Of String[20] = (
+  EmbCount = 34;
+  EmbPath : Array[0..33] Of String[20] = (
     '/sbin/init',
     '/bin/hello',
     '/bin/forkwait',
@@ -27351,18 +28452,19 @@ Const
     '/bin/idetest',
     '/bin/preempttest',
     '/bin/pstress',
-    '/bin/syscalltest');
-  EmbSize : Array[0..32] Of LongInt = (
-    3544, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
+    '/bin/syscalltest',
+    '/bin/sigrttest');
+  EmbSize : Array[0..33] Of LongInt = (
+    3548, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
     2320, 1104, 11936, 2476, 3268, 8720, 2376, 2004, 5100, 3248, 1712, 3568,
-    2812, 10656, 2748, 2640, 2196, 2560, 2552, 4028, 12104);
-  EmbStart : Array[0..33] Of LongInt = (
+    2812, 10656, 2748, 2640, 2196, 2560, 2552, 4028, 12104, 8776);
+  EmbStart : Array[0..34] Of LongInt = (
     0, 79, 117, 161, 212, 263, 313, 401, 439, 476, 528, 629, 690, 742, 767,
     1033, 1089, 1162, 1356, 1409, 1454, 1568, 1641, 1680, 1760, 1823, 2060,
-    2122, 2181, 2230, 2287, 2344, 2434, 2703);
-  EmbData : Array[0..2702] Of String[60] = (
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAADADAAAAAAAADQAIAAC',
-    'ACgABwAGAAEAAAAAAAAAAIAECACABAgACwAAAAsAAAUAAAAAEAAAUeV0ZAAA',
+    2122, 2181, 2230, 2287, 2344, 2434, 2703, 2899);
+  EmbData : Array[0..2898] Of String[60] = (
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAADEDAAAAAAAADQAIAAC',
+    'ACgABwAGAAEAAAAAAAAAAIAECACABAgECwAABAsAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuBQAAACJ5VdWU4Pk8IHskAUA',
     'AM2ASHQUuFiHBAjoRQUAALgBAAAA6bsEAAC4QgAAAM2AuHiHBAgx/zHb6CYF',
     'AACLDJ2AigQIhcl0XzHSiYwkkAEAAInIQ4mUJJQBAACNlCSQAQAAiUwkDOgB',
@@ -27419,27 +28521,27 @@ Const
     'dGVzdAAvYmluL21vdXNldGVzdAAvYmluL25ldHRlc3QAL2Jpbi9pc290ZXN0',
     'AC9iaW4vZmF0dGVzdAAvYmluL2ZidGVzdAAvYmluL3N3YXB0ZXN0AC9iaW4v',
     'a2lsbHRlc3QAL2Jpbi9pZGV0ZXN0AC9iaW4vcHJlZW1wdHRlc3QAL2Jpbi9w',
-    'c3RyZXNzAC9iaW4vc3lzY2FsbHRlc3QAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'c3RyZXNzAC9iaW4vc3lzY2FsbHRlc3QAL2Jpbi9zaWdydHRlc3QAAAAAAAAA',
     'ABOHBAgshwQIN4cECAAAAAAAAAAAAAAAAAAAAAAAAAAApIgECK+IBAi9iAQI',
     'y4gECNiIBAjmiAQI84gECACJBAgPiQQIHIkECCqJBAg4iQQIRIkECFKJBAhf',
     'iQQIbokECHyJBAiJiQQIlokECKOJBAiwiQQIv4kECMyJBAjZiQQI5okECPKJ',
-    'BAgAigQIDooECBuKBAgsigQIOYoECAAAAABHQ0M6IChVYnVudHUgMTMuMy4w',
-    'LTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AQAAAAAAAAAAAAAABADx/wgAAACfhQQIIAAAAAIAAQAPAAAAv4UECB0AAAAC',
-    'AAEAFwAAANyFBAgJAAAAAgABABwAAADlhQQIkgAAAAIAAQAgAAAAd4YECF0A',
-    'AAACAAEAJQAAAICKBAiAAAAAAQACACsAAADUhgQIKQAAABIAAQAxAAAAZIUE',
-    'CAAAAAAQAAEAOAAAAIuFBAgAAAAAEAABAEoAAACShQQIAAAAABAAAQBFAAAA',
-    'AJsECAAAAAAQAAIALAAAAHSABAjwBAAAEgABAFEAAAAAmwQIAAAAABAAAgBY',
-    'AAAAAJsECAAAAAAQAAIAAGluaXQuYwBzdHJjbXAAcHV0c19mZABwdXRzAHJ1',
-    'bgBwdXRkAHRlc3RzAGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nf',
-    'c3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIA',
-    'LnRleHQALnJvZGF0YQAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAHSABAh0AAAAiQYAAAAA',
-    'AAAAAAAAAQAAAAAAAAAhAAAAAQAAAAIAAAAAhwQIAAcAAAAEAAAAAAAAAAAA',
-    'ACAAAAAAAAAAKQAAAAEAAAAwAAAAAAAAAAALAAAtAAAAAAAAAAAAAAABAAAA',
-    'AQAAAAEAAAACAAAAAAAAAAAAAAAwCwAAAAEAAAUAAAAIAAAABAAAABAAAAAJ',
-    'AAAAAwAAAAAAAAAAAAAAMAwAAF0AAAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMA',
-    'AAAAAAAAAAAAAI0MAAAyAAAAAAAAAAAAAAABAAAAAAAAAA==',
+    'BAgAigQIDooECBuKBAgsigQIOYoECEqKBAgAAAAAR0NDOiAoVWJ1bnR1IDEz',
+    'LjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAEAAAAAAAAAAAAAAAQA8f8IAAAAn4UECCAAAAACAAEADwAAAL+FBAgd',
+    'AAAAAgABABcAAADchQQICQAAAAIAAQAcAAAA5YUECJIAAAACAAEAIAAAAHeG',
+    'BAhdAAAAAgABACUAAACAigQIhAAAAAEAAgArAAAA1IYECCkAAAASAAEAMQAA',
+    'AGSFBAgAAAAAEAABADgAAACLhQQIAAAAABAAAQBKAAAAkoUECAAAAAAQAAEA',
+    'RQAAAASbBAgAAAAAEAACACwAAAB0gAQI8AQAABIAAQBRAAAABJsECAAAAAAQ',
+    'AAIAWAAAAASbBAgAAAAAEAACAABpbml0LmMAc3RyY21wAHB1dHNfZmQAcHV0',
+    'cwBydW4AcHV0ZAB0ZXN0cwBjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9f',
+    'YnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3Ry',
+    'dGFiAC50ZXh0AC5yb2RhdGEALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAAB0gAQIdAAAAIkG',
+    'AAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAACAAAAAIcECAAHAAAEBAAAAAAA',
+    'AAAAAAAgAAAAAAAAACkAAAABAAAAMAAAAAAAAAAECwAALQAAAAAAAAAAAAAA',
+    'AQAAAAEAAAABAAAAAgAAAAAAAAAAAAAANAsAAAABAAAFAAAACAAAAAQAAAAQ',
+    'AAAACQAAAAMAAAAAAAAAAAAAADQMAABdAAAAAAAAAAAAAAABAAAAAAAAABEA',
+    'AAADAAAAAAAAAAAAAACRDAAAMgAAAAAAAAAAAAAAAQAAAAAAAAA=',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAOYIECDQAAABYBQAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAinAwAApwMAAAUAAAAAEAAAAQAAAKgD',
     'AACokwQIqJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -30063,7 +31165,203 @@ Const
     'IQAAAAAAAAAAAAAgAAAAAAAAADQAAAABAAAAMAAAAAAAAACgKwAALQAAAAAA',
     'AAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAA0CsAAEABAAAHAAAADAAA',
     'AAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAABAtAACTAAAAAAAAAAAAAAABAAAA',
-    'AAAAABEAAAADAAAAAAAAAAAAAACjLQAAPQAAAAAAAAAAAAAAAQAAAAAAAAA=');
+    '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',
+    'BAiJBJUgrwQIoUCvBAhAo0CvBAhdw1WJwTHSieVTgDwRAHQDQuv3uAQAAAC7',
+    'AQAAAM2AW13DVYnlVonGuNSZBAhTidPozf///4nw6Mb///+F27jNmQQIusiZ',
+    'BAgPRcLosv///4XbdAj/BYSvBAjrBv8FgK8ECFteXcNVieVTg+wIi0UIixCN',
+    'SASNRJAIUFFS6Nzm//+Jw7gBAAAAzYCDxBDr/gAAIE9LCgAgRkFJTAoAS1RF',
+    'U1Q6IABydC5zaWdxdWV1ZV8zAHJ0LnF1ZXVlZF90aHJlZQBydC5ydF9vcmRl',
+    'cmVkX3ZhbHVlcwBydC5zdGRfbm90X3F1ZXVlZABydC5raWxsX3J0X2NvZGVf',
+    'dXNlcgBydC5zaWdxdWV1ZV9wZXJtAHJ0LnNpZ3F1ZXVlX2VpbnZhbABydC53',
+    'YWl0X2VhZ2FpbgBydC53YWl0X3BlbmRpbmcAcnQud2FpdF90aW1lb3V0AHJ0',
+    'LndhaXRfd29rZW5fYnlfY2hpbGQAc2ZkLmNyZWF0ZQBzZmQuZWFnYWluAHNm',
+    'ZC5wb2xsAHNmZC5yZWFkX3R3bwBzZmQuY29udGVudHMAc2ZkLnNtYWxsX2J1',
+    'ZgBzZmQudXBkYXRlX21hc2sAc2ZkLm9sZF9tYXNrX2dvbmUAdGltZXIuY3Jl',
+    'YXRlAHRpbWVyLmJhZF9jbG9jawB0aW1lci5zZXR0aW1lAHRpbWVyLmdldHRp',
+    'bWUAdGltZXIudGhyZWVfZXhwaXJhdGlvbnMAdGltZXIub3ZlcnJ1bl9hcGkA',
+    'dGltZXIuZGlzYXJtAHRpbWVyLm9uZXNob3QAdGltZXIub25lc2hvdF9vbmNl',
+    'AHRpbWVyLmFic3RpbWUAdGltZXIuZGVsZXRlAHRpbWVyLnNpZ2V2X25vbmUA',
+    'dGltZXIuc2lnZXZfbm9uZV9zaWxlbnQAcnQuc2Vndl9zaWFkZHIAcGlkZmQu',
+    'b3BlbgBwaWRmZC5ub3RfcmVhZHkAcGlkZmQucG9sbF9leGl0AHBpZGZkLndh',
+    'aXRpZABwaWRmZC5zZW5kX3NpZ25hbABwaWRmZC5iYWRmZAAvdG1wL2xrMQAw',
+    'MTIzNDU2Nzg5AGZsb2NrLmV4AGZsb2NrLmNvbmZsaWN0X290aGVyX29wZW4A',
+    'ZmxvY2suc2FtZV9mZF91cGdyYWRlAGZsb2NrLnNoX3ZzX2V4AGZsb2NrLmJs',
+    'b2NraW5nX2NoaWxkAGZsb2NrLmVpbnZhbABmbG9jay5yZWxlYXNlZF9vbl9j',
+    'bG9zZQAvdG1wL2xrMgAwMTIzNDU2Nzg5YWJjZGVmAHBvc2l4LnNldF93cgBw',
+    'b3NpeC5zYW1lX3Byb2Nlc3Nfb2sAcG9zaXguY2hpbGRfY29uZmxpY3RzAHBv',
+    'c2l4LnBhcnRpYWxfdW5sb2NrX3NwbGl0AHBvc2l4LnNldGxrd19hZnRlcl9j',
+    'bG9zZV9yZWxlYXNlAC90bXAvbGszAG9mZC5zZXQAb2ZkLmNvbmZsaWN0X3Nh',
+    'bWVfcHJvY2VzcwBvZmQuZ2V0bGsAb2ZkLnBpZF9laW52YWwAb2ZkLnVubG9j',
+    'awBvZmQucmVsZWFzZWRfb25fY2xvc2UAZmNudGwucGlwZV9zegBzaWdydCBE',
+    'T05FCgAAKwIAAC0AAAAAAAAAAAAAAAAAAAAALTEBAAAAAIDDyQEBAAAAAAAA',
+    'AAoAAAAAAAAAAQAAAAUAAAACAAAAAAAAAAEAAAAAAAAAZAAAAAAAAAACAAAA',
+    'AwAAAAQAAAAAAAAAAQAAAAMAAAAEAAAAAAAAAAEAAAAAAAAAAwAAAAAAAAAB',
+    'AAAABwAAAAMAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAAAAAAoA',
+    'AAAAAAAAAAAAAAEAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAEAAAAAAAAAAAAA',
+    'AAoAAAAAAAAAAAAAAEdDQzogKFVidW50dSAxMy4zLjAtNnVidW50dTJ+MjQu',
+    'MDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAE',
+    'APH/DQAAALSYBAgnAAAAAgABABIAAADbmAQIXgAAAAIAAQAUAAAAQK8ECAQA',
+    'AAABAAMAGQAAAGCvBAggAAAAAQADAB0AAAAArwQIIAAAAAEAAwAlAAAA4K4E',
+    'CCAAAAABAAMALAAAACCvBAggAAAAAQADADMAAAA5mQQIIAAAAAIAAQA4AAAA',
+    'WZkECEQAAAACAAEAPgAAAISvBAgEAAAAAQADAEYAAACArwQIBAAAAAEAAwBO',
+    'AAAAnZkECCkAAAASAAEAVAAAAHmYBAgAAAAAEAABAFsAAACgmAQIAAAAABAA',
+    'AQBtAAAAp5gECAAAAAAQAAEAaAAAAOCuBAgAAAAAEAADAE8AAACUgAQI5RcA',
+    'ABIAAQB0AAAA0K4ECAAAAAAQAAMAewAAAIivBAgAAAAAEAADAABzaWdydHRl',
+    'c3QuYwBzZWd2AGgAZ290bgBnb3QAZ290Y29kZQBnb3RwaWQAZ290dmFsAHB1',
+    'dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGNtYWluAGt1X3NjNgBfX3Jlc3Rv',
+    'cmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRh',
+    'YgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNzAC5jb21tZW50AAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAG',
+    'AAAAlIAECJQAAAAyGQAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAAgAAAMiZ',
+    'BAjIGQAACAUAAAAAAAAAAAAABAAAAAAAAAApAAAACAAAAAMAAADgrgQI4B4A',
+    'AKgAAAAAAAAAAAAAACAAAAAAAAAALgAAAAEAAAAwAAAAAAAAANAeAAAtAAAA',
+    'AAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAAAAHwAAUAEAAAYAAAAN',
+    'AAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAAUCAAAIAAAAAAAAAAAAAAAAEA',
+    'AAAAAAAAEQAAAAMAAAAAAAAAAAAAANAgAAA3AAAAAAAAAAAAAAABAAAAAAAA',
+    'AA==');
 
 { END-EMBED }
 { Installer les programmes embarques dans le tmpfs racine }

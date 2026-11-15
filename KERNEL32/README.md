@@ -69,6 +69,7 @@ Parties ajoutees en phase 2 (placees physiquement avant la partie 14) :
 | 22 | reseau : pilote RTL8139 (PCI, DMA, IRQ), ARP, IPv4, ICMP (echo), UDP, TCP reel (poignee de mains, retransmission, fenetre, MSS 1400, fermeture), `SIOCGIFADDR/SIOCSIFADDR/SIOCGIFFLAGS...`, `/proc/net/dev` et `route`, `ip=A.B.C.D` sur la ligne de commande |
 | 23 | iso9660 (CD-ROM, lecture seule, Rock Ridge : `NM`, `PX`, `SL`) sur ATAPI (commande PACKET en PIO, partie 11) |
 | 26 | swap : `swapon`/`swapoff` (87/115) sur un peripherique `mkswap` (SWAPSPACE2 v1, 128 Mo au plus) ou `swap=/dev/hdXN` au demarrage ; `SwapReclaim` (appele par `AllocPages` sous 96 pages libres) ecrit sur disque les pages anonymes privees a une seule reference (seconde chance par bit "accede"), PTE non present portant la case (bit 9), page-in dans la faute de page (aussi en mode noyau), cases comptees pour `fork`, `/proc/meminfo` SwapTotal/SwapFree |
+| 29 | signaux temps reel : file d'attente de `siginfo` par tache (16 entrees, signaux < 32 non empiles, RT empiles), `si_code/si_pid/si_uid/si_value`, `si_addr` des SIGSEGV, `rt_sigtimedwait(+64)`, `rt_sigqueueinfo`, `rt_tgsigqueueinfo`, `signalfd/signalfd4`, minuteries POSIX (`timer_create/settime/gettime/getoverrun/delete` + 64 bits, SIGEV_SIGNAL/NONE/THREAD_ID, resolution 10 ms, supprimees a l'execve), `pidfd_open`, `pidfd_send_signal`, `waitid(P_PIDFD)`, verrous de fichiers reels : `flock`, `fcntl` POSIX (F_GETLK/SETLK/SETLKW, 32 et 64 bits, decoupe des plages, liberes a la fermeture de tout descripteur du fichier et a la sortie du processus) et OFD (F_OFD_*), `F_GETPIPE_SZ` |
 | 28 | appels systeme complementaires issus de l'audit (lot A1, apres la partie 16) : ordonnancement (`sched_*`, `getcpu`, affinite), capacites (`capget/capset`, `Capable`, regles setuid/execve), `personality`, `sendfile/sendfile64/copy_file_range/splice/vmsplice`, `preadv/pwritev(+2)`, `fallocate`, `syncfs`, `statx`, `renameat2`, `openat2`, `faccessat2`, `fchmodat2`, `execveat`, `close_range`, `memfd_create`, `mlock*/mincore/madvise` reels (`VmLocked`, RLIMIT_MEMLOCK), `waitid`, `process_vm_readv/writev`, `kcmp`, `unshare(FILES/FS)`, `membarrier`, horloges 64 bits (`clock_*64`, `futex_time64`, `ppoll/pselect6`, `epoll_pwait2`, `timerfd*64`, `utimensat_time64`), `adjtimex`, `ioperm/iopl`, ENOSYS explicites (`EnosysList`) |
 | 25 | framebuffer Bochs/QEMU VGA : `fb=LxH` sur la ligne de commande programme le mode 32 bits (registres VBE 1CEh/1CFh), memoire video (BAR 0 PCI) mappee en F8000000h, `/dev/fb0` (29:0) : read, write, lseek, `FBIOGET_FSCREENINFO/VSCREENINFO`, `mmap` partage (VMA `VmPhys`, PTE hors comptage) |
 | 24 | FAT12/16/32 et vfat (noms longs UTF-8/UCS-2, noms courts `~N`, indicateurs de casse NT), lecture/ecriture, repertoires qui grandissent, renommage, troncature, attribut lecture seule, dates, `statfs`, FSInfo FAT32 ; options `ro`, `rw`, `umask=`, `uid=`, `gid=` ; types `vfat`, `msdos`, `fat` |
@@ -345,14 +346,14 @@ fichiers de plus de 2 Go non geres (positions 32 bits ; `EFBIG`), `ioperm`
 accorde tous les ports (IOPL), `fallocate` ne reserve pas de blocs,
 `renameat2(EXCHANGE)` non atomique, `openat2` refuse les `RESOLVE_*`,
 `adjtimex` ne discipline pas l'horloge, les verrous `flock`/`fcntl` sont
-toujours acceptes sans effet (stubs : lot suivant). Correction au passage :
+reels depuis la partie 29. Correction au passage :
 `FUTEX_WAIT_BITSET` utilise un delai absolu comme Linux et
 `clock_nanosleep(TIMER_ABSTIME)` tient compte des nanosecondes.
 
 ### Tests (suite)
 
-* `RUNK.SH` : 31 programmes embarques, 427 verifications (dont `syscalltest` : 94
-  verifications des appels du lot A1) (`fattest`, `fbtest`,
+* `RUNK.SH` : 32 programmes embarques, 485 verifications (dont `syscalltest` : 94
+  verifications du lot A1 et `sigrttest` : 58 du lot A2a) (`fattest`, `fbtest`,
   `swaptest`, `idetest` s'ignorent sans le materiel voulu ; `killtest` :
   `kill(pid, 0, -pgrp, -1)` ; `preempttest` : latence d'un processus en mode
   utilisateur pendant de longs appels systeme d'un autre (trou maximal
@@ -411,11 +412,20 @@ actions `sysinit wait once respawn ctrlaltdel shutdown`) et, sans inittab,
 | `ID`, `KILL`, `PS`, `MKDIR`, `RMDIR`, `RM`, `SYNC`, `HOSTNAME` | `/bin` | outils de base (`/proc` pour `ps`) |
 | `MOUNT`, `UMOUNT`, `HALT`, `REBOOT`, `POWEROFF` | `/sbin` | montages, arret (`reboot(2)`) |
 | `INSTALL.PAS` | `/sbin/install`, `/sbin/mkfs.ext2` | installateur et mkfs.ext2 (voir ci-dessous) |
+| `LN`, `CHOWN` (+`chgrp`), `MKNOD`, `READLINK` (+`realpath`) | `/bin` | liens, proprietaires (-R), fichiers speciaux, chemins canoniques |
+| `UPTIME`, `FREE`, `DMESG`, `PGREP` (+`pkill`, `pidof`, `killall`) | `/bin` | information systeme par `/proc` et `syslog(2)`, recherche et signaux par nom |
+| `NICE`, `NOHUP`, `TIMEOUT`, `USLEEP`, `PRINTENV`, `TTY`, `NOLOGIN` | `/bin`, `/sbin/nologin` | lancement de commandes, delais, environnement |
+| `FIND`, `XARGS`, `TAR` | `/bin` | `find` (-name -iname -type -size -mtime -newer -empty -maxdepth -exec -delete), `xargs` (-n -0 -I -t), `tar` ustar c/x/t, v, z (via gzip), -C ; archives relues par GNU tar et inversement |
 
 Cinq langues : `FR` (defaut), `EN`, `GR` (allemand), `SP`, `IT`. La langue vient
 de la variable `LANGUAGE` (`/etc/profile`, ou `/etc/default/locale`), que
 `init` lit et transmet a ses fils ; messages systeme (`SysErrorText`,
 init, getty, login, passwd, installateur...) traduits.
+
+Modules du noyau : `lpc -3M` produit des `.ko` ELF32 ET_REL (voir
+`TOOLS/LPC.TXT`, "Cible -3M", et `DEMANDES_A.md`). /etc complet : passwd,
+group, shadow (comptes systeme en `/sbin/nologin`), shells, hosts,
+resolv.conf, securetty, nsswitch.conf, protocols, services, login.defs.
 
 ### Installateur et mkfs.ext2 (`USR/INSTALL.PAS`)
 
