@@ -91,7 +91,7 @@ fgrep        marche    ok    fgrep alpha in.txt
 fmt          marche    ok    fmt --width=30 long.txt                      
 fold         marche    ok    fold --width=20 long.txt                     
 format       marche    aide  aide /?                                      demarre et affiche son aide
-free         marche    aide  aide /?                                      demarre et affiche son aide
+free         marche    ok    aide /?                                      demarre et affiche son aide
 fromdos      marche    aide  aide /?                                      demarre et affiche son aide
 gcal         marche    aide  aide /?                                      demarre et affiche son aide
 geqn         marche    aide  aide /?                                      demarre et affiche son aide
@@ -119,7 +119,7 @@ htdigest     marche    aide  aide /?                                      demarr
 htpasswd     marche    aide  aide /?                                      demarre et affiche son aide
 iconv        marche    aide  aide /?                                      demarre et affiche son aide
 id           marche    ok    id                                           
-ifconfig     marche    aide  aide /?                                      demarre et affiche son aide
+ifconfig     marche    ok    aide /?                                      demarre et affiche son aide
 ispell       marche    aide  aide /?                                      demarre et affiche son aide
 join         marche    ok    join j1.txt j2.txt                           
 ksh          reserves  aide  aide /?                                      shell interactif : l'aide /? attend l'entree
@@ -200,3 +200,62 @@ which        marche    ok    which ls
 yes          marche    -     yes                                          boucle infinie par nature : essai par tube vers head
 zcat         marche    aide  aide /?                                      demarre et affiche son aide
 zforce       marche    aide  aide /?                                      demarre et affiche son aide
+
+
+PROGRAMMES DE USR/ (ecrits pour KERNEL32, installes par BUILD.SH)
+QEMU : ok = essai fonctionnel dans run.sh ; sess = verifie par les sessions
+       (init, getty, login, sh, installateur, RUNU power/install) ; aide = essai /?
+
+chown        ok
+dmesg        ok
+find         ok
+free         ok
+getty        sess
+halt         sess
+hostname     sess
+hwclock      ok
+id           ok
+ifconfig     ok
+init         sess
+install      sess
+kill         sess
+ln           ok
+login        sess
+lsmod        ok
+mkdir        ok
+mknod        ok
+mkpasswd     sess
+mkswap       ok
+mount        sess
+nc           aide
+nice         ok
+nohup        aide
+nologin      aide
+nslookup     ok
+passwd       sess
+pgrep        ok
+ping         ok
+poweroff     sess
+printenv     ok
+ps           sess
+readlink     ok
+reboot       sess
+renice       ok
+rm           ok
+rmdir        ok
+route        ok
+sh           sess
+su           ok
+swapon       aide
+sync         sess
+sysctl       aide
+tar          ok
+time         ok
+timeout      ok
+tty          aide
+umount       sess
+uptime       ok
+usleep       ok
+watch        aide
+wget         aide
+xargs        ok

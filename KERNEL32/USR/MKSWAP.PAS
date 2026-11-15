@@ -83,7 +83,8 @@ BEGIN
     Inc(I);
   End;
   If Dev = '' Then Usage('mkswap [-s KiB] [-L label] device');
-  Fd := SysOpen(Dev, O_RDWR Or O_CREAT, 384);
+  If Kb > 0 Then Fd := SysOpen(Dev, O_RDWR Or O_CREAT, 384)
+  Else Fd := SysOpen(Dev, O_RDWR, 0);
   If Fd < 0 Then
   Begin
     Warn(Dev);

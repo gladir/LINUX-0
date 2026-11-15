@@ -368,6 +368,11 @@ int main(void){
   /* laisser le contenu rw pour la suite de la verification hote */
   r=mount("/dev/hda1","/mnt","ext2",0,0);
   ktest("ext2.mount_rw_again",r==0);
+  { /* attributs etendus et ACL sur ext2 (bloc EA ; e2fsck verifie ensuite) */
+    int p=fork(),stx=0;
+    if(p==0){char*a[]={"/bin/xattrtest","/mnt/xa",0};char*e[]={"PATH=/bin",0};execve("/bin/xattrtest",a,e);_exit(127);}
+    waitpid(p,&stx,0);
+    ktest("ext2.xattr_acl_suite",stx==0); }
   unlink("/mnt/pbig");
   umount("/mnt");
   puts("KTEST: ext2 DONE\n");

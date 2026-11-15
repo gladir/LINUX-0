@@ -69,6 +69,8 @@ BEGIN
     I := 3;
   End;
   If I >= SysArgCount Then Usage('watch [-n seconds] command...');
+  If (SysArgStr(I) = '/?') Or (SysArgStr(I) = '--help') Then
+    Usage('watch [-n seconds] command...');
   Cmd := '';
   For K := I To SysArgCount - 1 Do Cmd := Cmd + SysArgStr(K) + ' ';
   While True Do

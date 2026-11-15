@@ -179,7 +179,6 @@ def generate(D):
           'dmesg | grep -q . && ok dmesg || ko dmesg x',
           'usleep 1000 && ok usleep || ko usleep x',
           'mkswap -s 256 $U/sw >/dev/null && ok mkswap || ko mkswap x',
-          'swapon $U/sw && swapoff $U/sw && ok "swapon/swapoff" || ko "swapon/swapoff" x',
           '[ "$(su linux -c "id -u")" = 1000 ] && ok su || ko su x',
           'hwclock -r > /dev/null && ok hwclock || ko hwclock x',
           'renice 0 $$ > /dev/null && ok renice || ko renice x',

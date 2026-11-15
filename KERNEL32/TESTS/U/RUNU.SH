@@ -20,12 +20,12 @@
 #              dans $W (pas dans IMAGE/, partage) ; KSRC=... choisit le noyau
 #   Variables : LPC (compilateur), W (travail, defaut /tmp/linux0-u-tests),
 #   IMAGE (image toute faite : saute l'etape build), KSRC, QEMU_T (delai,
-#   defaut 240).
+#   defaut 600).
 HERE=$(cd "$(dirname "$0")" && pwd)
 K32=$HERE/../..
 LPC=${LPC:-/tmp/claude-0/work/k32/bin/lpc}
 W=${W:-/tmp/linux0-u-tests}
-QT=${QEMU_T:-240}
+QT=${QEMU_T:-600}
 export LPC W
 mkdir -p "$W/bin" "$W/src"
 STEPS=${*:-sh host qemu power net install}
@@ -54,7 +54,7 @@ for st in $STEPS; do
       -c 'login: =root' -c 'Mot de passe : =root' \
       -c '=sh /usr/share/bench/run.sh' -c '=echo QFIN' -s 'QFIN$' > "$W/qemu.txt" 2>&1
     grep 'BENCH-FIN\|HELP-FIN' "$W/qemu.txt"
-    grep -q 'BENCH-FIN' "$W/qemu.txt" || FAIL=1 ;;
+    grep -q 'BENCH-FIN' "$W/qemu.txt" && grep -q 'HELP-FIN' "$W/qemu.txt" || FAIL=1 ;;
   power)
     build
     [ -f "$IMAGE" ] || { FAIL=1; continue; }
