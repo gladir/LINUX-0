@@ -167,3 +167,11 @@ KERNEL32/TESTS/RUNQEMU.SH X.IMG     # ou un ELF : qemu -kernel
 KERNEL32/TESTS/QEMU.PY boot         # batterie complète (une minute environ)
 KERNEL32/TESTS/E2CHECK.SH X.IMG NOYAU.ELF   # e2fsck + lecteur indépendant
 ```
+
+## initrd (partie 38 du noyau)
+
+`/boot/linux0.cfg` accepte `initrd=/chemin` : le fichier (cpio newc, brut ou
+gzip) est lu apres le noyau (a l'adresse arrondie a la page, **sous 16 Mo**,
+limite de INT 15h/87h) et transmis comme **module Multiboot** (flag 3,
+`mods_count` en 20, `mods_addr` en 24, un module en `7E070h`). `TOOLS/MKIMAGE.SH
+-I initrd.cpio.gz` le copie en `/boot/initrd.img` et ecrit la ligne.

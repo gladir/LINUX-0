@@ -31,7 +31,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
   20  getpid                 reel     ku.h,ptracetest.c,seccomptest.c
   21  mount                  reel     ku.h
   22  umount                 reel     ku.h
-  23  setuid                 reel     dirtest.c,ku.h,misctest.c,modtest.c,nstest.c,seccomptest.c,syscalltest.c,xattrtest.c
+  23  setuid                 reel     dirtest.c,effects.c,ku.h,misctest.c,modtest.c,nstest.c,seccomptest.c,syscalltest.c,xattrtest.c
   24  getuid                 reel     ku.h,seccomptest.c
   25  stime                  reel     
   26  ptrace                 reel     ptracetest.c,seccomptest.c
@@ -203,9 +203,9 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  192  mmap2                  reel     ku.h,mqfutextest.c
  193  truncate64             reel     bigtest.c
  194  ftruncate64            reel     bigtest.c
- 195  stat64                 reel     bigtest.c,dirtest.c,ext2test.c,ext4test.c,fattest.c,jrntest.c,ku.h,misctest.c,modtest.c,socktest.c,syscalltest.c,xattrtest.c
- 196  lstat64                reel     dirtest.c,ext2test.c,ku.h
- 197  fstat64                reel     bigtest.c,dirtest.c,ext2test.c,ext4test.c,fattest.c,ku.h
+ 195  stat64                 reel     bigtest.c,dirtest.c,effects.c,ext2test.c,ext4test.c,fattest.c,initrdtest.c,jrntest.c,ku.h,loopmnt.c,misctest.c,modtest.c,proc2test.c,rotest.c,socktest.c,syscalltest.c,xattrtest.c
+ 196  lstat64                reel     dirtest.c,ext2test.c,ku.h,rotest.c
+ 197  fstat64                reel     bigtest.c,dirtest.c,ext2test.c,ext4test.c,fattest.c,ku.h,looptest.c,proc2test.c
  198  lchown32               reel     
  199  getuid32               reel     
  200  getgid32               reel     
@@ -247,8 +247,8 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  238  tkill                  reel     
  239  sendfile64             reel     bigtest.c,syscalltest.c
  240  futex                  reel     mqfutextest.c
- 241  sched_setaffinity      reel     syscalltest.c
- 242  sched_getaffinity      reel     syscalltest.c
+ 241  sched_setaffinity      reel     smptest.c,syscalltest.c
+ 242  sched_getaffinity      reel     smptest.c,syscalltest.c
  243  set_thread_area        reel     
  244  get_thread_area        reel     
  245  io_setup               reel     mqfutextest.c
@@ -479,14 +479,14 @@ B1. FAMILLES D'IOCTL
    SIOCGIFADDR/SIOCSIFADDR (reseau)   present  
    SIOCGIFCONF/SIOCGIFHWADDR          present  
    RTC_RD_TIME/RTC_SET_TIME           present  
-   LOOP_SET_FD (loop)                 absent   
+   LOOP_SET_FD (loop)                 present  
    EVIOCG* (evdev)                    present  
    TUNSETIFF (tun/tap)                absent   
    SNDCTL_* (son)                     absent   
    CDROM* / SG_IO (SCSI)              absent   
    FS_IOC_GETFLAGS (chattr)           absent   
    FIFREEZE/FITRIM                    absent   
-   -> 15 / 23
+   -> 16 / 23
 
 B2. SYSTEMES DE FICHIERS
    ext2                               present  
@@ -499,17 +499,17 @@ B2. SYSTEMES DE FICHIERS
    devpts                             present  
    iso9660                            present  
    vfat/msdos                         present  
-   minix                              absent   
+   minix                              present  
    squashfs                           absent   
-   cramfs                             absent   
-   romfs                              absent   
+   cramfs                             present  
+   romfs                              present  
    overlayfs                          absent   
    initramfs (cpio newc)              present  
-   loop (/dev/loopN)                  absent   
+   loop (/dev/loopN)                  present  
    9p / nfs                           absent   hors perimetre
    cgroup                             absent   
    debugfs/tracefs                    absent   ENOSYS honnete
-   -> 11 / 20
+   -> 15 / 20
 
 B3. PILOTES ET PERIPHERIQUES
    IDE/ATA PIO (hda..hdd)             present  
@@ -531,37 +531,41 @@ B3. PILOTES ET PERIPHERIQUES
    E1000 / NE2000 / PCnet             absent   
    son SB16/AC97                      absent   
    evdev /dev/input/event*            absent   
-   SMP (APIC/IOAPIC/AP)               absent   
-   ACPI (arret, MADT)                 absent   
+   SMP reel (ordonnancement multi-CPU, IPI) absent   AP demarres mais a l arret
+   SMP : detection ACPI MADT / MP + demarrage AP a l arret present  partie 38
+   ACPI (MADT seulement ; pas AML/arret) present  
    HPET                               absent   
-   PCI (config + /proc/bus/pci)       present  
+   PCI (config + /sys/bus/pci ; pas de /proc/bus/pci) present  
    /dev/null zero full random urandom present  
    /dev/mem kmem port kmsg            present  
    /dev/rtc                           present  
    /dev/tty* /dev/ptmx pts            present  
    modules du noyau (.ko ET_REL, insmod/rmmod) present  partie 36
    swap sur fichier ordinaire         present  partie 36
-   -> 17 / 29
+   -> 19 / 30
 
 B4. /PROC ET /SYS
    /proc/meminfo uptime version cmdline present  
    /proc/cpuinfo stat loadavg         present  
    /proc/mounts filesystems           present  
    /proc/PID/stat status cmdline maps present  
-   /proc/PID/fd fdinfo exe cwd root environ absent   
+   /proc/PID/fd fdinfo exe cwd root environ present  
    /proc/PID/smaps statm limits io    absent   
-   /proc/PID/mountinfo wchan task/    absent   
+   /proc/PID/mountinfo wchan task/    present  
    /proc/net/dev route                present  
-   /proc/net/tcp udp arp              absent   
-   /proc/devices partitions interrupts absent   
-   /proc/iomem ioports locks          absent   
+   /proc/sysrq-trigger                present  partie 38
+   ASLR (pile, mmap)                  present  partie 38
+   overcommit_memory 0/1/2            present  partie 38
+   /proc/net/tcp udp unix arp snmp    present  partie 38
+   /proc/devices partitions interrupts present  
+   /proc/iomem ioports locks          present  
    /proc/swaps                        present  partie 36
    /proc/modules kallsyms             present  partie 36
    /proc/sys (sysctl ecriture)        present  partie 36
    /sys/block class kernel            present  
-   /sys/bus /sys/devices PCI          absent   
+   /sys/bus /sys/devices PCI          present  
    /sys/fs/cgroup                     absent   
-   -> 9 / 17
+   -> 18 / 20
 
 B5. FAMILLES DE SOCKETS
    AF_UNIX stream/dgram/socketpair    present  
@@ -593,4 +597,4 @@ B6. DRAPEAUX mmap / clone / open
 
 C. SYNTHESE
    appels reels : 357 / 451 (79.2 %) ; stubs 2 ; ENOSYS explicites 81 ; absents 11
-   familles B1-B6 presentes : 65 / 111 (58.6 %)
+   familles B1-B6 presentes : 81 / 115 (70.4 %)

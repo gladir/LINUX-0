@@ -81,6 +81,7 @@ Parties ajoutees en phase 2 (placees physiquement avant la partie 14) :
 | 35 | fichiers de plus de 2 Go (physiquement apres la partie 2 pour l'arithmetique `U64*`, repartie dans le VFS, ext2, FAT, iso9660, le peripherique bloc, les verrous et les appels systeme) : voir la section "Partie 35" |
 | 36 | `/proc/sys` (sysctl en lecture et ecriture), `/proc/swaps`, swap sur fichier ordinaire, chargeur de modules (`init_module/delete_module/finit_module`, `.ko` de `lpc -3M`), `/proc/modules`, `/proc/kallsyms`, `request_irq` pour les modules : voir la section "Partie 36" |
 | 37 | ext3/ext4 (physiquement dans la partie 18, plus la couche bloc de la partie 11) : fonctionnalites compat/incompat/ro_compat reconnues et refusees proprement si inconnues, arbre d'extents en lecture/ecriture, journal jbd/jbd2 (rejeu au montage, ecriture journalisee `data=ordered`/`data=writeback`), `flex_bg`, `meta_bg`, `64bit`, `uninit_bg`/`GDT_CSUM` (crc16), `metadata_csum` (crc32c), `extra_isize`/`i_crtime`, `huge_file`, `dir_index` (lecture), blocs de 1 a 64 Ko, `sparse_super2`, orphelins, chargeur BOOT/ capable de lire ext3/ext4 : voir la section "Partie 37" |
+| 38 | `/proc` et `/sys` complets, loop, PCI, SMP (detection), initramfs, minix/cramfs/romfs, effets de sysctl : `/proc/net/{tcp,udp,raw,unix,arp,snmp,sockstat,protocols}`, `/proc/{partitions,diskstats,devices,interrupts,ioports,iomem,vmstat,buddyinfo,misc,cgroups,tty/drivers,sysrq-trigger}`, `/proc/PID/{environ,limits,statm,comm,io,mountinfo,mounts,cgroup,oom_score,task,fdinfo/N,...}` + liens magiques (`fd/N`, `cwd`, `exe`, `root`), `/dev/loop0..15` + `/dev/loop-control` (`LOOP_*`), enumeration PCI (`/sys/bus/pci/devices`), detection ACPI MADT / tables MP et demarrage des processeurs secondaires a l'arret, inflate (deflate/zlib/gzip), initramfs cpio newc (module Multiboot, `initrd=` du chargeur), minix v1/v2/v3, cramfs, romfs (lecture seule), racine `vfat/iso9660/minix/cramfs/romfs` (`rootfstype=`), ASLR, overcommit, `kernel.panic`, SysRq |
 | ... | `/sys` (`PopulateSys`), pseudo-terminaux (maitre `PtmxXxx`, esclaves `Ttys[PtyBase+N]`, devpts = tmpfs a la partie 14), FPU/SSE (`FpuDetect`, FXSAVE), bind mounts / `pivot_root` / `MS_MOVE` (partie 12), racine reelle `TryRealRoot` (partie 17) |
 
 ## Carte memoire
@@ -599,6 +600,115 @@ sommes de controle) : quatre transactions dont une revocation.
 etape de la validation, nouveau demarrage (rejeu), verification de l'etat et
 `e2fsck`. `TESTS/K/RUNBOOT4.SH [-o "options mke2fs"] [-N entrees]` : amorce
 par le chargeur depuis une partition ext4.
+
+### Partie 38 : /proc complet, loop, PCI, detection SMP (lot 1 et debut du lot 2 de D5)
+
+**/proc/net** (generes depuis la table des sockets, colonne `inode` = numero
+d'inode de la socket, le meme que celui de `fstat`) : `tcp` et `udp` (format
+Linux : adresses/ports en hexadecimal, etat, files, uid, inode), `raw`, `unix`
+(RefCount, Flags 00010000 si en ecoute, Type, St, inode, chemin ou `@abstrait`),
+`arp` (cache ARP), `snmp` (Ip/Icmp/Tcp/Udp ; seuls `Forwarding`, `DefaultTTL`,
+`InReceives`, `OutRequests` et `CurrEstab` sont reels, le reste vaut 0),
+`sockstat`, `protocols`, plus `dev` et `route` deja la. `netstat`, `ss`, `lsof`,
+`fuser` de `USR/PROCINFO.PAS` les lisent (verifie sous QEMU).
+
+**/proc/PID** : `environ`, `limits` (RLIMIT_*), `statm`, `comm`, `io` (compteurs
+a 0 : pas de comptabilite d'E/S par tache), `mountinfo`, `mounts`, `cgroup`
+(`0::/`), `oom_score`, `oom_score_adj`, `wchan`, `loginuid`, `sessionid`,
+`personality`, `fdinfo/N` (pos, flags octal, mnt_id, ino), `task/TID/...` (les
+threads du groupe ; l'inode de `task/TID` est celui de `/proc/TID`), `status`
+complete (`Threads`, `SigQ`, `SigIgn`, `SigCgt`, `Cap*`). `/proc` ne liste plus que
+les chefs de groupe (les threads restent accessibles par `/proc/TID` et
+`task/`). **Liens magiques** : `fd/N`, `cwd`, `exe`, `root` sont suivis jusqu'a
+l'objet (`stat("/proc/self/fd/3")` rend l'inode du fichier, du tube ou de la
+socket ; `open` d'un tube par ce chemin rejoint le tube) ; `readlink` rend le
+chemin, `socket:[n]`, `pipe:[n]` ; `ns/*` ne sont pas suivis.
+
+**Haut de /proc** : `partitions`, `diskstats` (compteurs reels de lectures /
+ecritures / secteurs par disque et partition, tenus dans `BlkRW`), `devices`,
+`interrupts` (compteur par IRQ), `ioports`, `iomem` (carte E820), `vmstat`,
+`buddyinfo`, `misc`, `cgroups` (en-tete seul : pas de cgroups), `tty/drivers`.
+
+**Peripheriques loop** (`/dev/loop0..7` crees au demarrage, `/dev/loop-control`
+10:237, jusqu'a 16 peripheriques) : `LOOP_SET_FD`, `CLR_FD`, `SET_STATUS(64)`,
+`GET_STATUS(64)`, `CHANGE_FD` (lecture seule), `SET_CAPACITY`, `SET_DIRECT_IO`
+(accepte), `SET_BLOCK_SIZE`, `CONFIGURE`, `LOOP_CTL_ADD/REMOVE/GET_FREE`. Offset et
+`sizelimit` sur 64 bits, drapeau lecture seule (ecriture refusee `EPERM`,
+`EROFS` a l'ecriture differee), fichier de support ordinaire ou peripherique bloc.
+`mount -t ext2 /dev/loop0` marche (le cache de tampons est vide au `SET_FD`,
+ecrit et vide au `CLR_FD`) ; `CLR_FD` et le changement d'offset refusent `EBUSY`
+si le loop est monte. **Limites** : pas de chiffrement (`lo_encrypt_type` != 0 :
+`EINVAL`), `AUTOCLEAR` et `PARTSCAN` memorises mais sans effet (pas de comptage
+des ouvertures), pas de `/sys/block/loopN/loop/*` ni de taille dans `/sys`.
+`BLKROGET`, `BLKFLSBUF` (vide vraiment) et `BLKSSZGET` ajoutes aux
+peripheriques blocs.
+
+**PCI** : enumeration du bus 0 et des ponts (jusqu'a 32 fonctions, taille des
+BAR mesuree a l'amorce avant les pilotes) ; `/sys/bus/pci/devices/0000:BB:DD.F/`
+{`vendor`, `device`, `class`, `revision`, `subsystem_*`, `irq`, `uevent`,
+`resource` (7 lignes ; drapeaux approximatifs), `config` (256 octets)}.
+`/sys/bus/usb/devices` existe mais est vide : aucun controleur USB n'est gere.
+
+**SMP (detection seulement)** : ACPI (RSDP, RSDT/XSDT, MADT : CPU, IOAPIC,
+adresse LAPIC) avec repli sur les tables MP ; LAPIC mappe, identite du BSP lue ;
+chaque processeur secondaire est reveille (INIT + 2 SIPI, trampoline 16 bits en
+2000h, pagination du noyau) puis **reste arrete (HLT)**. L'ordonnanceur, les
+verrous et les interruptions restent mono-processeur (PIC 8259, verrou unique) :
+`/proc/cpuinfo`, `sched_getaffinity` et `/sys/devices/system/cpu/online` ne
+declarent que le CPU 0 ; `present`, `possible`, `offline` et `cpuN/online` (=0)
+decrivent les autres. Option `nosmp` : detection sans demarrage des
+processeurs. Valide sous `qemu -smp 1/2/4` (ACPI) ; le repli MP n'est valide
+que structurellement (QEMU sans ACPI ne publie qu'un CPU).
+
+**Piege du compilateur (trouve ici)** : un appel dont deux arguments `String`
+sont des concatenations (`F(A + B, X, C + D)`) corrompt le premier : copier les
+arguments dans des variables avant l'appel. Le code de `PopulateSys` le faisait :
+`/sys/block/*/dev`, `size`, `partition`, `/sys/class/block/*` et
+`/sys/class/{mem,tty}/*/dev` etaient absents ou faux (corrige, teste).
+
+Tests : `proc2test` (~90 verifications), `looptest` (~45), `smptest` (9) dans
+RUNK ; `TESTS/K/RUNLOOP.SH` (ext2 dans un fichier ext2, `e2fsck` du disque et des
+deux images). `RUNK.SH` accepte `QX="-smp 4"` (options QEMU supplementaires).
+
+**Initramfs** : un module Multiboot (`qemu -initrd a,b,...`, ou `initrd=/boot/initrd.img`
+dans `/boot/linux0.cfg` pour le chargeur de `BOOT/`, fichier place juste apres le
+noyau, sous 16 Mo ; `TOOLS/MKIMAGE.SH -I`) est extrait dans la racine en memoire
+avant le demarrage : cpio newc brut, gzip (inflate de la partie 38, algorithme de
+puff), gzip + cpio concatenes, plusieurs modules (jusqu'a 4). Fichiers (modes
+complets, setuid, proprietaire, date), repertoires (parents absents crees), liens
+symboliques, liens physiques (`nlink` > 1, meme inode), noeuds de peripheriques,
+tubes nommes. Les pages du module sont rendues au noyau apres l'extraction. Si
+`/init` (ou `rdinit=`) existe, il devient le processus 1 et la racine reelle
+`root=` n'est pas montee d'office (a lui de monter puis `chroot`/`pivot_root`) ;
+sinon la suite est inchangee. Limites : pas de bzip2/xz/lzma/lz4/zstd (module
+refuse, message), pas de `/dev/initrd` (ancien initrd image), le chargeur ne lit
+que ext2/3/4.
+
+**minix, cramfs, romfs** (lecture seule, une seule serie d'operations `RoXxx`) :
+minix v1/v2/v3 (noms de 14, 30 ou 60 octets ; zones directes, indirectes, double
+et triple ; blocs de 1 Ko verifies, 2 a 4 Ko non testes), cramfs (pages zlib de 4 Ko,
+trous, blocs non compresses ; sans les drapeaux `DIRECT_PTR`/XIP), romfs (liens
+durs, peripheriques, bit d'execution). Montage par `mount -t minix|cramfs|romfs`
+ou comme racine (`root=/dev/hdX`, `rootfstype=` facultatif : sans lui le noyau
+essaie ext2, vfat, iso9660, minix, cramfs, romfs). Un systeme de fichiers racine en
+lecture seule doit contenir les repertoires `/dev`, `/proc`, `/sys`. NON FAIT :
+squashfs, overlayfs, minix en ecriture, `mkfs`.
+
+**Effets de sysctl** (reste stocke sans effet : `vm.swappiness`, `net.ipv4.ip_forward`,
+`kernel.printk`, ...) : `kernel.randomize_va_space` (defaut 2 : sommet de pile et base
+des `mmap` randomises ; le tas ne l'est pas), `vm.overcommit_memory` (0 refuse une
+demande plus grande que RAM + swap ; 1 toujours ; 2 somme des espaces d'adressage
+<= swap + RAM x `overcommit_ratio`/100 ; `MAP_NORESERVE`, `PROT_NONE` et
+`MAP_SHARED` ne comptent pas), `kernel.sysrq` (defaut 1) avec `/proc/sysrq-trigger`
+(`b o s u e i m t h c 0-9`, masque `kernel.sysrq` respecte), `kernel.panic` (et le
+parametre `panic=N` : redemarrage N secondes apres une panique). `/proc/sys/kernel/sysrq`
+et la touche SysRq du clavier : la touche n'est pas branchee.
+
+Tests (suite) : `RUNINITRD.SH` (raw, gzip, 2 modules, gzip+raw, amorce par le
+chargeur sur disque), `RUNRO.SH` (cramfs via `mkfs.cramfs` de l'hote, minix
+5 variantes validees par `fsck.minix`, romfs par `MKROFS.PY`, ~140 verifications),
+`RUNROOT.SH` (racine ext2, vfat, iso9660, minix, cramfs, romfs), `RUNPANIC.SH`,
+`effects` (ASLR, overcommit, sysrq) dans RUNK.
 
 ### Lots A2c et A2d (ptrace, seccomp, xattr/ACL, clone3/espaces de noms)
 

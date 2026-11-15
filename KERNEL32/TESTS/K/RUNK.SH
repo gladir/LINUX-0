@@ -26,6 +26,7 @@ cp "$K32/KERNEL32.PAS" "$W/"
 (cd "$W" && "$LPC" -3K KERNEL32.PAS) || exit 1
 ARGS=(-kernel "$W/KERNEL32" -serial "file:$W/out.txt" -display none -m 64 -no-reboot -append "console=ttyS0 $KARGS")
 [ -n "$DISK" ] && ARGS+=(-drive "file=$DISK,format=raw,if=ide")
+[ -n "$QX" ] && ARGS+=($QX)
 timeout "$TMO" qemu-system-i386 "${ARGS[@]}" 2>/dev/null &
 QP=$!
 for i in $(seq 1 "$TMO"); do

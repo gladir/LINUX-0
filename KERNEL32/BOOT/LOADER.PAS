@@ -70,7 +70,8 @@ Var
  IBlk:Array[0..14] Of LongInt;
  Raw:Array[0..127] Of Byte;
  { noyau }
- KPath,CmdLine,LinkBuf:Str255;
+ KPath,CmdLine,LinkBuf,IPath:Str255;
+ IStart,IEnd:LongInt;
  Entry:LongInt;
  LoadEnd:LongInt;
  MemTop:LongInt;
@@ -559,6 +560,7 @@ Begin
   If (C=Chr(10)) Or (C=Chr(13)) Then Begin
    Line:=Trim(Line);
    If Copy(Line,1,7)='kernel=' Then KPath:=Trim(Copy(Line,8,255))
+   Else If Copy(Line,1,7)='initrd=' Then IPath:=Trim(Copy(Line,8,255))
    Else If Copy(Line,1,8)='cmdline=' Then CmdLine:=Trim(Copy(Line,9,255))
    Else If Line='chs=1' Then Begin
     HasExt:=False; PrintLn('Lecture en CHS imposee (chs=1)');
@@ -636,6 +638,38 @@ Begin
   Die('point d''entree du noyau invalide ('+Hex(Entry,8)+'h)');
 End;
 
+{ initrd=CHEMIN : le fichier est charge juste apres le noyau (sous 16 Mo)
+  et transmis comme module Multiboot }
+Procedure LoadInitrd;
+Var Ino,Done,Dst,Sz,B:LongInt; Bo,Chunk:Word;
+Begin
+ IStart:=0; IEnd:=0;
+ If Length(IPath)=0 Then Exit;
+ Ino:=Resolve(IPath);
+ If Ino=0 Then Begin PrintLn('initrd '+IPath+' introuvable : ignore'); Exit; End;
+ If (IMode And $F000)<>$8000 Then Begin
+  PrintLn('initrd '+IPath+' n''est pas un fichier : ignore'); Exit;
+ End;
+ Sz:=ISize;
+ Dst:=((LoadEnd+4095) Div 4096)*4096;
+ If (Sz<=0) Or (Dst+Sz>MemTop) Or (Dst+Sz>$1000000) Or (Dst+Sz<Dst) Then Begin
+  PrintLn('initrd trop gros (doit tenir sous 16 Mo) : ignore'); Exit;
+ End;
+ Print('initrd : '+IPath+' ('+Num(Sz)+' octets) en '+Hex(Dst,8)+'h ');
+ IStart:=Dst; Done:=0; Shown:=0;
+ While Done<Sz Do Begin
+  B:=Done Div BlkSize; Bo:=Word(Done Mod BlkSize);
+  Chunk:=BlkSize-Bo;
+  If Sz-Done<Chunk Then Chunk:=Word(Sz-Done);
+  ReadBlock(Bmap(B),DataBuf);
+  HiPut(Dst,BufSeg,DataBuf+Bo,Chunk);
+  Inc(Dst,Chunk); Inc(Done,Chunk);
+  If Done-Shown>=65536 Then Begin PutC('.'); Shown:=Done; End;
+ End;
+ IEnd:=IStart+Sz;
+ PrintLn('');
+End;
+
 { ------------------------------------------------------------ Multiboot }
 
 Procedure BuildMbi;
@@ -686,6 +720,13 @@ Procedure PutCmdline;
 Const Nm:String[7]='LINUX-0';
 Var I:Word;
 Begin
+ If IEnd>IStart Then Begin
+  MemL[MbiSeg:0]:=MemL[MbiSeg:0] Or 8;
+  MemL[MbiSeg:20]:=1;
+  MemL[MbiSeg:24]:=MbiPhys+$70;
+  MemL[MbiSeg:$70]:=IStart; MemL[MbiSeg:$74]:=IEnd;
+  MemL[MbiSeg:$78]:=0; MemL[MbiSeg:$7C]:=0;
+ End;
  For I:=1 To Length(CmdLine) Do Mem[MbiSeg:CmdOfs+I-1]:=Ord(CmdLine[I]);
  Mem[MbiSeg:CmdOfs+Length(CmdLine)]:=0;
  For I:=1 To 7 Do Mem[MbiSeg:$5F+I]:=Ord(Nm[I]);
@@ -735,8 +776,10 @@ Begin
          Num(InoSize)+' octets');
  KPath:='/boot/linux0';
  CmdLine:='root=/dev/hd'+Chr(97+(Drive And $7F))+Chr(49+PartIdx)+' ro';
+ IPath:=''; IStart:=0; IEnd:=0;
  ReadConfig;
  LoadElf;
+ LoadInitrd;
  PutCmdline;
  PrintLn('Ligne de commande : '+CmdLine);
  PrintLn('Entree du noyau en '+Hex(Entry,8)+'h : demarrage');

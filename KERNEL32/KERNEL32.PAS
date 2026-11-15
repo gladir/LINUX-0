@@ -1110,6 +1110,7 @@ Const
     'Exception SIMD');
 
 Procedure KPanic(Const Msg : String); Forward;
+Procedure PanicHook; Forward;
 Procedure KTrap(F : LongInt); Forward;
 
 Procedure SetGdt(N, Lo, Hi : LongInt);
@@ -1366,6 +1367,7 @@ Begin
   LogToVc := True;
   KLog('');
   KLog('NOYAU : panique : ' + Msg);
+  PanicHook;
   CpuHalt;
 End;
 
@@ -1469,6 +1471,8 @@ Var
   E820Base, E820Len, E820Type : Array[0..MaxE820 - 1] Of LongInt;
   RamTopPhys       : LongInt;      { fin de la memoire utilisable (<= 896 Mo) }
   KeymapName       : String[8];
+  NMods            : LongInt;      { modules Multiboot (initramfs) }
+  ModStart, ModEnd : Array[0..3] Of LongInt;
   RootDev          : String[63];
   InitPath         : String[63];
   UnameRel         : String[63];   { release de uname (KERNEL32 par defaut) }
@@ -1499,6 +1503,20 @@ Begin
   End;
   If (MbFlags And 4) <> 0 Then
     CmdLine := PStr(P2V(MemL[0:P2V(MbInfo + 16)]));
+  NMods := 0;
+  If ((MbFlags And 8) <> 0) And (MemL[0:P2V(MbInfo + 20)] > 0) Then
+  Begin
+    Pos := MemL[0:P2V(MbInfo + 24)];
+    Sz := MemL[0:P2V(MbInfo + 20)];
+    If Sz > 4 Then Sz := 4;
+    For I := 0 To Sz - 1 Do
+      If MemL[0:P2V(Pos + I * 16 + 4)] > MemL[0:P2V(Pos + I * 16)] Then
+      Begin
+        ModStart[NMods] := MemL[0:P2V(Pos + I * 16)];
+        ModEnd[NMods] := MemL[0:P2V(Pos + I * 16 + 4)];
+        Inc(NMods);
+      End;
+  End;
   If (MbFlags And 64) <> 0 Then
   Begin
     Len := MemL[0:P2V(MbInfo + 44)];
@@ -1791,11 +1809,42 @@ Begin
 End;
 
 { Initialiser le gestionnaire de pages ; a appeler apres ComputeRam }
+{ Ajouter les pages [P0, P1) (numeros de pages) a la memoire libre, sauf
+  celles des modules Multiboot (initramfs, a partir du module K) }
+Procedure FreeRangeMods(P0, P1, K : LongInt);
+Var O, Ms, Me : LongInt;
+Begin
+  While K < NMods Do
+  Begin
+    Ms := ModStart[K] Shr 12;
+    Me := PageUp(ModEnd[K]) Shr 12;
+    If (Ms < P1) And (Me > P0) Then
+    Begin
+      If Ms > P0 Then FreeRangeMods(P0, Ms, K + 1);
+      If Me < P1 Then FreeRangeMods(Me, P1, K + 1);
+      Exit;
+    End;
+    Inc(K);
+  End;
+  While P0 < P1 Do
+  Begin
+    O := MaxOrder;
+    While (O > 0) And (((P0 And ((1 Shl O) - 1)) <> 0) Or (P0 + (1
+        Shl O) > P1)) Do Dec(O);
+    FreeListAdd(O, P2V(P0 Shl 12));
+    FreePagesCnt := FreePagesCnt + (1 Shl O);
+    P0 := P0 + (1 Shl O);
+  End;
+End;
+
 Procedure InitMemory;
 Var I, P, Lo, Hi, O : LongInt;
 Begin
   KernelEndPhys := PageUp(V2P(KernelEnd) + 4096);
   EarlyPtr := KernelEndPhys;
+  For I := 0 To NMods - 1 Do
+    If (ModStart[I] < KernelEndPhys + $800000) And (ModEnd[I] > EarlyPtr) Then
+      EarlyPtr := PageUp(ModEnd[I]);
   NPages := RamTopPhys Shr 12;
   PgFlagsV := EarlyAlloc(NPages);
   PgRefV := EarlyAlloc(NPages * 2);
@@ -1816,15 +1865,7 @@ Begin
       Hi := PageDown(Hi);
       P := Lo Shr 12;
       Hi := Hi Shr 12;
-      While P < Hi Do
-      Begin
-        O := MaxOrder;
-        While (O > 0) And (((P And ((1 Shl O) - 1)) <> 0) Or (P + (1
-            Shl O) > Hi)) Do Dec(O);
-        FreeListAdd(O, P2V(P Shl 12));
-        FreePagesCnt := FreePagesCnt + (1 Shl O);
-        P := P + (1 Shl O);
-      End;
+      FreeRangeMods(P, Hi, 0);
     End;
   TotalFreePages := FreePagesCnt;
 End;
@@ -2025,6 +2066,9 @@ Begin
   PtePtr := Pt + ((Va Shr 12) And 1023) * 4;
 End;
 
+Function OvercommitOk(Pages : LongInt) : Boolean; Forward;
+Function AslrPages(Max : LongInt) : LongInt; Forward;
+
 Function MmNew : PMm;
 Var Mm : PMm;
 Begin
@@ -2039,7 +2083,7 @@ Begin
   End;
   Mm^.PgdPhys := V2P(Mm^.Pgd);
   Mm^.Count := 1;
-  Mm^.MmapBase := TaskUnmappedBase;
+  Mm^.MmapBase := TaskUnmappedBase + (AslrPages(4096) Shl 12);
   Mm^.StackLimit := DefStackLimit;
   MmNew := Mm;
 End;
@@ -2624,6 +2668,12 @@ Begin
     MmMap := -ENOMEM;
     Exit;
   End;
+  If ((Flags And MAP_SHARED) = 0) And ((Prot And 2) <> 0)
+     And ((Flags And $4000) = 0) And Not OvercommitOk(Len Shr 12) Then
+  Begin
+    MmMap := -ENOMEM;
+    Exit;
+  End;
   If (Flags And MAP_FIXED) <> 0 Then
   Begin
     If ((Addr And $FFF) <> 0) Or Not ULt(Addr, UserTop) Or ULt(UserTop, Addr
@@ -2704,6 +2754,7 @@ Begin
     If (Cur^.RlimCur[RLIM_AS] <> RLIM_INFINITY)
        And ((Mm^.TotalVm + ((NewEnd - OldEnd) Shr 12))
             > (Cur^.RlimCur[RLIM_AS] Shr 12)) Then Exit;
+    If Not OvercommitOk((NewEnd - OldEnd) Shr 12) Then Exit;
     If (V <> Nil) And (V^.Start = OldEnd) And (V^.Flags = (MAP_PRIVATE
         Or MAP_ANONYMOUS Or VmHeap)) Then
     Begin
@@ -5152,6 +5203,17 @@ Begin
   IdeDevice := D;
 End;
 
+Const
+  MajLoop = 7;                     { /dev/loop0..15 (partie 38) }
+
+Function LoopSectors(Min : LongInt) : LongInt; Forward;
+Function LoopRW(Min, Sector, Count, Buf : LongInt; Write : Boolean)
+    : LongInt; Forward;
+
+Var
+  DsRd, DsRs, DsWr, DsWs : Array[0..87] Of LongInt;
+      { /proc/diskstats : D*16+P (IDE), 64 fd0, 65 ram0, 66.. loop }
+
 { Taille en secteurs de 512 octets (0 si le peripherique n'existe pas) }
 Function BlkSectors(Dev : LongInt) : LongInt;
 Var Maj, Min, D, P : LongInt;
@@ -5159,6 +5221,11 @@ Begin
   Maj := (Dev Shr 8) And $FFF;
   Min := Dev And $FF;
   BlkSectors := 0;
+  If Maj = MajLoop Then
+  Begin
+    BlkSectors := LoopSectors(Min);
+    Exit;
+  End;
   If Maj = MajRam Then
   Begin
     If Min = 0 Then BlkSectors := RamSectors;
@@ -5173,30 +5240,35 @@ Begin
   If D >= 0 Then BlkSectors := PartSize[D * 16 + P];
 End;
 
-Function BlkRW(Dev, Sector, Count, Buf : LongInt; Write : Boolean) : LongInt;
+Function BlkRW0(Dev, Sector, Count, Buf : LongInt; Write : Boolean) : LongInt;
 Var Maj, Min, D, P, Total : LongInt;
 Begin
   Maj := (Dev Shr 8) And $FFF;
   Min := Dev And $FF;
-  BlkRW := -ENXIO;
+  BlkRW0 := -ENXIO;
   Total := BlkSectors(Dev);
   If Total = 0 Then Exit;
   If (Sector < 0) Or (Sector + Count > Total) Then
   Begin
-    BlkRW := -EIO;
+    BlkRW0 := -EIO;
+    Exit;
+  End;
+  If Maj = MajLoop Then
+  Begin
+    BlkRW0 := LoopRW(Min, Sector, Count, Buf, Write);
     Exit;
   End;
   If Maj = MajRam Then
   Begin
     If Write Then MemCopy(RamBase + Sector * 512, Buf, Count * 512)
     Else MemCopy(Buf, RamBase + Sector * 512, Count * 512);
-    BlkRW := 0;
+    BlkRW0 := 0;
     Exit;
   End;
   If Maj = MajFlp Then
   Begin
     Inc(BlkReads);
-    BlkRW := FlpRW(Sector, Count, Buf, Write);
+    BlkRW0 := FlpRW(Sector, Count, Buf, Write);
     Exit;
   End;
   D := IdeDevice(Maj, Min, P);
@@ -5205,32 +5277,77 @@ Begin
   Begin
     If Write Then
     Begin
-      BlkRW := -EROFS;
+      BlkRW0 := -EROFS;
       Exit;
     End;
     For Total := 0 To Count - 1 Do
     Begin
       If AtapiReadBlock(D, (Sector + Total) Div 4) <> 0 Then
       Begin
-        BlkRW := -EIO;
+        BlkRW0 := -EIO;
         Exit;
       End;
       MemCopy(Buf + Total * 512, CdBuf + ((Sector + Total) Mod 4) * 512, 512);
     End;
     Inc(BlkReads);
-    BlkRW := 0;
+    BlkRW0 := 0;
     Exit;
   End;
   Sector := Sector + PartStart[D * 16 + P];
   If Write Then
   Begin
     Inc(BlkWrites);
-    BlkRW := IdeWriteSectors(D, Sector, Count, Buf);
+    BlkRW0 := IdeWriteSectors(D, Sector, Count, Buf);
   End
   Else
   Begin
     Inc(BlkReads);
-    BlkRW := IdeReadSectors(D, Sector, Count, Buf);
+    BlkRW0 := IdeReadSectors(D, Sector, Count, Buf);
+  End;
+End;
+
+{ Indice des compteurs /proc/diskstats d'un peripherique (-1 : aucun) }
+Function DsIndex(Dev : LongInt; Var Whole : LongInt) : LongInt;
+Var Maj, Min, D, P : LongInt;
+Begin
+  Maj := (Dev Shr 8) And $FFF;
+  Min := Dev And $FF;
+  Whole := -1;
+  DsIndex := -1;
+  If Maj = MajRam Then DsIndex := 65
+  Else If Maj = MajFlp Then DsIndex := 64
+  Else If Maj = MajLoop Then
+  Begin
+    If Min < 16 Then DsIndex := 66 + Min;
+  End
+  Else
+  Begin
+    D := IdeDevice(Maj, Min, P);
+    If D >= 0 Then
+    Begin
+      DsIndex := D * 16 + P;
+      If P <> 0 Then Whole := D * 16;
+    End;
+  End;
+End;
+
+Function BlkRW(Dev, Sector, Count, Buf : LongInt; Write : Boolean) : LongInt;
+Var R, X, W : LongInt;
+Begin
+  R := BlkRW0(Dev, Sector, Count, Buf, Write);
+  BlkRW := R;
+  If R <> 0 Then Exit;
+  X := DsIndex(Dev, W);
+  If X < 0 Then Exit;
+  If Write Then
+  Begin
+    Inc(DsWr[X]); DsWs[X] := DsWs[X] + Count;
+    If W >= 0 Then Begin Inc(DsWr[W]); DsWs[W] := DsWs[W] + Count; End;
+  End
+  Else
+  Begin
+    Inc(DsRd[X]); DsRs[X] := DsRs[X] + Count;
+    If W >= 0 Then Begin Inc(DsRd[W]); DsRs[W] := DsRs[W] + Count; End;
   End;
 End;
 
@@ -6154,6 +6271,8 @@ Function WalkFrom(Start : PDentry; Const Path : String; Follow : Boolean;
 
 { Resoudre un composant qui est un lien symbolique : D (reference reprise),
   Dir = repertoire contenant le lien. Retourne la cible dans Res }
+Function ProcMagic(D : PDentry; Var Res : PDentry) : LongInt; Forward;
+
 Function FollowLink(Dir, D : PDentry; Var Res : PDentry) : LongInt;
 Var Tgt : String; R : LongInt; Base : PDentry;
 Begin
@@ -6166,9 +6285,15 @@ Begin
   End;
   If (D^.Inode^.Xflags And $200) <> 0 Then
   Begin
-    { lien magique (/proc/N/ns/*) : jamais suivi }
-    Res := D;
-    FollowLink := 0;
+    { lien magique : /proc/N/ns/* jamais suivi ; fd/N, cwd, exe, root :
+      l'objet lui-meme (partie 38) }
+    R := ProcMagic(D, Res);       { 0 suivi, 1 non suivi, <0 erreur }
+    If R > 0 Then
+    Begin
+      Res := D;
+      R := 0;
+    End;
+    FollowLink := R;
     Exit;
   End;
   Inc(LinkDepth);
@@ -8971,10 +9096,17 @@ Begin
   BdevRead := Done;
 End;
 
+Function LoopReadOnly(Min : LongInt) : Boolean; Forward;
+
 Function BdevWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
 Var Dev, N, Done, Blk, Off, Chunk : LongInt; B : PBuf;
 Begin
   Dev := F^.Inode^.Rdev;
+  If (((Dev Shr 8) And $FFF) = MajLoop) And LoopReadOnly(Dev And $FF) Then
+  Begin
+    BdevWrite := -EPERM;
+    Exit;
+  End;
   If BlkSectors(Dev) = 0 Then
   Begin
     BdevWrite := -ENXIO;
@@ -9009,8 +9141,16 @@ Begin
   BdevWrite := Done;
 End;
 
+Function LoopIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt; Forward;
+
 Function BdevIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt;
 Begin
+  If (((F^.Inode^.Rdev Shr 8) And $FFF) = MajLoop) And (Cmd >= $4C00)
+     And (Cmd <= $4C0F) Then
+  Begin
+    BdevIoctl := LoopIoctl(F, Cmd, Arg);
+    Exit;
+  End;
   If Cmd = LongInt($80081272) Then
   Begin
     { BLKGETSIZE64 : taille en octets sur 64 bits }
@@ -9026,8 +9166,13 @@ Begin
   Case Cmd Of
     $1260 : BdevIoctl := PutUserL(Arg, BlkSectors(F^.Inode^.Rdev));
         { BLKGETSIZE }
-    $125E : BdevIoctl := 0;
-        { BLKFLSBUF }
+    $125E : BdevIoctl := PutUserL(Arg, 0);       { BLKROGET }
+    $1261 :
+      Begin                                      { BLKFLSBUF }
+        BSync(F^.Inode^.Rdev);
+        BdevIoctl := 0;
+      End;
+    $1268 : BdevIoctl := PutUserL(Arg, 512);     { BLKSSZGET }
 
   Else
     BdevIoctl := -ENOTTY;
@@ -9074,6 +9219,9 @@ Begin
 End;
 
 Function MiscMouseOps : LongInt; Forward;
+Function MiscLoopCtlOps : LongInt; Forward;
+Function LoopCtlIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt; Forward;
+Function LoopIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt; Forward;
 
 Function RtcOpen(I : PInode; F : PFile) : LongInt;
 Begin
@@ -9081,6 +9229,11 @@ Begin
   Else If (I^.Rdev And $FF) = 1 Then
   Begin
     F^.FOps := MiscMouseOps;
+    RtcOpen := 0;
+  End
+  Else If (I^.Rdev And $FF) = 237 Then
+  Begin
+    F^.FOps := MiscLoopCtlOps;
     RtcOpen := 0;
   End
   Else RtcOpen := -ENXIO;
@@ -9168,7 +9321,7 @@ End;
 { ==================================================================== }
 
 Const
-  ProcBufSize = 8192;
+  ProcBufSize = 32768;
   PrNames : Array[0..10] Of String[12] = (
     '', '', 'version', 'meminfo', 'uptime', 'mounts', 'cpuinfo', 'stat',
     'loadavg', 'filesystems', 'cmdline');
@@ -9178,9 +9331,10 @@ Const
   SyEntBase = $30000000;        { /proc/sys : inodes des parametres }
   SyDirBase = $30100000;        { /proc/sys : inodes des repertoires }
   PrSwaps = 15; PrModules = 16; PrKallsyms = 17;
-  P36Extra = 4;                 { entrees ajoutees a /proc : sys, swaps... }
 
 Var
+  BspApic, NrCpuPresent : LongInt;   { partie 38 : SMP }
+  P36Extra : LongInt;           { entrees ajoutees a /proc (36, 38) }
   SysIpTtl, SyIcmpIgnoreAll : LongInt;   { net.ipv4 (partie 36) }
   NetPresent  : Boolean;        { carte reseau detectee (partie 22) }
   NetRxPkts, NetTxPkts, NetRxBytes, NetTxBytes, NetRxErr : LongInt;
@@ -9189,6 +9343,12 @@ Var
   ProcLen     : LongInt;
 
 Function P36Gen(Ino : LongInt) : Boolean; Forward;
+Function P38Gen(Ino : LongInt) : Boolean; Forward;
+Function P38Lookup(Dir : PInode; Var Nm : String; Var Res : PInode) : LongInt;
+    Forward;
+Function P38Readdir(F : PFile; K : LongInt; Var Ino : LongInt; Var Nm : String;
+    Var DType : LongInt) : LongInt; Forward;
+Procedure PxInit; Forward;
 Function P36Lookup(Dir : PInode; Var Nm : String; Var Res : PInode) : LongInt;
     Forward;
 Function P36Readdir(F : PFile; K : LongInt; Var Ino : LongInt; Var Nm : String;
@@ -9318,6 +9478,7 @@ Var Pid, Idx, I, N, Ticks, Rss, Vsz : LongInt; T : PTask; S : String;
 Begin
   ProcLen := 0;
   If P36Gen(Ino) Then Exit;
+  If P38Gen(Ino) Then Exit;
   Pid := Ino Shr 8;
   Idx := Ino And 255;
   If Pid = 0 Then
@@ -9383,6 +9544,7 @@ Begin
       5 : GenMounts;
       6 : Begin
             PAddLn('processor       : 0');
+            PAddLn('apicid          : ' + IntStr(BspApic));
             PAddLn('vendor_id       : LINUX-0');
             PAddLn('model name      : i386 compatible');
             PAddLn('bogomips        : 100.00');
@@ -9458,6 +9620,26 @@ Begin
           PAddLn('SigBlk: ' + HexStr(T^.Blk[0], 8));
           PAddLn('NoNewPrivs: ' + IntStr(T^.NoNewPrivs));
           PAddLn('Seccomp: ' + IntStr(T^.SecMode));
+          N := 0;
+          For I := 1 To MaxTasks - 1 Do
+            If (Tasks[I].State <> TsFree) And (Tasks[I].Tgid = T^.Tgid) Then
+              Inc(N);
+          PAddLn('Threads:        ' + IntStr(N));
+          PAddLn('SigQ:   ' + IntStr(T^.SigQN) + '/16384');
+          Ticks := 0;
+          Rss := 0;
+          If T^.Sig <> Nil Then
+            For I := 1 To 32 Do
+            Begin
+              If T^.Sig^.Handler[I] = 1 Then Ticks := Ticks Or (1 Shl (I - 1))
+              Else If T^.Sig^.Handler[I] > 1 Then
+                Rss := Rss Or (1 Shl (I - 1));
+            End;
+          PAddLn('SigIgn: ' + HexStr(Ticks, 16));
+          PAddLn('SigCgt: ' + HexStr(Rss, 16));
+          PAddLn('CapInh: ' + HexStr(T^.CapI1, 8) + HexStr(T^.CapI0, 8));
+          PAddLn('CapPrm: ' + HexStr(T^.CapP1, 8) + HexStr(T^.CapP0, 8));
+          PAddLn('CapEff: ' + HexStr(T^.CapE1, 8) + HexStr(T^.CapE0, 8));
         End;
     3 : If (T^.Mm <> Nil) And (T^.Mm^.ArgEnd > T^.Mm^.ArgStart)
         Then   { cmdline }
@@ -9499,6 +9681,12 @@ End;
 Function ProcLookup(Dir : PInode; Var Nm : String; Var Res : PInode) : LongInt;
 Var I, Pid, Idx, Fd, R36 : LongInt; T : PTask; Names4 : String;
 Begin
+  R36 := P38Lookup(Dir, Nm, Res);
+  If R36 <= 0 Then
+  Begin
+    ProcLookup := R36;
+    Exit;
+  End;
   R36 := P36Lookup(Dir, Nm, Res);
   If R36 <= 0 Then
   Begin
@@ -9583,6 +9771,7 @@ Begin
       Begin
         Res := ProcMkInode(Dir^.Sb, $10000000 + Pid * 1024 + Fd,
             S_IFLNK Or $1C0);
+        If Res <> Nil Then Res^.Xflags := $200;
         ProcLookup := 0;
       End;
     Exit;
@@ -9603,6 +9792,7 @@ Begin
   Begin
     If Nm = 'exe' Then Idx := 6 Else If Nm = 'cwd' Then Idx := 7 Else Idx := 8;
     Res := ProcMkInode(Dir^.Sb, Pid * 256 + Idx, S_IFLNK Or $1FF);
+    If Res <> Nil Then Res^.Xflags := $200;
     ProcLookup := 0;
     Exit;
   End;
@@ -9711,6 +9901,7 @@ Begin
   End;
   K := F^.Pos - 2;
   C := P36Readdir(F, K, Ino, Nm, DType);
+  If C < 0 Then C := P38Readdir(F, K, Ino, Nm, DType);
   If C >= 0 Then
   Begin
     ProcReaddir := C;
@@ -9756,7 +9947,7 @@ Begin
     End;
     C := K - PrSelf - P36Extra;
     For I := 1 To MaxTasks - 1 Do
-      If Tasks[I].State <> TsFree Then
+      If (Tasks[I].State <> TsFree) And (Tasks[I].Tgid = Tasks[I].Pid) Then
       Begin
         If C = 0 Then
         Begin
@@ -9857,6 +10048,7 @@ Begin
   ProcLnkOps[IoReadlink] := LongInt(@ProcReadlink);
   MemFill(LongInt(@ProcFOps[0]), 0, SizeOf(ProcFOps));
   ProcFOps[FoRead] := LongInt(@ProcRead);
+  PxInit;
   MemFill(LongInt(@ProcDirFOps[0]), 0, SizeOf(ProcDirFOps));
   ProcDirFOps[FoReaddir] := LongInt(@ProcReaddir);
 End;
@@ -15779,14 +15971,15 @@ End;
 Function ExecSetupStack(Mm : PMm; Entry, Phdr, Phnum, Phent,
     Secure : LongInt) : LongInt;
 Var Strs, NStr, Total, Sp, I, P, ArgPtr, EnvPtr, AuxCount, Str0, ExecFn, Plat,
-    Rnd, Len : LongInt;
+    Rnd, Len, Skip : LongInt;
     Tab : LongInt; V : PVma; Base : LongInt;
 Begin
   ExecSetupStack := -ENOMEM;
+  Skip := AslrPages(256) Shl 12;           { ASLR : decalage du sommet }
   Len := Length(ExPath) + 1;
   { de haut en bas : execfn, chaines, plate-forme, aleatoire, auxv, envp,
     argv, argc }
-  Sp := UserStackTop - 4;
+  Sp := UserStackTop - 4 - Skip;
   Sp := Sp - Len;
   ExecFn := Sp;
   Sp := Sp - ExUsed;
@@ -15802,12 +15995,12 @@ Begin
   Sp := Sp And Not 15;
   { VMA de pile : jusqu'au sommet, croissance vers le bas }
   Base := PageDown(Sp - 4096);
-  V := VmaNew(Base, UserStackTop, PROT_READ Or PROT_WRITE, MAP_PRIVATE
+  V := VmaNew(Base, UserStackTop - Skip, PROT_READ Or PROT_WRITE, MAP_PRIVATE
       Or MAP_ANONYMOUS Or VmStack Or MAP_GROWSDOWN);
   If V = Nil Then Exit;
   VmaInsert(Mm, V);
   Mm^.StartStack := Sp;
-  If Not EnsureUser(Base, UserStackTop - Base, True) Then Exit;
+  If Not EnsureUser(Base, UserStackTop - Skip - Base, True) Then Exit;
   { chaines }
   PutPStr(ExecFn, ExPath, Len);
   MemCopy(Str0, ExArgs, ExUsed);
@@ -16429,6 +16622,7 @@ Type
     SBuf, SHead, SLen, RtoAt, Retries : LongInt;
     FinQueued, FinSent, FinAcked : LongInt;
     Parent      : PSock;
+    Ino         : LongInt;          { numero d'inode (/proc/net) }
   End;
 
 Var
@@ -16567,6 +16761,7 @@ Begin
   End;
   F^.FOps := LongInt(@SockFOps[0]);
   F^.Priv := LongInt(S);
+  S^.Ino := I^.Ino;
   SockFile := F;
 End;
 
@@ -28141,8 +28336,12 @@ Begin
   End;
 End;
 
+Var
+  IrqCnt : Array[0..15] Of LongInt;   { /proc/interrupts (partie 38) }
+
 Procedure DoIrq(N : LongInt; FromUser : Boolean);
 Begin
+  If (N >= 0) And (N < 16) Then Inc(IrqCnt[N]);
   If PreemptOn Then
   Begin
     If (Cur <> IdleTask) And ((Not FromUser) Or (BklOwner <> Nil)) Then
@@ -37699,9 +37898,16 @@ Begin
 End;
 
 { write(2) sur un fichier de /proc : seuls les parametres sysctl s'ecrivent }
+Function SysrqWrite(Buf, Cnt : LongInt) : LongInt; Forward;
+
 Function ProcWrite36(F : PFile; Buf, Cnt : LongInt) : LongInt;
 Var I, N, K : LongInt; S : String;
 Begin
+  If F^.Inode^.Ino = $40000014 Then
+  Begin
+    ProcWrite36 := SysrqWrite(Buf, Cnt);
+    Exit;
+  End;
   If (F^.Inode^.Ino < SyEntBase) Or (F^.Inode^.Ino >= SyEntBase + SyCount) Then
   Begin
     ProcWrite36 := -EINVAL;
@@ -38694,7 +38900,7 @@ Begin
     P36Readdir := SyReaddir(D^.Ino - SyDirBase, K, Ino, Nm, DType);
     Exit;
   End;
-  If (D^.Ino = 1) And (K >= PrSelf) And (K < PrSelf + P36Extra) Then
+  If (D^.Ino = 1) And (K >= PrSelf) And (K < PrSelf + 4) Then
   Begin
     Case K - PrSelf Of
       0 : Begin Nm := 'sys'; Ino := SyDirBase; DType := DT_DIR; End;
@@ -38724,12 +38930,13 @@ Begin
   SyAddStr('kernel/domainname', SkDom, '', 1);
   SyAddInt('kernel/pid_max', LongInt(@SysPidMax), 32768, 301, 4194303, 1);
   SyAddInt('kernel/threads-max', 0, MaxTasks - 1, 0, 1000000, 0);
-  SyAddInt('kernel/randomize_va_space', LongInt(@SyRandomize), 0, 0, 2, 1);
+  SyAddInt('kernel/randomize_va_space', LongInt(@SyRandomize), 2, 0, 2, 1);
   SyAddInt('kernel/panic', LongInt(@SyPanic), 0, 0, 3600, 1);
+  If CmdGet('panic') <> '' Then SyPanic := StrVal(CmdGet('panic'));
   SyAddInt('kernel/panic_on_oops', LongInt(@SyPanicOops), 0, 0, 1, 1);
   SyAddStr('kernel/printk', SkStr, '4' + Chr(9) + '4' + Chr(9) + '1' + Chr(9)
       + '7', 1);
-  SyAddInt('kernel/sysrq', LongInt(@SySysrq), 0, 0, 511, 1);
+  SyAddInt('kernel/sysrq', LongInt(@SySysrq), 1, 0, 511, 1);
   SyAddInt('kernel/ngroups_max', 0, 65536, 0, 65536, 0);
   SyAddInt('kernel/overflowuid', 0, 65534, 0, 65535, 0);
   SyAddInt('kernel/overflowgid', 0, 65534, 0, 65535, 0);
@@ -38938,6 +39145,9 @@ Begin
       I));
   KMknod('/dev/ttyS0', S_IFCHR Or $1B6, MkDev(4, 64));
   KMknod('/dev/ram0', S_IFBLK Or $1B0, MkDev(1, 0));
+  For I := 0 To 7 Do KMknod('/dev/loop' + IntStr(I), S_IFBLK Or $1B0,
+      MkDev(MajLoop, I));
+  KMknod('/dev/loop-control', S_IFCHR Or $1B0, MkDev(10, 237));
   If FbOn Then KMknod('/dev/fb0', S_IFCHR Or $1B6, MkDev(29, 0));
   If FlpPresent Then KMknod('/dev/fd0', S_IFBLK Or $1B0, MkDev(MajFlp, 0));
   For D := 0 To 3 Do
@@ -38970,9 +39180,3489 @@ Begin
 End;
 
 Procedure SysDevFile(Const Dir : String; Maj, Min : LongInt);
+Var Pth, Val : String;
 Begin
   KMkdir(Dir, $1ED);
-  KWriteStr(Dir + '/dev', $124, IntStr(Maj) + ':' + IntStr(Min) + #10);
+  Pth := Dir + '/dev';
+  Val := IntStr(Maj) + ':' + IntStr(Min) + #10;
+  KWriteStr(Pth, $124, Val);
+End;
+
+{ ==================================================================== }
+{ Partie 38 - /proc complet (reseau, disques, processus), PCI dans /sys, }
+{ peripheriques loop et loop-control                                    }
+{ ==================================================================== }
+
+Const
+  PxBase = $40000000;            { inodes /proc de la partie 38 }
+  PxMax = 40;
+  PxPart = 1; PxDiskst = 2; PxDevices = 3; PxIntr = 4; PxIoports = 5;
+  PxIomem = 6; PxVmstat = 7; PxBuddy = 8; PxMisc = 9; PxCgroups = 10;
+  PxTty = 11; PxTtyDrv = 12; PxSysrq = 20;
+  PxNTcp = 30; PxNUdp = 31; PxNRaw = 32; PxNUnix = 33; PxNSnmp = 34;
+  PxNSock = 35; PxNArp = 36; PxNProto = 37;
+  PidEntMax = 25;                { entrees des repertoires /proc/PID }
+  PidNm : Array[0..25] Of String[14] = (
+    '', 'stat', 'status', 'cmdline', 'maps', 'fd', 'exe', 'cwd', 'root',
+    'ns', 'fdinfo', 'environ', 'limits', 'statm', 'comm', 'io', 'mountinfo',
+    'mounts', 'cgroup', 'oom_score', 'task', 'oom_score_adj', 'wchan',
+    'loginuid', 'sessionid', 'personality');
+  FdinfoBase = $18000000;        { /proc/PID/fdinfo/N }
+  MaxLoop = 16;
+  LoopCtlMinor = 237;
+
+Var
+  PxPar, PxKd, PxId : Array[0..PxMax - 1] Of LongInt;
+  PxNm : Array[0..PxMax - 1] Of String[16];
+  PxN : LongInt;
+  PxRootN : LongInt;
+  { ---- loop ---- }
+  LoF : Array[0..MaxLoop - 1] Of PFile;
+  LoOffL, LoOffH, LoLimL, LoLimH, LoFl, LoSec, LoPres, LoBs :
+      Array[0..MaxLoop - 1] Of LongInt;
+  LoName : Array[0..MaxLoop * 64 - 1] Of Byte;
+  LoopCtlFOps : Array[0..15] Of LongInt;
+  { ---- liste de peripheriques blocs (partitions, diskstats) ---- }
+  PdN : LongInt;
+  PdMaj, PdMin, PdBlk, PdIdx : Array[0..95] Of LongInt;
+  PdName : Array[0..95] Of String[12];
+  { ---- PCI ---- }
+  PciN : LongInt;
+  PciBus, PciDv, PciFn, PciHdr, PciCls, PciRev, PciVen, PciDid, PciSv,
+  PciSd, PciIrq, PciPin : Array[0..31] Of LongInt;
+  PciBar, PciBarSz : Array[0..32 * 7 - 1] Of LongInt;
+  PciCfg : Array[0..32 * 64 - 1] Of LongInt;
+
+Procedure PxAdd(Par : LongInt; Const Nm : String; Kd, Id : LongInt);
+Begin
+  If PxN >= PxMax Then Exit;
+  PxPar[PxN] := Par;
+  PxNm[PxN] := Nm;
+  PxKd[PxN] := Kd;
+  PxId[PxN] := Id;
+  Inc(PxN);
+End;
+
+Procedure PxInit;
+Var I : LongInt;
+Begin
+  PxN := 0;
+  PxAdd(1, 'partitions', 0, PxPart);
+  PxAdd(1, 'diskstats', 0, PxDiskst);
+  PxAdd(1, 'devices', 0, PxDevices);
+  PxAdd(1, 'interrupts', 0, PxIntr);
+  PxAdd(1, 'ioports', 0, PxIoports);
+  PxAdd(1, 'iomem', 0, PxIomem);
+  PxAdd(1, 'vmstat', 0, PxVmstat);
+  PxAdd(1, 'buddyinfo', 0, PxBuddy);
+  PxAdd(1, 'misc', 0, PxMisc);
+  PxAdd(1, 'cgroups', 0, PxCgroups);
+  PxAdd(1, 'sysrq-trigger', 0, PxSysrq);
+  PxAdd(1, 'tty', 1, PxTty);
+  PxRootN := PxN;
+  PxAdd(PxBase + PxTty, 'drivers', 0, PxTtyDrv);
+  PxAdd(12, 'tcp', 0, PxNTcp);
+  PxAdd(12, 'udp', 0, PxNUdp);
+  PxAdd(12, 'raw', 0, PxNRaw);
+  PxAdd(12, 'unix', 0, PxNUnix);
+  PxAdd(12, 'snmp', 0, PxNSnmp);
+  PxAdd(12, 'sockstat', 0, PxNSock);
+  PxAdd(12, 'arp', 0, PxNArp);
+  PxAdd(12, 'protocols', 0, PxNProto);
+  I := 0;
+  P36Extra := 4 + PxRootN;
+End;
+
+Function PxPadL(Const S : String; N : LongInt) : String;
+Var R : String;
+Begin
+  R := S;
+  While Length(R) < N Do R := ' ' + R;
+  PxPadL := R;
+End;
+
+Function PxPad(Const S : String; N : LongInt) : String;
+Var R : String;
+Begin
+  R := S;
+  While Length(R) < N Do R := R + ' ';
+  PxPad := R;
+End;
+
+Function PxIp(A : LongInt) : String;
+Begin
+  PxIp := IntStr((A Shr 24) And 255) + '.' + IntStr((A Shr 16) And 255) + '.'
+      + IntStr((A Shr 8) And 255) + '.' + IntStr(A And 255);
+End;
+
+Function PxOct(V : LongInt) : String;
+Var S : String;
+Begin
+  S := '';
+  If V = 0 Then S := '0';
+  While V <> 0 Do
+  Begin
+    S := Chr(48 + (V And 7)) + S;
+    V := (V Shr 3) And $1FFFFFFF;
+  End;
+  PxOct := S;
+End;
+
+{ ---- Liste des peripheriques blocs ---- }
+
+Procedure PdAdd(Maj, Min, Blk, Idx : LongInt; Const Nm : String);
+Begin
+  If PdN >= 96 Then Exit;
+  PdMaj[PdN] := Maj; PdMin[PdN] := Min; PdBlk[PdN] := Blk;
+  PdIdx[PdN] := Idx; PdName[PdN] := Nm;
+  Inc(PdN);
+End;
+
+Procedure PdBuild;
+Var D, P, Maj, Mn, K : LongInt; Nm : String;
+Begin
+  PdN := 0;
+  If RamSectors > 0 Then PdAdd(MajRam, 0, RamSectors Div 2, 65, 'ram0');
+  If FlpPresent Then PdAdd(MajFlp, 0, FlpTotal Div 2, 64, 'fd0');
+  For D := 0 To 3 Do
+    If DiskPresent[D] Then
+    Begin
+      Nm := 'hd' + Chr(97 + D);
+      If D < 2 Then
+      Begin
+        Maj := MajIde0; Mn := D * 64;
+      End
+      Else
+      Begin
+        Maj := MajIde1; Mn := (D - 2) * 64;
+      End;
+      PdAdd(Maj, Mn, PartSize[D * 16] Div 2, D * 16, Nm);
+      For P := 1 To 15 Do
+        If PartSize[D * 16 + P] > 0 Then
+          PdAdd(Maj, Mn + P, PartSize[D * 16 + P] Div 2, D * 16 + P,
+              Nm + IntStr(P));
+    End;
+  For K := 0 To MaxLoop - 1 Do
+    If LoopSectors(K) > 0 Then
+      PdAdd(MajLoop, K, LoopSectors(K) Div 2, 66 + K, 'loop' + IntStr(K));
+End;
+
+{ ---- /proc/net ---- }
+
+Function PxTcpState(S : PSock) : LongInt;
+Begin
+  PxTcpState := 0;
+  If S^.State = SsListen Then
+  Begin
+    PxTcpState := 10;
+    Exit;
+  End;
+  If S^.Net <> 0 Then
+  Begin
+    Case S^.TState Of
+      TcpListen : PxTcpState := 10;
+      TcpSynSent : PxTcpState := 2;
+      TcpSynRcvd : PxTcpState := 3;
+      TcpEstab : PxTcpState := 1;
+      TcpFinWait1 : PxTcpState := 4;
+      TcpFinWait2 : PxTcpState := 5;
+      TcpCloseWait : PxTcpState := 8;
+      TcpLastAck : PxTcpState := 9;
+      TcpClosing : PxTcpState := 11;
+      TcpTimeWait : PxTcpState := 6;
+    End;
+    Exit;
+  End;
+  If S^.State = SsConn Then
+  Begin
+    If (S^.PeerWrDone <> 0) Or (S^.PeerGone <> 0) Then PxTcpState := 8
+    Else PxTcpState := 1;
+  End;
+End;
+
+Procedure PxInetRow(N : LongInt; S : PSock; St, Tx, Rx : LongInt);
+Begin
+  PAddLn(PxPadL(IntStr(N), 4) + ': ' + HexStr(Bswap32(S^.LAddr), 8) + ':'
+      + HexStr(S^.LPort, 4) + ' ' + HexStr(Bswap32(S^.RAddr), 8) + ':'
+      + HexStr(S^.RPort, 4) + ' ' + HexStr(St, 2) + ' ' + HexStr(Tx, 8) + ':'
+      + HexStr(Rx, 8) + ' 00:00000000 00000000 ' + PxPadL(IntStr(S^.CUid), 5)
+      + '        0 ' + IntStr(S^.Ino) + ' 1 00000000 100 0 0 10 0');
+End;
+
+Procedure PxGenInet(Typ : LongInt);
+Var I, N, St : LongInt; S : PSock;
+Begin
+  If Typ = SOCK_STREAM Then
+    PAddLn('  sl  local_address rem_address   st tx_queue rx_queue tr '
+        + 'tm->when retrnsmt   uid  timeout inode')
+  Else
+    PAddLn('   sl  local_address rem_address   st tx_queue rx_queue tr '
+        + 'tm->when retrnsmt   uid  timeout inode ref pointer drops');
+  N := 0;
+  For I := 0 To MaxSocks - 1 Do
+  Begin
+    S := @Socks[I];
+    If (S^.State <> SsFree) And (S^.Family = AF_INET) And (S^.Typ = Typ)
+       And (S^.Closed = 0) Then
+    Begin
+      If Typ = SOCK_STREAM Then
+      Begin
+        St := PxTcpState(S);
+        If St <> 0 Then
+        Begin
+          If St = 10 Then PxInetRow(N, S, St, 0, S^.NBacklog)
+          Else PxInetRow(N, S, St, S^.SLen, S^.BLen);
+          Inc(N);
+        End;
+      End
+      Else If (S^.Bound <> 0) Or (S^.HasDest <> 0) Then
+      Begin
+        If S^.HasDest <> 0 Then St := 1 Else St := 7;
+        PxInetRow(N, S, St, 0, S^.QCount);
+        Inc(N);
+      End;
+    End;
+  End;
+End;
+
+Procedure PxGenUnix;
+Var I, K, N, Fl, St : LongInt; S : PSock; Nm : String;
+Begin
+  PAddLn('Num       RefCount Protocol Flags    Type St Inode Path');
+  For I := 0 To MaxSocks - 1 Do
+  Begin
+    S := @Socks[I];
+    If (S^.State <> SsFree) And (S^.Family = AF_UNIX) And (S^.Closed = 0)
+       Then
+    Begin
+      Fl := 0;
+      St := 1;
+      If S^.State = SsListen Then Fl := $10000
+      Else If (S^.Peer <> Nil) Or (S^.State = SsConn) Then St := 3;
+      Nm := '';
+      If S^.KeyLen > 0 Then
+      Begin
+        If S^.Key[0] = 0 Then Nm := '@' Else Nm := Chr(S^.Key[0]);
+        For K := 1 To S^.KeyLen - 1 Do
+          If Length(Nm) < 200 Then Nm := Nm + Chr(S^.Key[K]);
+      End;
+      N := 2;
+      PAddLn(HexStr(LongInt(S), 8) + ': ' + HexStr(N, 8) + ' 00000000 '
+          + HexStr(Fl, 8) + ' ' + HexStr(S^.Typ, 4) + ' ' + HexStr(St, 2)
+          + ' ' + PxPadL(IntStr(S^.Ino), 5) + ' ' + Nm);
+    End;
+  End;
+End;
+
+Procedure PxGenArp;
+Var I : LongInt; Mc : String; K : LongInt;
+Begin
+  PAddLn('IP address       HW type     Flags       HW address            '
+      + 'Mask     Device');
+  For I := 0 To MaxArp - 1 Do
+    If ArpAge[I] <> 0 Then
+    Begin
+      Mc := '';
+      For K := 0 To 5 Do
+      Begin
+        If K > 0 Then Mc := Mc + ':';
+        Mc := Mc + Lower2(HexStr(ArpMac[I * 6 + K], 2));
+      End;
+      PAddLn(PxPad(PxIp(ArpIp[I]), 17) + '0x1         0x2         '
+          + PxPad(Mc, 22) + '*        eth0');
+    End;
+End;
+
+Procedure PxGenSnmp;
+Var I, Tcp, Udp, Est : LongInt; S : PSock;
+Begin
+  Est := 0; Tcp := 0; Udp := 0;
+  For I := 0 To MaxSocks - 1 Do
+  Begin
+    S := @Socks[I];
+    If (S^.State <> SsFree) And (S^.Family = AF_INET) Then
+      If S^.Typ = SOCK_STREAM Then
+      Begin
+        Inc(Tcp);
+        If PxTcpState(S) = 1 Then Inc(Est);
+      End
+      Else If S^.Typ = SOCK_DGRAM Then Inc(Udp);
+  End;
+  PAddLn('Ip: Forwarding DefaultTTL InReceives InHdrErrors InAddrErrors '
+      + 'ForwDatagrams InUnknownProtos InDiscards InDelivers OutRequests '
+      + 'OutDiscards OutNoRoutes ReasmTimeout ReasmReqds ReasmOKs '
+      + 'ReasmFails FragOKs FragFails FragCreates');
+  PAddLn('Ip: 2 ' + IntStr(SysIpTtl) + ' ' + IntStr(NetRxPkts)
+      + ' 0 0 0 0 0 ' + IntStr(NetRxPkts) + ' ' + IntStr(NetTxPkts)
+      + ' 0 0 0 0 0 0 0 0 0');
+  PAdd('Icmp: InMsgs InErrors InCsumErrors InDestUnreachs InTimeExcds '
+      + 'InParmProbs InSrcQuenchs InRedirects InEchos InEchoReps ');
+  PAdd('InTimestamps InTimestampReps InAddrMasks InAddrMaskReps OutMsgs '
+      + 'OutErrors OutDestUnreachs OutTimeExcds OutParmProbs ');
+  PAddLn('OutSrcQuenchs OutRedirects OutEchos OutEchoReps OutTimestamps '
+      + 'OutTimestampReps OutAddrMasks OutAddrMaskReps');
+  PAddLn('Icmp: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0');
+  PAddLn('Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens '
+      + 'AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs '
+      + 'InErrs OutRsts InCsumErrors');
+  PAddLn('Tcp: 1 200 120000 -1 0 0 0 0 ' + IntStr(Est) + ' 0 0 0 0 0 0');
+  PAddLn('Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors '
+      + 'SndbufErrors InCsumErrors IgnoredMulti');
+  PAddLn('Udp: 0 0 0 0 0 0 0 0');
+End;
+
+Procedure PxGenSockstat;
+Var I, Used, Tcp, Udp, Raw : LongInt; S : PSock;
+Begin
+  Used := 0; Tcp := 0; Udp := 0; Raw := 0;
+  For I := 0 To MaxSocks - 1 Do
+  Begin
+    S := @Socks[I];
+    If S^.State <> SsFree Then
+    Begin
+      Inc(Used);
+      If S^.Family = AF_INET Then
+        If S^.Typ = SOCK_STREAM Then Inc(Tcp)
+        Else If S^.Typ = SOCK_DGRAM Then Inc(Udp)
+        Else Inc(Raw);
+    End;
+  End;
+  PAddLn('sockets: used ' + IntStr(Used));
+  PAddLn('TCP: inuse ' + IntStr(Tcp) + ' orphan 0 tw 0 alloc ' + IntStr(Tcp)
+      + ' mem 0');
+  PAddLn('UDP: inuse ' + IntStr(Udp) + ' mem 0');
+  PAddLn('UDPLITE: inuse 0');
+  PAddLn('RAW: inuse ' + IntStr(Raw));
+  PAddLn('FRAG: inuse 0 memory 0');
+End;
+
+Procedure PxGenProtocols;
+Begin
+  PAddLn('protocol  size sockets  memory press maxhdr slab module cl co di '
+      + 'ac io in de sh ss gs se re sp bi br ha uh gp em');
+  PAddLn('UNIX     ' + IntStr(SizeOf(TSock)) + '      0       0   no      0'
+      + '   no   kernel  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n'
+      + '  n  n');
+  PAddLn('RAW      ' + IntStr(SizeOf(TSock)) + '      0       0   no      0'
+      + '   no   kernel  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n'
+      + '  n  n');
+  PAddLn('UDP      ' + IntStr(SizeOf(TSock)) + '      0       0   no      0'
+      + '   no   kernel  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n'
+      + '  n  n');
+  PAddLn('TCP      ' + IntStr(SizeOf(TSock)) + '      0       0   no      0'
+      + '   no   kernel  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y'
+      + '  y  y');
+End;
+
+{ ---- /proc : disques, peripheriques, memoire ---- }
+
+Procedure PxGenPartitions;
+Var I : LongInt;
+Begin
+  PdBuild;
+  PAddLn('major minor  #blocks  name');
+  PAddLn('');
+  For I := 0 To PdN - 1 Do
+    PAddLn(PxPadL(IntStr(PdMaj[I]), 4) + ' ' + PxPadL(IntStr(PdMin[I]), 7)
+        + ' ' + PxPadL(IntStr(PdBlk[I]), 10) + ' ' + PdName[I]);
+End;
+
+Procedure PxGenDiskstats;
+Var I, X : LongInt;
+Begin
+  PdBuild;
+  For I := 0 To PdN - 1 Do
+  Begin
+    X := PdIdx[I];
+    PAddLn(PxPadL(IntStr(PdMaj[I]), 4) + ' ' + PxPadL(IntStr(PdMin[I]), 7)
+        + ' ' + PdName[I] + ' ' + IntStr(DsRd[X]) + ' 0 ' + IntStr(DsRs[X])
+        + ' 0 ' + IntStr(DsWr[X]) + ' 0 ' + IntStr(DsWs[X]) + ' 0 0 0 0');
+  End;
+End;
+
+Procedure PxGenDevices;
+Begin
+  PAddLn('Character devices:');
+  PAddLn('  1 mem');
+  PAddLn('  4 /dev/vc/0');
+  PAddLn('  4 tty');
+  PAddLn('  4 ttyS');
+  PAddLn('  5 /dev/tty');
+  PAddLn('  5 /dev/console');
+  PAddLn('  5 /dev/ptmx');
+  PAddLn(' 10 misc');
+  PAddLn(' 13 input');
+  PAddLn(' 29 fb');
+  PAddLn('136 pts');
+  PAddLn('');
+  PAddLn('Block devices:');
+  PAddLn('  1 ramdisk');
+  PAddLn('  2 fd');
+  PAddLn('  3 ide0');
+  PAddLn('  7 loop');
+  PAddLn(' 22 ide1');
+End;
+
+Procedure PxGenIntr;
+Var I : LongInt; Nm : String;
+Begin
+  PAddLn('           CPU0');
+  For I := 0 To 15 Do
+  Begin
+    Nm := '';
+    Case I Of
+      0 : Nm := 'timer';
+      1 : Nm := 'i8042';
+      2 : Nm := 'cascade';
+      4 : Nm := 'serial';
+      6 : Nm := 'floppy';
+      8 : Nm := 'rtc0';
+      12 : Nm := 'i8042';
+      14 : Nm := 'ide0';
+      15 : Nm := 'ide1';
+    End;
+    If NetPresent And (I = NicIrq) Then Nm := 'eth0';
+    If (Nm <> '') Or (IrqCnt[I] > 0) Then
+      PAddLn(PxPadL(IntStr(I), 3) + ': ' + PxPadL(IntStr(IrqCnt[I]), 10)
+          + '    XT-PIC  ' + Nm);
+  End;
+  PAddLn('NMI:          0   Non-maskable interrupts');
+  PAddLn('ERR:          0');
+End;
+
+Procedure PxGenIoports;
+Begin
+  PAddLn('0000-001f : dma1');
+  PAddLn('0020-0021 : pic1');
+  PAddLn('0040-0043 : timer0');
+  PAddLn('0060-0060 : keyboard');
+  PAddLn('0064-0064 : keyboard');
+  PAddLn('0070-0071 : rtc0');
+  PAddLn('0080-008f : dma page reg');
+  PAddLn('00a0-00a1 : pic2');
+  PAddLn('00c0-00df : dma2');
+  PAddLn('00f0-00ff : fpu');
+  PAddLn('0170-0177 : ide1');
+  PAddLn('01f0-01f7 : ide0');
+  PAddLn('02f8-02ff : serial');
+  PAddLn('03c0-03df : vga+');
+  PAddLn('03f2-03f5 : floppy');
+  PAddLn('03f6-03f6 : ide0');
+  PAddLn('03f8-03ff : serial');
+  PAddLn('0cf8-0cff : PCI conf1');
+End;
+
+Procedure PxGenIomem;
+Var I : LongInt; Nm : String; E : LongInt;
+Begin
+  For I := 0 To NE820 - 1 Do
+  Begin
+    Case E820Type[I] Of
+      1 : Nm := 'System RAM';
+      3 : Nm := 'ACPI Tables';
+      4 : Nm := 'ACPI Non-volatile Storage';
+    Else Nm := 'Reserved';
+    End;
+    E := E820Base[I] + E820Len[I] - 1;
+    PAddLn(HexStr(E820Base[I], 8) + '-' + HexStr(E, 8) + ' : ' + Nm);
+  End;
+  PAddLn('000a0000-000bffff : Video RAM area');
+  PAddLn('000c0000-000c7fff : Video ROM');
+  PAddLn('fee00000-fee00fff : Local APIC');
+End;
+
+Procedure PxGenVmstat;
+Var Dirty : LongInt;
+Begin
+  Dirty := BDirtyCount;
+  PAddLn('nr_free_pages ' + IntStr(FreePagesCnt));
+  PAddLn('nr_dirty ' + IntStr(Dirty));
+  PAddLn('nr_buffers ' + IntStr(BufCount));
+  PAddLn('pgfault ' + IntStr(FaultsTotal));
+  PAddLn('pswpused ' + IntStr(SwapUsed));
+  PAddLn('ctxt_switches ' + IntStr(NrSwitches));
+  PAddLn('kpreempts ' + IntStr(NrPreempts));
+End;
+
+Procedure PxGenBuddy;
+Var O : LongInt; S : String;
+Begin
+  S := 'Node 0, zone   Normal';
+  For O := 0 To MaxOrder Do S := S + ' ' + PxPadL(IntStr(FreeCnt[O]), 6);
+  PAddLn(S);
+End;
+
+Procedure PxGenMisc;
+Begin
+  PAddLn(' 1 psaux');
+  PAddLn('135 rtc');
+  PAddLn('237 loop-control');
+End;
+
+Procedure PxGenTtyDrivers;
+Var S : String;
+Begin
+  PAddLn('/dev/tty             /dev/tty        5       0 system:/dev/tty');
+  PAddLn('/dev/console         /dev/console    5       1 system:console');
+  PAddLn('/dev/ptmx            /dev/ptmx       5       2 system');
+  PAddLn('serial               /dev/ttyS       4  64-67 serial');
+  PAddLn('pty_slave            /dev/pts      136   0-255 pty:slave');
+  S := 'vc';
+  PAddLn('vcs                  /dev/vcs        7       0 ' + S);
+End;
+
+{ ---- /proc/PID ---- }
+
+Function PxSbId(Sb : PSuper) : LongInt;
+Var I : LongInt;
+Begin
+  PxSbId := 0;
+  For I := 0 To MaxSupers - 1 Do
+    If Supers[I] = Sb Then PxSbId := I + 20;
+End;
+
+Procedure PxGenMountinfo;
+Var I, K, Pass, Par : LongInt; Sb : PSuper; Pth, Opts, Src : String;
+Begin
+  For Pass := 0 To 1 Do
+    For I := 0 To MaxSupers - 1 Do
+    Begin
+      Sb := Supers[I];
+      If (Sb <> Nil) And (Sb^.Root <> Nil)
+         And ((Sb^.Covered = Nil) = (Pass = 0)) Then
+      Begin
+        Src := '';
+        If Sb^.DevName <> 0 Then
+          For K := 1 To Mem[0:Sb^.DevName] Do
+            Src := Src + Chr(Mem[0:Sb^.DevName + K]);
+        If Sb^.Covered <> Nil Then
+        Begin
+          Pth := DentryPath(Sb^.Covered);
+          Par := PxSbId(Sb^.Covered^.Sb);
+        End
+        Else
+        Begin
+          Pth := '/';
+          Par := 0;
+        End;
+        If (Sb^.Flags And MS_RDONLY) <> 0 Then Opts := 'ro' Else Opts := 'rw';
+        PAddLn(IntStr(I + 20) + ' ' + IntStr(Par) + ' '
+            + IntStr((Sb^.Dev Shr 8) And $FFF) + ':' + IntStr(Sb^.Dev And $FF)
+            + ' / ' + Pth + ' ' + Opts + ',relatime - ' + FsNames[Sb^.FsType]
+            + ' ' + Src + ' ' + Opts);
+      End;
+    End;
+End;
+
+Procedure PxLimRow(Const Nm : String; Cur_, Max_ : LongInt;
+    Const Unit_ : String);
+Var A, B : String;
+Begin
+  If Cur_ = RLIM_INFINITY Then A := 'unlimited' Else A := UStr(Cur_);
+  If Max_ = RLIM_INFINITY Then B := 'unlimited' Else B := UStr(Max_);
+  PAddLn(PxPad(Nm, 26) + PxPad(A, 21) + PxPad(B, 21) + PxPad(Unit_, 10));
+End;
+
+Procedure PxGenLimits(T : PTask);
+Begin
+  PAddLn(PxPad('Limit', 26) + PxPad('Soft Limit', 21) + PxPad('Hard Limit',
+      21) + PxPad('Units', 10));
+  PxLimRow('Max cpu time', T^.RlimCur[0], T^.RlimMax[0], 'seconds');
+  PxLimRow('Max file size', T^.RlimCur[1], T^.RlimMax[1], 'bytes');
+  PxLimRow('Max data size', T^.RlimCur[2], T^.RlimMax[2], 'bytes');
+  PxLimRow('Max stack size', T^.RlimCur[3], T^.RlimMax[3], 'bytes');
+  PxLimRow('Max core file size', T^.RlimCur[4], T^.RlimMax[4], 'bytes');
+  PxLimRow('Max resident set', T^.RlimCur[5], T^.RlimMax[5], 'bytes');
+  PxLimRow('Max processes', T^.RlimCur[6], T^.RlimMax[6], 'processes');
+  PxLimRow('Max open files', T^.RlimCur[7], T^.RlimMax[7], 'files');
+  PxLimRow('Max locked memory', T^.RlimCur[8], T^.RlimMax[8], 'bytes');
+  PxLimRow('Max address space', T^.RlimCur[9], T^.RlimMax[9], 'bytes');
+  PxLimRow('Max file locks', T^.RlimCur[10], T^.RlimMax[10], 'locks');
+  PxLimRow('Max pending signals', T^.RlimCur[11], T^.RlimMax[11], 'signals');
+  PxLimRow('Max msgqueue size', T^.RlimCur[12], T^.RlimMax[12], 'bytes');
+  PxLimRow('Max nice priority', T^.RlimCur[13], T^.RlimMax[13], '');
+  PxLimRow('Max realtime priority', T^.RlimCur[14], T^.RlimMax[14], '');
+  PxLimRow('Max realtime timeout', T^.RlimCur[15], T^.RlimMax[15], 'us');
+End;
+
+{ Ajouter N octets de la memoire de la tache T (adresse Va) a ProcBuf }
+Procedure PxAddMem(T : PTask; Va, N : LongInt);
+Var K, P, Pte : LongInt;
+Begin
+  If T^.Mm = Nil Then Exit;
+  K := 0;
+  While (K < N) And (ProcLen < ProcBufSize) Do
+  Begin
+    P := PtePtr(T^.Mm, Va + K, False);
+    If P = 0 Then Break;
+    Pte := MemL[0:P];
+    If (Pte And 1) = 0 Then Break;
+    ProcBuf[ProcLen] := Mem[0:P2V(Pte And LongInt($FFFFF000))
+        + ((Va + K) And $FFF)];
+    Inc(ProcLen);
+    Inc(K);
+  End;
+End;
+
+Procedure PxGenPid(T : PTask; Idx : LongInt);
+Var Rss, Vsz, Txt, Dat : LongInt;
+Begin
+  Case Idx Of
+    11 : If (T^.Mm <> Nil) And (T^.Mm^.EnvEnd > T^.Mm^.EnvStart) Then
+           PxAddMem(T, T^.Mm^.EnvStart, T^.Mm^.EnvEnd - T^.Mm^.EnvStart);
+    12 : PxGenLimits(T);
+    13 : Begin
+           Rss := 0; Vsz := 0; Txt := 0; Dat := 0;
+           If T^.Mm <> Nil Then
+           Begin
+             Rss := T^.Mm^.Rss; Vsz := T^.Mm^.TotalVm;
+             Txt := (T^.Mm^.EndCode - T^.Mm^.StartCode) Div 4096;
+             Dat := (T^.Mm^.EndData - T^.Mm^.StartData) Div 4096;
+           End;
+           PAddLn(IntStr(Vsz) + ' ' + IntStr(Rss) + ' 0 ' + IntStr(Txt)
+               + ' 0 ' + IntStr(Dat) + ' 0');
+         End;
+    14 : PAddLn(TaskComm(T));
+    15 : Begin
+           PAddLn('rchar: 0');
+           PAddLn('wchar: 0');
+           PAddLn('syscr: 0');
+           PAddLn('syscw: 0');
+           PAddLn('read_bytes: 0');
+           PAddLn('write_bytes: 0');
+           PAddLn('cancelled_write_bytes: 0');
+         End;
+    16 : PxGenMountinfo;
+    17 : GenMounts;
+    18 : PAddLn('0::/');
+    19, 21 : PAddLn('0');
+    22 : PAddLn('0');
+    23, 24 : PAddLn('4294967295');
+    25 : PAddLn(HexStr(T^.Persona, 8));
+  End;
+End;
+
+Procedure PxGenFdinfo(Pid, Fd : LongInt);
+Var T : PTask; F : PFile;
+Begin
+  T := PidTask(Pid);
+  If (T = Nil) Or (T^.Files = Nil) Or (Fd < 0) Or (Fd >= MaxFd) Then Exit;
+  F := Pointer(T^.Files^.Fd[Fd]);
+  If F = Nil Then Exit;
+  PAddLn('pos:' + #9 + IntStr(F^.Pos));
+  PAddLn('flags:' + #9 + '0' + PxOct(F^.Flags));
+  PAddLn('mnt_id:' + #9 + IntStr(PxSbId(F^.Inode^.Sb)));
+  PAddLn('ino:' + #9 + IntStr(F^.Inode^.Ino));
+End;
+
+Function P38Gen(Ino : LongInt) : Boolean;
+Var Pid, Idx : LongInt; T : PTask;
+Begin
+  P38Gen := True;
+  If Ino >= PxBase Then
+  Begin
+    Case Ino - PxBase Of
+      PxPart : PxGenPartitions;
+      PxDiskst : PxGenDiskstats;
+      PxDevices : PxGenDevices;
+      PxIntr : PxGenIntr;
+      PxIoports : PxGenIoports;
+      PxIomem : PxGenIomem;
+      PxVmstat : PxGenVmstat;
+      PxBuddy : PxGenBuddy;
+      PxMisc : PxGenMisc;
+      PxCgroups : PAddLn('#subsys_name' + #9 + 'hierarchy' + #9 + 'num_cgroups'
+          + #9 + 'enabled');
+      PxTtyDrv : PxGenTtyDrivers;
+      PxNTcp : PxGenInet(SOCK_STREAM);
+      PxNUdp : PxGenInet(SOCK_DGRAM);
+      PxNRaw : PxGenInet(SOCK_RAW);
+      PxNUnix : PxGenUnix;
+      PxNSnmp : PxGenSnmp;
+      PxNSock : PxGenSockstat;
+      PxNArp : PxGenArp;
+      PxNProto : PxGenProtocols;
+    End;
+    Exit;
+  End;
+  If (Ino >= FdinfoBase) And (Ino < $20000000) Then
+  Begin
+    PxGenFdinfo((Ino - FdinfoBase) Shr 10, (Ino - FdinfoBase) And 1023);
+    Exit;
+  End;
+  If (Ino >= 256) And (Ino < $10000000) And ((Ino And 255) >= 10) Then
+  Begin
+    Pid := Ino Shr 8;
+    Idx := Ino And 255;
+    T := PidTask(Pid);
+    If T <> Nil Then PxGenPid(T, Idx);
+    Exit;
+  End;
+  P38Gen := False;
+End;
+
+{ ---- recherche et lecture de repertoire ---- }
+
+Function P38Lookup(Dir : PInode; Var Nm : String; Var Res : PInode)
+    : LongInt;
+Var I, Pid, Idx, Fd, Tid : LongInt; T, T2 : PTask;
+Begin
+  P38Lookup := 1;
+  If (Dir^.Ino = 1) Or (Dir^.Ino = 12) Or (Dir^.Ino >= PxBase) Then
+  Begin
+    For I := 0 To PxN - 1 Do
+      If (PxPar[I] = Dir^.Ino) And (PxNm[I] = Nm) Then
+      Begin
+        If PxKd[I] = 1 Then
+          Res := ProcMkInode(Dir^.Sb, PxBase + PxId[I], S_IFDIR Or $16D)
+        Else If PxId[I] = PxSysrq Then
+          Res := ProcMkInode(Dir^.Sb, PxBase + PxId[I], S_IFREG Or $80)
+        Else Res := ProcMkInode(Dir^.Sb, PxBase + PxId[I], S_IFREG Or $124);
+        If Res <> Nil Then P38Lookup := 0 Else P38Lookup := -ENOMEM;
+        Exit;
+      End;
+    If Dir^.Ino >= PxBase Then P38Lookup := -ENOENT;
+    Exit;
+  End;
+  If (Dir^.Ino < 256) Or (Dir^.Ino >= $10000000) Then Exit;
+  Pid := Dir^.Ino Shr 8;
+  Idx := Dir^.Ino And 255;
+  T := PidTask(Pid);
+  If T = Nil Then Exit;
+  If Idx = 0 Then
+  Begin
+    For I := 10 To PidEntMax Do
+      If PidNm[I] = Nm Then
+      Begin
+        Case I Of
+          10 : Res := ProcMkInode(Dir^.Sb, Pid * 256 + I, S_IFDIR Or $140);
+          20 : Res := ProcMkInode(Dir^.Sb, Pid * 256 + I, S_IFDIR Or $16D);
+          11, 15 : Res := ProcMkInode(Dir^.Sb, Pid * 256 + I,
+              S_IFREG Or $100);
+        Else
+          Res := ProcMkInode(Dir^.Sb, Pid * 256 + I, S_IFREG Or $124);
+        End;
+        If Res <> Nil Then
+        Begin
+          Res^.Uid := T^.Uid; Res^.Gid := T^.Gid;
+          P38Lookup := 0;
+        End
+        Else P38Lookup := -ENOMEM;
+        Exit;
+      End;
+    Exit;
+  End;
+  If Idx = 10 Then
+  Begin
+    P38Lookup := -ENOENT;
+    Fd := StrVal(Nm);
+    If (IntStr(Fd) = Nm) And (T^.Files <> Nil) And (Fd >= 0)
+       And (Fd < MaxFd) Then
+      If T^.Files^.Fd[Fd] <> 0 Then
+      Begin
+        Res := ProcMkInode(Dir^.Sb, FdinfoBase + Pid * 1024 + Fd,
+            S_IFREG Or $100);
+        If Res <> Nil Then P38Lookup := 0 Else P38Lookup := -ENOMEM;
+      End;
+    Exit;
+  End;
+  If Idx = 20 Then
+  Begin
+    P38Lookup := -ENOENT;
+    Tid := StrVal(Nm);
+    T2 := PidTask(Tid);
+    If (T2 <> Nil) And (IntStr(Tid) = Nm) And (T2^.Tgid = T^.Tgid) Then
+    Begin
+      Res := ProcMkInode(Dir^.Sb, Tid * 256, S_IFDIR Or $16D);
+      If Res <> Nil Then P38Lookup := 0 Else P38Lookup := -ENOMEM;
+    End;
+    Exit;
+  End;
+End;
+
+{ readdir : 1 entree, 0 fin, -1 pas a nous }
+Function P38Readdir(F : PFile; K : LongInt; Var Ino : LongInt; Var Nm : String;
+    Var DType : LongInt) : LongInt;
+Var D : PInode; I, J, C, Pid, Idx : LongInt; T : PTask;
+Begin
+  D := F^.Inode;
+  P38Readdir := -1;
+  If (D^.Ino = 1) Or (D^.Ino = 12) Or (D^.Ino >= PxBase) Then
+  Begin
+    If D^.Ino = 1 Then
+    Begin
+      If (K < PrSelf + 4) Or (K >= PrSelf + P36Extra) Then Exit;
+      C := K - PrSelf - 4;
+    End
+    Else If D^.Ino = 12 Then
+    Begin
+      If K < 2 Then Exit;
+      C := K - 2;
+    End
+    Else C := K;
+    P38Readdir := 0;
+    J := 0;
+    For I := 0 To PxN - 1 Do
+      If PxPar[I] = D^.Ino Then
+      Begin
+        If J = C Then
+        Begin
+          Nm := PxNm[I];
+          Ino := PxBase + PxId[I];
+          If PxKd[I] = 1 Then DType := DT_DIR Else DType := DT_REG;
+          P38Readdir := 1;
+          Exit;
+        End;
+        Inc(J);
+      End;
+    Exit;
+  End;
+  If (D^.Ino < 256) Or (D^.Ino >= $10000000) Then Exit;
+  Pid := D^.Ino Shr 8;
+  Idx := D^.Ino And 255;
+  T := PidTask(Pid);
+  If (Idx = 0) Or (Idx = 10) Or (Idx = 20) Then P38Readdir := 0;
+  If T = Nil Then Exit;
+  If Idx = 0 Then
+  Begin
+    If K >= PidEntMax Then Exit;
+    Nm := PidNm[K + 1];
+    Ino := (D^.Ino And Not 255) + K + 1;
+    Case K + 1 Of
+      5, 9, 10, 20 : DType := DT_DIR;
+      6, 7, 8 : DType := DT_LNK;
+    Else DType := DT_REG;
+    End;
+    P38Readdir := 1;
+    Exit;
+  End;
+  If Idx = 10 Then
+  Begin
+    If T^.Files = Nil Then Exit;
+    For C := 0 To MaxFd - 1 Do
+      If T^.Files^.Fd[C] <> 0 Then
+      Begin
+        If K = 0 Then
+        Begin
+          Nm := IntStr(C);
+          Ino := FdinfoBase + Pid * 1024 + C;
+          DType := DT_REG;
+          P38Readdir := 1;
+          Exit;
+        End;
+        Dec(K);
+      End;
+    Exit;
+  End;
+  If Idx = 20 Then
+    For I := 1 To MaxTasks - 1 Do
+      If (Tasks[I].State <> TsFree) And (Tasks[I].Tgid = T^.Tgid) Then
+      Begin
+        If K = 0 Then
+        Begin
+          Nm := IntStr(Tasks[I].Pid);
+          Ino := Tasks[I].Pid * 256;
+          DType := DT_DIR;
+          P38Readdir := 1;
+          Exit;
+        End;
+        Dec(K);
+      End;
+End;
+
+{ Liens magiques de /proc/PID : fd/N, cwd, exe, root. 0 : D est remplace
+  par la cible (Res, +1) ; 1 : non suivi ; <0 : erreur }
+Function ProcMagic(D : PDentry; Var Res : PDentry) : LongInt;
+Var Ino, Pid, Fd, R : LongInt; T : PTask; F : PFile; Tg : PDentry; S : String;
+    K : LongInt;
+Begin
+  ProcMagic := 1;
+  Ino := D^.Inode^.Ino;
+  If Ino >= $20000000 Then Exit;
+  Tg := Nil;
+  If Ino >= $10000000 Then
+  Begin
+    Pid := (Ino - $10000000) Shr 10;
+    Fd := (Ino - $10000000) And 1023;
+    T := PidTask(Pid);
+    If (T = Nil) Or (T^.Files = Nil) Then Exit;
+    F := Pointer(T^.Files^.Fd[Fd]);
+    If (F = Nil) Or (F^.Dentry = Nil) Then Exit;
+    Tg := F^.Dentry;
+  End
+  Else If (Ino >= 256) And ((Ino And 255) >= 6) And ((Ino And 255) <= 8) Then
+  Begin
+    Pid := Ino Shr 8;
+    T := PidTask(Pid);
+    If (T = Nil) Or (T^.Fs = Nil) Then Exit;
+    Case Ino And 255 Of
+      7 : Tg := PDentry(T^.Fs^.Pwd);
+      8 : Tg := PDentry(T^.Fs^.Root);
+    Else
+      Begin
+        S := '';
+        For K := 0 To T^.ExeLen - 1 Do S := S + Chr(T^.ExeBuf[K]);
+        If S = '' Then Exit;
+        DentryPut(LongInt(D));
+        R := PathWalk(S, True, Res);
+        If R <> 0 Then Res := Nil;
+        ProcMagic := R;
+        Exit;
+      End;
+    End;
+  End
+  Else Exit;
+  If Tg = Nil Then Exit;
+  DentryGet(LongInt(Tg));
+  DentryPut(LongInt(D));
+  Res := Tg;
+  ProcMagic := 0;
+End;
+
+{ ---- peripheriques loop ---- }
+
+Procedure LoopCalc(N : LongInt);
+Var F : PFile; SL, SH, Sec : LongInt; Ip : PInode;
+Begin
+  LoSec[N] := 0;
+  F := LoF[N];
+  If F = Nil Then Exit;
+  Ip := F^.Inode;
+  If (Ip^.Mode And S_IFMT) = S_IFBLK Then
+  Begin
+    SL := BlkSectors(Ip^.Rdev) Shl 9;
+    SH := BlkSectors(Ip^.Rdev) Shr 23;
+  End
+  Else
+  Begin
+    SL := Ip^.Size;
+    SH := Ip^.SizeHi;
+  End;
+  If U64Le(SL, SH, LoOffL[N], LoOffH[N]) Then Exit;
+  U64Sub(SL, SH, LoOffL[N], LoOffH[N]);
+  If ((LoLimL[N] <> 0) Or (LoLimH[N] <> 0))
+     And U64Lt(LoLimL[N], LoLimH[N], SL, SH) Then
+  Begin
+    SL := LoLimL[N];
+    SH := LoLimH[N];
+  End;
+  Sec := U64ShrL(SL, SH, 9);
+  If ((SH Shr 9) <> 0) Or (Sec < 0) Then Sec := $7FFFFFFF;
+  LoSec[N] := Sec;
+End;
+
+Function LoopSectors(Min : LongInt) : LongInt;
+Begin
+  If (Min >= 0) And (Min < MaxLoop) Then LoopSectors := LoSec[Min]
+  Else LoopSectors := 0;
+End;
+
+Function LoopReadOnly(Min : LongInt) : Boolean;
+Begin
+  LoopReadOnly := (Min >= 0) And (Min < MaxLoop) And ((LoFl[Min] And 1) <> 0);
+End;
+
+Function LoopRW(Min, Sector, Count, Buf : LongInt; Write : Boolean)
+    : LongInt;
+Var F : PFile; L, H, Done, Total, R, Fn : LongInt;
+Begin
+  LoopRW := -ENXIO;
+  If (Min < 0) Or (Min >= MaxLoop) Then Exit;
+  F := LoF[Min];
+  If F = Nil Then Exit;
+  If Write And ((LoFl[Min] And 1) <> 0) Then
+  Begin
+    LoopRW := -EROFS;
+    Exit;
+  End;
+  H := 0;
+  L := U64ShlL(Sector, 9, H);
+  U64Add(L, H, LoOffL[Min], LoOffH[Min]);
+  F^.Pos := L;
+  F^.PosHi := H;
+  Total := Count * 512;
+  Done := 0;
+  If Write Then Fn := GetOp(F^.FOps, FoWrite)
+  Else Fn := GetOp(F^.FOps, FoRead);
+  If Fn = 0 Then
+  Begin
+    LoopRW := -EIO;
+    Exit;
+  End;
+  While Done < Total Do
+  Begin
+    R := Call3(Fn, LongInt(F), Buf + Done, Total - Done);
+    If (R < 0) Or ((R = 0) And Write) Then
+    Begin
+      LoopRW := -EIO;
+      Exit;
+    End;
+    If R = 0 Then
+    Begin
+      MemFill(Buf + Done, 0, Total - Done);   { au-dela de la fin }
+      Break;
+    End;
+    Done := Done + R;
+  End;
+  LoopRW := 0;
+End;
+
+Function LoopInUse(N : LongInt) : Boolean;
+Var I : LongInt;
+Begin
+  LoopInUse := False;
+  For I := 0 To MaxSupers - 1 Do
+    If (Supers[I] <> Nil) And (Supers[I]^.Dev = ((MajLoop Shl 8) Or N)) Then
+      LoopInUse := True;
+End;
+
+Function LoopBind(N : LongInt; F : PFile; Ro : Boolean) : LongInt;
+Var NF : PFile; M, K : LongInt; S : String;
+Begin
+  If LoF[N] <> Nil Then
+  Begin
+    LoopBind := -EBUSY;
+    Exit;
+  End;
+  M := F^.Inode^.Mode And S_IFMT;
+  If (M <> S_IFREG) And (M <> S_IFBLK) Then
+  Begin
+    LoopBind := -EINVAL;
+    Exit;
+  End;
+  If (M = S_IFBLK) And (((F^.Inode^.Rdev Shr 8) And $FFF) = MajLoop)
+     And ((F^.Inode^.Rdev And $FF) = N) Then
+  Begin
+    LoopBind := -EBADF;
+    Exit;
+  End;
+  If F^.Dentry = Nil Then
+  Begin
+    LoopBind := -EINVAL;
+    Exit;
+  End;
+  DentryGet(LongInt(F^.Dentry));
+  NF := FileNew(F^.Dentry, (F^.Flags And O_ACCMODE) Or O_LARGEFILE);
+  If NF = Nil Then
+  Begin
+    DentryPut(LongInt(F^.Dentry));
+    LoopBind := -ENFILE;
+    Exit;
+  End;
+  LoF[N] := NF;
+  LoOffL[N] := 0; LoOffH[N] := 0; LoLimL[N] := 0; LoLimH[N] := 0;
+  LoFl[N] := 0;
+  If Ro Or ((F^.Flags And O_ACCMODE) = O_RDONLY) Then LoFl[N] := 1;
+  MemFill(LongInt(@LoName[N * 64]), 0, 64);
+  S := DentryPath(F^.Dentry);
+  For K := 1 To Length(S) Do
+    If K <= 63 Then LoName[N * 64 + K - 1] := Ord(S[K]);
+  LoopCalc(N);
+  BInvalidate((MajLoop Shl 8) Or N);
+  LoopBind := 0;
+End;
+
+Function LoopClear(N : LongInt) : LongInt;
+Var Dv : LongInt;
+Begin
+  If LoF[N] = Nil Then
+  Begin
+    LoopClear := -ENXIO;
+    Exit;
+  End;
+  If LoopInUse(N) Then
+  Begin
+    LoopClear := -EBUSY;
+    Exit;
+  End;
+  Dv := (MajLoop Shl 8) Or N;
+  BSync(Dv);
+  BInvalidate(Dv);
+  FilePut(LongInt(LoF[N]));
+  LoF[N] := Nil;
+  LoOffL[N] := 0; LoOffH[N] := 0; LoLimL[N] := 0; LoLimH[N] := 0;
+  LoFl[N] := 0; LoSec[N] := 0;
+  MemFill(LongInt(@LoName[N * 64]), 0, 64);
+  LoopClear := 0;
+End;
+
+{ loop_info64 (232 octets) vers l'espace utilisateur }
+Function LoopGet64(N, A : LongInt) : LongInt;
+Var F : PFile; Ip : PInode;
+Begin
+  If LoF[N] = Nil Then
+  Begin
+    LoopGet64 := -ENXIO;
+    Exit;
+  End;
+  If Not EnsureUser(A, 232, True) Then
+  Begin
+    LoopGet64 := -EFAULT;
+    Exit;
+  End;
+  F := LoF[N];
+  Ip := F^.Inode;
+  MemFill(A, 0, 232);
+  MemL[0:A] := Ip^.Dev;
+  MemL[0:A + 8] := Ip^.Ino;
+  MemL[0:A + 16] := (MajLoop Shl 8) Or N;
+  MemL[0:A + 24] := LoOffL[N];
+  MemL[0:A + 28] := LoOffH[N];
+  MemL[0:A + 32] := LoLimL[N];
+  MemL[0:A + 36] := LoLimH[N];
+  MemL[0:A + 40] := N;
+  MemL[0:A + 52] := LoFl[N];
+  MemCopy(A + 56, LongInt(@LoName[N * 64]), 64);
+  LoopGet64 := 0;
+End;
+
+Function LoopSet64(N, A : LongInt) : LongInt;
+Var Ol, Oh, Ll, Lh, Fl : LongInt;
+Begin
+  If LoF[N] = Nil Then
+  Begin
+    LoopSet64 := -ENXIO;
+    Exit;
+  End;
+  If Not EnsureUser(A, 232, False) Then
+  Begin
+    LoopSet64 := -EFAULT;
+    Exit;
+  End;
+  If MemL[0:A + 44] <> 0 Then            { chiffrement : non gere }
+  Begin
+    LoopSet64 := -EINVAL;
+    Exit;
+  End;
+  Ol := MemL[0:A + 24]; Oh := MemL[0:A + 28];
+  Ll := MemL[0:A + 32]; Lh := MemL[0:A + 36];
+  Fl := MemL[0:A + 52];
+  If (Ol <> LoOffL[N]) Or (Oh <> LoOffH[N]) Or (Ll <> LoLimL[N])
+     Or (Lh <> LoLimH[N]) Then
+  Begin
+    If LoopInUse(N) Then
+    Begin
+      LoopSet64 := -EBUSY;
+      Exit;
+    End;
+    BSync((MajLoop Shl 8) Or N);
+    BInvalidate((MajLoop Shl 8) Or N);
+    LoOffL[N] := Ol; LoOffH[N] := Oh; LoLimL[N] := Ll; LoLimH[N] := Lh;
+    LoopCalc(N);
+  End;
+  LoFl[N] := (LoFl[N] And 1) Or (Fl And (4 Or 8));
+  MemCopy(LongInt(@LoName[N * 64]), A + 56, 64);
+  LoName[N * 64 + 63] := 0;
+  LoopSet64 := 0;
+End;
+
+{ struct loop_info (i386, 140 octets) }
+Function LoopGet32(N, A : LongInt) : LongInt;
+Var Ip : PInode;
+Begin
+  If LoF[N] = Nil Then
+  Begin
+    LoopGet32 := -ENXIO;
+    Exit;
+  End;
+  If Not EnsureUser(A, 140, True) Then
+  Begin
+    LoopGet32 := -EFAULT;
+    Exit;
+  End;
+  Ip := LoF[N]^.Inode;
+  MemFill(A, 0, 140);
+  MemL[0:A] := N;
+  MemW[0:A + 4] := Ip^.Dev;
+  MemL[0:A + 8] := Ip^.Ino;
+  MemW[0:A + 12] := (MajLoop Shl 8) Or N;
+  MemL[0:A + 16] := LoOffL[N];
+  MemL[0:A + 28] := LoFl[N];
+  MemCopy(A + 32, LongInt(@LoName[N * 64]), 64);
+  LoopGet32 := 0;
+End;
+
+Function LoopSet32(N, A : LongInt) : LongInt;
+Begin
+  If LoF[N] = Nil Then
+  Begin
+    LoopSet32 := -ENXIO;
+    Exit;
+  End;
+  If Not EnsureUser(A, 140, False) Then
+  Begin
+    LoopSet32 := -EFAULT;
+    Exit;
+  End;
+  If MemL[0:A + 20] <> 0 Then
+  Begin
+    LoopSet32 := -EINVAL;
+    Exit;
+  End;
+  If MemL[0:A + 16] <> LoOffL[N] Then
+  Begin
+    If LoopInUse(N) Then
+    Begin
+      LoopSet32 := -EBUSY;
+      Exit;
+    End;
+    BSync((MajLoop Shl 8) Or N);
+    BInvalidate((MajLoop Shl 8) Or N);
+    LoOffL[N] := MemL[0:A + 16]; LoOffH[N] := 0;
+    LoopCalc(N);
+  End;
+  LoFl[N] := (LoFl[N] And 1) Or (MemL[0:A + 28] And (4 Or 8));
+  MemCopy(LongInt(@LoName[N * 64]), A + 32, 64);
+  LoName[N * 64 + 63] := 0;
+  LoopSet32 := 0;
+End;
+
+Function LoopIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt;
+Var N, R : LongInt; Bf : PFile; Nf : PFile; Ro : Boolean;
+Begin
+  N := F^.Inode^.Rdev And $FF;
+  If (N >= MaxLoop) Or (LoPres[N] = 0) Then
+  Begin
+    LoopIoctl := -ENXIO;
+    Exit;
+  End;
+  If (Cmd <> $4C03) And (Cmd <> $4C05) And ((F^.Flags And O_ACCMODE)
+     = O_RDONLY) Then
+  Begin
+    LoopIoctl := -EPERM;
+    Exit;
+  End;
+  Case Cmd Of
+    $4C00 :                                    { LOOP_SET_FD }
+      Begin
+        Bf := FdGet(Arg);
+        If Bf = Nil Then LoopIoctl := -EBADF
+        Else LoopIoctl := LoopBind(N, Bf, False);
+      End;
+    $4C01 : LoopIoctl := LoopClear(N);         { LOOP_CLR_FD }
+    $4C02 : LoopIoctl := LoopSet32(N, Arg);
+    $4C03 : LoopIoctl := LoopGet32(N, Arg);
+    $4C04 : LoopIoctl := LoopSet64(N, Arg);
+    $4C05 : LoopIoctl := LoopGet64(N, Arg);
+    $4C06 :                                    { LOOP_CHANGE_FD }
+      Begin
+        If (LoF[N] = Nil) Then LoopIoctl := -ENXIO
+        Else If (LoFl[N] And 1) = 0 Then LoopIoctl := -EINVAL
+        Else
+        Begin
+          Bf := FdGet(Arg);
+          If Bf = Nil Then LoopIoctl := -EBADF
+          Else If (Bf^.Flags And O_ACCMODE) <> O_RDONLY Then
+            LoopIoctl := -EINVAL
+          Else
+          Begin
+            Nf := LoF[N];
+            LoF[N] := Nil;
+            R := LoopBind(N, Bf, True);
+            If R = 0 Then FilePut(LongInt(Nf)) Else LoF[N] := Nf;
+            LoopIoctl := R;
+          End;
+        End;
+      End;
+    $4C07 :                                    { LOOP_SET_CAPACITY }
+      Begin
+        If LoF[N] = Nil Then LoopIoctl := -ENXIO
+        Else
+        Begin
+          LoopCalc(N);
+          LoopIoctl := 0;
+        End;
+      End;
+    $4C08 : LoopIoctl := 0;                    { LOOP_SET_DIRECT_IO }
+    $4C09 :                                    { LOOP_SET_BLOCK_SIZE }
+      Begin
+        If LoF[N] = Nil Then LoopIoctl := -ENXIO
+        Else
+        Begin
+          LoBs[N] := Arg;
+          LoopIoctl := 0;
+        End;
+      End;
+    $4C0A :                                    { LOOP_CONFIGURE }
+      Begin
+        If Not EnsureUser(Arg, 304, False) Then
+          LoopIoctl := -EFAULT
+        Else
+        Begin
+          Bf := FdGet(MemL[0:Arg]);
+          If Bf = Nil Then LoopIoctl := -EBADF
+          Else
+          Begin
+            Ro := (MemL[0:Arg + 8 + 52] And 1) <> 0;
+            R := LoopBind(N, Bf, Ro);
+            If R = 0 Then
+            Begin
+              If MemL[0:Arg + 4] <> 0 Then LoBs[N] := MemL[0:Arg + 4];
+              R := LoopSet64(N, Arg + 8);
+              If R <> 0 Then LoopClear(N);
+            End;
+            LoopIoctl := R;
+          End;
+        End;
+      End;
+  Else
+    LoopIoctl := -EINVAL;
+  End;
+End;
+
+{ ---- /dev/loop-control (misc 10:237) ---- }
+
+Function LoopCtlIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt;
+Var N, I : LongInt;
+Begin
+  LoopCtlIoctl := -ENOTTY;
+  Case Cmd Of
+    $4C80 :                                    { LOOP_CTL_ADD }
+      Begin
+        If Arg < 0 Then
+        Begin
+          N := -1;
+          For I := MaxLoop - 1 Downto 0 Do
+            If LoPres[I] = 0 Then N := I;
+        End
+        Else N := Arg;
+        If (N < 0) Or (N >= MaxLoop) Then LoopCtlIoctl := -ENOSPC
+        Else If LoPres[N] <> 0 Then LoopCtlIoctl := -EEXIST
+        Else
+        Begin
+          LoPres[N] := 1;
+          KMknod('/dev/loop' + IntStr(N), S_IFBLK Or $1B0,
+              MkDev(MajLoop, N));
+          LoopCtlIoctl := N;
+        End;
+      End;
+    $4C81 :                                    { LOOP_CTL_REMOVE }
+      Begin
+        If (Arg < 0) Or (Arg >= MaxLoop) Or (LoPres[Arg] = 0) Then
+          LoopCtlIoctl := -ENODEV
+        Else If (LoF[Arg] <> Nil) Or LoopInUse(Arg) Then
+          LoopCtlIoctl := -EBUSY
+        Else
+        Begin
+          LoPres[Arg] := 0;
+          LoopCtlIoctl := Arg;
+        End;
+      End;
+    $4C82 :                                    { LOOP_CTL_GET_FREE }
+      Begin
+        LoopCtlIoctl := -ENODEV;
+        For I := MaxLoop - 1 Downto 0 Do
+          If (LoPres[I] <> 0) And (LoF[I] = Nil) Then LoopCtlIoctl := I;
+      End;
+  End;
+End;
+
+Function MiscLoopCtlOps : LongInt;
+Begin
+  MiscLoopCtlOps := LongInt(@LoopCtlFOps[0]);
+End;
+
+Procedure InitLoop;
+Var I : LongInt;
+Begin
+  For I := 0 To MaxLoop - 1 Do
+  Begin
+    LoF[I] := Nil;
+    LoSec[I] := 0;
+    If I < 8 Then LoPres[I] := 1 Else LoPres[I] := 0;
+  End;
+  MemFill(LongInt(@LoopCtlFOps[0]), 0, SizeOf(LoopCtlFOps));
+  LoopCtlFOps[FoIoctl] := LongInt(@LoopCtlIoctl);
+End;
+
+{ ---- PCI : enumeration (bus 0 et ponts) ---- }
+
+Procedure PciScanBus(Bus, Depth : LongInt);
+Var Dv, Fn, Nf, V, Hd, I, K, Old, Sz, Msk, Cmd, Sec, Reg, NB : LongInt;
+Begin
+  For Dv := 0 To 31 Do
+  Begin
+    Nf := 1;
+    Fn := 0;
+    While Fn < Nf Do
+    Begin
+      V := PciRead(Bus, Dv, Fn, 0);
+      If (V And $FFFF) <> $FFFF Then
+      Begin
+        Hd := (PciRead(Bus, Dv, Fn, $C) Shr 16) And $FF;
+        If (Fn = 0) And ((Hd And $80) <> 0) Then Nf := 8;
+        If PciN < 32 Then
+        Begin
+          I := PciN;
+          Inc(PciN);
+          PciBus[I] := Bus; PciDv[I] := Dv; PciFn[I] := Fn;
+          PciHdr[I] := Hd And $7F;
+          PciVen[I] := V And $FFFF;
+          PciDid[I] := (V Shr 16) And $FFFF;
+          K := PciRead(Bus, Dv, Fn, 8);
+          PciCls[I] := (K Shr 8) And $FFFFFF;
+          PciRev[I] := K And $FF;
+          For K := 0 To 63 Do PciCfg[I * 64 + K] := PciRead(Bus, Dv, Fn, K * 4);
+          K := PciCfg[I * 64 + $3C Div 4];
+          PciIrq[I] := K And $FF;
+          PciPin[I] := (K Shr 8) And $FF;
+          PciSv[I] := 0; PciSd[I] := 0;
+          If PciHdr[I] = 0 Then
+          Begin
+            K := PciCfg[I * 64 + $2C Div 4];
+            PciSv[I] := K And $FFFF;
+            PciSd[I] := (K Shr 16) And $FFFF;
+          End;
+          If PciHdr[I] <= 1 Then
+          Begin
+            If PciHdr[I] = 0 Then NB := 6 Else NB := 2;
+            Cmd := PciRead(Bus, Dv, Fn, 4);
+            PciWrite(Bus, Dv, Fn, 4, Cmd And Not 7);
+            For K := 0 To NB - 1 Do
+            Begin
+              Reg := $10 + K * 4;
+              Old := PciRead(Bus, Dv, Fn, Reg);
+              PciWrite(Bus, Dv, Fn, Reg, LongInt($FFFFFFFF));
+              Sz := PciRead(Bus, Dv, Fn, Reg);
+              PciWrite(Bus, Dv, Fn, Reg, Old);
+              If (Old And 1) <> 0 Then
+                Msk := Sz And LongInt($FFFC) Or LongInt($FFFF0000)
+              Else Msk := Sz And LongInt($FFFFFFF0);
+              If (Sz = 0) Or (Sz = LongInt($FFFFFFFF)) Then Sz := 0
+              Else Sz := (Not Msk) + 1;
+              PciBar[I * 7 + K] := Old;
+              PciBarSz[I * 7 + K] := Sz;
+            End;
+            If PciHdr[I] = 0 Then Reg := $30 Else Reg := $38;
+            Old := PciRead(Bus, Dv, Fn, Reg);
+            PciWrite(Bus, Dv, Fn, Reg, LongInt($FFFFF800));
+            Sz := PciRead(Bus, Dv, Fn, Reg);
+            PciWrite(Bus, Dv, Fn, Reg, Old);
+            Sz := Sz And LongInt($FFFFF800);
+            If Sz <> 0 Then Sz := (Not Sz) + 1;
+            PciBar[I * 7 + 6] := Old And LongInt($FFFFF800);
+            PciBarSz[I * 7 + 6] := Sz;
+            PciWrite(Bus, Dv, Fn, 4, Cmd);
+          End;
+        End;
+        If ((Hd And $7F) = 1) And (Depth < 4) Then
+        Begin
+          Sec := (PciRead(Bus, Dv, Fn, $18) Shr 8) And $FF;
+          If (Sec <> 0) And (Sec <> Bus) Then PciScanBus(Sec, Depth + 1);
+        End;
+      End;
+      Inc(Fn);
+    End;
+  End;
+End;
+
+Procedure PciScan;
+Begin
+  PciN := 0;
+  PciScanBus(0, 0);
+  KLog('PCI : ' + IntStr(PciN) + ' peripherique(s)');
+End;
+
+Function PciNameOf(I : LongInt) : String;
+Begin
+  PciNameOf := '0000:' + Lower2(HexStr(PciBus[I], 2)) + ':'
+      + Lower2(HexStr(PciDv[I], 2)) + '.' + IntStr(PciFn[I]);
+End;
+
+Var
+  PciRes : Array[0..511] Of Byte;
+  PciResN : LongInt;
+
+Procedure PciResAdd(Const S : String);
+Var K : LongInt;
+Begin
+  For K := 1 To Length(S) Do
+    If PciResN < 512 Then
+    Begin
+      PciRes[PciResN] := Ord(S[K]);
+      Inc(PciResN);
+    End;
+End;
+
+Procedure PciWr(Const Dir, Nm, Val : String);
+Var P : String;
+Begin
+  P := Dir + '/' + Nm;
+  KWriteStr(P, $124, Val);
+End;
+
+Procedure PciPopulate;
+Var I, K, Sz, B, Fl : LongInt; Nm, Pth : String;
+Begin
+  KMkdir('/sys/bus', $1ED);
+  KMkdir('/sys/bus/pci', $1ED);
+  KMkdir('/sys/bus/pci/devices', $1ED);
+  KMkdir('/sys/bus/usb', $1ED);          { aucun controleur USB gere }
+  KMkdir('/sys/bus/usb/devices', $1ED);
+  For I := 0 To PciN - 1 Do
+  Begin
+    Nm := PciNameOf(I);
+    Pth := '/sys/bus/pci/devices/' + Nm;
+    KMkdir(Pth, $1ED);
+    PciWr(Pth, 'vendor', '0x' + Lower2(HexStr(PciVen[I], 4))
+        + #10);
+    PciWr(Pth, 'device', '0x' + Lower2(HexStr(PciDid[I], 4))
+        + #10);
+    PciWr(Pth, 'class', '0x' + Lower2(HexStr(PciCls[I], 6)) + #10);
+    PciWr(Pth, 'revision', '0x' + Lower2(HexStr(PciRev[I], 2))
+        + #10);
+    PciWr(Pth, 'subsystem_vendor', '0x'
+        + Lower2(HexStr(PciSv[I], 4)) + #10);
+    PciWr(Pth, 'subsystem_device', '0x'
+        + Lower2(HexStr(PciSd[I], 4)) + #10);
+    PciWr(Pth, 'irq', IntStr(PciIrq[I]) + #10);
+    PciWr(Pth, 'uevent', 'PCI_CLASS='
+        + Lower2(HexStr(PciCls[I], 6)) + #10 + 'PCI_ID='
+        + Lower2(HexStr(PciVen[I], 4)) + ':' + Lower2(HexStr(PciDid[I], 4))
+        + #10 + 'PCI_SLOT_NAME=' + Nm + #10);
+    PciResN := 0;
+    For K := 0 To 6 Do
+    Begin
+      B := PciBar[I * 7 + K];
+      Sz := PciBarSz[I * 7 + K];
+      If (Sz = 0) Or (PciHdr[I] > 1) Or ((PciHdr[I] = 1) And (K > 1)
+         And (K < 6)) Then
+        PciResAdd('0x0000000000000000 0x0000000000000000 '
+            + '0x0000000000000000' + #10)
+      Else
+      Begin
+        If K = 6 Then
+        Begin
+          Fl := $200;
+          B := B And LongInt($FFFFF800);
+        End
+        Else If (B And 1) <> 0 Then
+        Begin
+          Fl := $40101;
+          B := B And LongInt($FFFFFFFC);
+        End
+        Else
+        Begin
+          Fl := $40200;
+          If (B And 8) <> 0 Then Fl := Fl Or $2000;
+          B := B And LongInt($FFFFFFF0);
+        End;
+        PciResAdd('0x00000000' + Lower2(HexStr(B, 8)) + ' 0x00000000'
+            + Lower2(HexStr(B + Sz - 1, 8)) + ' 0x00000000'
+            + Lower2(HexStr(Fl, 8)) + #10);
+      End;
+    End;
+    KWriteFile(Pth + '/resource', $124, LongInt(@PciRes[0]), PciResN);
+    KWriteFile(Pth + '/config', $124, LongInt(@PciCfg[I * 64]), 256);
+  End;
+End;
+
+Var
+  SysPathV, SysValV : String;
+
+Procedure LoopSys;
+Var I : LongInt; Nm : String;
+Begin
+  For I := 0 To 7 Do
+  Begin
+    Nm := 'loop' + IntStr(I);
+    KMkdir('/sys/block/' + Nm, $1ED);
+    SysPathV := '/sys/block/' + Nm + '/dev';
+    SysValV := IntStr(MajLoop) + ':' + IntStr(I) + #10;
+    KWriteStr(SysPathV, $124, SysValV);
+    SysPathV := '/sys/block/' + Nm + '/removable';
+    SysValV := '0' + #10;
+    KWriteStr(SysPathV, $124, SysValV);
+    SysPathV := '../../block/' + Nm;
+    SysValV := '/sys/class/block/' + Nm;
+    VfsSymlink(SysPathV, SysValV);
+  End;
+End;
+
+{ ==================================================================== }
+{ Partie 38 (suite) - inflate (deflate/zlib/gzip) et initramfs (cpio    }
+{ newc, brut ou gzip, module Multiboot)                                 }
+{ ==================================================================== }
+{ Inflate : algorithme de puff (Mark Adler) : tables de Huffman canoniques
+  decodees bit a bit. La sortie va soit dans un tampon memoire (InflDst),
+  soit dans l'analyseur cpio (InflDst = 0). }
+
+Const
+  InflWin = 32768;
+  InflLBase : Array[0..28] Of LongInt = (3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15,
+    17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227,
+    258);
+  InflLExt : Array[0..28] Of LongInt = (0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2,
+    2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0);
+  InflDBase : Array[0..29] Of LongInt = (1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33,
+    49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097,
+    6145, 8193, 12289, 16385, 24577);
+  InflDExt : Array[0..29] Of LongInt = (0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5,
+    5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13);
+  InflOrder : Array[0..18] Of LongInt = (16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11,
+    4, 12, 3, 13, 2, 14, 1, 15);
+
+Var
+  InflSrc, InflPos, InflLen, InflBits, InflBitCnt, InflOut, InflErr : LongInt;
+  InflDst, InflDstMax : LongInt;
+  InflWinBuf : Array[0..InflWin - 1] Of Byte;
+  InflLens : Array[0..349] Of LongInt;
+  InflLCnt, InflDCnt : Array[0..15] Of LongInt;
+  InflLSym : Array[0..287] Of LongInt;
+  InflDSym : Array[0..31] Of LongInt;
+
+Procedure CpioFeed(Buf, N : LongInt); Forward;
+
+Procedure InflFlush(From, N : LongInt);
+Begin
+  If InflDst <> 0 Then
+  Begin
+    If From + N <= InflDstMax Then
+      MemCopy(InflDst + From, LongInt(@InflWinBuf[From And (InflWin - 1)]), N)
+    Else InflErr := 9;
+  End
+  Else CpioFeed(LongInt(@InflWinBuf[From And (InflWin - 1)]), N);
+End;
+
+Procedure InflPut(B : LongInt);
+Begin
+  InflWinBuf[InflOut And (InflWin - 1)] := B;
+  Inc(InflOut);
+  If (InflOut And 4095) = 0 Then InflFlush(InflOut - 4096, 4096);
+End;
+
+Function InflBit : LongInt;
+Begin
+  If InflBitCnt = 0 Then
+  Begin
+    If InflPos >= InflLen Then
+    Begin
+      InflErr := 1;
+      InflBit := 0;
+      Exit;
+    End;
+    InflBits := Mem[0:InflSrc + InflPos];
+    Inc(InflPos);
+    InflBitCnt := 8;
+  End;
+  InflBit := InflBits And 1;
+  InflBits := InflBits Shr 1;
+  Dec(InflBitCnt);
+End;
+
+Function InflGetBits(N : LongInt) : LongInt;
+Var V, I : LongInt;
+Begin
+  V := 0;
+  For I := 0 To N - 1 Do V := V Or (InflBit Shl I);
+  InflGetBits := V;
+End;
+
+Function InflDecode(Var Cnt : Array Of LongInt; Var Sym : Array Of LongInt)
+    : LongInt;
+Var Code, First, Index, Len, C : LongInt;
+Begin
+  Code := 0; First := 0; Index := 0;
+  For Len := 1 To 15 Do
+  Begin
+    Code := Code Or InflBit;
+    C := Cnt[Len];
+    If Code - C < First Then
+    Begin
+      InflDecode := Sym[Index + (Code - First)];
+      Exit;
+    End;
+    Index := Index + C;
+    First := (First + C) Shl 1;
+    Code := Code Shl 1;
+    If InflErr <> 0 Then Break;
+  End;
+  InflDecode := -1;
+End;
+
+{ Construire les tables de Lens[Base .. Base+N-1] ; retourne <0 si
+  sur-souscrit }
+Function InflBuild(Var Cnt : Array Of LongInt; Var Sym : Array Of LongInt;
+    Base, N : LongInt) : LongInt;
+Var I, Left, S : LongInt; Offs : Array[0..15] Of LongInt;
+Begin
+  For I := 0 To 15 Do Cnt[I] := 0;
+  For S := 0 To N - 1 Do Inc(Cnt[InflLens[Base + S]]);
+  If Cnt[0] = N Then
+  Begin
+    InflBuild := 0;
+    Exit;
+  End;
+  Left := 1;
+  For I := 1 To 15 Do
+  Begin
+    Left := Left Shl 1;
+    Left := Left - Cnt[I];
+    If Left < 0 Then
+    Begin
+      InflBuild := Left;
+      Exit;
+    End;
+  End;
+  Offs[1] := 0;
+  For I := 1 To 14 Do Offs[I + 1] := Offs[I] + Cnt[I];
+  For S := 0 To N - 1 Do
+    If InflLens[Base + S] <> 0 Then
+    Begin
+      Sym[Offs[InflLens[Base + S]]] := S;
+      Inc(Offs[InflLens[Base + S]]);
+    End;
+  InflBuild := Left;
+End;
+
+Function InflCodes : LongInt;
+Var Sym, Len, Dsym, Dist, K : LongInt;
+Begin
+  InflCodes := 0;
+  While InflErr = 0 Do
+  Begin
+    Sym := InflDecode(InflLCnt, InflLSym);
+    If Sym < 0 Then
+    Begin
+      InflErr := 2;
+      Break;
+    End;
+    If Sym < 256 Then InflPut(Sym)
+    Else If Sym = 256 Then Break
+    Else
+    Begin
+      Sym := Sym - 257;
+      If Sym >= 29 Then
+      Begin
+        InflErr := 3;
+        Break;
+      End;
+      Len := InflLBase[Sym] + InflGetBits(InflLExt[Sym]);
+      Dsym := InflDecode(InflDCnt, InflDSym);
+      If (Dsym < 0) Or (Dsym >= 30) Then
+      Begin
+        InflErr := 4;
+        Break;
+      End;
+      Dist := InflDBase[Dsym] + InflGetBits(InflDExt[Dsym]);
+      If (Dist > InflOut) Or (Dist > InflWin) Then
+      Begin
+        InflErr := 5;
+        Break;
+      End;
+      For K := 1 To Len Do
+        InflPut(InflWinBuf[(InflOut - Dist) And (InflWin - 1)]);
+    End;
+  End;
+  If InflErr <> 0 Then InflCodes := -1;
+End;
+
+Function InflStored : LongInt;
+Var Len, NLen, K : LongInt;
+Begin
+  InflBitCnt := 0;
+  InflStored := -1;
+  If InflPos + 4 > InflLen Then
+  Begin
+    InflErr := 1;
+    Exit;
+  End;
+  Len := Mem[0:InflSrc + InflPos] Or (Mem[0:InflSrc + InflPos + 1] Shl 8);
+  NLen := Mem[0:InflSrc + InflPos + 2] Or (Mem[0:InflSrc + InflPos + 3] Shl 8);
+  InflPos := InflPos + 4;
+  If (Len Xor NLen) <> $FFFF Then
+  Begin
+    InflErr := 6;
+    Exit;
+  End;
+  If InflPos + Len > InflLen Then
+  Begin
+    InflErr := 1;
+    Exit;
+  End;
+  For K := 0 To Len - 1 Do InflPut(Mem[0:InflSrc + InflPos + K]);
+  InflPos := InflPos + Len;
+  InflStored := 0;
+End;
+
+Function InflFixed : LongInt;
+Var I : LongInt;
+Begin
+  For I := 0 To 143 Do InflLens[I] := 8;
+  For I := 144 To 255 Do InflLens[I] := 9;
+  For I := 256 To 279 Do InflLens[I] := 7;
+  For I := 280 To 287 Do InflLens[I] := 8;
+  InflBuild(InflLCnt, InflLSym, 0, 288);
+  For I := 0 To 29 Do InflLens[I] := 5;
+  InflBuild(InflDCnt, InflDSym, 0, 30);
+  InflFixed := InflCodes;
+End;
+
+Function InflDynamic : LongInt;
+Var NLen, NDist, NCode, I, Sym, Rep, Prev, Idx : LongInt;
+Begin
+  InflDynamic := -1;
+  NLen := InflGetBits(5) + 257;
+  NDist := InflGetBits(5) + 1;
+  NCode := InflGetBits(4) + 4;
+  If (NLen > 286) Or (NDist > 30) Then
+  Begin
+    InflErr := 7;
+    Exit;
+  End;
+  For I := 0 To 18 Do InflLens[I] := 0;
+  For I := 0 To NCode - 1 Do InflLens[InflOrder[I]] := InflGetBits(3);
+  If InflBuild(InflLCnt, InflLSym, 0, 19) <> 0 Then
+  Begin
+    InflErr := 8;
+    Exit;
+  End;
+  Idx := 0;
+  While (Idx < NLen + NDist) And (InflErr = 0) Do
+  Begin
+    Sym := InflDecode(InflLCnt, InflLSym);
+    If Sym < 0 Then
+    Begin
+      InflErr := 2;
+      Exit;
+    End;
+    If Sym < 16 Then
+    Begin
+      InflLens[20 + Idx] := Sym;
+      Inc(Idx);
+    End
+    Else
+    Begin
+      Prev := 0;
+      If Sym = 16 Then
+      Begin
+        If Idx = 0 Then
+        Begin
+          InflErr := 8;
+          Exit;
+        End;
+        Prev := InflLens[20 + Idx - 1];
+        Rep := 3 + InflGetBits(2);
+      End
+      Else If Sym = 17 Then Rep := 3 + InflGetBits(3)
+      Else Rep := 11 + InflGetBits(7);
+      If Idx + Rep > NLen + NDist Then
+      Begin
+        InflErr := 8;
+        Exit;
+      End;
+      For I := 1 To Rep Do
+      Begin
+        InflLens[20 + Idx] := Prev;
+        Inc(Idx);
+      End;
+    End;
+  End;
+  If InflErr <> 0 Then Exit;
+  If InflLens[20 + 256] = 0 Then
+  Begin
+    InflErr := 8;
+    Exit;
+  End;
+  If InflBuild(InflLCnt, InflLSym, 20, NLen) < 0 Then
+  Begin
+    InflErr := 8;
+    Exit;
+  End;
+  If InflBuild(InflDCnt, InflDSym, 20 + NLen, NDist) < 0 Then
+  Begin
+    InflErr := 8;
+    Exit;
+  End;
+  InflDynamic := InflCodes;
+End;
+
+{ Mode 0 : deflate brut, 1 : zlib, 2 : gzip. Src : adresse virtuelle ; Len
+  octets ; retourne 0 ou un code d'erreur ; InflPos = octets consommes }
+Function Inflate(Src, Len, Mode : LongInt) : LongInt;
+Var Last, Typ, Fl, K, X : LongInt;
+Begin
+  InflSrc := Src; InflLen := Len; InflPos := 0; InflBits := 0;
+  InflBitCnt := 0; InflOut := 0; InflErr := 0;
+  If Mode = 1 Then InflPos := 2;
+  If Mode = 2 Then
+  Begin
+    If (Len < 18) Or (Mem[0:Src] <> $1F) Or (Mem[0:Src + 1] <> $8B)
+       Or (Mem[0:Src + 2] <> 8) Then
+    Begin
+      Inflate := 20;
+      Exit;
+    End;
+    Fl := Mem[0:Src + 3];
+    InflPos := 10;
+    If (Fl And 4) <> 0 Then
+      InflPos := InflPos + 2 + Mem[0:Src + InflPos]
+          + (Mem[0:Src + InflPos + 1] Shl 8);
+    If (Fl And 8) <> 0 Then
+    Begin
+      While (InflPos < Len) And (Mem[0:Src + InflPos] <> 0) Do Inc(InflPos);
+      Inc(InflPos);
+    End;
+    If (Fl And 16) <> 0 Then
+    Begin
+      While (InflPos < Len) And (Mem[0:Src + InflPos] <> 0) Do Inc(InflPos);
+      Inc(InflPos);
+    End;
+    If (Fl And 2) <> 0 Then InflPos := InflPos + 2;
+  End;
+  Repeat
+    Last := InflGetBits(1);
+    Typ := InflGetBits(2);
+    If InflErr <> 0 Then Break;
+    Case Typ Of
+      0 : X := InflStored;
+      1 : X := InflFixed;
+      2 : X := InflDynamic;
+    Else
+      Begin
+        InflErr := 10;
+        X := -1;
+      End;
+    End;
+    If X <> 0 Then Break;
+  Until Last <> 0;
+  If (InflErr = 0) And ((InflOut And 4095) <> 0) Then
+    InflFlush(InflOut - (InflOut And 4095), InflOut And 4095);
+  If Mode = 2 Then InflPos := InflPos + 8;     { CRC32 + ISIZE }
+  If Mode = 1 Then InflPos := InflPos + 4;     { Adler32 }
+  K := 0;
+  Inflate := InflErr;
+End;
+
+{ ---- analyseur cpio newc ---- }
+
+Const
+  CpMaxHl = 64;
+
+Var
+  CpState, CpHave, CpNeed, CpRemain, CpPad, CpDone, CpErr, CpCount : LongInt;
+  CpMode, CpUid, CpGid, CpNlink, CpMtime, CpSize, CpNameSz, CpIno, CpDevMaj,
+  CpDevMin, CpRMaj, CpRMin : LongInt;
+  CpBuf : Array[0..511] Of Byte;
+  CpPath, CpLink : String;
+  CpFile : PFile;
+  HlIno, HlDev : Array[0..CpMaxHl - 1] Of LongInt;
+  HlPath : Array[0..CpMaxHl - 1] Of String[100];
+  HlN : LongInt;
+  CpHlHit : Boolean;
+
+Function CpHex(P : LongInt) : LongInt;
+Var I, V, C : LongInt;
+Begin
+  V := 0;
+  For I := 0 To 7 Do
+  Begin
+    C := CpBuf[P + I];
+    If (C >= 48) And (C <= 57) Then V := (V Shl 4) Or (C - 48)
+    Else If (C >= 65) And (C <= 70) Then V := (V Shl 4) Or (C - 55)
+    Else If (C >= 97) And (C <= 102) Then V := (V Shl 4) Or (C - 87)
+    Else CpErr := 2;
+  End;
+  CpHex := V;
+End;
+
+Procedure CpMkParents(Const P : String);
+Var I : LongInt; S : String;
+Begin
+  For I := 2 To Length(P) Do
+    If P[I] = '/' Then
+    Begin
+      S := Copy(P, 1, I - 1);
+      KMkdir(S, $1ED);
+    End;
+End;
+
+Procedure CpSetOwner(Const P : String);
+Var D : PDentry;
+Begin
+  If PathWalk(P, False, D) = 0 Then
+  Begin
+    D^.Inode^.Uid := CpUid;
+    D^.Inode^.Gid := CpGid;
+    D^.Inode^.Mtime := CpMtime;
+    DentryPut(LongInt(D));
+  End;
+End;
+
+Procedure CpEndFile;
+Begin
+  If CpFile <> Nil Then
+  Begin
+    CpFile^.Inode^.Uid := CpUid;
+    CpFile^.Inode^.Gid := CpGid;
+    CpFile^.Inode^.Mtime := CpMtime;
+    FilePut(LongInt(CpFile));
+    CpFile := Nil;
+  End;
+End;
+
+{ Le nom est complet : creer l'entree }
+Procedure CpBeginEntry;
+Var K, R, T : LongInt; Nm : String; F : PFile;
+Begin
+  Nm := '';
+  For K := 0 To CpNameSz - 2 Do Nm := Nm + Chr(CpBuf[K]);
+  If Nm = 'TRAILER!!!' Then
+  Begin
+    CpState := 5;                  { archive suivante eventuelle }
+    Exit;
+  End;
+  While (Length(Nm) > 1) And (Nm[1] = '.') And (Nm[2] = '/') Do
+    Delete(Nm, 1, 2);
+  While (Length(Nm) > 0) And (Nm[1] = '/') Do Delete(Nm, 1, 1);
+  CpRemain := CpSize;
+  CpState := 2;
+  CpPad := (4 - (CpSize And 3)) And 3;
+  CpFile := Nil;
+  If (Nm = '') Or (Nm = '.') Then Exit;
+  CpPath := '/' + Nm;
+  Inc(CpCount);
+  CpMkParents(CpPath);
+  T := CpMode And S_IFMT;
+  If T = S_IFDIR Then
+  Begin
+    KMkdir(CpPath, CpMode And $FFF);
+    CpSetOwner(CpPath);
+  End
+  Else If T = S_IFREG Then
+  Begin
+    CpHlHit := False;
+    If CpNlink > 1 Then
+    Begin
+      For K := 0 To HlN - 1 Do
+        If (HlIno[K] = CpIno) And (HlDev[K] = CpDevMaj * 256 + CpDevMin)
+           Then
+        Begin
+          VfsUnlink(CpPath, False);
+          If VfsLink(HlPath[K], CpPath) = 0 Then CpHlHit := True;
+        End;
+      If (Not CpHlHit) And (HlN < CpMaxHl) And (Length(CpPath) <= 100) Then
+      Begin
+        HlIno[HlN] := CpIno;
+        HlDev[HlN] := CpDevMaj * 256 + CpDevMin;
+        HlPath[HlN] := CpPath;
+        Inc(HlN);
+      End;
+    End;
+    If CpHlHit Then R := VfsOpen(CpPath, O_WRONLY Or O_TRUNC, 0, F)
+    Else R := VfsOpen(CpPath, O_CREAT Or O_WRONLY Or O_TRUNC,
+        CpMode And $FFF, F);
+    If R = 0 Then
+    Begin
+      CpFile := F;
+      If CpRemain = 0 Then CpEndFile;
+    End
+    Else KLog('initramfs : ' + CpPath + ' : erreur ' + IntStr(-R));
+  End
+  Else If T = S_IFLNK Then CpLink := ''
+  Else
+  Begin
+    KMknod(CpPath, CpMode And (S_IFMT Or $FFF), MkDev(CpRMaj, CpRMin));
+    CpSetOwner(CpPath);
+  End;
+End;
+
+Procedure CpioFeed(Buf, N : LongInt);
+Var Take, K : LongInt;
+Begin
+  While (N > 0) And (CpDone = 0) And (CpErr = 0) Do
+  Begin
+    Case CpState Of
+      0 :
+        Begin
+          Take := 110 - CpHave;
+          If Take > N Then Take := N;
+          MemCopy(LongInt(@CpBuf[CpHave]), Buf, Take);
+          CpHave := CpHave + Take; Buf := Buf + Take; N := N - Take;
+          If CpHave = 110 Then
+          Begin
+            If (CpBuf[0] <> 48) Or (CpBuf[1] <> 55) Or (CpBuf[2] <> 48)
+               Or (CpBuf[3] <> 55) Or (CpBuf[4] <> 48)
+               Or ((CpBuf[5] <> 49) And (CpBuf[5] <> 50)) Then
+            Begin
+              CpErr := 1;
+              Exit;
+            End;
+            CpIno := CpHex(6); CpMode := CpHex(14); CpUid := CpHex(22);
+            CpGid := CpHex(30); CpNlink := CpHex(38); CpMtime := CpHex(46);
+            CpSize := CpHex(54); CpDevMaj := CpHex(62); CpDevMin := CpHex(70);
+            CpRMaj := CpHex(78); CpRMin := CpHex(86); CpNameSz := CpHex(94);
+            If (CpNameSz < 1) Or (CpNameSz > 400) Then CpErr := 3;
+            CpHave := 0;
+            CpNeed := CpNameSz + ((4 - ((110 + CpNameSz) And 3)) And 3);
+            CpState := 1;
+          End;
+        End;
+      1 :
+        Begin
+          Take := CpNeed - CpHave;
+          If Take > N Then Take := N;
+          MemCopy(LongInt(@CpBuf[CpHave]), Buf, Take);
+          CpHave := CpHave + Take; Buf := Buf + Take; N := N - Take;
+          If CpHave = CpNeed Then
+          Begin
+            CpHave := 0;
+            CpBeginEntry;
+            If (CpState = 2) And (CpRemain = 0) Then CpState := 3;
+          End;
+        End;
+      2 :
+        Begin
+          Take := CpRemain;
+          If Take > N Then Take := N;
+          If CpFile <> Nil Then
+          Begin
+            If VfsWrite(CpFile, Buf, Take) <> Take Then
+              KLog('initramfs : ecriture de ' + CpPath + ' incomplete');
+          End
+          Else If (CpMode And S_IFMT) = S_IFLNK Then
+            For K := 0 To Take - 1 Do
+              If Length(CpLink) < 250 Then
+                CpLink := CpLink + Chr(Mem[0:Buf + K]);
+          Buf := Buf + Take; N := N - Take;
+          CpRemain := CpRemain - Take;
+          If CpRemain = 0 Then
+          Begin
+            If CpFile <> Nil Then CpEndFile
+            Else If (CpMode And S_IFMT) = S_IFLNK Then
+            Begin
+              VfsSymlink(CpLink, CpPath);
+              CpSetOwner(CpPath);
+            End;
+            CpState := 3;
+          End;
+        End;
+      5 :
+        Begin
+          If Mem[0:Buf] = 0 Then
+          Begin
+            Inc(Buf);
+            Dec(N);
+          End
+          Else CpState := 0;
+        End;
+      3 :
+        Begin
+          Take := CpPad - CpHave;
+          If Take > N Then Take := N;
+          CpHave := CpHave + Take; Buf := Buf + Take; N := N - Take;
+          If CpHave >= CpPad Then
+          Begin
+            CpHave := 0;
+            CpState := 0;
+          End;
+        End;
+    Else
+      CpErr := 9;
+    End;
+  End;
+End;
+
+{ ---- modules Multiboot ---- }
+
+Var
+  InitrdLoaded : Boolean;
+
+{ Decompresser / analyser un module (Start, Len : adresses physiques) }
+Function InitrdFeed(Start, Len : LongInt) : LongInt;
+Var V, Pos, R : LongInt;
+Begin
+  V := P2V(Start);
+  InitrdFeed := 0;
+  Pos := 0;
+  While (Pos + 6 <= Len) And (CpDone = 0) And (CpErr = 0) Do
+  Begin
+    If (Mem[0:V + Pos] = $1F) And (Mem[0:V + Pos + 1] = $8B) Then
+    Begin
+      InflDst := 0;
+      R := Inflate(V + Pos, Len - Pos, 2);
+      If R <> 0 Then
+      Begin
+        KLog('initramfs : erreur gzip ' + IntStr(R));
+        InitrdFeed := R;
+        Exit;
+      End;
+      Pos := Pos + InflPos;
+      While (Pos < Len) And (Mem[0:V + Pos] = 0) Do Inc(Pos);
+    End
+    Else If (Mem[0:V + Pos] = 48) And (Mem[0:V + Pos + 1] = 55) Then
+    Begin
+      CpioFeed(V + Pos, Len - Pos);
+      Pos := Len;
+    End
+    Else
+    Begin
+      KLog('initramfs : format de module inconnu');
+      InitrdFeed := 30;
+      Exit;
+    End;
+  End;
+  If CpErr <> 0 Then InitrdFeed := CpErr;
+End;
+
+{ Liberer les pages d'un module (apres l'extraction) }
+Procedure ModFree(Start, Len : LongInt);
+Var P, E : LongInt;
+Begin
+  P := PageUp(Start);
+  E := PageDown(Start + Len);
+  While P < E Do
+  Begin
+    FreePages(P2V(P), 0);
+    TotalFreePages := TotalFreePages + 1;
+    P := P + 4096;
+  End;
+End;
+
+{ Decompresse les modules Multiboot dans la racine en memoire. Retourne
+  Vrai si /init (ou rdinit=) existe ensuite. }
+Function InitramfsLoad : Boolean;
+Var K, R : LongInt; D : PDentry; Ri : String;
+Begin
+  InitramfsLoad := False;
+  If NMods = 0 Then Exit;
+  CpState := 0; CpHave := 0; CpDone := 0; CpErr := 0; CpCount := 0;
+  CpFile := Nil; HlN := 0;
+  For K := 0 To NMods - 1 Do
+  Begin
+    CpState := 0; CpHave := 0; CpDone := 0;
+    R := InitrdFeed(ModStart[K], ModEnd[K] - ModStart[K]);
+    If R <> 0 Then
+      KLog('initramfs : module ' + IntStr(K) + ' : erreur ' + IntStr(R));
+    CpEndFile;
+    CpErr := 0;
+  End;
+  For K := 0 To NMods - 1 Do ModFree(ModStart[K], ModEnd[K] - ModStart[K]);
+  KLog('initramfs : ' + IntStr(CpCount) + ' entrees extraites');
+  InitrdLoaded := CpCount > 0;
+  Ri := CmdGet('rdinit');
+  If Ri = '' Then Ri := '/init';
+  If PathWalk(Ri, True, D) = 0 Then
+  Begin
+    DentryPut(LongInt(D));
+    If CmdGet('init') = '' Then InitPath := Ri;
+    InitramfsLoad := True;
+  End;
+End;
+
+{ ==================================================================== }
+{ Partie 38 (suite) - minix (v1/v2/v3), cramfs et romfs (lecture seule) }
+{ ==================================================================== }
+{ Une seule serie d'operations VFS (RoXxx) pour les trois systemes de
+  fichiers ; Sb^.Priv (TRoSb) memorise le genre. cramfs decompresse ses
+  pages avec Inflate (zlib). }
+
+Const
+  RoMinix = 1; RoCramfs = 2; RoRomfs = 3;
+
+Type
+  PRoSb = ^TRoSb;
+  TRoSb = Record
+    Kind, Dev, Bs, ZSz, NameLen, ISize, ITab, NInodes, Root, Ver : LongInt;
+  End;
+
+Var
+  RoIOps, RoLnkIOps, RoDirFOps, RoFileFOps, RoSOps : Array[0..15] Of LongInt;
+  RoTmp : Array[0..4095] Of Byte;
+  RoCmp : Array[0..8191] Of Byte;
+
+{ Lire Cnt octets a la position Off du peripherique (blocs de 1 Ko) }
+Function RoRead(Dev, Off, Buf, Cnt : LongInt) : LongInt;
+Var Blk, Bo, Chunk, Done : LongInt; B : PBuf;
+Begin
+  Done := 0;
+  While Done < Cnt Do
+  Begin
+    Blk := (Off + Done) Shr 10;
+    Bo := (Off + Done) And 1023;
+    Chunk := 1024 - Bo;
+    If Chunk > Cnt - Done Then Chunk := Cnt - Done;
+    B := BRead(Dev, Blk, 1024);
+    If B = Nil Then
+    Begin
+      RoRead := -EIO;
+      Exit;
+    End;
+    MemCopy(Buf + Done, B^.Data + Bo, Chunk);
+    BRelease(B);
+    Done := Done + Chunk;
+  End;
+  RoRead := 0;
+End;
+
+Function RoU32(Dev, Off : LongInt) : LongInt;
+Var V : LongInt;
+Begin
+  V := 0;
+  If RoRead(Dev, Off, LongInt(@V), 4) <> 0 Then V := 0;
+  RoU32 := V;
+End;
+
+Function RoU32Be(Dev, Off : LongInt) : LongInt;
+Begin
+  RoU32Be := Bswap32(RoU32(Dev, Off));
+End;
+
+Function RoU16(Dev, Off : LongInt) : LongInt;
+Var V : LongInt;
+Begin
+  V := 0;
+  If RoRead(Dev, Off, LongInt(@V), 2) <> 0 Then V := 0;
+  RoU16 := V And $FFFF;
+End;
+
+{ ---- minix ---- }
+
+{ Octet de l'inode minix N (1..) dans la table }
+Function MxIOff(X : PRoSb; N : LongInt) : LongInt;
+Begin
+  MxIOff := X^.ITab + (N - 1) * X^.ISize;
+End;
+
+{ Numero de zone du bloc de fichier Idx de l'inode N ; 0 : trou }
+Function MxZone(X : PRoSb; N, Idx : LongInt) : LongInt;
+Var Io, Ppb, Z, K, Lvl : LongInt;
+Begin
+  Io := MxIOff(X, N);
+  Ppb := X^.Bs Div X^.ZSz;
+  MxZone := 0;
+  If X^.ZSz = 2 Then
+  Begin
+    If Idx < 7 Then
+    Begin
+      MxZone := RoU16(X^.Dev, Io + 14 + Idx * 2);
+      Exit;
+    End;
+    Idx := Idx - 7;
+    If Idx < Ppb Then
+    Begin
+      Z := RoU16(X^.Dev, Io + 14 + 14);
+      If Z <> 0 Then MxZone := RoU16(X^.Dev, Z * X^.Bs + Idx * 2);
+      Exit;
+    End;
+    Idx := Idx - Ppb;
+    If Idx < Ppb * Ppb Then
+    Begin
+      Z := RoU16(X^.Dev, Io + 14 + 16);
+      If Z = 0 Then Exit;
+      Z := RoU16(X^.Dev, Z * X^.Bs + (Idx Div Ppb) * 2);
+      If Z <> 0 Then MxZone := RoU16(X^.Dev, Z * X^.Bs + (Idx Mod Ppb) * 2);
+    End;
+    Exit;
+  End;
+  { v2 / v3 : zones de 32 bits a partir de l'octet 24 }
+  If Idx < 7 Then
+  Begin
+    MxZone := RoU32(X^.Dev, Io + 24 + Idx * 4);
+    Exit;
+  End;
+  Idx := Idx - 7;
+  Lvl := 1;
+  K := Ppb;
+  While (Lvl <= 3) And (Idx >= K) Do
+  Begin
+    Idx := Idx - K;
+    K := K * Ppb;
+    Inc(Lvl);
+  End;
+  If Lvl > 3 Then Exit;
+  Z := RoU32(X^.Dev, Io + 24 + (6 + Lvl) * 4);
+  While (Lvl > 0) And (Z <> 0) Do
+  Begin
+    K := K Div Ppb;
+    Z := RoU32(X^.Dev, Z * X^.Bs + (Idx Div K) * 4);
+    Idx := Idx Mod K;
+    Dec(Lvl);
+  End;
+  MxZone := Z;
+End;
+
+{ ---- operations communes ---- }
+
+Function RoReadInode(I : PInode) : LongInt;
+Var X : PRoSb; Io, M, W0, W1, W2, T, Nb : LongInt; Raw : Array[0..63] Of Byte;
+    A : LongInt;
+Begin
+  X := Pointer(I^.Sb^.Priv);
+  RoReadInode := -EIO;
+  I^.Uid := 0; I^.Gid := 0; I^.Nlink := 1;
+  I^.Atime := 0; I^.Mtime := 0; I^.Ctime := 0;
+  A := LongInt(@Raw[0]);
+  Case X^.Kind Of
+    RoMinix :
+      Begin
+        If (I^.Ino < 1) Or (I^.Ino > X^.NInodes) Then Exit;
+        Io := MxIOff(X, I^.Ino);
+        If RoRead(X^.Dev, Io, A, X^.ISize) <> 0 Then Exit;
+        M := MemW[0:A];
+        I^.Mode := M;
+        If X^.ZSz = 2 Then
+        Begin
+          I^.Uid := MemW[0:A + 2];
+          I^.Size := MemL[0:A + 4];
+          I^.Mtime := MemL[0:A + 8];
+          I^.Gid := Raw[12];
+          I^.Nlink := Raw[13];
+          I^.Rdev := MemW[0:A + 14];
+        End
+        Else
+        Begin
+          I^.Nlink := MemW[0:A + 2];
+          I^.Uid := MemW[0:A + 4];
+          I^.Gid := MemW[0:A + 6];
+          I^.Size := MemL[0:A + 8];
+          I^.Atime := MemL[0:A + 12];
+          I^.Mtime := MemL[0:A + 16];
+          I^.Ctime := MemL[0:A + 20];
+          I^.Rdev := MemW[0:A + 24];
+        End;
+        If (M And S_IFMT) = S_IFCHR Then
+          I^.Rdev := MkDev((I^.Rdev Shr 8) And $FF, I^.Rdev And $FF)
+        Else If (M And S_IFMT) = S_IFBLK Then
+          I^.Rdev := MkDev((I^.Rdev Shr 8) And $FF, I^.Rdev And $FF);
+        I^.Priv := I^.Ino;
+      End;
+    RoCramfs :
+      Begin
+        If RoRead(X^.Dev, I^.Ino, A, 12) <> 0 Then Exit;
+        W0 := MemL[0:A]; W1 := MemL[0:A + 4]; W2 := MemL[0:A + 8];
+        I^.Mode := W0 And $FFFF;
+        I^.Uid := (W0 Shr 16) And $FFFF;
+        I^.Size := W1 And $FFFFFF;
+        I^.Gid := (W1 Shr 24) And $FF;
+        I^.Priv := (W2 Shr 6) Shl 2;           { octet de debut des donnees }
+        Nb := 0;
+        I^.Nlink := 1;
+        If (I^.Mode And S_IFMT) = S_IFDIR Then I^.Nlink := 2;
+        Nb := 0;
+      End;
+    RoRomfs :
+      Begin
+        W0 := RoU32Be(X^.Dev, I^.Ino);
+        W1 := RoU32Be(X^.Dev, I^.Ino + 4);
+        I^.Size := RoU32Be(X^.Dev, I^.Ino + 8);
+        T := W0 And 7;
+        Case T Of
+          1 : I^.Mode := S_IFDIR Or $16D;
+          2 : I^.Mode := S_IFREG Or $124;
+          3 : I^.Mode := S_IFLNK Or $1FF;
+          4 : I^.Mode := S_IFBLK Or $120;
+          5 : I^.Mode := S_IFCHR Or $120;
+          6 : I^.Mode := S_IFSOCK Or $120;
+          7 : I^.Mode := S_IFIFO Or $120;
+        Else
+          Exit;                       { 0 : lien dur, resolu par l'appelant }
+        End;
+        If ((W0 And 8) <> 0) And (T <> 1) Then I^.Mode := I^.Mode Or $49;
+        If T = 1 Then I^.Nlink := 2;
+        If (T = 4) Or (T = 5) Then
+          I^.Rdev := MkDev((W1 Shr 16) And $FFFF, W1 And $FFFF);
+        { donnees : apres l'en-tete (16 octets + nom arrondi) }
+        I^.Priv := I^.Ino + 16;
+        M := 0;
+        While True Do
+        Begin
+          If RoRead(X^.Dev, I^.Ino + 16 + M, A, 1) <> 0 Then Exit;
+          If Raw[0] = 0 Then Break;
+          Inc(M);
+          If M > 4000 Then Exit;
+        End;
+        I^.Priv := I^.Ino + ((16 + M + 1 + 15) And Not 15);
+        If T = 1 Then I^.Priv2 := W1 And Not 15;   { premier fichier }
+      End;
+  Else
+    Exit;
+  End;
+  If I^.Size < 0 Then I^.Size := 0;
+  I^.Blocks := (I^.Size + 511) Shr 9;
+  If (I^.Mode And S_IFMT) = S_IFDIR Then
+  Begin
+    I^.IOps := LongInt(@RoIOps[0]);
+    I^.FOps := LongInt(@RoDirFOps[0]);
+  End
+  Else If (I^.Mode And S_IFMT) = S_IFLNK Then
+    I^.IOps := LongInt(@RoLnkIOps[0])
+  Else If (I^.Mode And S_IFMT) = S_IFREG Then
+  Begin
+    I^.IOps := 0;
+    I^.FOps := LongInt(@RoFileFOps[0]);
+  End;
+  RoReadInode := 0;
+End;
+
+{ Lire des donnees de l'inode I (octet Pos du fichier) : octets lus ou -errno }
+Function RoData(I : PInode; Pos, Buf, Cnt : LongInt) : LongInt;
+Var X : PRoSb; N, Done, Idx, Bo, Chunk, Z, Base, Nb, St, En, Fl, Len,
+    R : LongInt;
+Begin
+  X := Pointer(I^.Sb^.Priv);
+  If Pos >= I^.Size Then
+  Begin
+    RoData := 0;
+    Exit;
+  End;
+  N := Cnt;
+  If N > I^.Size - Pos Then N := I^.Size - Pos;
+  Done := 0;
+  Case X^.Kind Of
+    RoMinix :
+      While Done < N Do
+      Begin
+        Idx := (Pos + Done) Div X^.Bs;
+        Bo := (Pos + Done) Mod X^.Bs;
+        Chunk := X^.Bs - Bo;
+        If Chunk > N - Done Then Chunk := N - Done;
+        Z := MxZone(X, I^.Ino, Idx);
+        If Z = 0 Then MemFill(Buf + Done, 0, Chunk)
+        Else If RoRead(X^.Dev, Z * X^.Bs + Bo, Buf + Done, Chunk) <> 0 Then
+        Begin
+          If Done = 0 Then RoData := -EIO Else RoData := Done;
+          Exit;
+        End;
+        Done := Done + Chunk;
+      End;
+    RoRomfs :
+      Begin
+        If RoRead(X^.Dev, I^.Priv + Pos, Buf, N) <> 0 Then
+        Begin
+          RoData := -EIO;
+          Exit;
+        End;
+        Done := N;
+      End;
+    RoCramfs :
+      Begin
+        Base := I^.Priv;
+        Nb := (I^.Size + 4095) Shr 12;
+        While Done < N Do
+        Begin
+          Idx := (Pos + Done) Shr 12;
+          Bo := (Pos + Done) And 4095;
+          Chunk := 4096 - Bo;
+          If Chunk > N - Done Then Chunk := N - Done;
+          En := RoU32(X^.Dev, Base + Idx * 4);
+          Fl := En And LongInt($C0000000);
+          En := En And $3FFFFFFF;
+          If Idx = 0 Then St := Base + Nb * 4
+          Else St := RoU32(X^.Dev, Base + (Idx - 1) * 4) And $3FFFFFFF;
+          Len := I^.Size - (Idx Shl 12);
+          If Len > 4096 Then Len := 4096;
+          If En = St Then MemFill(LongInt(@RoTmp[0]), 0, 4096)
+          Else If (En < St) Or (En - St > 8192) Then
+          Begin
+            If Done = 0 Then RoData := -EIO Else RoData := Done;
+            Exit;
+          End
+          Else If (Fl And LongInt($80000000)) <> 0 Then
+            R := RoRead(X^.Dev, St, LongInt(@RoTmp[0]), Len)
+          Else
+          Begin
+            R := RoRead(X^.Dev, St, LongInt(@RoCmp[0]), En - St);
+            If R = 0 Then
+            Begin
+              InflDst := LongInt(@RoTmp[0]);
+              InflDstMax := 4096;
+              R := Inflate(LongInt(@RoCmp[0]), En - St, 1);
+              InflDst := 0;
+            End;
+          End;
+          If (En <> St) And (R <> 0) Then
+          Begin
+            If Done = 0 Then RoData := -EIO Else RoData := Done;
+            Exit;
+          End;
+          MemCopy(Buf + Done, LongInt(@RoTmp[Bo]), Chunk);
+          Done := Done + Chunk;
+        End;
+      End;
+  End;
+  RoData := Done;
+End;
+
+Function RoFileRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
+Var R : LongInt;
+Begin
+  R := RoData(F^.Inode, F^.Pos, Buf, Cnt);
+  If R > 0 Then F^.Pos := F^.Pos + R;
+  RoFileRead := R;
+End;
+
+Function RoReadlink(I : PInode; Buf, Size : LongInt) : LongInt;
+Var N, R : LongInt;
+Begin
+  N := I^.Size;
+  If N > Size Then N := Size;
+  If N > 255 Then N := 255;
+  R := RoData(I, 0, Buf, N);
+  If R < 0 Then RoReadlink := R Else RoReadlink := R;
+End;
+
+{ Entree numero Idx (0..) du repertoire Dir : retourne 1, 0 (fin), -errno ;
+  Ino, Nm et Mode (type) en sortie. Next : position suivante. }
+Function RoDirEntry(Dir : PInode; Var Pos : LongInt; Var Ino : LongInt;
+    Var Nm : String; Var DType : LongInt) : LongInt;
+Var X : PRoSb; Es, K, A, Nl, W, T, Off : LongInt; Raw : Array[0..127] Of Byte;
+Begin
+  X := Pointer(Dir^.Sb^.Priv);
+  A := LongInt(@Raw[0]);
+  RoDirEntry := 0;
+  DType := 0;
+  Case X^.Kind Of
+    RoMinix :
+      Begin
+        Es := X^.NameLen + 2;
+        If X^.Ver = 3 Then Es := X^.NameLen + 4;
+        While Pos + Es <= Dir^.Size Do
+        Begin
+          If RoData(Dir, Pos, A, Es) <> Es Then
+          Begin
+            RoDirEntry := -EIO;
+            Exit;
+          End;
+          Pos := Pos + Es;
+          If X^.Ver = 3 Then
+          Begin
+            Ino := MemL[0:A];
+            K := 4;
+          End
+          Else
+          Begin
+            Ino := MemW[0:A];
+            K := 2;
+          End;
+          If Ino <> 0 Then
+          Begin
+            Nm := '';
+            While (K < Es) And (Raw[K] <> 0) Do
+            Begin
+              Nm := Nm + Chr(Raw[K]);
+              Inc(K);
+            End;
+            RoDirEntry := 1;
+            Exit;
+          End;
+        End;
+      End;
+    RoCramfs :
+      Begin
+        { Pos : 0 ".", 1 "..", puis 2 + decalage dans la liste }
+        If Pos = 0 Then
+        Begin
+          Nm := '.'; Ino := Dir^.Ino; DType := DT_DIR; Pos := 1;
+          RoDirEntry := 1;
+          Exit;
+        End;
+        If Pos = 1 Then
+        Begin
+          Nm := '..'; Ino := Dir^.Ino; DType := DT_DIR; Pos := 2;
+          RoDirEntry := 1;
+          Exit;
+        End;
+        Off := Pos - 2;
+        If Off + 12 > Dir^.Size Then Exit;
+        If RoRead(X^.Dev, Dir^.Priv + Off, A, 12) <> 0 Then
+        Begin
+          RoDirEntry := -EIO;
+          Exit;
+        End;
+        W := MemL[0:A + 8];
+        Nl := (W And 63) Shl 2;
+        If (Nl = 0) Or (Nl > 120) Or (Off + 12 + Nl > Dir^.Size) Then
+        Begin
+          RoDirEntry := -EIO;
+          Exit;
+        End;
+        T := MemL[0:A] And S_IFMT;
+        Ino := Dir^.Priv + Off;
+        If RoRead(X^.Dev, Ino + 12, A, Nl) <> 0 Then
+        Begin
+          RoDirEntry := -EIO;
+          Exit;
+        End;
+        Nm := '';
+        K := 0;
+        While (K < Nl) And (Raw[K] <> 0) Do
+        Begin
+          Nm := Nm + Chr(Raw[K]);
+          Inc(K);
+        End;
+        Pos := Pos + 12 + Nl;
+        If T = S_IFDIR Then DType := DT_DIR
+        Else If T = S_IFLNK Then DType := DT_LNK
+        Else If T = S_IFREG Then DType := DT_REG;
+        RoDirEntry := 1;
+      End;
+    RoRomfs :
+      Begin
+        If Pos = 0 Then Off := Dir^.Priv2 Else Off := Pos;
+        If (Off = 0) Or (Off >= X^.NInodes) Then Exit;
+        W := RoU32Be(X^.Dev, Off);
+        T := RoU32Be(X^.Dev, Off + 4);
+        Ino := Off;
+        If (W And 7) = 0 Then Ino := T And Not 15;   { lien dur }
+        Nm := '';
+        K := 0;
+        While K < 200 Do
+        Begin
+          If RoRead(X^.Dev, Off + 16 + K, A, 1) <> 0 Then Break;
+          If Raw[0] = 0 Then Break;
+          Nm := Nm + Chr(Raw[0]);
+          Inc(K);
+        End;
+        Pos := W And Not 15;
+        If Pos = 0 Then Pos := -1;           { dernier : fin au prochain appel }
+        Case W And 7 Of
+          1 : DType := DT_DIR;
+          2 : DType := DT_REG;
+          3 : DType := DT_LNK;
+        End;
+        RoDirEntry := 1;
+      End;
+  End;
+End;
+
+Function RoReaddir(F : PFile; Var Ino : LongInt; Var Nm : String;
+    Var DType : LongInt) : LongInt;
+Var P : LongInt;
+Begin
+  P := F^.Pos;
+  If P < 0 Then
+  Begin
+    RoReaddir := 0;
+    Exit;
+  End;
+  RoReaddir := RoDirEntry(F^.Inode, P, Ino, Nm, DType);
+  F^.Pos := P;
+End;
+
+Function RoLookup(Dir : PInode; Var Nm : String; Var Res : PInode) : LongInt;
+Var P, Ino, R, Dt : LongInt; N2 : String; I : PInode;
+Begin
+  P := 0;
+  While P >= 0 Do
+  Begin
+    R := RoDirEntry(Dir, P, Ino, N2, Dt);
+    If R < 0 Then
+    Begin
+      RoLookup := R;
+      Exit;
+    End;
+    If R = 0 Then Break;
+    If N2 = Nm Then
+    Begin
+      I := IGet(Dir^.Sb, Ino);
+      If I = Nil Then
+      Begin
+        RoLookup := -EIO;
+        Exit;
+      End;
+      Res := I;
+      RoLookup := 0;
+      Exit;
+    End;
+  End;
+  RoLookup := -ENOENT;
+End;
+
+Procedure RoStatfs(Sb : PSuper; Buf : LongInt);
+Var X : PRoSb;
+Begin
+  X := Pointer(Sb^.Priv);
+  MemFill(Buf, 0, 32);
+  MemL[0:Buf] := Sb^.BlockSize;
+  MemL[0:Buf + 24] := 255;
+  Case X^.Kind Of
+    RoMinix : MemL[0:Buf + 28] := $137F;
+    RoCramfs : MemL[0:Buf + 28] := $28CD3D45;
+    RoRomfs : MemL[0:Buf + 28] := $7275;
+  End;
+End;
+
+Procedure RoClear(I : PInode);
+Begin
+End;
+
+Procedure RoUmount(Sb : PSuper);
+Begin
+  If Sb^.Priv <> 0 Then KFree(Sb^.Priv);
+  Sb^.Priv := 0;
+End;
+
+{ Montage : le genre (RoMinix...) est deduit du type de systeme de fichiers
+  par les trois fonctions ci-dessous }
+Function RoMountKind(Sb : PSuper; Var DevName : String; Flags, Kind : LongInt)
+    : LongInt;
+Var Dev, K, A, M, Ver, Nl, Bs, Rt : LongInt; X : PRoSb; Ino : PInode;
+    D : PDentry; Raw : Array[0..127] Of Byte; S : String;
+Begin
+  RoMountKind := -EINVAL;
+  Dev := ExResolveDev(DevName);
+  If Dev = 0 Then
+  Begin
+    RoMountKind := -ENOTBLK;
+    Exit;
+  End;
+  If BlkSectors(Dev) = 0 Then
+  Begin
+    RoMountKind := -ENXIO;
+    Exit;
+  End;
+  For K := 0 To MaxSupers - 1 Do
+    If (Supers[K] <> Nil) And (Supers[K] <> Sb) And (Supers[K]^.Dev = Dev) Then
+    Begin
+      RoMountKind := -EBUSY;
+      Exit;
+    End;
+  A := LongInt(@Raw[0]);
+  X := Pointer(KMallocZ(SizeOf(TRoSb)));
+  If X = Nil Then
+  Begin
+    RoMountKind := -ENOMEM;
+    Exit;
+  End;
+  X^.Kind := Kind; X^.Dev := Dev;
+  Bs := 1024;
+  Case Kind Of
+    RoMinix :
+      Begin
+        If RoRead(Dev, 1024, A, 32) <> 0 Then
+        Begin
+          KFree(LongInt(X));
+          Exit;
+        End;
+        M := MemW[0:A + 16];
+        If (M <> $137F) And (M <> $138F) And (M <> $2468) And (M <> $2478)
+           Then M := MemW[0:A + 24];
+        Ver := 0;
+        Case M Of
+          $137F : Begin Ver := 1; Nl := 14; End;
+          $138F : Begin Ver := 1; Nl := 30; End;
+          $2468 : Begin Ver := 2; Nl := 14; End;
+          $2478 : Begin Ver := 2; Nl := 30; End;
+          $4D5A : Begin Ver := 3; Nl := 60; End;
+        End;
+        If Ver = 0 Then Begin KFree(LongInt(X)); Exit; End;
+        If Ver = 3 Then
+        Begin
+          Bs := MemW[0:A + 28];
+          X^.NInodes := MemL[0:A];
+          If (MemW[0:A + 6] = 0) Or (MemW[0:A + 8] = 0) Then
+          Begin
+            KFree(LongInt(X));
+            Exit;
+          End;
+          X^.ITab := (2 + MemW[0:A + 6] + MemW[0:A + 8]) * Bs;
+          If MemW[0:A + 12] <> 0 Then Begin KFree(LongInt(X)); Exit; End;
+          Rt := 0;
+        End
+        Else
+        Begin
+          X^.NInodes := MemW[0:A];
+          X^.ITab := (2 + MemW[0:A + 4] + MemW[0:A + 6]) * Bs;
+          If MemW[0:A + 10] <> 0 Then Begin KFree(LongInt(X)); Exit; End;
+        End;
+        If (Bs < 1024) Or (Bs > 4096) Or ((Bs And (Bs - 1)) <> 0) Then
+        Begin
+          KFree(LongInt(X));
+          Exit;
+        End;
+        X^.Bs := Bs;
+        If Ver = 1 Then X^.ZSz := 2 Else X^.ZSz := 4;
+        If Ver = 1 Then X^.ISize := 32 Else X^.ISize := 64;
+        X^.NameLen := Nl;
+        X^.Ver := Ver;
+        X^.Root := 1;
+      End;
+    RoCramfs :
+      Begin
+        If RoRead(Dev, 0, A, 76) <> 0 Then Begin KFree(LongInt(X)); Exit; End;
+        If MemL[0:A] <> $28CD3D45 Then Begin KFree(LongInt(X)); Exit; End;
+        X^.Bs := 4096;
+        X^.Root := 64;
+      End;
+    RoRomfs :
+      Begin
+        If RoRead(Dev, 0, A, 16) <> 0 Then Begin KFree(LongInt(X)); Exit; End;
+        If (MemL[0:A] <> $6D6F722D) Or (MemL[0:A + 4] <> $2D736631) Then
+        Begin
+          KFree(LongInt(X));
+          Exit;
+        End;
+        X^.NInodes := Bswap32(MemL[0:A + 8]);        { taille totale }
+        M := 0;
+        While M < 200 Do
+        Begin
+          If RoRead(Dev, 16 + M, A, 1) <> 0 Then Break;
+          If Raw[0] = 0 Then Break;
+          Inc(M);
+        End;
+        X^.Root := (16 + M + 1 + 15) And Not 15;
+        X^.Bs := 1024;
+      End;
+  End;
+  Sb^.Priv := LongInt(X);
+  Sb^.Dev := Dev;
+  Sb^.BlockSize := X^.Bs;
+  Sb^.LargeFiles := 0;
+  Sb^.Flags := Flags Or MS_RDONLY;
+  Sb^.SOps := LongInt(@RoSOps[0]);
+  Ino := IGet(Sb, X^.Root);
+  If Ino = Nil Then
+  Begin
+    KFree(LongInt(X));
+    Sb^.Priv := 0;
+    RoMountKind := -EIO;
+    Exit;
+  End;
+  If (Ino^.Mode And S_IFMT) <> S_IFDIR Then
+  Begin
+    InodePut(LongInt(Ino));
+    InodePurgeSb(Sb);
+    KFree(LongInt(X));
+    Sb^.Priv := 0;
+    RoMountKind := -EINVAL;
+    Exit;
+  End;
+  D := DentryNew(Nil, '', Ino, Sb);
+  If D = Nil Then
+  Begin
+    InodePut(LongInt(Ino));
+    InodePurgeSb(Sb);
+    KFree(LongInt(X));
+    Sb^.Priv := 0;
+    RoMountKind := -ENOMEM;
+    Exit;
+  End;
+  Sb^.Root := D;
+  S := '';
+  RoMountKind := 0;
+End;
+
+Function MinixMount(Sb : PSuper; Var DevName : String; Flags,
+    Data : LongInt) : LongInt;
+Begin
+  MinixMount := RoMountKind(Sb, DevName, Flags, RoMinix);
+End;
+
+Function CramfsMount(Sb : PSuper; Var DevName : String; Flags,
+    Data : LongInt) : LongInt;
+Begin
+  CramfsMount := RoMountKind(Sb, DevName, Flags, RoCramfs);
+End;
+
+Function RomfsMount(Sb : PSuper; Var DevName : String; Flags,
+    Data : LongInt) : LongInt;
+Begin
+  RomfsMount := RoMountKind(Sb, DevName, Flags, RoRomfs);
+End;
+
+Procedure InitRoFs;
+Begin
+  MemFill(LongInt(@RoIOps[0]), 0, SizeOf(RoIOps));
+  RoIOps[IoLookup] := LongInt(@RoLookup);
+  MemFill(LongInt(@RoLnkIOps[0]), 0, SizeOf(RoLnkIOps));
+  RoLnkIOps[IoReadlink] := LongInt(@RoReadlink);
+  MemFill(LongInt(@RoDirFOps[0]), 0, SizeOf(RoDirFOps));
+  RoDirFOps[FoReaddir] := LongInt(@RoReaddir);
+  MemFill(LongInt(@RoFileFOps[0]), 0, SizeOf(RoFileFOps));
+  RoFileFOps[FoRead] := LongInt(@RoFileRead);
+  MemFill(LongInt(@RoSOps[0]), 0, SizeOf(RoSOps));
+  RoSOps[SoReadInode] := LongInt(@RoReadInode);
+  RoSOps[SoStatfs] := LongInt(@RoStatfs);
+  RoSOps[SoUmount] := LongInt(@RoUmount);
+  RoSOps[SoClearInode] := LongInt(@RoClear);
+  RegisterFs('minix', LongInt(@MinixMount));
+  RegisterFs('cramfs', LongInt(@CramfsMount));
+  RegisterFs('romfs', LongInt(@RomfsMount));
+End;
+
+{ ==================================================================== }
+{ Partie 38 (suite) - SMP : detection ACPI MADT, LAPIC, IOAPIC et      }
+{ demarrage des processeurs secondaires (etat gare)                    }
+{ ==================================================================== }
+{ Les processeurs secondaires sont reveilles (INIT + SIPI), passent en
+  mode protege avec la pagination du noyau, puis restent arretes (HLT,
+  interruptions coupees) : l'ordonnanceur et le noyau restent mono-
+  processeur. Option nosmp : detection seulement (pas de demarrage). }
+
+Const
+  MaxCpus = 16;
+  PwPde = 1000;                  { fenetre de mappage physique FA000000h }
+  LapicPde = 1001;               { LAPIC : FA400000h }
+  TrampPhys = $2000;
+  TrampCr3 = $6E; TrampStk = $72; TrampEntry = $76;
+  TrampCode : Array[0..121] Of Byte = (
+    250, 252, 140, 200, 142, 216, 15, 1, 22, 104, 0, 15, 32, 192, 102, 131,
+    200, 1, 15, 34, 192, 102, 234, 29, 32, 0, 0, 8, 0, 102, 184, 16, 0, 142,
+    216, 142, 192, 142, 224, 142, 232, 142, 208, 161, 110, 32, 0, 0, 15, 34,
+    216, 15, 32, 192, 13, 0, 0, 1, 128, 15, 34, 192, 139, 37, 114, 32, 0, 0,
+    161, 118, 32, 0, 0, 255, 224, 144, 144, 144, 144, 144, 0, 0, 0, 0, 0, 0,
+    0, 0, 255, 255, 0, 0, 0, 154, 207, 0, 255, 255, 0, 0, 0, 146, 207, 0,
+    23, 0, 80, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  );
+
+Var
+  PwPt, PwSlot : LongInt;
+  NrCpuStarted, LapicPhys, LapicVirt : LongInt;
+  NrIoapic, SmpDetected : LongInt;
+  CpuApic, CpuState : Array[0..MaxCpus - 1] Of LongInt;
+      { CpuState : 1 demarre (BSP ou gare), 0 non demarre }
+  IoapicAddr, IoapicId, IoapicGsi : Array[0..7] Of LongInt;
+  ApOnline : LongInt;
+  SmpNoStart : Boolean;
+  AcpiSrc : String[8];
+
+{ Adresse virtuelle d'une adresse physique quelconque (2 pages) }
+Function PhysPtr(Phys : LongInt) : LongInt;
+Var Pg, A : LongInt;
+Begin
+  If PwPt = 0 Then
+  Begin
+    PwPt := AllocZeroPage;
+    If PwPt = 0 Then
+    Begin
+      PhysPtr := 0;
+      Exit;
+    End;
+    MemL[0:MasterPd + PwPde * 4] := V2P(PwPt) Or $13;
+  End;
+  Pg := Phys And LongInt($FFFFF000);
+  MemL[0:PwPt + PwSlot * 4] := Pg Or $13;
+  MemL[0:PwPt + PwSlot * 4 + 4] := (Pg + 4096) Or $13;
+  A := LongInt(PwPde Shl 22) + PwSlot * 4096 + (Phys And $FFF);
+  PwSlot := PwSlot + 2;
+  If PwSlot >= 1022 Then PwSlot := 0;
+  FlushTlb;
+  PhysPtr := A;
+End;
+
+Function SmpSumOk(A, Len : LongInt) : Boolean;
+Var I, S : LongInt;
+Begin
+  S := 0;
+  For I := 0 To Len - 1 Do S := S + Mem[0:A + I];
+  SmpSumOk := (S And $FF) = 0;
+End;
+
+{ Signature de 4 octets a l'adresse virtuelle A }
+Function SigAt(A : LongInt; Const S : String) : Boolean;
+Var I : LongInt;
+Begin
+  SigAt := False;
+  For I := 1 To Length(S) Do
+    If Mem[0:A + I - 1] <> Ord(S[I]) Then Exit;
+  SigAt := True;
+End;
+
+Function FindRsdp : LongInt;
+Var A, Ebda, E : LongInt;
+Begin
+  FindRsdp := 0;
+  Ebda := MemW[0:P2V($40E)] Shl 4;
+  For E := 0 To 1 Do
+  Begin
+    If E = 0 Then A := Ebda Else A := $E0000;
+    If (E = 0) And ((Ebda < $80000) Or (Ebda > $A0000)) Then Continue;
+    While (A + 16 <= $100000) And ((E = 1) Or (A < Ebda + 1024)) Do
+    Begin
+      If SigAt(P2V(A), 'RSD PTR ') And SmpSumOk(P2V(A), 20) Then
+      Begin
+        FindRsdp := A;
+        Exit;
+      End;
+      A := A + 16;
+    End;
+  End;
+End;
+
+Procedure MadtParse(V : LongInt);
+Var Len, P, T, L, Fl : LongInt;
+Begin
+  Len := MemL[0:V + 4];
+  If (Len < 44) Or (Len > 4096) Then Exit;
+  LapicPhys := MemL[0:V + 36];
+  P := 44;
+  While P + 2 <= Len Do
+  Begin
+    T := Mem[0:V + P];
+    L := Mem[0:V + P + 1];
+    If L < 2 Then Break;
+    If (T = 0) And (L >= 8) Then
+    Begin
+      Fl := MemL[0:V + P + 4];
+      If ((Fl And 3) <> 0) And (NrCpuPresent < MaxCpus) Then
+      Begin
+        CpuApic[NrCpuPresent] := Mem[0:V + P + 3];
+        CpuState[NrCpuPresent] := 0;
+        Inc(NrCpuPresent);
+      End;
+    End
+    Else If (T = 1) And (L >= 12) And (NrIoapic < 8) Then
+    Begin
+      IoapicId[NrIoapic] := Mem[0:V + P + 2];
+      IoapicAddr[NrIoapic] := MemL[0:V + P + 4];
+      IoapicGsi[NrIoapic] := MemL[0:V + P + 8];
+      Inc(NrIoapic);
+    End
+    Else If (T = 5) And (L >= 12) Then LapicPhys := MemL[0:V + P + 4];
+    P := P + L;
+  End;
+End;
+
+{ Parcours de la table racine (RSDT 32 bits ou XSDT 64 bits) a la recherche
+  de la MADT ("APIC") }
+Procedure AcpiScan;
+Var R, V, Rev, Tab, N, I, Ent, Sz, Madt, Hdr : LongInt;
+Begin
+  R := FindRsdp;
+  If R = 0 Then Exit;
+  V := P2V(R);
+  Rev := Mem[0:V + 15];
+  Tab := MemL[0:V + 16];
+  Sz := 4;
+  If (Rev >= 2) And (MemL[0:V + 24] <> 0) And (MemL[0:V + 28] = 0) Then
+  Begin
+    Tab := MemL[0:V + 24];
+    Sz := 8;
+  End;
+  Hdr := PhysPtr(Tab);
+  If Hdr = 0 Then Exit;
+  N := (MemL[0:Hdr + 4] - 36) Div Sz;
+  If (N < 0) Or (N > 64) Then Exit;
+  For I := 0 To N - 1 Do
+  Begin
+    Hdr := PhysPtr(Tab);
+    Ent := MemL[0:Hdr + 36 + I * Sz];
+    Madt := PhysPtr(Ent);
+    If (Madt <> 0) And SigAt(Madt, 'APIC') Then
+    Begin
+      MadtParse(Madt);
+      AcpiSrc := 'ACPI';
+      Exit;
+    End;
+  End;
+End;
+
+{ Tables MP d'Intel ("_MP_" puis "PCMP") : solution de repli }
+Procedure MpScan;
+Var A, Ebda, E, Cfg, V, Cnt, I, P, T : LongInt;
+Begin
+  Ebda := MemW[0:P2V($40E)] Shl 4;
+  For E := 0 To 2 Do
+  Begin
+    Case E Of
+      0 : A := Ebda;
+      1 : A := $9FC00;
+    Else A := $F0000;
+    End;
+    If (E = 0) And ((Ebda < $80000) Or (Ebda > $A0000)) Then Continue;
+    While A + 16 <= $100000 Do
+    Begin
+      If (E < 2) And (A >= $A0000) Then Break;
+      If (E = 0) And (A >= Ebda + 1024) Then Break;
+      If (E = 1) And (A >= $A0000) Then Break;
+      If SigAt(P2V(A), '_MP_') And SmpSumOk(P2V(A), 16) Then
+      Begin
+        Cfg := MemL[0:P2V(A) + 4];
+        If Cfg <> 0 Then
+        Begin
+          V := PhysPtr(Cfg);
+          If (V <> 0) And SigAt(V, 'PCMP') Then
+          Begin
+            LapicPhys := MemL[0:V + 36];
+            Cnt := MemW[0:V + 34];
+            P := V + 44;
+            For I := 1 To Cnt Do
+            Begin
+              T := Mem[0:P];
+              If T = 0 Then
+              Begin
+                If ((Mem[0:P + 3] And 1) <> 0) And (NrCpuPresent < MaxCpus)
+                   Then
+                Begin
+                  CpuApic[NrCpuPresent] := Mem[0:P + 1];
+                  CpuState[NrCpuPresent] := 0;
+                  Inc(NrCpuPresent);
+                End;
+                P := P + 20;
+              End
+              Else If T = 2 Then
+              Begin
+                If (NrIoapic < 8) And ((Mem[0:P + 3] And 1) <> 0) Then
+                Begin
+                  IoapicId[NrIoapic] := Mem[0:P + 1];
+                  IoapicAddr[NrIoapic] := MemL[0:P + 4];
+                  IoapicGsi[NrIoapic] := 0;
+                  Inc(NrIoapic);
+                End;
+                P := P + 8;
+              End
+              Else P := P + 8;
+            End;
+            AcpiSrc := 'MP';
+            Exit;
+          End;
+        End;
+      End;
+      A := A + 16;
+    End;
+  End;
+End;
+
+Function LapicRead(Reg : LongInt) : LongInt;
+Begin
+  LapicRead := MemL[0:LapicVirt + Reg];
+End;
+
+Procedure LapicWrite(Reg, V : LongInt);
+Begin
+  MemL[0:LapicVirt + Reg] := V;
+End;
+
+Procedure SmpDelayUs(Us : LongInt);
+Var I : LongInt;
+Begin
+  For I := 1 To Us Do
+    asm
+      in al,80h
+    end;
+End;
+
+{ Point d'entree physique -> virtuel d'un processeur secondaire }
+Procedure ApEntry;
+Begin
+  asm
+    cli
+    mov eax,MasterPdPhys
+    mov cr3,eax
+    lgdt GdtPtr
+    lidt IdtPtr
+    mov ax,10h
+    mov ds,ax
+    mov es,ax
+    mov fs,ax
+    mov gs,ax
+    mov ss,ax
+  end;
+  Inc(ApOnline);
+  While True Do
+    asm
+      cli
+      hlt
+    end;
+End;
+
+Procedure SmpStartAp(Idx : LongInt);
+Var Pd, Pt, I, Stk, Want, Tries, Tr : LongInt;
+Begin
+  Pd := AllocZeroPage;
+  Pt := AllocZeroPage;
+  Stk := AllocPages(2);
+  If (Pd = 0) Or (Pt = 0) Or (Stk = 0) Then
+  Begin
+    KLog('SMP : memoire insuffisante pour le CPU ' + IntStr(Idx));
+    Exit;
+  End;
+  For I := 768 To 1023 Do MemL[0:Pd + I * 4] := MemL[0:MasterPd + I * 4];
+  MemL[0:Pd] := V2P(Pt) Or 3;
+  For I := 0 To 1023 Do MemL[0:Pt + I * 4] := (I Shl 12) Or 3;
+  Tr := P2V(TrampPhys);
+  For I := 0 To 121 Do Mem[0:Tr + I] := TrampCode[I];
+  MemL[0:Tr + TrampCr3] := V2P(Pd);
+  MemL[0:Tr + TrampStk] := Stk + 16384 - 16;
+  MemL[0:Tr + TrampEntry] := LongInt(@ApEntry);
+  Want := ApOnline + 1;
+  { INIT, puis deux SIPI }
+  LapicWrite($310, CpuApic[Idx] Shl 24);
+  LapicWrite($300, $4500);
+  SmpDelayUs(10000);
+  For I := 1 To 2 Do
+  Begin
+    LapicWrite($310, CpuApic[Idx] Shl 24);
+    LapicWrite($300, $4600 Or (TrampPhys Shr 12));
+    SmpDelayUs(200);
+  End;
+  Tries := 0;
+  While (ApOnline < Want) And (Tries < 200000) Do
+  Begin
+    SmpDelayUs(10);
+    Inc(Tries);
+  End;
+  If ApOnline >= Want Then
+  Begin
+    CpuState[Idx] := 1;
+    Inc(NrCpuStarted);
+    KLog('SMP : CPU ' + IntStr(Idx) + ' (APIC ' + IntStr(CpuApic[Idx])
+        + ') demarre, a l''arret');
+  End
+  Else KLog('SMP : CPU ' + IntStr(Idx) + ' ne repond pas');
+End;
+
+Procedure SmpInit;
+Var I, Pt, K : LongInt; Ok : Boolean;
+Begin
+  NrCpuPresent := 0; NrIoapic := 0; NrCpuStarted := 1;
+  PwSlot := 0; PwPt := 0; AcpiSrc := '';
+  SmpNoStart := Pos(' nosmp', ' ' + CmdLine) > 0;
+  AcpiScan;
+  If NrCpuPresent = 0 Then MpScan;
+  If NrCpuPresent = 0 Then
+  Begin
+    NrCpuPresent := 1;
+    CpuApic[0] := 0;
+    CpuState[0] := 1;
+    AcpiSrc := 'aucune';
+    Exit;
+  End;
+  SmpDetected := 1;
+  { LAPIC : fenetre de 4 Ko non cachee }
+  If LapicPhys = 0 Then LapicPhys := LongInt($FEE00000);
+  Pt := AllocZeroPage;
+  If Pt = 0 Then Exit;
+  MemL[0:MasterPd + LapicPde * 4] := V2P(Pt) Or $13;
+  MemL[0:Pt] := (LapicPhys And LongInt($FFFFF000)) Or $13;
+  LapicVirt := LongInt(LapicPde Shl 22) + (LapicPhys And $FFF);
+  FlushTlb;
+  BspApic := (LapicRead($20) Shr 24) And $FF;
+  For I := 0 To NrCpuPresent - 1 Do
+    If CpuApic[I] = BspApic Then CpuState[I] := 1;
+  KLog('SMP : ' + IntStr(NrCpuPresent) + ' processeur(s) (' + AcpiSrc
+      + '), BSP APIC ' + IntStr(BspApic) + ', ' + IntStr(NrIoapic)
+      + ' IOAPIC');
+  If SmpNoStart Or (NrCpuPresent < 2) Then Exit;
+  For I := 0 To NrCpuPresent - 1 Do
+    If CpuApic[I] <> BspApic Then SmpStartAp(I);
+  K := 0;
+End;
+
+{ ==================================================================== }
+{ Partie 38 (suite) - effets de sysctl : ASLR, overcommit, sysrq, panic  }
+{ ==================================================================== }
+
+{ kernel.randomize_va_space : 1 pile et mappages anonymes, 2 idem (le tas
+  n'est pas randomise) ; 0 aucune }
+Function AslrPages(Max : LongInt) : LongInt;
+Begin
+  If (SyRandomize = 0) Or (Max <= 0) Then AslrPages := 0
+  Else AslrPages := (RandNext And $7FFFFFFF) Mod Max;
+End;
+
+{ vm.overcommit_memory : 0 heuristique (refuse une demande plus grande que
+  la memoire + le swap), 1 toujours, 2 strict (somme des espaces
+  d'adressage <= swap + RAM * overcommit_ratio / 100) }
+Function OvercommitOk(Pages : LongInt) : Boolean;
+Var I, Sum, Lim : LongInt;
+Begin
+  OvercommitOk := True;
+  If SyOvercommit = 1 Then Exit;
+  Lim := TotalFreePages;
+  If SyOvercommit = 0 Then
+  Begin
+    If SwapOn Then Lim := Lim + SwapSlots - 1;
+    If Pages > Lim Then OvercommitOk := False;
+    Exit;
+  End;
+  Sum := 0;
+  For I := 0 To MaxTasks - 1 Do
+    If (Tasks[I].State <> TsFree) And (Tasks[I].Tgid = Tasks[I].Pid)
+       And (Tasks[I].Mm <> Nil) Then Sum := Sum + Tasks[I].Mm^.TotalVm;
+  Lim := (TotalFreePages Div 100) * SyOvercommitRatio;
+  If SwapOn Then Lim := Lim + SwapSlots - 1;
+  If Sum + Pages > Lim Then OvercommitOk := False;
+End;
+
+{ kernel.panic = N > 0 : redemarrage N secondes apres une panique }
+Procedure PanicHook;
+Var S : LongInt;
+Begin
+  If SyPanic <= 0 Then Exit;
+  KLog('redemarrage dans ' + IntStr(SyPanic) + ' s');
+  For S := 1 To SyPanic Do SmpDelayUs(1000000);
+  RebootCpu;
+End;
+
+{ /proc/sysrq-trigger : une lettre ; kernel.sysrq : 0 inactif, 1 tout, sinon
+  masque (2 niveau, 4 clavier, 8 dumps, 16 sync, 32 remontage ro, 64
+  signaux, 128 arret/redemarrage, 256 priorites) }
+Function SysrqOk(Bit : LongInt) : Boolean;
+Begin
+  SysrqOk := (SySysrq = 1) Or ((SySysrq And Bit) <> 0);
+  If Not ((SySysrq = 1) Or ((SySysrq And Bit) <> 0)) Then
+    KLog('SysRq : cette operation est desactivee (kernel.sysrq)');
+End;
+
+Procedure SysrqKillAll(Sig : LongInt);
+Var I, N : LongInt;
+Begin
+  N := 0;
+  For I := 1 To MaxTasks - 1 Do
+    If (Tasks[I].State <> TsFree) And (Tasks[I].Pid > 1)
+       And (Tasks[I].Mm <> Nil) And (@Tasks[I] <> Cur) Then
+    Begin
+      SendSig(@Tasks[I], Sig);
+      Inc(N);
+    End;
+  KLog('SysRq : signal ' + IntStr(Sig) + ' envoye a ' + IntStr(N)
+      + ' processus');
+End;
+
+Function SysrqWrite(Buf, Cnt : LongInt) : LongInt;
+Var C : LongInt;
+Begin
+  SysrqWrite := Cnt;
+  If Cnt < 1 Then Exit;
+  C := Mem[0:Buf];
+  Case Chr(C) Of
+    'b' : If SysrqOk(128) Then
+          Begin
+            KLog('SysRq : redemarrage immediat');
+            RebootCpu;
+          End;
+    'o' : If SysrqOk(128) Then
+          Begin
+            KLog('SysRq : extinction');
+            VfsShutdown;
+            PowerOff;
+          End;
+    's' : If SysrqOk(16) Then
+          Begin
+            VfsSyncAll;
+            KLog('SysRq : Emergency Sync');
+          End;
+    'u' : If SysrqOk(32) Then
+          Begin
+            VfsShutdown;
+            KLog('SysRq : Emergency Remount R/O');
+          End;
+    'e' : If SysrqOk(64) Then SysrqKillAll(15);
+    'i' : If SysrqOk(64) Then SysrqKillAll(9);
+    'm' : If SysrqOk(8) Then
+          Begin
+            KLog('SysRq : Show Memory');
+            KLog('pages libres : ' + IntStr(FreePagesCnt) + ' sur '
+                + IntStr(TotalFreePages) + ', tampons : ' + IntStr(BufCount));
+          End;
+    't' : If SysrqOk(8) Then
+          Begin
+            KLog('SysRq : Show State');
+            DumpTasks;
+          End;
+    'h' : KLog('SysRq : HELP : b o s u e i m t h c 0-9');
+    'c' : If SysrqOk(8) Then
+          Begin
+            KLog('SysRq : Trigger a crash');
+            KPanic('SysRq : crash');
+          End;
+    '0'..'9' : If SysrqOk(2) Then
+                 KLog('SysRq : niveau de journal ' + Chr(C));
+  Else
+    KLog('SysRq : touche inconnue ' + Chr(C));
+  End;
 End;
 
 Procedure PopulateSys;
@@ -38989,8 +42679,31 @@ Begin
   KWriteStr('/sys/kernel/hostname', $124, HostName + #10);
   KWriteStr('/sys/kernel/version', $124, '#1 ' + KVersion + #10);
   KWriteStr('/sys/devices/system/cpu/online', $124, '0' + #10);
-  KWriteStr('/sys/devices/system/cpu/possible', $124, '0' + #10);
-  KWriteStr('/sys/devices/system/cpu/present', $124, '0' + #10);
+  If NrCpuPresent > 1 Then
+  Begin
+    KWriteStr('/sys/devices/system/cpu/possible', $124, '0-'
+        + IntStr(NrCpuPresent - 1) + #10);
+    KWriteStr('/sys/devices/system/cpu/present', $124, '0-'
+        + IntStr(NrCpuPresent - 1) + #10);
+    KWriteStr('/sys/devices/system/cpu/offline', $124, '1-'
+        + IntStr(NrCpuPresent - 1) + #10);
+  End
+  Else
+  Begin
+    KWriteStr('/sys/devices/system/cpu/possible', $124, '0' + #10);
+    KWriteStr('/sys/devices/system/cpu/present', $124, '0' + #10);
+    KWriteStr('/sys/devices/system/cpu/offline', $124, #10);
+  End;
+  For D := 0 To NrCpuPresent - 1 Do
+  Begin
+    KMkdir('/sys/devices/system/cpu/cpu' + IntStr(D), $1ED);
+    If D > 0 Then
+    Begin
+      SysPathV := '/sys/devices/system/cpu/cpu' + IntStr(D) + '/online';
+      SysValV := '0' + #10;
+      KWriteStr(SysPathV, $1A4, SysValV);
+    End;
+  End;
   KWriteStr('/sys/power/state', $124, 'mem' + #10);
   If FlpPresent Then
   Begin
@@ -39008,28 +42721,41 @@ Begin
       If D < 2 Then Begin Maj := MajIde0; Mn := D * 64; End
       Else Begin Maj := MajIde1; Mn := (D - 2) * 64; End;
       KMkdir('/sys/block/' + Nm, $1ED);
-      KWriteStr('/sys/block/' + Nm + '/dev', $124,
-          IntStr(Maj) + ':' + IntStr(Mn) + #10);
-      KWriteStr('/sys/block/' + Nm + '/size', $124,
-          IntStr(PartSize[D * 16]) + #10);
-      KWriteStr('/sys/block/' + Nm + '/removable', $124, '0' + #10);
-      KWriteStr('/sys/block/' + Nm + '/ro', $124, '0' + #10);
-      VfsSymlink('../../block/' + Nm, '/sys/class/block/' + Nm);
+      SysPathV := '/sys/block/' + Nm + '/dev';
+    SysValV := IntStr(Maj) + ':' + IntStr(Mn) + #10;
+    KWriteStr(SysPathV, $124, SysValV);
+      SysPathV := '/sys/block/' + Nm + '/size';
+    SysValV := IntStr(PartSize[D * 16]) + #10;
+    KWriteStr(SysPathV, $124, SysValV);
+      SysPathV := '/sys/block/' + Nm + '/removable';
+    SysValV := '0' + #10;
+    KWriteStr(SysPathV, $124, SysValV);
+      SysPathV := '/sys/block/' + Nm + '/ro';
+    SysValV := '0' + #10;
+    KWriteStr(SysPathV, $124, SysValV);
+      SysPathV := '../../block/' + Nm;
+      SysValV := '/sys/class/block/' + Nm;
+      VfsSymlink(SysPathV, SysValV);
       For P := 1 To 15 Do
         If PartSize[D * 16 + P] > 0 Then
         Begin
           Pn := Nm + IntStr(P);
           KMkdir('/sys/block/' + Nm + '/' + Pn, $1ED);
-          KWriteStr('/sys/block/' + Nm + '/' + Pn + '/dev', $124,
-              IntStr(Maj) + ':' + IntStr(Mn + P) + #10);
-          KWriteStr('/sys/block/' + Nm + '/' + Pn + '/size', $124,
-              IntStr(PartSize[D * 16 + P]) + #10);
-          KWriteStr('/sys/block/' + Nm + '/' + Pn + '/start', $124,
-              IntStr(PartStart[D * 16 + P]) + #10);
-          KWriteStr('/sys/block/' + Nm + '/' + Pn + '/partition', $124,
-              IntStr(P) + #10);
-          VfsSymlink('../../block/' + Nm + '/' + Pn,
-              '/sys/class/block/' + Pn);
+          SysPathV := '/sys/block/' + Nm + '/' + Pn + '/dev';
+    SysValV := IntStr(Maj) + ':' + IntStr(Mn + P) + #10;
+    KWriteStr(SysPathV, $124, SysValV);
+          SysPathV := '/sys/block/' + Nm + '/' + Pn + '/size';
+    SysValV := IntStr(PartSize[D * 16 + P]) + #10;
+    KWriteStr(SysPathV, $124, SysValV);
+          SysPathV := '/sys/block/' + Nm + '/' + Pn + '/start';
+    SysValV := IntStr(PartStart[D * 16 + P]) + #10;
+    KWriteStr(SysPathV, $124, SysValV);
+          SysPathV := '/sys/block/' + Nm + '/' + Pn + '/partition';
+    SysValV := IntStr(P) + #10;
+    KWriteStr(SysPathV, $124, SysValV);
+          SysPathV := '../../block/' + Nm + '/' + Pn;
+          SysValV := '/sys/class/block/' + Pn;
+          VfsSymlink(SysPathV, SysValV);
         End;
     End;
   KMkdir('/sys/class/net/lo', $1ED);
@@ -39062,6 +42788,8 @@ Begin
   SysDevFile('/sys/class/tty/tty', 5, 0);
   SysDevFile('/sys/class/tty/ttyS0', 4, 64);
   For D := 1 To NVc Do SysDevFile('/sys/class/tty/tty' + IntStr(D), 4, D);
+  LoopSys;
+  PciPopulate;
 End;
 
 Procedure MakeTree;
@@ -39097,8 +42825,8 @@ End;
   encodes en base64, ecrits dans le tmpfs racine au demarrage. }
 
 Const
-  EmbCount = 49;
-  EmbPath : Array[0..48] Of String[20] = (
+  EmbCount = 54;
+  EmbPath : Array[0..53] Of String[20] = (
     '/sbin/init',
     '/bin/hello',
     '/bin/forkwait',
@@ -39142,29 +42870,35 @@ Const
     '/bin/xattrtest',
     '/bin/nstest',
     '/bin/bigtest',
+    '/bin/proc2test',
+    '/bin/looptest',
+    '/bin/loopmnt',
+    '/bin/smptest',
+    '/bin/effects',
     '/bin/modtest',
     '/bin/hello.ko',
     '/bin/hello2.ko',
     '/bin/badinit.ko',
     '/bin/unkmod.ko',
     '/bin/irqmod.ko');
-  EmbSize : Array[0..48] Of LongInt = (
-    3748, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
+  EmbSize : Array[0..53] Of LongInt = (
+    3832, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
     2320, 1104, 12408, 6948, 3124, 2476, 3268, 8720, 2376, 2004, 5100, 3248,
     1712, 3568, 2812, 10804, 2748, 4256, 2196, 2700, 2552, 4028, 12232, 8776,
-    6368, 7332, 11572, 7548, 7316, 5932, 9416, 9456, 3276, 1336, 980, 816,
-    2288);
-  EmbStart : Array[0..49] Of LongInt = (
-    0, 84, 122, 166, 217, 268, 318, 406, 444, 481, 533, 634, 695, 747, 772,
-    1048, 1203, 1273, 1329, 1402, 1596, 1649, 1694, 1808, 1881, 1920, 2000,
-    2063, 2304, 2366, 2461, 2510, 2570, 2627, 2717, 2989, 3185, 3327, 3490,
-    3748, 3916, 4079, 4211, 4421, 4632, 4705, 4735, 4757, 4776, 4827);
-  EmbData : Array[0..4826] Of String[60] = (
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAACMDQAAAAAAADQAIAAC',
-    'ACgABwAGAAEAAAAAAAAAAIAECACABAjMCwAAzAsAAAUAAAAAEAAAUeV0ZAAA',
+    6368, 7332, 11572, 7548, 7316, 5932, 9416, 11828, 5256, 3188, 2360, 4016,
+    9456, 3276, 1336, 980, 816, 2288);
+  EmbStart : Array[0..54] Of LongInt = (
+    0, 86, 124, 168, 219, 270, 320, 408, 446, 483, 535, 636, 697, 749, 774,
+    1050, 1205, 1275, 1331, 1404, 1598, 1651, 1696, 1810, 1883, 1922, 2002,
+    2065, 2306, 2368, 2463, 2512, 2572, 2629, 2719, 2991, 3187, 3329, 3492,
+    3750, 3918, 4081, 4213, 4423, 4686, 4803, 4874, 4927, 5017, 5228, 5301,
+    5331, 5353, 5372, 5423);
+  EmbData : Array[0..5422] Of String[60] = (
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAADgDQAAAAAAADQAIAAC',
+    'ACgABwAGAAEAAAAAAAAAAIAECACABAggDAAAIAwAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuBQAAACJ5VdWU4Pk8IHskAUA',
     'AM2ASHQUuFiHBAjoRQUAALgBAAAA6bsEAAC4QgAAAM2AuHiHBAgx/zHb6CYF',
-    'AACLDJ0giwQIhcl0XzHSiYwkkAEAAInIQ4mUJJQBAACNlCSQAQAAiUwkDOgB',
+    'AACLDJ1giwQIhcl0XzHSiYwkkAEAAInIQ4mUJJQBAACNlCSQAQAAiUwkDOgB',
     'BQAAica4qYcECOjsBAAAi0QkDOjjBAAAuLGHBAiF9nQXuLaHBAhH6M8EAACJ',
     '8OhjBQAAuFaHBAjovgQAAOuWuMSHBAjosgQAAInY6EYFAAC414cECOihBAAA',
     'ifjoNQUAALhWhwQI6JAEAACDfQgBfjOLRQy63ocECItABOg9BAAAicaFwHUd',
@@ -39194,7 +42928,7 @@ Const
     'HItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADNgDHtieCD5PBQ6DUBAABV',
     'ieVWicZTMdsPtgQeD7YMGoTAdAVDOMh071spyF5dw1WJ0THSieVTicOAPBEA',
     'dANC6/e4BAAAAM2AW13DicK4AQAAAOvaVYnlV1ZTg+wsiUXUuAIAAACJVdDN',
-    'gIXAdViNfdi+AIsECLkEAAAAi13U86WNVdi4CwAAAItN0M2AugCHBAi4AgAA',
+    'gIXAdViNfdi+QIsECLkEAAAAi13U86WNVdi4CwAAAItN0M2AugCHBAi4AgAA',
     'ALt/AAAA6I3///+LVdS4AgAAAOiA////ugmHBAi4AgAAAOhx////uAEAAADN',
     'gOv+icO4/////3gPjU3YuAcAAAAx0s2Ai0XYg8QsW15fXcNVieVWU4nDg+ww',
     'xkX3AIXAeQ732LkhAAAAvgoAAADrDXXyxkX2MLkgAAAA6x+FwHQRMdJJ9/aK',
@@ -39221,29 +42955,31 @@ Const
     'ZXN0AC9iaW4vcHJlZW1wdHRlc3QAL2Jpbi9wc3RyZXNzAC9iaW4vc3lzY2Fs',
     'bHRlc3QAL2Jpbi9zaWdydHRlc3QAL2Jpbi9pcGN0ZXN0AC9iaW4vbXFmdXRl',
     'eHRlc3QAL2Jpbi9wdHJhY2V0ZXN0AC9iaW4vc2VjY29tcHRlc3QAL2Jpbi94',
-    'YXR0cnRlc3QAL2Jpbi9uc3Rlc3QAL2Jpbi9iaWd0ZXN0AC9iaW4vbW9kdGVz',
-    'dAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAThwQILIcECDeHBAgAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAKSIBAiviAQIvYgECMuIBAjYiAQI5ogECPOIBAgAiQQI',
-    'D4kECByJBAgqiQQIOIkECESJBAhSiQQIYIkECG2JBAh6iQQIiYkECJeJBAik',
-    'iQQIsYkECL6JBAjLiQQI2okECOeJBAj0iQQIAYoECA2KBAgbigQIKYoECDaK',
-    'BAhHigQIVIoECGWKBAh0igQIgYoECJKKBAiiigQIs4oECMKKBAjOigQI24oE',
-    'CAAAAABHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEz',
-    'LjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/wgAAACf',
-    'hQQIIAAAAAIAAQAPAAAAv4UECB0AAAACAAEAFwAAANyFBAgJAAAAAgABABwA',
-    'AADlhQQIkgAAAAIAAQAgAAAAd4YECF0AAAACAAEAJQAAACCLBAisAAAAAQAC',
-    'ACsAAADUhgQIKQAAABIAAQAxAAAAZIUECAAAAAAQAAEAOAAAAIuFBAgAAAAA',
-    'EAABAEoAAACShQQIAAAAABAAAQBFAAAAzJsECAAAAAAQAAIALAAAAHSABAjw',
-    'BAAAEgABAFEAAADMmwQIAAAAABAAAgBYAAAAzJsECAAAAAAQAAIAAGluaXQu',
-    'YwBzdHJjbXAAcHV0c19mZABwdXRzAHJ1bgBwdXRkAHRlc3RzAGNtYWluAGt1',
-    'X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5z',
-    'eW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuY29tbWVu',
-    'dAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsA',
-    'AAABAAAABgAAAHSABAh0AAAAiQYAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAA',
-    'AAIAAAAAhwQIAAcAAMwEAAAAAAAAAAAAACAAAAAAAAAAKQAAAAEAAAAwAAAA',
-    'AAAAAMwLAAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAAD8',
-    'CwAAAAEAAAUAAAAIAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAA/AwAAF0A',
-    'AAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAAFkNAAAyAAAAAAAA',
-    'AAAAAAABAAAAAAAAAA==',
+    'YXR0cnRlc3QAL2Jpbi9uc3Rlc3QAL2Jpbi9iaWd0ZXN0AC9iaW4vcHJvYzJ0',
+    'ZXN0AC9iaW4vbG9vcHRlc3QAL2Jpbi9sb29wbW50AC9iaW4vc21wdGVzdAAv',
+    'YmluL2VmZmVjdHMAL2Jpbi9tb2R0ZXN0AAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'E4cECCyHBAg3hwQIAAAAAAAAAAAAAAAAAAAAAAAAAACkiAQIr4gECL2IBAjL',
+    'iAQI2IgECOaIBAjziAQIAIkECA+JBAgciQQIKokECDiJBAhEiQQIUokECGCJ',
+    'BAhtiQQIeokECImJBAiXiQQIpIkECLGJBAi+iQQIy4kECNqJBAjniQQI9IkE',
+    'CAGKBAgNigQIG4oECCmKBAg2igQIR4oECFSKBAhligQIdIoECIGKBAiSigQI',
+    'oooECLOKBAjCigQIzooECNuKBAjqigQI+IoECAWLBAgSiwQIH4sECAAAAABH',
+    'Q0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/wgAAACfhQQIIAAA',
+    'AAIAAQAPAAAAv4UECB0AAAACAAEAFwAAANyFBAgJAAAAAgABABwAAADlhQQI',
+    'kgAAAAIAAQAgAAAAd4YECF0AAAACAAEAJQAAAGCLBAjAAAAAAQACACsAAADU',
+    'hgQIKQAAABIAAQAxAAAAZIUECAAAAAAQAAEAOAAAAIuFBAgAAAAAEAABAEoA',
+    'AACShQQIAAAAABAAAQBFAAAAIJwECAAAAAAQAAIALAAAAHSABAjwBAAAEgAB',
+    'AFEAAAAgnAQIAAAAABAAAgBYAAAAIJwECAAAAAAQAAIAAGluaXQuYwBzdHJj',
+    'bXAAcHV0c19mZABwdXRzAHJ1bgBwdXRkAHRlc3RzAGNtYWluAGt1X3NjNgBf',
+    'X3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIA',
+    'LnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuY29tbWVudAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAA',
+    'BgAAAHSABAh0AAAAiQYAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAAAIAAAAA',
+    'hwQIAAcAACAFAAAAAAAAAAAAACAAAAAAAAAAKQAAAAEAAAAwAAAAAAAAACAM',
+    'AAAtAAAAAAAAAAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAABQDAAAAAEA',
+    'AAUAAAAIAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAAUA0AAF0AAAAAAAAA',
+    'AAAAAAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAAK0NAAAyAAAAAAAAAAAAAAAB',
+    'AAAAAAAAAA==',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAOYIECDQAAABYBQAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAinAwAApwMAAAUAAAAAEAAAAQAAAKgD',
     'AACokwQIqJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -43581,6 +47317,600 @@ Const
     'AGABAAAGAAAADgAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAKgiAACpAAAA',
     'AAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAABRIwAANwAAAAAAAAAA',
     'AAAAAQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAcZoECDQAAAD0LAAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAgVKgAAFSoAAAUAAAAAEAAAAQAAAAAA',
+    'AAAAsAQIALAECAAAAACInQAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFW5AQAAADHSuGcBAACJ5VdWU7sCAAAAg+TwgewABgAA',
+    'x0QkGBAAAADNgIlEJAyNdCREjUQkNInCQMYCADnwdfbHRCQ0AgAAAItcJAy4',
+    'aQEAALoQAAAAx0QkOH8AAAGNTCQ0zYAx0oXAuE2eBAgPlMLoQBwAAItcJAy4',
+    'awEAALkEAAAAzYC4bwEAAItcJAyNTCQ0jVQkGM2AZotUJDaNRCQshvIPt9Lo',
+    'fxoAAItcJAy4xQAAAI2MJAACAADNgDH/hcB1B4u8JFgCAACJ+onw6JkaAAC4',
+    'Vp4ECOhkGwAAMdKFwH4rumSeBAi4QLEECOgmGQAAicKFwHQWuhKfBAi4QLEE',
+    'COgRGQAAMdKFwA+VwrhyngQI6J0bAAC6xJ4ECI1EJHTo0xsAAI1UJCyNRCR9',
+    '6MYbAAC6gZ4ECI2EJIEAAADotRsAAI1EJHTofBoAADHShcCJw7iTngQID5XC',
+    '6FUbAAAx0oXbdBKNVCREidjopxgAADHShcAPlcK4op4ECDH2uwIAAADoLBsA',
+    'ALkBAAAAuGcBAACJ8s2AuhAAAACJRCQEjUwkNLhqAQAAi1wkBM2AiQQki1wk',
+    'DLhsAQAAifGJ8s2AiUQkCItUJAiDPCQA99IPlMDB6h8hwri3ngQI6NQaAAC4',
+    'Vp4ECOhWGgAAuoCfBAiNhCQAAgAA6P0aAACNVCQsjYQkAQIAAOjtGgAAuvSf',
+    'BAiNhCQFAgAA6NwaAAC6xJ4ECI1EJHTozhoAAI1UJCyNRCR96MEaAAC6w54E',
+    'CI2EJIEAAADosBoAALpAsQQIMcmAOgB0FTHAilwEdDgcAnUHQIP4F3XxQULr',
+    '5jHShcm4zp4ECA+fwug6GgAAuoCfBAi4QLEECOiOFwAAhcB1BDHS6yS4xJ4E',
+    'COgtGQAAhcB07rringQIuECxBAjoaRcAADHShcAPlcK4554ECOj1GQAAi1wk',
+    'CLjFAAAAjYwkAAIAAM2AMdKFwHUHi5QkWAIAAI1EJESNXCRUvlUAAADoexgA',
+    'AI1UJES4QLEECOgZFwAAicK4AZ8ECOiqGQAAidi6GJ8ECOjiGQAAi1QkDI1E',
+    'JGLoSBgAAI2MJAABAAC6TwAAAInwzYCJxoXAfgrGhAQAAQAAAOsIxoQkAAEA',
+    'AAC6J58ECI2EJJwAAADonBkAAIn6jYQkpAAAAOgBGAAAjYQknAAAAOhzFgAA',
+    'MdLGhAScAAAAXcaEBJ0AAAAAhfZ+Go2UJJwAAACNhCQAAQAA6FgWAAAx0oXA',
+    'D5TCuDCfBAjoBBkAAI2MJAACAAC4wwAAAM2AMdKFwHUHi5QkEAIAAIHiAPAA',
+    'ALhDnwQIgfoAwAAAD5TCD7bS6M0YAACNjCQAAgAAuMMAAADNgDHShcB1B4uU',
+    'JFgCAAA5+rhXnwQID5TCD7bS6KAYAAC6BgAAAItcJAiJ0M2AidCLXCQEzYCJ',
+    '0ItcJAzNgLkCAAAAMdK4ZwEAAInLzYCJRCQMjVQkRI1EJDSJwUDGAQA50HX2',
+    'McCLXCQMuhAAAACNTCQ0iUQkOLhpAQAAx0QkNAIAAADNgLhvAQAAi1wkDI1U',
+    'JBjNgGaLVCQ2jUQkLIbyD7fS6I4WAAC4ap8ECOibFwAAunifBAiJw41EJHTo',
+    'QxgAAI1UJCyNRCR96DYYAAC6gp8ECI2EJIEAAADoJRgAAI1EJHTo7BYAADHS',
+    'iceF234dumSeBAi4QLEECOgkFQAAhf8PlcEx0oXAD5XCIcq4lJ8ECI20JAAC',
+    'AADoohcAAItcJAy4xQAAAInxzYAx0oXAdQeLlCRYAgAAjUQkROg2FgAAMdKF',
+    '/3QSjVQkRIn46NEUAAAx0oXAD5XCuKKfBAjoXRcAALgGAAAAi1wkDM2AuAoA',
+    'AAC7sJ8ECM2AuQEAAAAx0rhnAQAAicvNgIlEJAyNlCRuAgAAifCJwUDGAQA5',
+    '0HX2ZseEJAACAAABALqwnwQIjYQkAgIAAOhIFwAAidCJ8egwFAAAi1wkDI1Q',
+    'A7hpAQAAzYC4awEAAItcJAy5AgAAAM2AuMUAAACLXCQMjYwkAAEAAM2AMdKF',
+    'wHUHi5QkWAEAAI1EJEToDRcAALkBAAAAMdK4ZwEAAInLzYCJRCQIjZQkbgIA',
+    'AI2EJAACAACJwUDGAQA50HX2ZseEJAACAAABAI2EJAMCAAC6CqAECMaEJAIC',
+    'AAAA6KoWAACLXCQIuGkBAACJ8boIAAAAzYC/ZwEAALsBAAAAuQIAAAAx0on4',
+    'zYCJx7i9nwQI6L8VAAAx0oXAfiu6zJ8ECLhAsQQI6IETAACJwoXAdBa61Z8E',
+    'CLhAsQQI6GwTAAAx0oXAD5XCuNufBAjo+BUAALiwnwQI6AIVAAAx0onDhcB0',
+    'IrrnnwQI6D8TAACJwoXAdBKNVCREidjoLhMAADHShcAPlcK4+J8ECI10JCTo',
+    'thUAALgJoAQI6MAUAAAx0oXAuBCgBAgPlcLomxUAALkBAAAAuGgBAAAx0onL',
+    'zYC4vZ8ECOgNFQAAi1wkJLjFAAAAjYwkAAEAAM2AMdKFwHUHi5QkWAEAAI1E',
+    'JETosRUAAI1EJEToZBQAADHShcB0EboeoAQI6KMSAAAx0oXAD5XCuCagBAjo',
+    'LxUAALoGAAAAi1wkJInQzYCLXCQoidDNgItcJAyJ0M2AidCJ+82Ai1wkCInQ',
+    'zYC4CgAAALuwnwQIzYC4OqAECOh6FAAAukmgBAi4QLEECOhCEgAAhcB0KrpY',
+    'oAQIuECxBAjoLxIAAIXAdBe6aqAECLhAsQQI6BwSAACFwA+VwA+2wInCuHug',
+    'BAjopRQAALiEoAQI6CcUAAC6l6AECLhAsQQI6O8RAACJwoXAdBa6paAECLhA',
+    'sQQI6NoRAAAx0oXAD5XCuLCgBAjoZhQAALi9oAQI6OgTAAC6y6AECLhAsQQI',
+    '6LARAACJwrjWoAQI6EEUAAC43qAECOjDEwAAuvKgBAi4QLEECOiLEQAAicKF',
+    'wHQWuvugBAi4QLEECOh2EQAAMdKFwA+Vwrj/oAQI6AIUAAC4DaEECOiEEwAA',
+    'MdKFwH4WumSeBAi4QLEECOhGEQAAMdKFwA+VwrgboQQI6NITAAC6YJ4ECLgj',
+    'oQQI6G4RAACFwHUEMdLrT7p0nwQIuCOhBAjoVxEAAIXAdOm6x58ECLgjoQQI',
+    '6EQRAACFwHTWulKpBAi4I6EECOgxEQAAhcB0w7otoQQIuCOhBAjoHhEAADHS',
+    'hcAPlcK4M6EECLs/oQQI6F0TAAC5QgAAALqkAQAAuAUAAADNgLlLoQQIiUQk',
+    'DLoKAAAAi1wkDLgEAAAAzYCNvCScAAAAuhifBAiJ+In76GITAACLVCQMjYQk',
+    'qgAAAOjFEQAAuFUAAAC6YwAAAI2MJAACAADNgIXAfgrGhAQAAgAAAOsIxoQk',
+    'AAIAAAC6P6EECI2EJAACAADoFxAAADHShcC4VqEECA+UwujDEgAAjVQkHI2E',
+    'JJwAAADo/xAAAItcJAyNjCQAAQAAicK4xQAAAM2AMcmFwHUHi4wkWAEAADnK',
+    'dAQx0utAjVQkILg/oQQI6MgQAACLXCQMjYwkAAEAAInCuMUAAADNgDHJhcB1',
+    'B4uMJFgBAAA5ynXJMdKLRCQgOUQkHA+UwrhnoQQIjVwkVOg8EgAAuCoAAADN',
+    'gLoYnwQIjYQknAAAAIn76GYSAACLVCRUjYQkqgAAAOjJEAAAuFUAAAC6YwAA',
+    'AI2MJAACAADNgIXAfgrGhAQAAgAAAOsIxoQkAAIAAAC6dqEECI2EJAACAACJ',
+    '++g5DwAAicK4faEECOjKEQAAjYwkAAEAALjDAAAAzYAx0oXAdQeLlCQQAQAA',
+    'geIA8AAAuI6hBAi+BQAAAIn7gfoAEAAAD5TCD7bS6IwRAAC5AAgAADHSifDN',
+    'gInCica4m6EECPfSweof6G4RAACF9ngJuAYAAACJ882AugYAAACLXCRUidDN',
+    'gItcJFiJ0M2AuKihBAiNVCQc6IoPAACNVCQgicO4t6EECOh6DwAAMdI5w3UN',
+    'MdKLRCQgOUQkHA+Uwri5oQQI6BERAACNVCQcuMChBAjoTw8AAI1UJCCJw7jc',
+    'owQI6D8PAAAx0jnDdQ0x0otEJCA5RCQcD5TCuNChBAi72KEECOjREAAAjVQk',
+    'HLjYoQQI6A8PAACNVCQgica456EECOj/DgAAOcZ1CotEJCA5RCQcdAQx0usf',
+    'jYwkAAEAALjDAAAAzYCFwHXqMdKDvCRYAQAAAA+Vwrj2oQQI6HgQAAC4VQAA',
+    'ALpjAAAAjYwkAAIAAM2AhcB+CsaEBAACAAAA6wjGhCQAAgAAALrnoQQIjYQk',
+    'AAIAAOiBDQAAMdKFwLj9oQQID5TC6C0QAAC6DaIECI2EJJwAAADoYBAAAItU',
+    'JAyNhCSuAAAA6MMOAACNhCScAAAA6IwPAAC6IKIECLhAsQQI6FQNAACFwHQq',
+    'uiiiBAi4QLEECOhBDQAAhcB0F7oxogQIuECxBAjoLg0AAIXAD5XAD7bAicK4',
+    'OaIECOi3DwAAi1wkDLgTAAAAMdK5AwAAAM2AjYQknAAAAOglDwAAukSiBAi4',
+    'QLEECOjtDAAAicK4S6IECOh+DwAAui+iBAi4W6IECOgaDQAAhcB1BDHS6ym6',
+    'L6IECLhtogQI6AMNAACFwHTpunuiBAi4W6IECOjwDAAAMdKFwA+Uwrh+ogQI',
+    '6DQPAAC4BgAAAItcJAzNgLgKAAAAuz+hBAjNgLiNogQI6J8OAAAx0jnCfROA',
+    'ukCxBAgAdQfGgkCxBAgKQuvpuqCiBAi4QLEECOhODAAAicKFwHQWuqaiBAi4',
+    'QLEECOg5DAAAMdKFwA+VwrixogQI6MUOAAC4vaIECOhHDgAAus+iBAi4QLEE',
+    'COgPDAAAhcB0KrreogQIuECxBAjo/AsAAIXAdBe67KIECLhAsQQI6OkLAACF',
+    'wA+VwA+2wInCuPaiBAjocg4AALgBowQI6PQNAACgQLEECDHSg+gwPAl3Frp3',
+    'owQIuECxBAjorgsAADHShcAPlcK4EqMECOg6DgAAuByjBAjovA0AALrsoQQI',
+    'uECxBAjohAsAAInCuCyjBAjoFQ4AALg1owQI6JcNAAC6Q6MECLhAsQQI6F8L',
+    'AACJwoXAdBa6SqMECLhAsQQI6EoLAAAx0oXAD5XCuFejBAjo1g0AALheowQI',
+    '6FgNAAC6c6MECLhAsQQI6CALAACFwHQqunmjBAi4QLEECOgNCwAAhcB0F7qD',
+    'owQIuECxBAjo+goAAIXAD5XAD7bAicK4jKMECOiDDQAAuJqjBAjoBQ0AALqs',
+    'owQIuECxBAjozQoAAInCuLyjBAjoXg0AALjHowQI6OAMAAC62aMECLhAsQQI',
+    '6KgKAACJwrjeowQI6DkNAAC46aMECOi7DAAAMdKFwH4RuP6jBAjoqwwAADHS',
+    'hcAPn8K4F6QECOgODQAAuBQAAADNgInCjYQkAAEAALthpAQI6KsLAACNhCQA',
+    'AgAAuiWkBAjoJw0AAI2UJAABAAC4JaQECOh9CgAAicK4NaQECOjGDAAAjYQk',
+    'AAIAALpCpAQI6PkMAACNlCQAAQAAjYQkEAIAAOjmDAAAidDo0AkAALp3pAQI',
+    'jYQEEAIAAOjODAAAjYQkAAIAAOgKDAAAuuyhBAi4QLEECOjSCQAAicK4U6QE',
+    'COhjDAAAMdK4BQAAAInRzYDB6B+Jwrh9pAQI6EkMAAC6+qIECLiNpAQI6OUJ',
+    'AACFwHUEMdLrYrq1ogQIuI2kBAjozgkAAIXAdOm6ZqIECLiNpAQI6LsJAACF',
+    'wHTWupCjBAi4jaQECOioCQAAhcB0w7owpAQIuI2kBAjolQkAAIXAdLC6vKEE',
+    'CLiNpAQI6IIJAAAx0oXAD5XCuJikBAjoxgsAALikpAQI6EgLAAAx0oXAfiu6',
+    'tqQECLhAsQQI6AoJAACJwoXAdBa6v6QECLhAsQQI6PUIAAAx0oXAD5XCuMek',
+    'BAjogQsAALjWpAQI6AMLAAAx0oXAfiu656QECLhAsQQI6MUIAACJwoXAdBa6',
+    'AqUECLhAsQQI6LAIAAAx0oXAD5XCuAelBAjoPAsAALgXpQQI6L4KAAAx0oXA',
+    'fha6J6UECLhAsQQI6IAIAAAx0oXAD5XCuC6lBAjoDAsAALg9pQQI6I4KAAC6',
+    'S6UECLhAsQQI6FYIAACFwHQqul6lBAi4QLEECOhDCAAAhcB0F7ptpQQIuECx',
+    'BAjoMAgAAIXAD5XAD7bAicK4c6UECOi5CgAAuIClBAjoOwoAALqRpQQIuECx',
+    'BAjoAwgAAInChcB0FrqWpQQIuECxBAjo7gcAADHShcAPlcK4nKUECOh6CgAA',
+    'uECxBAiKCITJdAiA+Tp0A0Dr8jHSgPk6dR1AgDggdPox0g++CI1Z0ID7CXcK',
+    'a9IKQI1UCtDr64XSuKylBAgPn8IPttLoMQoAALjJpQQI6LMJAAAx0oXAfiu6',
+    '16UECLhAsQQI6HUHAACJwoXAdBa63KUECLhAsQQI6GAHAAAx0oXAD5XCuOOl',
+    'BAjo7AkAALjwpQQI6G4JAAAx0oXAfha6/KUECLhAsQQI6DAHAAAx0oXAD5XC',
+    'uAemBAjovAkAALgSpgQI6D4JAAAx0oXAfiu6H6YECLhAsQQI6AAHAACJwoXA',
+    'dBa6LaYECLhAsQQI6OsGAAAx0oXAD5XCuDWmBAjodwkAALhBpgQI6PkIAAAx',
+    '0oXAfha6UaYECLhAsQQI6LsGAAAx0oXAD5XCuF+mBAjoRwkAALhupgQI6MkI',
+    'AAAx0oXAfha6eaYECLhAsQQI6IsGAAAx0oXAD5XCuIamBAjoFwkAALiQpgQI',
+    '6JkIAAAx0oXAfha6nqYECLhAsQQI6FsGAAAx0oXAD5XCuKqmBAjo5wgAALi3',
+    'pgQI6GkIAAAx0oXAfha6yaYECLhAsQQI6CsGAAAx0oXAD5XCuNamBAjotwgA',
+    'ALoMpQQIuOemBAjoUwYAAIXAdQcx0umfAAAAujOlBAi456YECOg5BgAAhcB0',
+    '5rp4pQQIuOemBAjoJgYAAIXAdNO6oaUECLjnpgQI6BMGAACFwHTAuimhBAi4',
+    '56YECOgABgAAhcB0rbrtpgQIuOemBAjo7QUAAIXAdJq68aYECLjnpgQI6NoF',
+    'AACFwHSHupOkBAi456YECOjHBQAAhcAPhHD///+6+qYECLjnpgQI6LAFAAAx',
+    '0oXAD5XCuP6mBAjo9AcAALgUAAAAzYCJwo2EJAACAADolgYAAI2UJAACAAC4',
+    '56YECOh5BQAAicK4C6cECOjCBwAAuoKnBAi4HKcECOheBQAAicK4MacECOin',
+    'BwAAuD2nBAjoKQcAALpmpwQIica4QLEECOjvBAAAicKFwA+F/AAAALttpwQI',
+    'uQAAAQC4BQAAAM2AiUQkDLiPpwQI6EUHAAC/3AAAAItcJAy6WAIAAI2MJAAC',
+    'AACJ+M2AiceFwH4vMdKNnBQAAgAAuHejBAiJVCQI6A8HAACNQxPoBwcAAA+3',
+    'QxCLVCQIAcI5+nzV67K4AqoECOjtBgAAuJanBAjo4wYAAIX2ifCNjCQAAgAA',
+    'xoQkIQIAAAB5BPfY6xF1D8aEJCACAAAwvyAAAADrK78hAAAAuwoAAACFwHQQ',
+    'MdJP9/OKkgSqBAiIFDnr7IX2eQnGhDz/AQAALU+NBDnohgYAALiipwQI6HwG',
+    'AAC4QLEECOhyBgAAuKWnBAjoaAYAALpmpwQIuECxBAi+BQAAALv0pwQI6NAD',
+    'AACJwriopwQI6GEGAAC4t6cECOjjBQAAut+nBAi4QLEECOirAwAAicK45qcE',
+    'COg8BgAAMdKJ8InRzYCJxoXAeQQx0us/vwMAAAC6LAEAAInzifiNjCQAAgAA',
+    'zYCJx7gGAAAAzYCB/wABAAB11IC8JAACAACGdcox0oC8JAECAACAD5TCuB2o',
+    'BAjo4QUAALgsqAQI6GMFAAAx0oXAfha6V6gECLhAsQQI6CUDAAAx0oXAD5XC',
+    'uGqoBAjosQUAALh7qAQI6DMFAAAx0oXAfha6pKgECLhAsQQI6PUCAAAx0oXA',
+    'D5XCuLGoBAi7xKgECOh8BQAAuMMAAACNjCQAAgAAzYAx0oXAdQeLlCQQAgAA',
+    'geIA8AAAuNmoBAi7HKcECIH6AEAAAA+Uwg+20uhABQAAuQAAAQAx0rgFAAAA',
+    'zYAx9olEJAwx24XAD4gAAQAAv9wAAACLXCQMugAEAACNjCQAAgAAifjNgInH',
+    'hcB+PTHbjYwcAAIAAIB5EzB1IoP+B38difCNUROJTCQIRsHgBY2EBAABAADo',
+    'GgUAAItMJAgPt0EQAcM5+3zH66S4BgAAAItcJAzNgDHbMf859w+NjQAAALrl',
+    'qAQIjYQknAAAAOjiBAAAifjB4AWNlAQAAQAAjYQksQAAAOjKBAAAidDotAEA',
+    'ALpNqAQIjYQEsQAAAOiyBAAAjYQknAAAAOjuAwAAuvuoBAi4QLEECOi2AQAA',
+    'hcB1JroOqQQIuECxBAjoowEAAIXAdRO6IakECLhAsQQI6JABAACFwHQBQ0fp',
+    'a////04Pn8Ax0oXbD5/CIcK4NKkECOgLBAAAuEGpBAjojQMAADHSg/gCfh6A',
+    'PUCxBAg3dRWAPUGxBAg6dQwx0oA9QrEECDAPlMK4VqkECLtqqQQI6M0DAACN',
+    'jCQAAgAAuMMAAADNgDHShcB1B4uUJBACAACB4gDwAAC4gakECIH6AEAAAA+U',
+    'wg+20uiWAwAAuJepBAjoGAMAADHSg/gCfh6APUCxBAgxdRWAPUGxBAg6dQwx',
+    '0oA9QrEECDMPlMK4r6kECOhdAwAAuMapBAjo3wIAADHSg/gCfh6APUCxBAg0',
+    'dRWAPUGxBAg6dQwx0oA9QrEECDEPlMK43qkECOgkAwAAuPGpBAjo/AIAADHA',
+    'gz2ATQUIAA+VwI1l9FteX13DVVdWU4tEJBSLXCQYi0wkHItUJCCLdCQki3wk',
+    'KItsJCzNgFteX13DuK0AAADNgDHtieCD5PBQ6IEDAACJwjHAgDwCAHQDQOv3',
+    'w1WJ5VaJxlMx2w+2BB4PtgwahMB0BUM4yHTvWynIXl3DVYnBidCJ5VdWU4Ps',
+    'HIlV5Oi9////icaJyIA4AInCdB6LTeSNPAY5+nQNihk4GnQDQOvmQkHr77gB',
+    'AAAA6wIxwIPEHFteX13DVbkAAAEAieVXVlOJw7gFAAAAgewcCAAAiZXg9///',
+    'MdLNgDH2iYXk9///hcB4Zr/cAAAAi53k9///jY3o9///ugAIAACJ+M2AiceF',
+    'wH45MduNjB3o9///i5Xg9///jUETiY3c9///6C3///+Ljdz3//+FwLgBAAAA',
+    'D0TwD7dBEAHDOft8y+unuAYAAACLneT3///NgIHEHAgAAInwW15fXcNVieVT',
+    'icO4wwAAAI1NnIPsYM2AhcB1CotFnIkCi0X06wIxwIPEYFtdw4nBidDB6gyK',
+    'kiieBAjGQQQAiBGJwsHqCIPiD4qSKJ4ECIhRAYnCg+APweoEioAongQIg+IP',
+    'ipIongQIiEEDiFECw1WJ5VdWU4nDidCD7BCF0nQHilXoMcnrB7IwuQEAAACI',
+    'Vei+CgAAAIXAdA4x0kH39oPCMIhUDefr7onIjTQLhcB0D0iKVAXoicf334hU',
+    'Pv/r7cYECwCDxBBbXl9dw1WJ5VdWicZTu0CxBAiD7ByAOwB0WTH/igw7hMl0',
+    'CID5CnQDR+vxgf8rAQAAfgoB+4D5AYPb/+vYMcA5x3QMihQDQIiQ/68ECOvw',
+    'ifK4ALAECIhN58aHALAECADo7/3//4pN54XAdMe4ALAECOsCMcCDxBxbXl9d',
+    'w1Ux0onRieVXVlOJw7gFAAAAzYAx9onHhcB4Nro/nAAAjY5AsQQIuAMAAACJ',
+    '+ynyzYCFwH4KAcaB/j6cAAB+3MaGQLEECAC4BgAAAIn7zYCJ8FteX13DVYnB',
+    'ieVTuwEAAABS6EL9//+JwrgEAAAAzYBZW13DVYnlVonGuEWeBAhTidPoz///',
+    '/4nw6Mj///+F27g+ngQIujmeBAgPRcLotP///4XbdAj/BYRNBQjrBv8FgE0F',
+    'CFteXcNVMcmJ5VOKHAqIHAhBhNt19Vtdw1WJ5VaJxlONReyD7BDoTf7//41F',
+    '7LkFAAAA6L78//8x0onDicgp2DnQfgfGBBYgQuvxMdKD+wUPTcKNVewB8Oio',
+    '////uAUAAAA5ww9M2MYEHiDGRB4BAIPEEFteXcNVieVTg+wIi0UIixCNSASN',
+    'RJAIUFFS6Hri//+Jw7gBAAAAzYCDxBDr/jAxMjM0NTY3ODlBQkNERUYAIE9L',
+    'CgAgRkFJTAoAS1RFU1Q6IABuZXQuYmluZAAvcHJvYy9uZXQvdGNwAGxvY2Fs',
+    'X2FkZHJlc3MAbmV0LnRjcF9oZWFkZXIAIDAwMDAwMDAwOjAwMDAgMEEAbmV0',
+    'LnRjcF9saXN0ZW4AbmV0LnRjcF9saXN0ZW5faW5vZGUAbmV0LmNvbm5lY3QA',
+    'IDAxMDAwMDdGOgBuZXQudGNwX2VzdGFibGlzaGVkACAwMSAAbmV0LnRjcF9l',
+    'c3RhYmxpc2hlZF9zdGF0ZQBuZXQudGNwX2FjY2VwdGVkX2lub2RlAC9wcm9j',
+    'L3NlbGYvZmQvAHNvY2tldDpbAGZkLnJlYWRsaW5rX3NvY2tldABmZC5zdGF0',
+    'X3NvY2tldF9tb2RlAGZkLnN0YXRfc29ja2V0X2lubwAvcHJvYy9uZXQvdWRw',
+    'ADAwMDAwMDAwOgAgMDAwMDAwMDA6MDAwMCAwNwBuZXQudWRwX2JvdW5kAG5l',
+    'dC51ZHBfaW5vZGUAL3RtcC9weC5zb2NrAC9wcm9jL25ldC91bml4AFJlZkNv',
+    'dW50AElub2RlAHVuaXguaGVhZGVyADAwMDEwMDAwIDAwMDEgMDEAdW5peC5s',
+    'aXN0ZW5fbGluZQBAcHhhYnMAdW5peC5hYnN0cmFjdAAwMDAxIDAzAHVuaXgu',
+    'cGFpcl9jb25uZWN0ZWQAL3Byb2MvbmV0L3NubXAASXA6IEZvcndhcmRpbmcA',
+    'VGNwOiBSdG9BbGdvcml0aG0AVWRwOiBJbkRhdGFncmFtcwBuZXQuc25tcAAv',
+    'cHJvYy9uZXQvc29ja3N0YXQAc29ja2V0czogdXNlZABUQ1A6IGludXNlAG5l',
+    'dC5zb2Nrc3RhdAAvcHJvYy9uZXQvYXJwAEhXIGFkZHJlc3MAbmV0LmFycAAv',
+    'cHJvYy9uZXQvcHJvdG9jb2xzAHByb3RvY29sAFRDUABuZXQucHJvdG9jb2xz',
+    'AC9wcm9jL25ldC9yYXcAbmV0LnJhdwAvcHJvYy9uZXQAcm91dGUAbmV0LnJl',
+    'YWRkaXIAL3RtcC9mZHRlc3QAMDEyMzQ1Njc4OQBmZC5yZWFkbGlua19maWxl',
+    'AGZkLnN0YXRfZm9sbG93AHBpcGU6WwBmZC5yZWFkbGlua19waXBlAGZkLnN0',
+    'YXRfcGlwZQBmZC5vcGVuX3BpcGUAL3Byb2Mvc2VsZi9jd2QALgBmZC5jd2QA',
+    'L3Byb2Mvc2VsZi9yb290AGZkLnJvb3QAL3Byb2Mvc2VsZi9leGUAL2Jpbi9w',
+    'cm9jMnRlc3QAZmQuZXhlAGZkLmV4ZV9yZWFkbGluawAvcHJvYy9zZWxmL2Zk',
+    'aW5mby8AcG9zOgkxMABmbGFnczoJMABtbnRfaWQ6AGZkaW5mby5wb3MAcG9z',
+    'OgkzAGZkaW5mby5wb3Nfc2VlawAvcHJvYy9zZWxmL2ZkaW5mbwAvcHJvYy9z',
+    'ZWxmL2ZkADc3AGZkaW5mby5yZWFkZGlyAC9wcm9jL3NlbGYvZW52aXJvbgBQ',
+    'QVRIPQBURVJNPWxpbnV4AHBpZC5lbnZpcm9uAC9wcm9jL3NlbGYvbGltaXRz',
+    'AE1heCBvcGVuIGZpbGVzAE1heCBmaWxlIHNpemUAdW5saW1pdGVkAHBpZC5s',
+    'aW1pdHMAL3Byb2Mvc2VsZi9zdGF0bQBwaWQuc3RhdG0AL3Byb2Mvc2VsZi9j',
+    'b21tAHBpZC5jb21tAC9wcm9jL3NlbGYvaW8AcmNoYXI6AHdyaXRlX2J5dGVz',
+    'OgBwaWQuaW8AL3Byb2Mvc2VsZi9tb3VudGluZm8AIC8gLyAAIC0gdG1wZnMg',
+    'ACAtIHByb2MgAHBpZC5tb3VudGluZm8AL3Byb2Mvc2VsZi9tb3VudHMAcHJv',
+    'YyAvcHJvYyBwcm9jAHBpZC5tb3VudHMAL3Byb2Mvc2VsZi9jZ3JvdXAAMDo6',
+    'LwBwaWQuY2dyb3VwAC9wcm9jL3NlbGYvb29tX3Njb3JlAC9wcm9jL3NlbGYv',
+    'b29tX3Njb3JlX2FkagBwaWQub29tX3Njb3JlAC9wcm9jL3NlbGYvdGFzawBw',
+    'aWQudGFza19kaXIAL3Byb2Mvc2VsZi90YXNrLwBwaWQudGFza19zdGF0AC9w',
+    'cm9jL3NlbGYvdGFzay85OTk5OTkvc3RhdABwaWQudGFza19lbm9lbnQAL3By',
+    'b2Mvc2VsZgBwaWQucmVhZGRpcgAvcHJvYy9zZWxmL3N0YXR1cwBUaHJlYWRz',
+    'OgBDYXBFZmY6AHBpZC5zdGF0dXNfZXh0AC9wcm9jL3BhcnRpdGlvbnMAbWFq',
+    'b3IgbWlub3IgICNibG9ja3MgIG5hbWUAcmFtMABwcm9jLnBhcnRpdGlvbnMA',
+    'L3Byb2MvZGlza3N0YXRzACByYW0wIABwcm9jLmRpc2tzdGF0cwAvcHJvYy9k',
+    'ZXZpY2VzAENoYXJhY3RlciBkZXZpY2VzOgBCbG9jayBkZXZpY2VzOgAgbG9v',
+    'cABwcm9jLmRldmljZXMAL3Byb2MvaW50ZXJydXB0cwBDUFUwAHRpbWVyAHBy',
+    'b2MuaW50ZXJydXB0cwBwcm9jLmludGVycnVwdHNfdGltZXJfY291bnRzAC9w',
+    'cm9jL2lvcG9ydHMAcGljMQBzZXJpYWwAcHJvYy5pb3BvcnRzAC9wcm9jL2lv',
+    'bWVtAFN5c3RlbSBSQU0AcHJvYy5pb21lbQAvcHJvYy92bXN0YXQAbnJfZnJl',
+    'ZV9wYWdlcwBwZ2ZhdWx0AHByb2Mudm1zdGF0AC9wcm9jL2J1ZGR5aW5mbwB6',
+    'b25lICAgTm9ybWFsAHByb2MuYnVkZHlpbmZvAC9wcm9jL21pc2MAbG9vcC1j',
+    'b250cm9sAHByb2MubWlzYwAvcHJvYy9jZ3JvdXBzAHN1YnN5c19uYW1lAHBy',
+    'b2MuY2dyb3VwcwAvcHJvYy90dHkvZHJpdmVycwAvZGV2L2NvbnNvbGUAcHJv',
+    'Yy50dHlfZHJpdmVycwAvcHJvYwBzeXMAa2FsbHN5bXMAdHR5AHByb2MucmVh',
+    'ZGRpcgBwcm9jLnJlYWRkaXJfcGlkAC9zeXMvYnVzL3BjaS9kZXZpY2VzAHN5',
+    'cy5wY2lfZGlyAC9zeXMvYnVzL3BjaS9kZXZpY2VzLzAwMDA6MDA6MDAuMC92',
+    'ZW5kb3IAMHg4MDg2AC9zeXMvYnVzL3BjaS9kZXZpY2VzLzAwMDA6MDA6MDAu',
+    'MAAgIGRpcjoAICB2ZW5kb3Igcj0AIFsAXQoAc3lzLnBjaV92ZW5kb3IAL3N5',
+    'cy9idXMvcGNpL2RldmljZXMvMDAwMDowMDowMC4wL2NsYXNzADB4MDYwMABz',
+    'eXMucGNpX2NsYXNzAC9zeXMvYnVzL3BjaS9kZXZpY2VzLzAwMDA6MDA6MDAu',
+    'MC9jb25maWcAc3lzLnBjaV9jb25maWcAL3N5cy9idXMvcGNpL2RldmljZXMv',
+    'MDAwMDowMDowMC4wL3Jlc291cmNlADB4MDAwMDAwMDAwMDAwMDAwMABzeXMu',
+    'cGNpX3Jlc291cmNlAC9zeXMvYnVzL3BjaS9kZXZpY2VzLzAwMDA6MDA6MDAu',
+    'MC91ZXZlbnQAUENJX0lEPTgwODY6AHN5cy5wY2lfaXJxX3VldmVudAAvc3lz',
+    'L2J1cy91c2IvZGV2aWNlcwBzeXMudXNiX2RpcgAvc3lzL2J1cy9wY2kvZGV2',
+    'aWNlcy8AMHgwMDAwMDAwMDAwMDQwMTAxADB4MDAwMDAwMDAwMDA0MDIwMAAw',
+    'eDAwMDAwMDAwMDAwNDIyMDgAc3lzLnBjaV9iYXJzAC9zeXMvYmxvY2svbG9v',
+    'cDAvZGV2AHN5cy5ibG9ja19sb29wMF9kZXYAL3N5cy9jbGFzcy9ibG9jay9s',
+    'b29wMABzeXMuY2xhc3NfYmxvY2tfbG9vcDAAL3N5cy9jbGFzcy9tZW0vbnVs',
+    'bC9kZXYAc3lzLmNsYXNzX21lbV9udWxsX2RldgAvc3lzL2NsYXNzL3R0eS90',
+    'dHkxL2RldgBzeXMuY2xhc3NfdHR5MV9kZXYAS1RFU1Q6IHByb2MyIERPTkUK',
+    'ADAxMjM0NTY3ODlhYmNkZWYAR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1',
+    'Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAA',
+    'AAAABADx/w0AAAB+mgQIDgAAAAIAAQAUAAAAjJoECCAAAAACAAEAGwAAAKya',
+    'BAhIAAAAAgABAB8AAAD0mgQIoQAAAAIAAQAnAAAAlZsECCkAAAACAAEALwAA',
+    'AL6bBAhCAAAAAgABADQAAAAAnAQIXQAAAAIAAQA4AAAAXZwECHgAAAACAAEA',
+    'SwAAAECxBAhAnAAAAQADAE8AAAAAsAQILAEAAAEAAwBUAAAA1ZwECFYAAAAC',
+    'AAEAZgAAACudBAgeAAAAAgABAGsAAABJnQQIRAAAAAIAAQBxAAAAhE0FCAQA',
+    'AAABAAMAeQAAAIBNBQgEAAAAAQADAIEAAACNnQQIFAAAAAIAAQCQAAAAoZ0E',
+    'CF4AAAACAAEAlQAAAP+dBAgpAAAAEgABAJsAAABDmgQIAAAAABAAAQCiAAAA',
+    'apoECAAAAAAQAAEAtAAAAHGaBAgAAAAAEAABAK8AAAAAsAQIAAAAABAAAwCW',
+    'AAAAlIAECK8ZAAASAAEAuwAAAACwBAgAAAAAEAADAMIAAACITQUIAAAAABAA',
+    'AwAAcHJvYzJ0ZXN0LmMAc3RybGVuAHN0cmNtcABoYXMAaGFzbmFtZQBzdF9p',
+    'bm9wAGhleDQAZGVjAGxpbmVvZi5jb25zdHByb3AuMABiaWcAbG4uMABzbHVy',
+    'cC5jb25zdHByb3AuMABwdXRzAGt0ZXN0AGt1X3Bhc3MAa3VfZmFpbABzdHJj',
+    'cHlfLmlzcmEuMABwYWQ1AGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19i',
+    'c3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0',
+    'YWIALnRleHQALnJvZGF0YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiU',
+    'AAAAlB0AAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAADIAAAAongQIKB4AAO0L',
+    'AAAAAAAAAAAAAAEAAAABAAAAKQAAAAgAAAADAAAAALAECAAwAACInQAAAAAA',
+    'AAAAAAAgAAAAAAAAAC4AAAABAAAAMAAAAAAAAAAVKgAALQAAAAAAAAAAAAAA',
+    'AQAAAAEAAAABAAAAAgAAAAAAAAAAAAAARCoAALABAAAGAAAAEwAAAAQAAAAQ',
+    'AAAACQAAAAMAAAAAAAAAAAAAAPQrAADHAAAAAAAAAAAAAAABAAAAAAAAABEA',
+    'AAADAAAAAAAAAAAAAAC7LAAANwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAzIwECDQAAABIEwAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAhEEQAARBEAAAUAAAAAEAAAAQAAAGAB',
+    'AABgoQQIYKEECAAAAAAIQAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFWJ5VdWU4Pk8IHsABAAAIMMJACB7BABAAC4CgAAALvG',
+    'jQQIzYC5QgAAALqkAQAAuAUAAADNgIlEJBgx9onyuGDBBAjoIgwAAItcJBi4',
+    'BAAAALoAEAAAuWDBBAjNgEaD/kB12b/bjQQIvgUAAAAx0onwifuJ0c2AhcB5',
+    'BDHS6yKJ8Lv4jQQIzYCFwHjvifC5AgAAALvmjQQIzYD30MHoH4nCuAOOBAiJ',
+    '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',
+    'cDAAL2Rldi9sb29wLWNvbnRyb2wAL2Rldi9sb29wNwBsb29wLm5vZGVzAGxv',
+    'b3AudW5ib3VuZF9lbnhpbwBsb29wLmN0bF9nZXRfZnJlZQBsb29wLnNldF9m',
+    'ZABsb29wLnNldF9mZF9idXN5AGxvb3AuY3RsX2dldF9mcmVlX25leHQAbG9v',
+    'cC5zaXplAGxvb3AuYmxrZ2V0c2l6ZQBsb29wLnJlYWQAbG9vcC5yZWFkX29m',
+    'ZgBsb29wLndyaXRlAGxvb3AuZ2V0X3N0YXR1czY0AGxvb3AuZ2V0X3N0YXR1',
+    'czY0X25hbWUAbG9vcC5zZXRfc3RhdHVzNjQAbG9vcC5zaXplX2xpbWl0AGxv',
+    'b3Aub2Zmc2V0X3JlYWQAbG9vcC5lb2YAbG9vcC5zZXRfc3RhdHVzNjRfZW5j',
+    'AGxvb3AuZ2V0X3N0YXR1czMyAGxvb3AuY2xyX2ZkAGxvb3AuYWZ0ZXJfY2xy',
+    'X2VueGlvAGxvb3AuY2xyX3R3aWNlAGxvb3AucGVyc2lzdGVkAC9kZXYvbG9v',
+    'cDEAbG9vcC5jb25maWd1cmUAbG9vcC5jb25maWd1cmVfc2l6ZQBsb29wLmNv',
+    'bmZpZ3VyZV9yZWFkAGxvb3AucmVhZG9ubHlfd3JpdGUAbG9vcC5yZWFkb25s',
+    'eV9mbGFnAGxvb3AuY2hhbmdlX2ZkAGxvb3AuY2xyX2ZkMQAvZGV2L2xvb3Ay',
+    'AGxvb3AucmRvbmx5X29wZW5fZXBlcm0AL2Rldi9sb29wMwAvZGV2L251bGwA',
+    'bG9vcC5zZXRfZmRfY2hhcl9laW52YWwAbG9vcC5zZXRfZmRfZWJhZGYAbG9v',
+    'cC5jdGxfYWRkX2VleGlzdABsb29wLmN0bF9hZGRfbmV3AC9kZXYvbG9vcDkA',
+    'bG9vcC5jdGxfYWRkX25vZGUAbG9vcC5kZXY5X2JpbmQAbG9vcC5jdGxfcmVt',
+    'b3ZlX2J1c3kAbG9vcC5jdGxfcmVtb3ZlAGxvb3AuY3RsX3JlbW92ZV9lbm9k',
+    'ZXYAbG9vcC5jdGxfYmFkY21kAC9wcm9jL3BhcnRpdGlvbnMAbG9vcC5wYXJ0',
+    'aXRpb25zX3VuYm91bmQAbG9vcC5wYXJ0aXRpb25zX2JvdW5kAEtURVNUOiBs',
+    'b29wIERPTkUKAEdDQzogKFVidW50dSAxMy4zLjAtNnVidW50dTJ+MjQuMDQu',
+    'MSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAEAPH/',
+    'DAAAANmMBAglAAAAAgABABQAAAD+jAQIJwAAAAIAAQAlAAAAJY0ECCAAAAAC',
+    'AAEAKgAAAEWNBAhEAAAAAgABADAAAABk4QQIBAAAAAEAAwA4AAAAYOEECAQA',
+    'AAABAAMAQAAAAGDBBAgAIAAAAQADAEQAAABgoQQIACAAAAEAAwBJAAAAiY0E',
+    'CCkAAAASAAEATwAAAJ6MBAgAAAAAEAABAFYAAADFjAQIAAAAABAAAQBoAAAA',
+    'zIwECAAAAAAQAAEAYwAAAGChBAgAAAAAEAADAEoAAACUgAQICgwAABIAAQBv',
+    'AAAARKEECAAAAAAQAAMAdgAAAGjhBAgAAAAAEAADAABsb29wdGVzdC5jAG1l',
+    'bWNtcF8AZmlsbC5jb25zdHByb3AuMABwdXRzAGt0ZXN0AGt1X3Bhc3MAa3Vf',
+    'ZmFpbABidWYAYnVmMgBjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9fYnNz',
+    'X3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFi',
+    'AC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAA',
+    'AB4NAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAAso0ECLINAACSAwAA',
+    'AAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAAGChBAhgEQAACEAAAAAAAAAA',
+    'AAAAIAAAAAAAAAAuAAAAAQAAADAAAAAAAAAARBEAAC0AAAAAAAAAAAAAAAEA',
+    'AAABAAAAAQAAAAIAAAAAAAAAAAAAAHQRAAAgAQAABgAAAAoAAAAEAAAAEAAA',
+    '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',
+    'ieVTgDwRAHQDQuv3uAQAAAC7AQAAAM2AW13DVYnlVonGuI6GBAhTidPozf//',
+    '/4nw6Mb///+F27iHhgQIuoKGBAgPRcLosv///4XbdAj/BWSpBAjrBv8FYKkE',
+    'CFteXcNVieVTg+wIi0UIixCNSASNRJAIUFFS6CD6//+Jw7gBAAAAzYCDxBDr',
+    '/iBPSwoAIEZBSUwKAEtURVNUOiAAL2Rldi9oZGExACAgKHBhcyBkZSAvZGV2',
+    'L2hkYTEgOiB0ZXN0cyBsb29wIGlnbm9yZXMpCgBleHQyAC9tbnQAICAobW9u',
+    'dGFnZSBleHQyIGltcG9zc2libGUpCgAvbW50L2lubmVyLmltZwAgIChwYXMg',
+    'ZGUgaW5uZXIuaW1nIDogdGVzdHMgbG9vcCBpZ25vcmVzKQoAL3N5cy9ibG9j',
+    'ay9oZGEvZGV2AGxvb3BtbnQuc3lzX2hkYV9kZXYAL3N5cy9ibG9jay9oZGEv',
+    'aGRhMS9zdGFydABsb29wbW50LnN5c19oZGExX3N0YXJ0AC9zeXMvY2xhc3Mv',
+    'YmxvY2svaGRhMQBsb29wbW50LnN5c19jbGFzc19oZGExAC9kZXYvbG9vcDAA',
+    'bG9vcG1udC5zZXRfZmQAL3RtcC9sbQBsb29wbW50Lm1vdW50AC90bXAvbG0v',
+    'aGVsbG8udHh0AGhlbGxvIGZyb20gaW5uZXIAbG9vcG1udC5yZWFkAC90bXAv',
+    'bG0vYmlnLmJpbgBsb29wbW50LnJlYWRfYmlnAC90bXAvbG0vbmV3LnR4dAB3',
+    'cml0dGVuIHRocm91Z2ggbG9vcAoAbG9vcG1udC53cml0ZQAvdG1wL2xtL2Qx',
+    'AGxvb3BtbnQubWtkaXIAbG9vcG1udC5jbHJfYnVzeQBsb29wbW50LnVtb3Vu',
+    'dABsb29wbW50LmNscl9mZAAvbW50L2lubmVyMi5pbWcAL2Rldi9sb29wMQBs',
+    'b29wbW50Lm9mZl9zZXRfZmQAbG9vcG1udC5vZmZfc3RhdHVzAGxvb3BtbnQu',
+    'b2ZmX21vdW50X3JvAGxvb3BtbnQub2ZmX3JlYWQAbG9vcG1udC5vZmZfdW1v',
+    'dW50AC9kZXYvbG9vcDIAbG9vcG1udC51bmJvdW5kX21vdW50AEtURVNUOiBs',
+    'b29wbW50IERPTkUKAEdDQzogKFVidW50dSAxMy4zLjAtNnVidW50dTJ+MjQu',
+    'MDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx',
+    '/wsAAACxhQQIRAAAAAIAAQAdAAAAYJkECAAQAAABAAMAIQAAAPWFBAggAAAA',
+    'AgABACYAAAAVhgQIRAAAAAIAAQAsAAAAZKkECAQAAAABAAMANAAAAGCpBAgE',
+    'AAAAAQADADwAAABZhgQIKQAAABIAAQBCAAAAdoUECAAAAAAQAAEASQAAAJ2F',
+    'BAgAAAAAEAABAFsAAACkhQQIAAAAABAAAQBWAAAAYJkECAAAAAAQAAMAPQAA',
+    'AJSABAjiBAAAEgABAGIAAABemQQIAAAAABAAAwBpAAAAaKkECAAAAAAQAAMA',
+    'AGxvb3BtbnQuYwBzbHVycC5jb25zdHByb3AuMABidWYAcHV0cwBrdGVzdABr',
+    'dV9wYXNzAGt1X2ZhaWwAY21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABfX2Jz',
+    'c19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0cnRh',
+    'YgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiU',
+    'AAAA7gUAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAADIAAACChgQIggYAANwC',
+    'AAAAAAAAAAAAAAEAAAABAAAAKQAAAAgAAAADAAAAYJkECGAJAAAIEAAAAAAA',
+    'AAAAAAAgAAAAAAAAAC4AAAABAAAAMAAAAAAAAABeCQAALQAAAAAAAAAAAAAA',
+    'AQAAAAEAAAABAAAAAgAAAAAAAAAAAAAAjAkAAAABAAAGAAAACAAAAAQAAAAQ',
+    'AAAACQAAAAMAAAAAAAAAAAAAAIwKAABuAAAAAAAAAAAAAAABAAAAAAAAABEA',
+    'AAADAAAAAAAAAAAAAAD6CgAANwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAvIMECDQAAAD4BwAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAgmBgAAJgYAAAUAAAAAEAAAAQAAAEAG',
+    'AABAlgQIQJYECAAAAAAICAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAFW4yoQECInlV1a+AQAAAFOD5PCD7GDoGgMAADHSgD1A',
+    'lgQIMHUygD1BlgQILXUeukCWBAgx9g++QgJCjUjQgPkJdwlr9gqNdAbQ6+pG',
+    'jUb/MdKD+A8PlsK46oQECOg3AwAAuP2EBAjoyQIAADHSgD1AlgQIMHUMMdKA',
+    'PUGWBAgKD5TCuByFBAjoDAMAALgwhQQI6J4CAACD/gF+TLlAlgQIMcAPvlEC',
+    'QY1a0ID7CXcJa8AKjUQQ0OvqMdKAPUCWBAgxdQuNVv85wg+Uwg+20rhQhQQI',
+    'Mf/ovgIAAMdEJAwBAAAA6YkAAACgQJYECDwKD5TChMAPlMAJwuvRigpCQIhI',
+    '/4TJdfWNTCQcg/8JfwSNTCQdMcCKFAGIVAQ7QITSdfSNRCQgicKNQAGAOgB1',
+    '9oX/uBSFBAi5JYYECA9FyDHAihwBiBwCQITbdfWF/3VcugUAAAC7YoUECLkA',
+    'AAEAidCJ+s2AicKFwHk2McCJRCQMRzn3fU6J+LkKAAAAxkQkHgCZ9/mDwDCD',
+    'wjCIRCQcjUQkIIhUJB26roQECOlb////uAYAAACJ082A68WNRCQg6IEBAACF',
+    'wH6ygD1AlgQIMHWp662LVCQMuH+FBAgx/+jGAQAAuIyFBAjoWAEAAInGMcA5',
+    '8H0mgLhAlgQIcHUajZhAlgQIMdKKipqFBAg4DBN1B0KD+gl170dA69Yx0k+4',
+    'pIUECA+UwjH/6HwBAAAx0jnyfSGNmkCWBAgxwIqIyIUECDgMA3ULQIP4BnXv',
+    'vwEAAABC69uJ+ri8hQQIjXwkIDHb6EMBAACNdCQgidi5BAAAAPOrifK48gAA',
+    'ALkQAAAAzYAx0oP4A34KMdKDfCQgAQ+UwrjPhQQIv/EAAAAx2+gGAQAAuQQA',
+    'AACJ+Inyx0QkIAIAAADNgDHSg/jquOSFBAgPlMLo4QAAAIn4ifK5BAAAAMdE',
+    'JCABAAAAzYAx0oXAuACGBAgPlMLovQAAALgVhgQI6JMAAAAxwIM9QJ4ECAAP',
+    'lcCNZfRbXl9dw1VXVlOLRCQUi1wkGItMJByLVCQgi3QkJIt8JCiLbCQszYBb',
+    'Xl9dw7itAAAAzYAx7Yngg+TwUOioAAAAVTHSidGJ5VOJw7gFAAAAzYCJw4XA',
+    'eCi4AwAAALlAlgQIuv8HAADNgDHShcAPSdC4BgAAAMaCQJYECADNgInTidhb',
+    'XcNVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJxrimhAQI',
+    'U4nT6M3///+J8OjG////hdu4n4QECLqahAQID0XC6LL///+F23QI/wVEngQI',
+    '6wb/BUCeBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBRUugI/P//icO4AQAA',
+    'AM2Ag8QQ6/4gT0sKACBGQUlMCgBLVEVTVDogAC9zeXMvZGV2aWNlcy9zeXN0',
+    'ZW0vY3B1L2NwdQAvc3lzL2RldmljZXMvc3lzdGVtL2NwdS9wcmVzZW50AHNt',
+    'cC5wcmVzZW50X2Zvcm1hdAAvc3lzL2RldmljZXMvc3lzdGVtL2NwdS9vbmxp',
+    'bmUAc21wLm9ubGluZV9vbmx5X2JzcAAvc3lzL2RldmljZXMvc3lzdGVtL2Nw',
+    'dS9vZmZsaW5lAHNtcC5vZmZsaW5lX3JhbmdlAC9zeXMvZGV2aWNlcy9zeXN0',
+    'ZW0vY3B1L2NwdTAAc21wLmNwdV9kaXJzAC9wcm9jL2NwdWluZm8AcHJvY2Vz',
+    'c29yAHNtcC5jcHVpbmZvX29ubGluZV9vbmx5AHNtcC5jcHVpbmZvX2FwaWNp',
+    'ZABzbXAuYWZmaW5pdHlfb25lX2NwdQBzbXAuc2V0YWZmaW5pdHlfb2ZmbGlu',
+    'ZV9jcHUAc21wLnNldGFmZmluaXR5X2NwdTAAS1RFU1Q6IHNtcCBET05FCgBH',
+    'Q0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8LAAAAyYMECEQAAAAC',
+    'AAEAHQAAAECWBAgACAAAAQADAB8AAAANhAQIIAAAAAIAAQAkAAAALYQECEQA',
+    'AAACAAEAKgAAAESeBAgEAAAAAQADADIAAABAngQIBAAAAAEAAwA6AAAAcYQE',
+    'CCkAAAASAAEAQAAAAI6DBAgAAAAAEAABAEcAAAC1gwQIAAAAABAAAQBZAAAA',
+    'vIMECAAAAAAQAAEAVAAAAECWBAgAAAAAEAADADsAAACUgAQI+gIAABIAAQBg',
+    'AAAAJpYECAAAAAAQAAMAZwAAAEieBAgAAAAAEAADAABzbXB0ZXN0LmMAc2x1',
+    'cnAuY29uc3Rwcm9wLjAAYgBwdXRzAGt0ZXN0AGt1X3Bhc3MAa3VfZmFpbABj',
+    'bWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBf',
+    'ZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEA',
+    'LmJzcwAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiUAAAABgQAAAAAAAAAAAAAAQAA',
+    'AAAAAAAhAAAAAQAAADIAAACahAQImgQAAIwBAAAAAAAAAAAAAAEAAAABAAAA',
+    'KQAAAAgAAAADAAAAQJYECEAGAAAICAAAAAAAAAAAAAAgAAAAAAAAAC4AAAAB',
+    'AAAAMAAAAAAAAAAmBgAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAA',
+    'AAAAAAAAVAYAAAABAAAGAAAACAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAA',
+    'AFQHAABsAAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAADABwAA',
+    'NwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    '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',
+    'MjM0NTY3ODlhYmNkZWYAWD0xAC9iaW4vZWZmZWN0cwBjaGlsZAAgT0sKACBG',
+    'QUlMCgBLVEVTVDogAC9wcm9jL3N5cy9rZXJuZWwvcmFuZG9taXplX3ZhX3Nw',
+    'YWNlAGFzbHIuZGVmYXVsdF8yAGFzbHIucmFuZG9taXplZABhc2xyLmRpc2Fi',
+    'bGVkX3N0YWJsZQAvcHJvYy9zeXMvdm0vb3ZlcmNvbW1pdF9tZW1vcnkAb3Zl',
+    'cmNvbW1pdC5oZXVyaXN0aWNfcmVmdXNlc19odWdlAG92ZXJjb21taXQuaGV1',
+    'cmlzdGljX3NtYWxsX29rAG92ZXJjb21taXQubm9yZXNlcnZlX29rAG92ZXJj',
+    'b21taXQubm9uZV9vawBvdmVyY29tbWl0LmFsd2F5cwAxMAAvcHJvYy9zeXMv',
+    'dm0vb3ZlcmNvbW1pdF9yYXRpbwBvdmVyY29tbWl0LnN0cmljdF9yZWZ1c2Vz',
+    'AG92ZXJjb21taXQuc3RyaWN0X3NtYWxsX29rAG92ZXJjb21taXQuc3RyaWN0',
+    'X3JhdGlvXzEwMAA1MAAvcHJvYy9zeXMva2VybmVsL3N5c3JxAHN5c3JxLmRl',
+    'ZmF1bHQAL3Byb2Mvc3lzcnEtdHJpZ2dlcgBzeXNycS5maWxlX21vZGUAbQB6',
+    'AHN5c3JxLndyaXRlX2NvdW50AGkAc3lzcnEuZGlzYWJsZWRfbm9fa2lsbAA2',
+    'NABiAHN5c3JxLm1hc2tfc2lnbmFsX2tpbGwAc3lzcnEudGVybV9hbGwAc3lz',
+    'cnEubm9ucm9vdF9kZW5pZWQAL3Byb2MvY21kbGluZQBlZmZjcmFzaABLVEVT',
+    'VDogZWZmZWN0cyBET05FCgBLVEVTVDogZWZmZWN0cyBjcmFzaAoAYwAAAACR',
+    'iQQInokECAAAAABHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0',
+    'LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx',
+    '/wsAAAAwhwQIIAAAAAIAAQASAAAAUIcECEQAAAACAAEAFgAAAJSHBAgzAAAA',
+    'AgABABoAAADHhwQIsQAAAAIAAQAkAAAAeIgECFYAAAACAAEANgAAAECcBAgA',
+    'AgAAAQADADgAAADOiAQIHgAAAAIAAQA9AAAA7IgECCAAAAACAAEAQgAAAAyJ',
+    'BAhEAAAAAgABAEgAAABEngQIBAAAAAEAAwBQAAAAQJ4ECAQAAAABAAMAWAAA',
+    'AFCJBAgpAAAAEgABAF4AAAD1hgQIAAAAABAAAQBlAAAAHIcECAAAAAAQAAEA',
+    'dwAAACOHBAgAAAAAEAABAHIAAABAnAQIAAAAABAAAwBZAAAAlIAECGEGAAAS',
+    'AAEAfgAAACycBAgAAAAAEAADAIUAAABIngQIAAAAABAAAwAAZWZmZWN0cy5j',
+    'AHN0cmNtcABwdXQAaGV4AHJ1bl9jaGlsZABzbHVycC5jb25zdHByb3AuMABi',
+    'AGFub24AcHV0cwBrdGVzdABrdV9wYXNzAGt1X2ZhaWwAY21haW4Aa3Vfc2M2',
+    'AF9fcmVzdG9yZV9ydABfX2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRh',
+    'YgAuc3RydGFiAC5zaHN0cnRhYgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1l',
+    'bnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'ABsAAAABAAAABgAAAJSABAiUAAAA5QgAAAAAAAAAAAAAAQAAAAAAAAAhAAAA',
+    'AQAAAAIAAAB8iQQIfAkAALACAAAAAAAAAAAAAAQAAAAAAAAAKQAAAAgAAAAD',
+    'AAAAQJwECEAMAAAIAgAAAAAAAAAAAAAgAAAAAAAAAC4AAAABAAAAMAAAAAAA',
+    'AAAsDAAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAAXAwA',
+    'AFABAAAGAAAADQAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAKwNAACKAAAA',
+    'AAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAA2DgAANwAAAAAAAAAA',
+    'AAAAAQAAAAAAAAA=',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAA7ZIECDQAAACwIwAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAgJIQAACSEAAAUAAAAAEAAAAQAAACAB',
     'AAAgsQQIILEECAAAAAAIEAEABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -44090,26 +48420,51 @@ End;
   Faux (et garde la racine en memoire) si root= est absent, illisible, ou
   si le disque ne contient aucun programme init. }
 Function TryRealRoot : Boolean;
-Var T, R, Fl : LongInt; Sb, OldSb : PSuper; Dn : String;
+Var T, R, Fl, Ci : LongInt; Sb, OldSb : PSuper; Dn, Rf, Tn : String;
     OldRoot, OldPwd : LongInt; D : PDentry;
 Begin
   TryRealRoot := False;
   If RootDev = '' Then Exit;
-  T := FindFsType('ext2');
-  If T < 0 Then Exit;
-  Sb := SuperNew(T);
-  If Sb = Nil Then Exit;
+  { type de la racine : rootfstype=... ou essai de ext2, vfat, iso9660,
+    minix, cramfs, romfs (partie 38) }
+  Rf := CmdGet('rootfstype');
   Dn := RootDev;
-  Sb^.DevName := KMalloc(Length(Dn) + 1);
-  MemCopy(Sb^.DevName, LongInt(@Dn), Length(Dn) + 1);
   If CmdHas('rw') Then Fl := 0 Else Fl := MS_RDONLY;
-  Sb^.Flags := Fl;
-  R := Call4(FsMount[T], LongInt(Sb), LongInt(@Dn), Fl, 0);
-  If R <> 0 Then
+  Sb := Nil;
+  R := -ENODEV;
+  For Ci := 0 To 6 Do
+  Begin
+    Case Ci Of
+      0 : If Rf <> '' Then Tn := Rf Else Tn := 'ext2';
+      1 : Tn := 'vfat';
+      2 : Tn := 'iso9660';
+      3 : Tn := 'minix';
+      4 : Tn := 'cramfs';
+      5 : Tn := 'romfs';
+    Else
+      Tn := '';
+    End;
+    If (Tn = '') Or ((Rf <> '') And (Ci > 0)) Then Break;
+    T := FindFsType(Tn);
+    If T < 0 Then Continue;
+    Sb := SuperNew(T);
+    If Sb = Nil Then Exit;
+    Sb^.DevName := KMalloc(Length(Dn) + 1);
+    MemCopy(Sb^.DevName, LongInt(@Dn), Length(Dn) + 1);
+    Sb^.Flags := Fl;
+    R := Call4(FsMount[T], LongInt(Sb), LongInt(@Dn), Fl, 0);
+    If R = 0 Then
+    Begin
+      KLog('racine : type ' + Tn);
+      Break;
+    End;
+    SuperRelease(Sb);
+    Sb := Nil;
+  End;
+  If (R <> 0) Or (Sb = Nil) Then
   Begin
     KLog('racine : impossible de monter ' + RootDev + ' (erreur '
         + IntStr(-R) + '), racine en memoire');
-    SuperRelease(Sb);
     Exit;
   End;
   { basculer la racine du processus 0 (et celle des futurs processus) }
@@ -44262,6 +48617,10 @@ Begin
   InitDevices;
   InitSockets;
   InitEvents;
+  InitLoop;
+  InitRoFs;
+  PciScan;
+  SmpInit;
   NetInit;
   FbInit;
   MountRoot;
@@ -44271,7 +48630,8 @@ Begin
   KLog('disque IDE : ' + IntStr(Ord(DiskPresent[0]) + Ord(DiskPresent[1])
       + Ord(DiskPresent[2]) + Ord(DiskPresent[3])) +
        ' lecteur(s), ramdisk ' + IntStr(RamSizeKb) + ' Ko');
-  If Not TryRealRoot Then InstallEmbedded;
+  If Not InitramfsLoad Then
+    If Not TryRealRoot Then InstallEmbedded;
   If CmdGet('swap') <> '' Then SwapOnDev(CmdGet('swap'));
   FpuDetect;
   InitFpu;

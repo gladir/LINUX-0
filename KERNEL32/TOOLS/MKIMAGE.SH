@@ -20,6 +20,8 @@
 #     -c  ecrit /boot/linux0.cfg avec cmdline=...
 #     -N  /boot : cree ce nombre de fichiers vides (essai des gros repertoires)
 #     -S  premier secteur de la partition (defaut 2048)
+#     -I  initramfs (cpio newc, brut ou gzip) copie en /boot/initrd.img et
+#         declare par initrd= dans /boot/linux0.cfg (sous 16 Mo)
 #     -R  revision ext2 : 1 (defaut, inodes de taille -i) ou 0 (inodes de 128)
 #     -C  le MBR charge le chargeur en CHS (essai du repli sans extensions)
 #
@@ -38,11 +40,12 @@ STAGE2=${STAGE2:-$BOOT/STAGE2.BIN}
 OUT= ; KERNEL= ; ROOT= ; MB=64 ; BS=1024 ; INO=128 ; CMD= ; NFILES=0
 START=2048 ; FORCECHS=0 ; REV=1
 usage() { sed -n '11,26p' "$0"; exit 2; }
-while getopts "o:k:r:s:b:i:c:N:S:CR:" o; do
+while getopts "o:k:r:s:b:i:c:N:S:CR:I:" o; do
   case $o in
     o) OUT=$OPTARG ;; k) KERNEL=$OPTARG ;; r) ROOT=$OPTARG ;;
     s) MB=$OPTARG ;; b) BS=$OPTARG ;; i) INO=$OPTARG ;; c) CMD=$OPTARG ;;
     N) NFILES=$OPTARG ;; S) START=$OPTARG ;; C) FORCECHS=1 ;; R) REV=$OPTARG ;;
+    I) INITRD=$OPTARG ;;
     *) usage ;;
   esac
 done
@@ -87,6 +90,12 @@ mkdir -p "$STAGE/boot"
 [ -z "$KERNEL" ] || cp "$KERNEL" "$STAGE/boot/linux0"
 [ -z "$CMD" ] ||
   printf 'kernel=/boot/linux0\ncmdline=%s\n' "$CMD" > "$STAGE/boot/linux0.cfg"
+if [ -n "$INITRD" ]; then          # initramfs charge par le chargeur (module)
+  cp "$INITRD" "$STAGE/boot/initrd.img"
+  [ -f "$STAGE/boot/linux0.cfg" ] ||
+    printf 'kernel=/boot/linux0\ncmdline=%s\n' "${CMD:-root=/dev/hda1 ro}" > "$STAGE/boot/linux0.cfg"
+  printf 'initrd=/boot/initrd.img\n' >> "$STAGE/boot/linux0.cfg"
+fi
 i=0
 while [ $i -lt $NFILES ]; do
   : > "$STAGE/boot/entree-$(printf %05d $i)-avec-un-nom-assez-long-pour-remplir"
