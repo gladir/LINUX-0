@@ -69,6 +69,7 @@ Parties ajoutees en phase 2 (placees physiquement avant la partie 14) :
 | 22 | reseau : pilote RTL8139 (PCI, DMA, IRQ), ARP, IPv4, ICMP (echo), UDP, TCP reel (poignee de mains, retransmission, fenetre, MSS 1400, fermeture), `SIOCGIFADDR/SIOCSIFADDR/SIOCGIFFLAGS...`, `/proc/net/dev` et `route`, `ip=A.B.C.D` sur la ligne de commande |
 | 23 | iso9660 (CD-ROM, lecture seule, Rock Ridge : `NM`, `PX`, `SL`) sur ATAPI (commande PACKET en PIO, partie 11) |
 | 26 | swap : `swapon`/`swapoff` (87/115) sur un peripherique `mkswap` (SWAPSPACE2 v1, 128 Mo au plus) ou `swap=/dev/hdXN` au demarrage ; `SwapReclaim` (appele par `AllocPages` sous 96 pages libres) ecrit sur disque les pages anonymes privees a une seule reference (seconde chance par bit "accede"), PTE non present portant la case (bit 9), page-in dans la faute de page (aussi en mode noyau), cases comptees pour `fork`, `/proc/meminfo` SwapTotal/SwapFree |
+| 28 | appels systeme complementaires issus de l'audit (lot A1, apres la partie 16) : ordonnancement (`sched_*`, `getcpu`, affinite), capacites (`capget/capset`, `Capable`, regles setuid/execve), `personality`, `sendfile/sendfile64/copy_file_range/splice/vmsplice`, `preadv/pwritev(+2)`, `fallocate`, `syncfs`, `statx`, `renameat2`, `openat2`, `faccessat2`, `fchmodat2`, `execveat`, `close_range`, `memfd_create`, `mlock*/mincore/madvise` reels (`VmLocked`, RLIMIT_MEMLOCK), `waitid`, `process_vm_readv/writev`, `kcmp`, `unshare(FILES/FS)`, `membarrier`, horloges 64 bits (`clock_*64`, `futex_time64`, `ppoll/pselect6`, `epoll_pwait2`, `timerfd*64`, `utimensat_time64`), `adjtimex`, `ioperm/iopl`, ENOSYS explicites (`EnosysList`) |
 | 25 | framebuffer Bochs/QEMU VGA : `fb=LxH` sur la ligne de commande programme le mode 32 bits (registres VBE 1CEh/1CFh), memoire video (BAR 0 PCI) mappee en F8000000h, `/dev/fb0` (29:0) : read, write, lseek, `FBIOGET_FSCREENINFO/VSCREENINFO`, `mmap` partage (VMA `VmPhys`, PTE hors comptage) |
 | 24 | FAT12/16/32 et vfat (noms longs UTF-8/UCS-2, noms courts `~N`, indicateurs de casse NT), lecture/ecriture, repertoires qui grandissent, renommage, troncature, attribut lecture seule, dates, `statfs`, FSInfo FAT32 ; options `ro`, `rw`, `umask=`, `uid=`, `gid=` ; types `vfat`, `msdos`, `fat` |
 | ... | `/sys` (`PopulateSys`), pseudo-terminaux (maitre `PtmxXxx`, esclaves `Ttys[PtyBase+N]`, devpts = tmpfs a la partie 14), FPU/SSE (`FpuDetect`, FXSAVE), bind mounts / `pivot_root` / `MS_MOVE` (partie 12), racine reelle `TryRealRoot` (partie 17) |
@@ -329,9 +330,29 @@ Principe (un seul verrou, pas de verrous fins) :
   section qui detient `PreemptCount`. La latence d'une tache en mode noyau est
   bornee par la tranche (environ 70 ms), pas par un point de preemption fin.
 
+### Audit de couverture (phase 4)
+
+`TOOLS/COUVERTURE.PY` genere `TOOLS/COUVERTURE.TXT` : table des 451 appels
+systeme de `unistd_32.h` (reel / stub / ENOSYS explicite / absent, test qui
+couvre l'appel) et familles d'ioctl, systemes de fichiers, pilotes, entrees
+/proc et /sys, sockets, drapeaux. Avant le lot A1 : 219 appels reels sur 451
+(48,6 %), 223 absents. Apres : voir `COUVERTURE.TXT` (293 reels, 65,0 %,
+5 stubs, 84 ENOSYS explicites, 69 absents). Les ENOSYS explicites sont les
+appels obsoletes (`break`, `stty`, `create_module`...) et ceux hors perimetre
+(`bpf`, `perf_event_open`, `io_uring`, nouvelle API de montage, `landlock`,
+`userfaultfd`, `quotactl`, `modify_ldt`, `vm86`...). Limites connues de ce lot :
+fichiers de plus de 2 Go non geres (positions 32 bits ; `EFBIG`), `ioperm`
+accorde tous les ports (IOPL), `fallocate` ne reserve pas de blocs,
+`renameat2(EXCHANGE)` non atomique, `openat2` refuse les `RESOLVE_*`,
+`adjtimex` ne discipline pas l'horloge, les verrous `flock`/`fcntl` sont
+toujours acceptes sans effet (stubs : lot suivant). Correction au passage :
+`FUTEX_WAIT_BITSET` utilise un delai absolu comme Linux et
+`clock_nanosleep(TIMER_ABSTIME)` tient compte des nanosecondes.
+
 ### Tests (suite)
 
-* `RUNK.SH` : 30 programmes embarques, 333 verifications (`fattest`, `fbtest`,
+* `RUNK.SH` : 31 programmes embarques, 427 verifications (dont `syscalltest` : 94
+  verifications des appels du lot A1) (`fattest`, `fbtest`,
   `swaptest`, `idetest` s'ignorent sans le materiel voulu ; `killtest` :
   `kill(pid, 0, -pgrp, -1)` ; `preempttest` : latence d'un processus en mode
   utilisateur pendant de longs appels systeme d'un autre (trou maximal

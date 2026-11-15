@@ -1818,6 +1818,7 @@ Const
   MAP_GROWSDOWN = $100;
   VmStack          = $10000;        { VMA de pile (croit vers le bas) }
   VmHeap           = $20000;
+  VmLocked         = $80000;        { mlock : page verrouillee en memoire }
   VmPhys           = $40000;        { VMA sur memoire physique (fb0) }
   PgDevBit         = $200;          { PTE : page hors du comptage }
   PgSwapBit        = $200;          { PTE non present : case de swap }
@@ -1848,6 +1849,7 @@ Type
     Rss, TotalVm : LongInt;      { pages }
     StackLimit   : LongInt;      { octets }
     DataLimit    : LongInt;
+    LockFuture   : LongInt;      { mlockall(MCL_FUTURE) }
   End;
 
 Var
@@ -2514,6 +2516,7 @@ Begin
       Exit;
     End;
   End;
+  If Mm^.LockFuture <> 0 Then Flags := Flags Or VmLocked;
   V := VmaNew(A, A + Len, Prot, Flags);
   If V = Nil Then
   Begin
@@ -2608,6 +2611,7 @@ Begin
       W^.FLen := V^.FLen;
     End
     Else If (V^.Flags And VmPhys) <> 0 Then W^.Off := V^.Off;
+    W^.Flags := W^.Flags And Not VmLocked;
     If Last = Nil Then New^.Vma := W Else Last^.Next := W;
     Last := W;
     New^.TotalVm := New^.TotalVm + ((W^.Fin - W^.Start) Shr 12);
@@ -2765,6 +2769,8 @@ Type
     SigStk             : Array[0..2] Of LongInt;    { sigaltstack }
     ReapPending        : LongInt;
     NeedBkl, Preempted, PreemptCount, CpuDue, Cr2 : LongInt;   { partie 27 }
+    Persona, CapLastE, RobustList, RobustLen : LongInt;       { partie 28 }
+    CapE0, CapE1, CapP0, CapP1, CapI0, CapI1 : LongInt;
     ExeLen             : LongInt;
     ExeBuf             : Array[0..127] Of Byte;     { chemin de l'executable }
     Fpu                : Array[0..131] Of LongInt;  { FXSAVE ou FNSAVE }
@@ -3339,6 +3345,49 @@ Begin
   T^.RlimCur[RLIM_NOFILE] := MaxFd; T^.RlimMax[RLIM_NOFILE] := MaxFd;
   T^.RlimCur[RLIM_CORE] := 0;
   T^.Tty := -1;
+  T^.CapE0 := -1; T^.CapE1 := $1FF; T^.CapP0 := -1; T^.CapP1 := $1FF;
+  T^.CapI0 := 0; T^.CapI1 := 0;
+End;
+
+{ ---- Capacites (partie 28) : le modele "root = toutes" de Linux sans
+  capacites de fichier ---- }
+
+{ Apres un changement d'identifiants : regles de capabilities(7) }
+Procedure CapUidFix;
+Begin
+  If (Cur^.Uid <> 0) And (Cur^.Euid <> 0) And (Cur^.Suid <> 0) Then
+  Begin
+    Cur^.CapP0 := 0; Cur^.CapP1 := 0; Cur^.CapE0 := 0; Cur^.CapE1 := 0;
+  End
+  Else If (Cur^.CapLastE = 0) And (Cur^.Euid <> 0) Then
+  Begin
+    Cur^.CapE0 := 0; Cur^.CapE1 := 0;
+  End
+  Else If (Cur^.CapLastE <> 0) And (Cur^.Euid = 0) Then
+  Begin
+    Cur^.CapE0 := Cur^.CapP0; Cur^.CapE1 := Cur^.CapP1;
+  End;
+  Cur^.CapLastE := Cur^.Euid;
+End;
+
+{ A l'execve : euid 0 -> toutes les capacites, sinon aucune }
+Procedure CapExecFix;
+Begin
+  If (Cur^.Euid = 0) Or (Cur^.Uid = 0) Then
+  Begin
+    Cur^.CapP0 := -1; Cur^.CapP1 := $1FF; Cur^.CapE0 := -1; Cur^.CapE1 := $1FF;
+  End
+  Else
+  Begin
+    Cur^.CapP0 := 0; Cur^.CapP1 := 0; Cur^.CapE0 := 0; Cur^.CapE1 := 0;
+  End;
+  Cur^.CapLastE := Cur^.Euid;
+End;
+
+Function Capable(Cap : LongInt) : Boolean;
+Begin
+  If Cap < 32 Then Capable := (Cur^.CapE0 And (1 Shl Cap)) <> 0
+  Else Capable := (Cur^.CapE1 And (1 Shl (Cap - 32))) <> 0;
 End;
 
 Function FilesNew : PFiles;
@@ -13196,6 +13245,7 @@ Begin
     Cur^.Egid := I^.Gid; Cur^.Fsgid := I^.Gid; Secure := 1;
   End;
   Cur^.Suid := Cur^.Euid; Cur^.Sgid := Cur^.Egid;
+  CapExecFix;
   { nom du processus }
   Nm := Path;
   K := Length(Nm);
@@ -20404,7 +20454,7 @@ Begin
       V := Mm^.Vma;
       While (V <> Nil) And Not Stop Do
       Begin
-        If (V^.Ino = 0) And ((V^.Flags And VmPhys) = 0) Then
+        If (V^.Ino = 0) And ((V^.Flags And (VmPhys Or VmLocked)) = 0) Then
         Begin
           Va := V^.Start;
           While ULt(Va, V^.Fin) And Not Stop Do
@@ -20684,7 +20734,7 @@ End;
     307 faccessat  330 dup3  331 pipe2  340 prlimit64  355 getrandom }
 
 Const
-  MaxSys      = 400;
+  MaxSys      = 470;
   AT_FDCWD    = -100;
   RdChunk     = 65536;
   KHostname   : String[64] = 'linux0';
@@ -23512,13 +23562,15 @@ Begin
       Exit;
     End;
     If Clk = 0 Then Now := XTime Else Now := Jiffies Div HZ;
-    If MemL[0:Req] <= Now Then
+    Now := (MemL[0:Req] - Now) * HZ + (MemL[0:Req + 4] - (XUsec * 1000))
+        Div (1000000000 Div HZ);
+    If Now <= 0 Then
     Begin
       SysClockNanosleep := 0;
       Exit;
     End;
-    SleepTicks((MemL[0:Req] - Now) * HZ);
-    SysClockNanosleep := 0;
+    If SleepTicks(Now) = WakeSignal Then SysClockNanosleep := -EINTR
+    Else SysClockNanosleep := 0;
     Exit;
   End;
   SysClockNanosleep := SysNanosleep(Req, Rem);
@@ -24114,8 +24166,28 @@ Begin
         Tmo := 0;
         If Timeout <> 0 Then
           If EnsureUser(Timeout, 8, False) Then
-            Tmo := MemL[0:Timeout] * HZ + (MemL[0:Timeout + 4] Div (1000000000
-                Div HZ)) + 1;
+          Begin
+            If Cmd = 9 Then
+            Begin
+              { FUTEX_WAIT_BITSET : delai absolu (REALTIME si drapeau 256) }
+              If (Op And 256) <> 0 Then
+                Tmo := (MemL[0:Timeout] - XTime) * HZ
+                    + (MemL[0:Timeout + 4] - XUsec * 1000)
+                    Div (1000000000 Div HZ) + 1
+              Else
+                Tmo := (MemL[0:Timeout] - Jiffies Div HZ) * HZ
+                    + (MemL[0:Timeout + 4] - (Jiffies Mod HZ)
+                    * (1000000000 Div HZ)) Div (1000000000 Div HZ) + 1;
+              If Tmo <= 0 Then
+              Begin
+                SysFutex := -110;
+                Exit;
+              End;
+            End
+            Else
+              Tmo := MemL[0:Timeout] * HZ + (MemL[0:Timeout + 4]
+                  Div (1000000000 Div HZ)) + 1;
+          End;
         R := SleepOn(UAddr, Tmo, True);
         If R = WakeSignal Then SysFutex := -EINTR
         Else If R = WakeTimeout Then SysFutex := -110
@@ -24545,6 +24617,9 @@ Begin
         R := Call6(Fn, F^.Ebx, F^.Ecx, F^.Edx, F^.Esi, F^.Edi, F^.Ebp);
       End;
   End;
+  { changements d'identifiants : mise a jour des capacites }
+  If (Nr = 23) Or (Nr = 70) Or (Nr = 164) Or (Nr = 203) Or (Nr = 208)
+     Or (Nr = 213) Then CapUidFix;
   F^.Eax := R;
 End;
 
@@ -24839,6 +24914,2157 @@ Begin
 End;
 
 { ==================================================================== }
+{ Partie 28 - Appels systeme complementaires (audit de couverture, lot A) }
+{ ==================================================================== }
+{ (placee apres la partie 16 : elle utilise ses fonctions) }
+
+{ ---- Divers : restart_syscall, personality, ordonnanceur, capacites ---- }
+
+Function SysRestartSyscall : LongInt;
+Begin
+  SysRestartSyscall := -EINTR;
+End;
+
+Function SysPersonality(P : LongInt) : LongInt;
+Begin
+  SysPersonality := Cur^.Persona;
+  If P <> -1 Then Cur^.Persona := P And $FFFFFF;
+End;
+
+Function SchedTarget(Pid : LongInt) : PTask;
+Begin
+  If Pid = 0 Then SchedTarget := Cur
+  Else SchedTarget := PidTask(Pid);
+End;
+
+Function SchedCheck(T : PTask; Pol, Prio : LongInt) : LongInt;
+Begin
+  SchedCheck := 0;
+  If (Pol < 0) Or (Pol > 5) Then SchedCheck := -EINVAL
+  Else If (Pol = 1) Or (Pol = 2) Then
+  Begin
+    If (Prio < 1) Or (Prio > 99) Then SchedCheck := -EINVAL
+    Else If Not Capable(23) Then SchedCheck := -EPERM;
+  End
+  Else If Prio <> 0 Then SchedCheck := -EINVAL;
+End;
+
+Function SysSchedSetscheduler(Pid, Pol, Param : LongInt) : LongInt;
+Var T : PTask; Prio, R : LongInt;
+Begin
+  T := SchedTarget(Pid);
+  If T = Nil Then
+  Begin
+    SysSchedSetscheduler := -ESRCH;
+    Exit;
+  End;
+  If Not EnsureUser(Param, 4, False) Then
+  Begin
+    SysSchedSetscheduler := -EFAULT;
+    Exit;
+  End;
+  Prio := MemL[0:Param];
+  R := SchedCheck(T, Pol And $FF, Prio);
+  If R <> 0 Then
+  Begin
+    SysSchedSetscheduler := R;
+    Exit;
+  End;
+  If (Pol And $FF) > 2 Then T^.Policy := 0 Else T^.Policy := Pol And $FF;
+  T^.RtPrio := Prio;
+  SysSchedSetscheduler := 0;
+End;
+
+Function SysSchedGetscheduler(Pid : LongInt) : LongInt;
+Var T : PTask;
+Begin
+  T := SchedTarget(Pid);
+  If T = Nil Then SysSchedGetscheduler := -ESRCH
+  Else SysSchedGetscheduler := T^.Policy;
+End;
+
+Function SysSchedSetparam(Pid, Param : LongInt) : LongInt;
+Var T : PTask; R : LongInt;
+Begin
+  T := SchedTarget(Pid);
+  If T = Nil Then
+  Begin
+    SysSchedSetparam := -ESRCH;
+    Exit;
+  End;
+  If Not EnsureUser(Param, 4, False) Then
+  Begin
+    SysSchedSetparam := -EFAULT;
+    Exit;
+  End;
+  R := SchedCheck(T, T^.Policy, MemL[0:Param]);
+  If R <> 0 Then
+  Begin
+    SysSchedSetparam := R;
+    Exit;
+  End;
+  T^.RtPrio := MemL[0:Param];
+  SysSchedSetparam := 0;
+End;
+
+Function SysSchedGetparam(Pid, Param : LongInt) : LongInt;
+Var T : PTask;
+Begin
+  T := SchedTarget(Pid);
+  If T = Nil Then
+  Begin
+    SysSchedGetparam := -ESRCH;
+    Exit;
+  End;
+  If Not EnsureUser(Param, 4, True) Then
+  Begin
+    SysSchedGetparam := -EFAULT;
+    Exit;
+  End;
+  MemL[0:Param] := T^.RtPrio;
+  SysSchedGetparam := 0;
+End;
+
+Function SysSchedRrGetInterval(Pid, Ts : LongInt) : LongInt;
+Var T : PTask;
+Begin
+  T := SchedTarget(Pid);
+  If T = Nil Then
+  Begin
+    SysSchedRrGetInterval := -ESRCH;
+    Exit;
+  End;
+  If Not EnsureUser(Ts, 8, True) Then
+  Begin
+    SysSchedRrGetInterval := -EFAULT;
+    Exit;
+  End;
+  MemL[0:Ts] := 0;
+  MemL[0:Ts + 4] := SliceFor(T^.Nice) * (1000000000 Div HZ);
+  SysSchedRrGetInterval := 0;
+End;
+
+{ sched_setattr / sched_getattr : struct sched_attr (size, policy, flags,
+  nice, priority, ...) }
+Function SysSchedSetattr(Pid, Attr, Flags : LongInt) : LongInt;
+Var T : PTask; Pol, Prio, R : LongInt;
+Begin
+  T := SchedTarget(Pid);
+  If T = Nil Then
+  Begin
+    SysSchedSetattr := -ESRCH;
+    Exit;
+  End;
+  If Not EnsureUser(Attr, 48, False) Then
+  Begin
+    SysSchedSetattr := -EFAULT;
+    Exit;
+  End;
+  Pol := MemL[0:Attr + 4] And $FF;
+  Prio := MemL[0:Attr + 20];
+  R := SchedCheck(T, Pol, Prio);
+  If R <> 0 Then
+  Begin
+    SysSchedSetattr := R;
+    Exit;
+  End;
+  If Pol > 2 Then T^.Policy := 0 Else T^.Policy := Pol;
+  T^.RtPrio := Prio;
+  If Pol = 0 Then
+    If (MemL[0:Attr + 16] >= -20) And (MemL[0:Attr + 16] <= 19) Then
+      T^.Nice := MemL[0:Attr + 16];
+  SysSchedSetattr := 0;
+End;
+
+Function SysSchedGetattr(Pid, Attr, Size, Flags : LongInt) : LongInt;
+Var T : PTask;
+Begin
+  T := SchedTarget(Pid);
+  If T = Nil Then
+  Begin
+    SysSchedGetattr := -ESRCH;
+    Exit;
+  End;
+  If (Size < 48) Or Not EnsureUser(Attr, 48, True) Then
+  Begin
+    If Size < 48 Then SysSchedGetattr := -EINVAL
+    Else SysSchedGetattr := -EFAULT;
+    Exit;
+  End;
+  MemFill(Attr, 0, 48);
+  MemL[0:Attr] := 48;
+  MemL[0:Attr + 4] := T^.Policy;
+  MemL[0:Attr + 16] := T^.Nice;
+  MemL[0:Attr + 20] := T^.RtPrio;
+  SysSchedGetattr := 0;
+End;
+
+{ Un seul processeur : masque d'affinite = 1 }
+Function SysSchedSetaffinity(Pid, Len, Mask : LongInt) : LongInt;
+Begin
+  If SchedTarget(Pid) = Nil Then
+  Begin
+    SysSchedSetaffinity := -ESRCH;
+    Exit;
+  End;
+  If (Len < 4) Or Not EnsureUser(Mask, 4, False) Then
+  Begin
+    If Len < 4 Then SysSchedSetaffinity := -EINVAL
+    Else SysSchedSetaffinity := -EFAULT;
+    Exit;
+  End;
+  If (MemL[0:Mask] And 1) = 0 Then SysSchedSetaffinity := -EINVAL
+  Else SysSchedSetaffinity := 0;
+End;
+
+Function SysSchedGetaffinity(Pid, Len, Mask : LongInt) : LongInt;
+Begin
+  If SchedTarget(Pid) = Nil Then
+  Begin
+    SysSchedGetaffinity := -ESRCH;
+    Exit;
+  End;
+  If Len < 4 Then
+  Begin
+    SysSchedGetaffinity := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(Mask, 4, True) Then
+  Begin
+    SysSchedGetaffinity := -EFAULT;
+    Exit;
+  End;
+  MemL[0:Mask] := 1;
+  SysSchedGetaffinity := 4;
+End;
+
+Function SysGetcpu(CpuA, NodeA, Cache : LongInt) : LongInt;
+Begin
+  SysGetcpu := 0;
+  If CpuA <> 0 Then
+    If PutUserL(CpuA, 0) < 0 Then SysGetcpu := -EFAULT;
+  If NodeA <> 0 Then
+    If PutUserL(NodeA, 0) < 0 Then SysGetcpu := -EFAULT;
+End;
+
+{ Priorites d'E/S : acceptees et memorisees nulle part (pas d'ordonnanceur
+  d'E/S) ; ioprio_get renvoie la classe "none" }
+Function SysIoprioSet(Which, Who, Prio : LongInt) : LongInt;
+Begin
+  If (Which < 1) Or (Which > 3) Then SysIoprioSet := -EINVAL
+  Else SysIoprioSet := 0;
+End;
+
+Function SysIoprioGet(Which, Who : LongInt) : LongInt;
+Begin
+  If (Which < 1) Or (Which > 3) Then SysIoprioGet := -EINVAL
+  Else SysIoprioGet := 0;
+End;
+
+{ ---- Capacites : capget / capset ---- }
+
+Function SysCapget(Hdr, Data : LongInt) : LongInt;
+Var Ver, Pid, Words : LongInt; T : PTask;
+Begin
+  If Not EnsureUser(Hdr, 8, True) Then
+  Begin
+    SysCapget := -EFAULT;
+    Exit;
+  End;
+  Ver := MemL[0:Hdr];
+  Pid := MemL[0:Hdr + 4];
+  If Ver = $19980330 Then Words := 1
+  Else If (Ver = $20071026) Or (Ver = $20080522) Then Words := 2
+  Else
+  Begin
+    MemL[0:Hdr] := $20080522;
+    If Data = 0 Then SysCapget := 0 Else SysCapget := -EINVAL;
+    Exit;
+  End;
+  If Pid < 0 Then
+  Begin
+    SysCapget := -EINVAL;
+    Exit;
+  End;
+  T := SchedTarget(Pid);
+  If T = Nil Then
+  Begin
+    SysCapget := -ESRCH;
+    Exit;
+  End;
+  If Data = 0 Then
+  Begin
+    SysCapget := 0;
+    Exit;
+  End;
+  If Not EnsureUser(Data, 12 * Words, True) Then
+  Begin
+    SysCapget := -EFAULT;
+    Exit;
+  End;
+  MemL[0:Data] := T^.CapE0; MemL[0:Data + 4] := T^.CapP0;
+  MemL[0:Data + 8] := T^.CapI0;
+  If Words = 2 Then
+  Begin
+    MemL[0:Data + 12] := T^.CapE1; MemL[0:Data + 16] := T^.CapP1;
+    MemL[0:Data + 20] := T^.CapI1;
+  End;
+  SysCapget := 0;
+End;
+
+Function SysCapset(Hdr, Data : LongInt) : LongInt;
+Var Ver, Words, E0, E1, P0, P1, I0, I1 : LongInt;
+Begin
+  If Not EnsureUser(Hdr, 8, True) Then
+  Begin
+    SysCapset := -EFAULT;
+    Exit;
+  End;
+  Ver := MemL[0:Hdr];
+  If Ver = $19980330 Then Words := 1
+  Else If (Ver = $20071026) Or (Ver = $20080522) Then Words := 2
+  Else
+  Begin
+    MemL[0:Hdr] := $20080522;
+    SysCapset := -EINVAL;
+    Exit;
+  End;
+  If (MemL[0:Hdr + 4] <> 0) And (MemL[0:Hdr + 4] <> Cur^.Pid) Then
+  Begin
+    SysCapset := -EPERM;
+    Exit;
+  End;
+  If Not EnsureUser(Data, 12 * Words, False) Then
+  Begin
+    SysCapset := -EFAULT;
+    Exit;
+  End;
+  E0 := MemL[0:Data]; P0 := MemL[0:Data + 4]; I0 := MemL[0:Data + 8];
+  E1 := 0; P1 := 0; I1 := 0;
+  If Words = 2 Then
+  Begin
+    E1 := MemL[0:Data + 12]; P1 := MemL[0:Data + 16]; I1 := MemL[0:Data + 20];
+  End;
+  If ((P0 And Not Cur^.CapP0) <> 0) Or ((P1 And Not Cur^.CapP1) <> 0)
+     Or ((E0 And Not P0) <> 0) Or ((E1 And Not P1) <> 0)
+     Or ((I0 And Not (Cur^.CapI0 Or Cur^.CapP0)) <> 0)
+     Or ((I1 And Not (Cur^.CapI1 Or Cur^.CapP1)) <> 0) Then
+  Begin
+    SysCapset := -EPERM;
+    Exit;
+  End;
+  Cur^.CapE0 := E0; Cur^.CapP0 := P0; Cur^.CapI0 := I0;
+  Cur^.CapE1 := E1 And $1FF; Cur^.CapP1 := P1 And $1FF; Cur^.CapI1 := I1;
+  SysCapset := 0;
+End;
+
+{ ---- Fichiers : copies, vecteurs, fallocate, statx, *at ---- }
+
+Const
+  EOVERFLOW = 75; ENODATA = 61;
+
+{ Copie noyau entre deux fichiers (sendfile, splice, copy_file_range).
+  InPtr / OutPtr : adresses utilisateur d'un decalage (0 : position du
+  fichier) ; Wide : decalage sur 64 bits }
+Function CopyFd(Fi, Fo : PFile; InPtr, OutPtr, Cnt : LongInt) : LongInt;
+Var Buf, Tot, Ch, R, W, SvI, SvO : LongInt;
+Begin
+  CopyFd := 0;
+  If Cnt <= 0 Then Exit;
+  If ((InPtr <> 0) And Not EnsureUser(InPtr, 4, True))
+     Or ((OutPtr <> 0) And Not EnsureUser(OutPtr, 4, True)) Then
+  Begin
+    CopyFd := -EFAULT;
+    Exit;
+  End;
+  Buf := AllocPages(0);
+  If Buf = 0 Then
+  Begin
+    CopyFd := -ENOMEM;
+    Exit;
+  End;
+  SvI := Fi^.Pos; SvO := Fo^.Pos;
+  If InPtr <> 0 Then Fi^.Pos := MemL[0:InPtr];
+  If OutPtr <> 0 Then Fo^.Pos := MemL[0:OutPtr];
+  Tot := 0;
+  R := 0;
+  While Tot < Cnt Do
+  Begin
+    Ch := Cnt - Tot;
+    If Ch > 4096 Then Ch := 4096;
+    R := VfsRead(Fi, Buf, Ch);
+    If R <= 0 Then Break;
+    W := VfsWrite(Fo, Buf, R);
+    If W <= 0 Then
+    Begin
+      Fi^.Pos := Fi^.Pos - R;
+      R := W;
+      Break;
+    End;
+    If W < R Then Fi^.Pos := Fi^.Pos - (R - W);
+    Tot := Tot + W;
+    If W < R Then
+    Begin
+      R := 0;
+      Break;
+    End;
+  End;
+  If InPtr <> 0 Then
+  Begin
+    MemL[0:InPtr] := Fi^.Pos;
+    Fi^.Pos := SvI;
+  End;
+  If OutPtr <> 0 Then
+  Begin
+    MemL[0:OutPtr] := Fo^.Pos;
+    Fo^.Pos := SvO;
+  End;
+  FreePages(Buf, 0);
+  If (Tot = 0) And (R < 0) Then CopyFd := R Else CopyFd := Tot;
+End;
+
+Function IsPipeFile(F : PFile) : Boolean;
+Begin
+  IsPipeFile := (F^.Inode^.Mode And S_IFMT) = S_IFIFO;
+End;
+
+{ sendfile (decalage 32 bits) et sendfile64 }
+Function DoSendfile(Out, In_, OffA, Cnt : LongInt) : LongInt;
+Var Fi, Fo : PFile;
+Begin
+  Fi := FdGet(In_); Fo := FdGet(Out);
+  If (Fi = Nil) Or (Fo = Nil) Then
+  Begin
+    DoSendfile := -EBADF;
+    Exit;
+  End;
+  If ((Fi^.Flags And O_ACCMODE) = O_WRONLY) Or ((Fo^.Flags And O_ACCMODE)
+      = O_RDONLY) Then
+  Begin
+    DoSendfile := -EBADF;
+    Exit;
+  End;
+  If (Fi^.Inode^.Mode And S_IFMT) <> S_IFREG Then
+  Begin
+    DoSendfile := -EINVAL;
+    Exit;
+  End;
+  If Cnt > $7FFFF000 Then Cnt := $7FFFF000;
+  DoSendfile := CopyFd(Fi, Fo, OffA, 0, Cnt);
+End;
+
+Function SysSendfile(Out, In_, OffA, Cnt : LongInt) : LongInt;
+Begin
+  SysSendfile := DoSendfile(Out, In_, OffA, Cnt);
+End;
+
+Function SysSendfile64(Out, In_, OffA, Cnt : LongInt) : LongInt;
+Begin
+  SysSendfile64 := DoSendfile(Out, In_, OffA, Cnt);
+End;
+
+Function SysCopyFileRange(Fdi, OffI, Fdo, OffO, Len, Flags : LongInt) : LongInt;
+Var Fi, Fo : PFile;
+Begin
+  If Flags <> 0 Then
+  Begin
+    SysCopyFileRange := -EINVAL;
+    Exit;
+  End;
+  Fi := FdGet(Fdi); Fo := FdGet(Fdo);
+  If (Fi = Nil) Or (Fo = Nil) Then
+  Begin
+    SysCopyFileRange := -EBADF;
+    Exit;
+  End;
+  If ((Fi^.Inode^.Mode And S_IFMT) <> S_IFREG)
+     Or ((Fo^.Inode^.Mode And S_IFMT) <> S_IFREG) Then
+  Begin
+    SysCopyFileRange := -EINVAL;
+    Exit;
+  End;
+  If (Fo^.Flags And O_APPEND) <> 0 Then
+  Begin
+    SysCopyFileRange := -EBADF;
+    Exit;
+  End;
+  SysCopyFileRange := CopyFd(Fi, Fo, OffI, OffO, Len);
+End;
+
+{ splice : au moins un des deux cotes est un tube }
+Function SysSplice(Fdi, OffI, Fdo, OffO, Len, Flags : LongInt) : LongInt;
+Var Fi, Fo : PFile;
+Begin
+  Fi := FdGet(Fdi); Fo := FdGet(Fdo);
+  If (Fi = Nil) Or (Fo = Nil) Then
+  Begin
+    SysSplice := -EBADF;
+    Exit;
+  End;
+  If (Flags And Not $F) <> 0 Then
+  Begin
+    SysSplice := -EINVAL;
+    Exit;
+  End;
+  If Not (IsPipeFile(Fi) Or IsPipeFile(Fo)) Then
+  Begin
+    SysSplice := -EINVAL;
+    Exit;
+  End;
+  If (IsPipeFile(Fi) And (OffI <> 0)) Or (IsPipeFile(Fo) And (OffO <> 0)) Then
+  Begin
+    SysSplice := -ESPIPE;
+    Exit;
+  End;
+  If Len > $7FFFF000 Then Len := $7FFFF000;
+  SysSplice := CopyFd(Fi, Fo, OffI, OffO, Len);
+End;
+
+{ vmsplice : ecrit (ou lit) un vecteur dans un tube }
+Function SysVmsplice(Fd, Iov, Nr, Flags : LongInt) : LongInt;
+Var F : PFile;
+Begin
+  F := FdGet(Fd);
+  If F = Nil Then
+  Begin
+    SysVmsplice := -EBADF;
+    Exit;
+  End;
+  If Not IsPipeFile(F) Then
+  Begin
+    SysVmsplice := -EBADF;
+    Exit;
+  End;
+  If (F^.Flags And O_ACCMODE) = O_WRONLY Then
+    SysVmsplice := SysWritev(Fd, Iov, Nr)
+  Else SysVmsplice := SysReadv(Fd, Iov, Nr);
+End;
+
+{ preadv / pwritev (+ v2) : position 64 bits ; au-dela de 2 Go : EFBIG }
+Function DoPrwv(Fd, Iov, Cnt, PosLo, PosHi : LongInt; Wr : Boolean) : LongInt;
+Var I, Tot, Base, Len, R : LongInt;
+Begin
+  If (Cnt < 0) Or (Cnt > 1024) Then
+  Begin
+    DoPrwv := -EINVAL;
+    Exit;
+  End;
+  If (PosHi <> 0) Or (PosLo < 0) Then
+  Begin
+    If (PosHi = -1) And (PosLo = -1) Then
+    Begin
+      If Wr Then DoPrwv := SysWritev(Fd, Iov, Cnt)
+      Else DoPrwv := SysReadv(Fd, Iov, Cnt);
+    End
+    Else DoPrwv := -EFBIG;
+    Exit;
+  End;
+  If Not EnsureUser(Iov, Cnt * 8, False) Then
+  Begin
+    DoPrwv := -EFAULT;
+    Exit;
+  End;
+  Tot := 0;
+  For I := 0 To Cnt - 1 Do
+  Begin
+    Base := MemL[0:Iov + I * 8];
+    Len := MemL[0:Iov + I * 8 + 4];
+    If Len = 0 Then Continue;
+    If Wr Then R := SysPwrite(Fd, Base, Len, PosLo + Tot, 0)
+    Else R := SysPread(Fd, Base, Len, PosLo + Tot, 0);
+    If R < 0 Then
+    Begin
+      If Tot = 0 Then Tot := R;
+      Break;
+    End;
+    Tot := Tot + R;
+    If R < Len Then Break;
+  End;
+  DoPrwv := Tot;
+End;
+
+Function SysPreadv(Fd, Iov, Cnt, Lo, Hi : LongInt) : LongInt;
+Begin
+  SysPreadv := DoPrwv(Fd, Iov, Cnt, Lo, Hi, False);
+End;
+
+Function SysPwritev(Fd, Iov, Cnt, Lo, Hi : LongInt) : LongInt;
+Begin
+  SysPwritev := DoPrwv(Fd, Iov, Cnt, Lo, Hi, True);
+End;
+
+Function SysPreadv2(Fd, Iov, Cnt, Lo, Hi, Flags : LongInt) : LongInt;
+Begin
+  If (Flags And Not $1F) <> 0 Then SysPreadv2 := -EOPNOTSUPP
+  Else SysPreadv2 := DoPrwv(Fd, Iov, Cnt, Lo, Hi, False);
+End;
+
+Function SysPwritev2(Fd, Iov, Cnt, Lo, Hi, Flags : LongInt) : LongInt;
+Begin
+  If (Flags And Not $1F) <> 0 Then SysPwritev2 := -EOPNOTSUPP
+  Else SysPwritev2 := DoPrwv(Fd, Iov, Cnt, Lo, Hi, True);
+End;
+
+{ fallocate : pas de reservation de blocs (les systemes de fichiers
+  alloueront a l'ecriture) ; mode 0 agrandit le fichier, KEEP_SIZE ne fait
+  rien, PUNCH_HOLE/ZERO_RANGE ecrivent des zeros }
+Function SysFallocate(Fd, Mode, OffLo, OffHi, LenLo, LenHi : LongInt) : LongInt;
+Var F : PFile; I : PInode; E, Buf, N, Ch, Sv, Pos : LongInt;
+Begin
+  F := FdGet(Fd);
+  If F = Nil Then
+  Begin
+    SysFallocate := -EBADF;
+    Exit;
+  End;
+  If (F^.Flags And O_ACCMODE) = O_RDONLY Then
+  Begin
+    SysFallocate := -EBADF;
+    Exit;
+  End;
+  I := F^.Inode;
+  If IsPipeFile(F) Then
+  Begin
+    SysFallocate := -ESPIPE;
+    Exit;
+  End;
+  If (I^.Mode And S_IFMT) <> S_IFREG Then
+  Begin
+    SysFallocate := -ENODEV;
+    Exit;
+  End;
+  If (OffHi <> 0) Or (LenHi <> 0) Or (OffLo < 0) Or (LenLo <= 0) Then
+  Begin
+    If (LenLo <= 0) And (LenHi = 0) Then SysFallocate := -EINVAL
+    Else SysFallocate := -EFBIG;
+    Exit;
+  End;
+  E := OffLo + LenLo;
+  If E < 0 Then
+  Begin
+    SysFallocate := -EFBIG;
+    Exit;
+  End;
+  Case Mode Of
+    0 : If E > I^.Size Then SysFallocate := VfsTruncateInode(I, E)
+        Else SysFallocate := 0;
+    1 : SysFallocate := 0;
+    3, $10, $11 :
+      Begin
+        Buf := AllocPages(0);
+        If Buf = 0 Then
+        Begin
+          SysFallocate := -ENOMEM;
+          Exit;
+        End;
+        MemFill(Buf, 0, 4096);
+        If E > I^.Size Then
+          If (Mode = $10) Then VfsTruncateInode(I, E) Else E := I^.Size;
+        Sv := F^.Pos;
+        Pos := OffLo;
+        N := 0;
+        While Pos < E Do
+        Begin
+          Ch := E - Pos;
+          If Ch > 4096 Then Ch := 4096;
+          F^.Pos := Pos;
+          If VfsWrite(F, Buf, Ch) <= 0 Then Break;
+          Pos := Pos + Ch;
+        End;
+        F^.Pos := Sv;
+        FreePages(Buf, 0);
+        SysFallocate := 0;
+      End;
+  Else
+    SysFallocate := -EOPNOTSUPP;
+  End;
+End;
+
+Function SysSyncfs(Fd : LongInt) : LongInt;
+Var F : PFile; Fn : LongInt;
+Begin
+  F := FdGet(Fd);
+  If F = Nil Then
+  Begin
+    SysSyncfs := -EBADF;
+    Exit;
+  End;
+  Fn := GetOp(F^.Inode^.Sb^.SOps, SoSync);
+  If Fn <> 0 Then Call1(Fn, LongInt(F^.Inode^.Sb));
+  If F^.Inode^.Sb^.Dev <> 0 Then BSync(F^.Inode^.Sb^.Dev);
+  SysSyncfs := 0;
+End;
+
+Function SysSyncFileRange(Fd, OffLo, OffHi, NLo, NHi, Flags : LongInt)
+    : LongInt;
+Begin
+  If (Flags And Not 7) <> 0 Then
+  Begin
+    SysSyncFileRange := -EINVAL;
+    Exit;
+  End;
+  If FdGet(Fd) = Nil Then SysSyncFileRange := -EBADF
+  Else SysSyncFileRange := SysFsync(Fd);
+End;
+
+Function SysReadahead(Fd, OffLo, OffHi, Cnt : LongInt) : LongInt;
+Var F : PFile;
+Begin
+  F := FdGet(Fd);
+  If F = Nil Then SysReadahead := -EBADF
+  Else If (F^.Inode^.Mode And S_IFMT) <> S_IFREG Then SysReadahead := -EINVAL
+  Else SysReadahead := 0;
+End;
+
+Function SysFadvise64(Fd, OffLo, OffHi, Len, Advice : LongInt) : LongInt;
+Var F : PFile;
+Begin
+  F := FdGet(Fd);
+  If F = Nil Then SysFadvise64 := -EBADF
+  Else If IsPipeFile(F) Then SysFadvise64 := -ESPIPE
+  Else If (Advice < 0) Or (Advice > 5) Then SysFadvise64 := -EINVAL
+  Else SysFadvise64 := 0;
+End;
+
+Function SysFadvise64_64(Fd, OffLo, OffHi, LenLo, LenHi, Advice : LongInt)
+    : LongInt;
+Begin
+  SysFadvise64_64 := SysFadvise64(Fd, OffLo, OffHi, LenLo, Advice);
+End;
+
+{ ---- Chemins relatifs a un repertoire ---- }
+
+{ Chemin absolu de P relatif a Dirfd }
+Function AtAbs(Dirfd : LongInt; Const P : String; Var Out : String) : LongInt;
+Var F : PFile;
+Begin
+  AtAbs := 0;
+  Out := P;
+  If (Dirfd = AT_FDCWD) Or ((Length(P) > 0) And (P[1] = '/')) Then Exit;
+  F := FdGet(Dirfd);
+  If F = Nil Then
+  Begin
+    AtAbs := -EBADF;
+    Exit;
+  End;
+  If Not IsDir(F^.Inode) Then
+  Begin
+    AtAbs := -ENOTDIR;
+    Exit;
+  End;
+  Out := DentryPath(F^.Dentry);
+  If Out = '/' Then Out := '' ;
+  Out := Out + '/' + P;
+End;
+
+Function SysRenameat2(Od, OldA, Nd, NewA, Flags : LongInt) : LongInt;
+Var P, Q, A, B, T : String; R : LongInt; D : PDentry;
+Begin
+  If (Flags And Not 7) <> 0 Then
+  Begin
+    SysRenameat2 := -EINVAL;
+    Exit;
+  End;
+  If ((Flags And 1) <> 0) And ((Flags And 2) <> 0) Then
+  Begin
+    SysRenameat2 := -EINVAL;
+    Exit;
+  End;
+  If (Flags And 4) <> 0 Then
+  Begin
+    SysRenameat2 := -EINVAL;
+    Exit;
+  End;
+  R := GetUserStr(OldA, P);
+  If R < 0 Then
+  Begin
+    SysRenameat2 := R;
+    Exit;
+  End;
+  R := GetUserStr(NewA, Q);
+  If R < 0 Then
+  Begin
+    SysRenameat2 := R;
+    Exit;
+  End;
+  R := AtAbs(Od, P, A);
+  If R = 0 Then R := AtAbs(Nd, Q, B);
+  If R <> 0 Then
+  Begin
+    SysRenameat2 := R;
+    Exit;
+  End;
+  If (Flags And 1) <> 0 Then
+  Begin
+    If PathWalk(B, False, D) = 0 Then
+    Begin
+      DentryPut(LongInt(D));
+      SysRenameat2 := -EEXIST;
+      Exit;
+    End;
+  End;
+  If (Flags And 2) <> 0 Then
+  Begin
+    { echange non atomique : A -> T, B -> A, T -> B }
+    If PathWalk(B, False, D) <> 0 Then
+    Begin
+      SysRenameat2 := -ENOENT;
+      Exit;
+    End;
+    DentryPut(LongInt(D));
+    T := A + '.xchg' + IntStr(Cur^.Pid);
+    R := VfsRename(A, T);
+    If R = 0 Then
+    Begin
+      R := VfsRename(B, A);
+      If R = 0 Then R := VfsRename(T, B)
+      Else VfsRename(T, A);
+    End;
+    SysRenameat2 := R;
+    Exit;
+  End;
+  SysRenameat2 := VfsRename(A, B);
+End;
+
+Function SysRenameatNew(Od, OldA, Nd, NewA : LongInt) : LongInt;
+Begin
+  SysRenameatNew := SysRenameat2(Od, OldA, Nd, NewA, 0);
+End;
+
+Function SysFaccessat2(Dirfd, PathA, Mode, Flags : LongInt) : LongInt;
+Begin
+  If (Flags And Not $1300) <> 0 Then SysFaccessat2 := -EINVAL
+  Else SysFaccessat2 := SysFaccessat(Dirfd, PathA, Mode);
+End;
+
+Function SysFchmodat2(Dirfd, PathA, Mode, Flags : LongInt) : LongInt;
+Begin
+  If (Flags And Not $1100) <> 0 Then SysFchmodat2 := -EINVAL
+  Else SysFchmodat2 := SysFchmodat(Dirfd, PathA, Mode);
+End;
+
+{ openat2 : struct open_how { flags, mode, resolve } ; les options
+  RESOLVE_* ne sont pas gerees (EOPNOTSUPP) }
+Function SysOpenat2(Dirfd, PathA, How, Size : LongInt) : LongInt;
+Begin
+  If Size < 24 Then
+  Begin
+    SysOpenat2 := -EINVAL;
+    Exit;
+  End;
+  If Not EnsureUser(How, 24, False) Then
+  Begin
+    SysOpenat2 := -EFAULT;
+    Exit;
+  End;
+  If (MemL[0:How + 16] <> 0) Or (MemL[0:How + 20] <> 0) Then
+  Begin
+    SysOpenat2 := -EOPNOTSUPP;
+    Exit;
+  End;
+  SysOpenat2 := SysOpenat(Dirfd, PathA, MemL[0:How], MemL[0:How + 8]);
+End;
+
+Function SysExecveat(Dirfd, PathA, Argv, Envp, Flags : LongInt) : LongInt;
+Var P : String; R : LongInt; Sv : PDentry;
+Begin
+  If (Flags And Not $1100) <> 0 Then
+  Begin
+    SysExecveat := -EINVAL;
+    Exit;
+  End;
+  R := GetUserStr(PathA, P);
+  If R < 0 Then
+  Begin
+    SysExecveat := R;
+    Exit;
+  End;
+  If (P = '') Then
+  Begin
+    SysExecveat := -ENOENT;
+    Exit;
+  End;
+  R := AtEnter(Dirfd, P, Sv);
+  If R < 0 Then
+  Begin
+    SysExecveat := R;
+    Exit;
+  End;
+  R := DoExecve(PathA, Argv, Envp);
+  AtRestore(Sv);
+  SysExecveat := R;
+End;
+
+Function SysCloseRange(First, Last, Flags : LongInt) : LongInt;
+Var I : LongInt; F : PFiles;
+Begin
+  If ((Flags And Not 6) <> 0) Or (First > Last) Then
+  Begin
+    SysCloseRange := -EINVAL;
+    Exit;
+  End;
+  If (Flags And 2) <> 0 Then
+  Begin
+    F := FilesDup(Cur^.Files);
+    If F <> Nil Then
+    Begin
+      FilesRelease(Cur^.Files);
+      Cur^.Files := F;
+    End;
+  End;
+  If Last >= MaxFd Then Last := MaxFd - 1;
+  For I := First To Last Do
+    If Cur^.Files^.Fd[I] <> 0 Then
+    Begin
+      If (Flags And 4) <> 0 Then Cur^.Files^.CloseExec[I] := 1
+      Else FdClose(I);
+    End;
+  SysCloseRange := 0;
+End;
+
+{ ---- statx ---- }
+
+Function SysStatx(Dirfd, PathA, Flags, Mask, Buf : LongInt) : LongInt;
+Var P : String; R : LongInt; Sv : PDentry; D : PDentry; I : PInode; F : PFile;
+    Own : Boolean;
+Begin
+  If (Flags And Not $7F00) <> 0 Then
+  Begin
+    SysStatx := -EINVAL;
+    Exit;
+  End;
+  R := GetUserStr(PathA, P);
+  If R < 0 Then
+  Begin
+    SysStatx := R;
+    Exit;
+  End;
+  If Not EnsureUser(Buf, 256, True) Then
+  Begin
+    SysStatx := -EFAULT;
+    Exit;
+  End;
+  Own := False;
+  D := Nil;
+  If (P = '') And ((Flags And $1000) <> 0) Then
+  Begin
+    F := FdGet(Dirfd);
+    If F = Nil Then
+    Begin
+      SysStatx := -EBADF;
+      Exit;
+    End;
+    I := F^.Inode;
+  End
+  Else
+  Begin
+    R := AtEnter(Dirfd, P, Sv);
+    If R < 0 Then
+    Begin
+      SysStatx := R;
+      Exit;
+    End;
+    R := PathWalk(P, (Flags And $100) = 0, D);
+    AtRestore(Sv);
+    If R <> 0 Then
+    Begin
+      SysStatx := R;
+      Exit;
+    End;
+    I := D^.Inode;
+    Own := True;
+  End;
+  MemFill(Buf, 0, 256);
+  MemL[0:Buf] := $7FF;
+  MemL[0:Buf + 4] := 4096;
+  MemL[0:Buf + 16] := I^.Nlink;
+  MemL[0:Buf + 20] := I^.Uid;
+  MemL[0:Buf + 24] := I^.Gid;
+  MemW[0:Buf + 28] := I^.Mode And $FFFF;
+  MemL[0:Buf + 32] := I^.Ino;
+  MemL[0:Buf + 40] := I^.Size;
+  MemL[0:Buf + 48] := I^.Blocks;
+  MemL[0:Buf + 64] := I^.Atime;
+  MemL[0:Buf + 96] := I^.Ctime;
+  MemL[0:Buf + 112] := I^.Mtime;
+  MemL[0:Buf + 128] := (I^.Rdev Shr 8) And $FFF;
+  MemL[0:Buf + 132] := I^.Rdev And $FF;
+  MemL[0:Buf + 136] := (I^.Dev Shr 8) And $FFF;
+  MemL[0:Buf + 140] := I^.Dev And $FF;
+  If Own Then DentryPut(LongInt(D));
+  SysStatx := 0;
+End;
+
+{ ---- Memoire : mincore, mlock, madvise ---- }
+
+{ Pages verrouillees d'un espace d'adressage }
+Function MmLockedPages(Mm : PMm) : LongInt;
+Var V : PVma; N : LongInt;
+Begin
+  N := 0;
+  V := Mm^.Vma;
+  While V <> Nil Do
+  Begin
+    If (V^.Flags And VmLocked) <> 0 Then N := N + ((V^.Fin - V^.Start) Shr 12);
+    V := V^.Next;
+  End;
+  MmLockedPages := N;
+End;
+
+{ [A, B) est-il entierement couvert par des VMA ? }
+Function MmRangeMapped(Mm : PMm; A, B : LongInt) : Boolean;
+Var V : PVma; Va : LongInt;
+Begin
+  Va := A;
+  While ULt(Va, B) Do
+  Begin
+    V := FindVma(Mm, Va);
+    If V = Nil Then
+    Begin
+      MmRangeMapped := False;
+      Exit;
+    End;
+    Va := V^.Fin;
+  End;
+  MmRangeMapped := True;
+End;
+
+{ Positionner / effacer VmLocked sur [A, B) en decoupant les VMA ; les pages
+  sont chargees (verrouillage) }
+Function MmLockRange(Mm : PMm; A, B : LongInt; Lock : Boolean) : LongInt;
+Var V, W : PVma; Va, P : LongInt;
+Begin
+  MmLockRange := 0;
+  V := Mm^.Vma;
+  While V <> Nil Do
+  Begin
+    If ULe(B, V^.Start) Then Break;
+    If ULt(A, V^.Fin) Then
+    Begin
+      If ULt(V^.Start, A) Then
+      Begin
+        W := VmaSplit(Mm, V, A);
+        If W = Nil Then
+        Begin
+          MmLockRange := -ENOMEM;
+          Exit;
+        End;
+        V := W;
+      End;
+      If ULt(B, V^.Fin) Then
+      Begin
+        W := VmaSplit(Mm, V, B);
+        If W = Nil Then
+        Begin
+          MmLockRange := -ENOMEM;
+          Exit;
+        End;
+      End;
+      If Lock Then
+      Begin
+        V^.Flags := V^.Flags Or VmLocked;
+        If (V^.Flags And VmPhys) = 0 Then
+        Begin
+          Va := V^.Start;
+          While ULt(Va, V^.Fin) Do
+          Begin
+            P := PtePtr(Mm, Va, False);
+            If (P = 0) Or ((MemL[0:P] And 1) = 0) Then
+              If (V^.Prot <> 0) Then MmFault(Mm, Va, False, 0);
+            Va := Va + PageSize;
+          End;
+        End;
+      End
+      Else V^.Flags := V^.Flags And Not VmLocked;
+    End;
+    V := V^.Next;
+  End;
+End;
+
+Function DoMlock(Addr, Len : LongInt) : LongInt;
+Var A, B, Lim, Have : LongInt;
+Begin
+  If Len < 0 Then
+  Begin
+    DoMlock := -EINVAL;
+    Exit;
+  End;
+  A := PageDown(Addr);
+  B := PageUp(Addr + Len);
+  If Len = 0 Then B := A;
+  If Not Capable(14) Then
+  Begin
+    Lim := Cur^.RlimCur[RLIM_MEMLOCK];
+    If Lim = 0 Then
+    Begin
+      DoMlock := -EPERM;
+      Exit;
+    End;
+    Have := MmLockedPages(Cur^.Mm) + ((B - A) Shr 12);
+    If (Lim <> RLIM_INFINITY) And (Have > (Lim Shr 12)) Then
+    Begin
+      DoMlock := -ENOMEM;
+      Exit;
+    End;
+  End;
+  If Not MmRangeMapped(Cur^.Mm, A, B) Then
+  Begin
+    DoMlock := -ENOMEM;
+    Exit;
+  End;
+  DoMlock := MmLockRange(Cur^.Mm, A, B, True);
+End;
+
+Function SysMlock(Addr, Len : LongInt) : LongInt;
+Begin
+  SysMlock := DoMlock(Addr, Len);
+End;
+
+Function SysMlock2(Addr, Len, Flags : LongInt) : LongInt;
+Begin
+  If (Flags And Not 1) <> 0 Then SysMlock2 := -EINVAL
+  Else SysMlock2 := DoMlock(Addr, Len);
+End;
+
+Function SysMunlock(Addr, Len : LongInt) : LongInt;
+Var A, B : LongInt;
+Begin
+  If Len < 0 Then
+  Begin
+    SysMunlock := -EINVAL;
+    Exit;
+  End;
+  A := PageDown(Addr);
+  B := PageUp(Addr + Len);
+  If Not MmRangeMapped(Cur^.Mm, A, B) Then
+  Begin
+    SysMunlock := -ENOMEM;
+    Exit;
+  End;
+  SysMunlock := MmLockRange(Cur^.Mm, A, B, False);
+End;
+
+Function SysMlockall(Flags : LongInt) : LongInt;
+Var V : PVma; Lim : LongInt;
+Begin
+  If ((Flags And Not 7) <> 0) Or ((Flags And 3) = 0) Then
+  Begin
+    SysMlockall := -EINVAL;
+    Exit;
+  End;
+  If Not Capable(14) Then
+  Begin
+    Lim := Cur^.RlimCur[RLIM_MEMLOCK];
+    If Lim = 0 Then
+    Begin
+      SysMlockall := -EPERM;
+      Exit;
+    End;
+    If (Lim <> RLIM_INFINITY) And ((Cur^.Mm^.TotalVm) > (Lim Shr 12)) Then
+    Begin
+      SysMlockall := -ENOMEM;
+      Exit;
+    End;
+  End;
+  If (Flags And 2) <> 0 Then Cur^.Mm^.LockFuture := 1;
+  If (Flags And 1) <> 0 Then
+  Begin
+    V := Cur^.Mm^.Vma;
+    While V <> Nil Do
+    Begin
+      MmLockRange(Cur^.Mm, V^.Start, V^.Fin, True);
+      V := V^.Next;
+    End;
+  End;
+  SysMlockall := 0;
+End;
+
+Function SysMunlockall : LongInt;
+Var V : PVma;
+Begin
+  Cur^.Mm^.LockFuture := 0;
+  V := Cur^.Mm^.Vma;
+  While V <> Nil Do
+  Begin
+    V^.Flags := V^.Flags And Not VmLocked;
+    V := V^.Next;
+  End;
+  SysMunlockall := 0;
+End;
+
+{ mincore : un octet par page, bit 0 = page en memoire }
+Function SysMincore(Addr, Len, Vec : LongInt) : LongInt;
+Var A, B, N, I, P, Pte : LongInt;
+Begin
+  If (Addr And $FFF) <> 0 Then
+  Begin
+    SysMincore := -EINVAL;
+    Exit;
+  End;
+  If Len < 0 Then
+  Begin
+    SysMincore := -ENOMEM;
+    Exit;
+  End;
+  A := Addr;
+  B := PageUp(Addr + Len);
+  N := (B - A) Shr 12;
+  If Not MmRangeMapped(Cur^.Mm, A, B) Then
+  Begin
+    SysMincore := -ENOMEM;
+    Exit;
+  End;
+  If Not EnsureUser(Vec, N, True) Then
+  Begin
+    SysMincore := -EFAULT;
+    Exit;
+  End;
+  For I := 0 To N - 1 Do
+  Begin
+    P := PtePtr(Cur^.Mm, A + I * PageSize, False);
+    Pte := 0;
+    If P <> 0 Then Pte := MemL[0:P];
+    Mem[0:Vec + I] := Pte And 1;
+  End;
+  SysMincore := 0;
+End;
+
+{ madvise : DONTNEED/FREE rendent les pages (anonymes : remises a zero a
+  l'acces) ; les autres conseils sont acceptes sans effet }
+Function SysMadviseReal(Addr, Len, Adv : LongInt) : LongInt;
+Var A, B : LongInt; V : PVma;
+Begin
+  If ((Addr And $FFF) <> 0) Or (Len < 0) Then
+  Begin
+    SysMadviseReal := -EINVAL;
+    Exit;
+  End;
+  A := Addr;
+  B := PageUp(Addr + Len);
+  If Not MmRangeMapped(Cur^.Mm, A, B) Then
+  Begin
+    SysMadviseReal := -ENOMEM;
+    Exit;
+  End;
+  Case Adv Of
+    0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21 :
+      SysMadviseReal := 0;
+    4, 8 :
+      Begin
+        V := Cur^.Mm^.Vma;
+        While V <> Nil Do
+        Begin
+          If (V^.Flags And VmLocked) <> 0 Then
+            If ULt(A, V^.Fin) And ULt(V^.Start, B) Then
+            Begin
+              SysMadviseReal := -EINVAL;
+              Exit;
+            End;
+          V := V^.Next;
+        End;
+        MmUnmapPages(Cur^.Mm, A, B);
+        SysMadviseReal := 0;
+      End;
+  Else
+    SysMadviseReal := -EINVAL;
+  End;
+End;
+
+{ ---- waitid ---- }
+
+Function DoWaitid(IdType, Id, Info, Options, Ru : LongInt) : LongInt;
+Var I, Found, Code, Stt : LongInt; T : PTask; Match : Boolean;
+Begin
+  If ((Options And Not $0300000F) <> 0) Or ((Options And $E) = 0)
+     Or (IdType < 0) Or (IdType > 2) Then
+  Begin
+    DoWaitid := -EINVAL;
+    Exit;
+  End;
+  If (Info <> 0) And Not EnsureUser(Info, 128, True) Then
+  Begin
+    DoWaitid := -EFAULT;
+    Exit;
+  End;
+  While True Do
+  Begin
+    Found := 0;
+    For I := 1 To MaxTasks - 1 Do
+    Begin
+      T := @Tasks[I];
+      If (T^.State <> TsFree) And (T^.Parent = Cur) And (T <> Cur) Then
+      Begin
+        Case IdType Of
+          0 : Match := True;
+          1 : Match := T^.Pid = Id;
+        Else
+          Match := (T^.Pgid = Id) Or ((Id = 0) And (T^.Pgid = Cur^.Pgid));
+        End;
+        If Not Match Then Continue;
+        Inc(Found);
+        Code := 0;
+        If (T^.State = TsZombie) And ((Options And 4) <> 0) Then
+        Begin
+          If (T^.ExitCode And $7F) = 0 Then
+          Begin
+            Code := 1; Stt := (T^.ExitCode Shr 8) And $FF;
+          End
+          Else
+          Begin
+            If (T^.ExitCode And $80) <> 0 Then Code := 3 Else Code := 2;
+            Stt := T^.ExitCode And $7F;
+          End;
+        End
+        Else If (T^.State = TsStopped) And ((Options And 2) <> 0)
+            And (T^.ReapPending <> 0) Then
+        Begin
+          Code := 5;
+          Stt := T^.ExitCode;
+        End;
+        If Code <> 0 Then
+        Begin
+          If Info <> 0 Then
+          Begin
+            MemFill(Info, 0, 128);
+            MemL[0:Info] := 17;
+            MemL[0:Info + 8] := Code;
+            MemL[0:Info + 12] := T^.Pid;
+            MemL[0:Info + 16] := T^.Uid;
+            MemL[0:Info + 20] := Stt;
+          End;
+          If (Options And $01000000) = 0 Then
+          Begin
+            If T^.State = TsZombie Then
+            Begin
+              Cur^.Cutime := Cur^.Cutime + T^.Utime + T^.Cutime;
+              Cur^.Cstime := Cur^.Cstime + T^.Stime + T^.Cstime;
+              ReapTask(T);
+            End
+            Else T^.ReapPending := 0;
+          End;
+          DoWaitid := 0;
+          Exit;
+        End;
+      End;
+    End;
+    If Found = 0 Then
+    Begin
+      DoWaitid := -ECHILD;
+      Exit;
+    End;
+    If (Options And 1) <> 0 Then
+    Begin
+      If Info <> 0 Then MemFill(Info, 0, 128);
+      DoWaitid := 0;
+      Exit;
+    End;
+    If SleepOn(LongInt(Cur), 0, True) = WakeSignal Then
+    Begin
+      DoWaitid := -ERESTARTSYS;
+      Exit;
+    End;
+  End;
+End;
+
+Function SysWaitid(IdType, Id, Info, Options, Ru : LongInt) : LongInt;
+Begin
+  SysWaitid := DoWaitid(IdType, Id, Info, Options, Ru);
+End;
+
+{ ---- Processus : robust list, unshare, kcmp, process_vm, membarrier ---- }
+
+Function SysSetRobustList(Head, Len : LongInt) : LongInt;
+Begin
+  If Len <> 12 Then
+  Begin
+    SysSetRobustList := -EINVAL;
+    Exit;
+  End;
+  Cur^.RobustList := Head;
+  Cur^.RobustLen := Len;
+  SysSetRobustList := 0;
+End;
+
+Function SysGetRobustList(Pid, HeadP, LenP : LongInt) : LongInt;
+Var T : PTask;
+Begin
+  T := SchedTarget(Pid);
+  If T = Nil Then
+  Begin
+    SysGetRobustList := -ESRCH;
+    Exit;
+  End;
+  If (PutUserL(HeadP, T^.RobustList) < 0) Or (PutUserL(LenP, 12) < 0) Then
+    SysGetRobustList := -EFAULT
+  Else SysGetRobustList := 0;
+End;
+
+Function SysUnshare(Flags : LongInt) : LongInt;
+Var F : PFiles; S : PFsStruct;
+Begin
+  If (Flags And Not ($400 Or $200 Or $10000 Or $20000)) <> 0 Then
+  Begin
+    SysUnshare := -EINVAL;
+    Exit;
+  End;
+  If (Flags And $400) <> 0 Then
+  Begin
+    F := FilesDup(Cur^.Files);
+    If F = Nil Then
+    Begin
+      SysUnshare := -ENOMEM;
+      Exit;
+    End;
+    FilesRelease(Cur^.Files);
+    Cur^.Files := F;
+  End;
+  If (Flags And $200) <> 0 Then
+  Begin
+    S := FsDup(Cur^.Fs);
+    If S = Nil Then
+    Begin
+      SysUnshare := -ENOMEM;
+      Exit;
+    End;
+    Cur^.Fs := S;
+  End;
+  SysUnshare := 0;
+End;
+
+Function SysKcmp(Pid1, Pid2, Typ, Idx1, Idx2 : LongInt) : LongInt;
+Var T1, T2 : PTask; A, B : LongInt;
+Begin
+  T1 := SchedTarget(Pid1); T2 := SchedTarget(Pid2);
+  If (T1 = Nil) Or (T2 = Nil) Then
+  Begin
+    SysKcmp := -ESRCH;
+    Exit;
+  End;
+  Case Typ Of
+    0 : Begin
+          If (Idx1 < 0) Or (Idx1 >= MaxFd) Or (Idx2 < 0) Or (Idx2 >= MaxFd)
+             Or (T1^.Files = Nil) Or (T2^.Files = Nil) Then
+          Begin
+            SysKcmp := -EBADF;
+            Exit;
+          End;
+          A := T1^.Files^.Fd[Idx1]; B := T2^.Files^.Fd[Idx2];
+          If (A = 0) Or (B = 0) Then
+          Begin
+            SysKcmp := -EBADF;
+            Exit;
+          End;
+        End;
+    1 : Begin A := LongInt(T1^.Mm); B := LongInt(T2^.Mm); End;
+    2 : Begin A := LongInt(T1^.Files); B := LongInt(T2^.Files); End;
+    3 : Begin A := LongInt(T1^.Fs); B := LongInt(T2^.Fs); End;
+    4 : Begin A := LongInt(T1^.Sig); B := LongInt(T2^.Sig); End;
+  Else
+    Begin
+      SysKcmp := -EINVAL;
+      Exit;
+    End;
+  End;
+  If A = B Then SysKcmp := 0
+  Else If ULt(A, B) Then SysKcmp := 1
+  Else SysKcmp := 2;
+End;
+
+{ Copie d'octets depuis / vers l'espace d'un autre processus }
+Function RemoteCopy(T : PTask; RAddr, Local, N : LongInt; ToRemote : Boolean)
+    : LongInt;
+Var Done, Ch, P, Pte, Pg, Off : LongInt;
+Begin
+  Done := 0;
+  While Done < N Do
+  Begin
+    Off := (RAddr + Done) And $FFF;
+    Ch := 4096 - Off;
+    If Ch > N - Done Then Ch := N - Done;
+    P := PtePtr(T^.Mm, PageDown(RAddr + Done), False);
+    Pte := 0;
+    If P <> 0 Then Pte := MemL[0:P];
+    If ((Pte And 1) = 0) Or (ToRemote And ((Pte And PgWrite) = 0)) Then
+    Begin
+      If MmFault(T^.Mm, PageDown(RAddr + Done), ToRemote, 0) <> 0 Then Break;
+      P := PtePtr(T^.Mm, PageDown(RAddr + Done), False);
+      Pte := MemL[0:P];
+      If (Pte And 1) = 0 Then Break;
+    End;
+    Pg := P2V(Pte And LongInt($FFFFF000));
+    If ToRemote Then MemCopy(Pg + Off, Local + Done, Ch)
+    Else MemCopy(Local + Done, Pg + Off, Ch);
+    Done := Done + Ch;
+  End;
+  RemoteCopy := Done;
+End;
+
+Function ProcessVm(Pid, Lv, Lc, Rv, Rc, Flags : LongInt; Wr : Boolean)
+    : LongInt;
+Var T : PTask; I, J, Tot, Ln, Rn, Lo, Ro, Ch, Got : LongInt;
+    LBase, LLen, RBase, RLen : LongInt;
+Begin
+  If (Flags <> 0) Or (Lc < 0) Or (Rc < 0) Or (Lc > 1024) Or (Rc > 1024) Then
+  Begin
+    ProcessVm := -EINVAL;
+    Exit;
+  End;
+  T := PidTask(Pid);
+  If (T = Nil) Or (T^.Mm = Nil) Then
+  Begin
+    ProcessVm := -ESRCH;
+    Exit;
+  End;
+  If Not ((Cur^.Euid = T^.Uid) Or Capable(19)) Then
+  Begin
+    ProcessVm := -EPERM;
+    Exit;
+  End;
+  If Not (EnsureUser(Lv, Lc * 8, False) And EnsureUser(Rv, Rc * 8, False)) Then
+  Begin
+    ProcessVm := -EFAULT;
+    Exit;
+  End;
+  Tot := 0;
+  J := 0; Ro := 0;
+  For I := 0 To Lc - 1 Do
+  Begin
+    LBase := MemL[0:Lv + I * 8]; LLen := MemL[0:Lv + I * 8 + 4];
+    Lo := 0;
+    While Lo < LLen Do
+    Begin
+      While (J < Rc) And (Ro >= MemL[0:Rv + J * 8 + 4]) Do
+      Begin
+        Inc(J);
+        Ro := 0;
+      End;
+      If J >= Rc Then
+      Begin
+        If Tot = 0 Then Tot := 0;
+        ProcessVm := Tot;
+        Exit;
+      End;
+      RBase := MemL[0:Rv + J * 8]; RLen := MemL[0:Rv + J * 8 + 4];
+      Ch := LLen - Lo;
+      If Ch > RLen - Ro Then Ch := RLen - Ro;
+      If Not EnsureUser(LBase + Lo, Ch, Not Wr) Then
+      Begin
+        If Tot = 0 Then Tot := -EFAULT;
+        ProcessVm := Tot;
+        Exit;
+      End;
+      Got := RemoteCopy(T, RBase + Ro, LBase + Lo, Ch, Wr);
+      Tot := Tot + Got;
+      If Got < Ch Then
+      Begin
+        If Tot = 0 Then Tot := -EFAULT;
+        ProcessVm := Tot;
+        Exit;
+      End;
+      Lo := Lo + Ch;
+      Ro := Ro + Ch;
+    End;
+  End;
+  ProcessVm := Tot;
+End;
+
+Function SysProcessVmReadv(Pid, Lv, Lc, Rv, Rc, Flags : LongInt) : LongInt;
+Begin
+  SysProcessVmReadv := ProcessVm(Pid, Lv, Lc, Rv, Rc, Flags, False);
+End;
+
+Function SysProcessVmWritev(Pid, Lv, Lc, Rv, Rc, Flags : LongInt) : LongInt;
+Begin
+  SysProcessVmWritev := ProcessVm(Pid, Lv, Lc, Rv, Rc, Flags, True);
+End;
+
+{ membarrier : un seul processeur, la barriere est triviale }
+Function SysMembarrier(Cmd, Flags, CpuId : LongInt) : LongInt;
+Begin
+  If Flags <> 0 Then SysMembarrier := -EINVAL
+  Else If Cmd = 0 Then SysMembarrier := $1F
+  Else If (Cmd = 1) Or (Cmd = 2) Or (Cmd = 4) Or (Cmd = 8) Or (Cmd = 16) Then
+    SysMembarrier := 0
+  Else SysMembarrier := -EINVAL;
+End;
+
+{ ---- Temps : clock_*, time64, adjtimex ---- }
+
+{ Zone de travail dans la pile utilisateur, sous ESP (inutilisee par l'ABI
+  i386) : sert a convertir les structures 64 bits vers les formes 32 bits }
+Function Scratch(N : LongInt) : LongInt;
+Var A : LongInt; Fr : PFrame;
+Begin
+  Fr := Pointer(Cur^.Frame);
+  A := (Fr^.UserEsp - 1024 - N) And Not 15;
+  If EnsureUser(A, N, True) Then Scratch := A Else Scratch := 0;
+End;
+
+Procedure Ts64To32(Src, Dst : LongInt);
+Begin
+  MemL[0:Dst] := MemL[0:Src];
+  MemL[0:Dst + 4] := MemL[0:Src + 8];
+End;
+
+Procedure Ts32To64(Src, Dst : LongInt);
+Begin
+  MemL[0:Dst] := MemL[0:Src];
+  If MemL[0:Src] < 0 Then MemL[0:Dst + 4] := -1 Else MemL[0:Dst + 4] := 0;
+  MemL[0:Dst + 8] := MemL[0:Src + 4];
+  MemL[0:Dst + 12] := 0;
+End;
+
+Function SysClockGettime64(Clk, Ts : LongInt) : LongInt;
+Var S, R : LongInt;
+Begin
+  S := Scratch(8);
+  If (S = 0) Or Not EnsureUser(Ts, 16, True) Then
+  Begin
+    SysClockGettime64 := -EFAULT;
+    Exit;
+  End;
+  R := SysClockGettime(Clk, S);
+  If R = 0 Then Ts32To64(S, Ts);
+  SysClockGettime64 := R;
+End;
+
+Function SysClockGetres64(Clk, Ts : LongInt) : LongInt;
+Var S, R : LongInt;
+Begin
+  If Ts = 0 Then
+  Begin
+    SysClockGetres64 := SysClockGetres(Clk, 0);
+    Exit;
+  End;
+  S := Scratch(8);
+  If (S = 0) Or Not EnsureUser(Ts, 16, True) Then
+  Begin
+    SysClockGetres64 := -EFAULT;
+    Exit;
+  End;
+  R := SysClockGetres(Clk, S);
+  If R = 0 Then Ts32To64(S, Ts);
+  SysClockGetres64 := R;
+End;
+
+Function DoClockSet(Clk, Sec, Nsec : LongInt) : LongInt;
+Begin
+  If Clk <> 0 Then
+  Begin
+    If (Clk = 1) Or (Clk = 4) Or (Clk = 7) Or (Clk = 2) Or (Clk = 3) Then
+      DoClockSet := -EINVAL
+    Else DoClockSet := -EINVAL;
+    Exit;
+  End;
+  If Not Capable(25) Then
+  Begin
+    DoClockSet := -EPERM;
+    Exit;
+  End;
+  If (Nsec < 0) Or (Nsec >= 1000000000) Or (Sec < 0) Then
+  Begin
+    DoClockSet := -EINVAL;
+    Exit;
+  End;
+  TimeOffset := Sec - BootTime - Jiffies Div HZ;
+  DoClockSet := 0;
+End;
+
+Function SysClockSettime(Clk, Ts : LongInt) : LongInt;
+Begin
+  If Not EnsureUser(Ts, 8, False) Then SysClockSettime := -EFAULT
+  Else SysClockSettime := DoClockSet(Clk, MemL[0:Ts], MemL[0:Ts + 4]);
+End;
+
+Function SysClockSettime64(Clk, Ts : LongInt) : LongInt;
+Begin
+  If Not EnsureUser(Ts, 16, False) Then SysClockSettime64 := -EFAULT
+  Else SysClockSettime64 := DoClockSet(Clk, MemL[0:Ts], MemL[0:Ts + 8]);
+End;
+
+Function SysClockNanosleep64(Clk, Flags, Req, Rem : LongInt) : LongInt;
+Var S, R : LongInt;
+Begin
+  S := Scratch(16);
+  If (S = 0) Or Not EnsureUser(Req, 16, False) Then
+  Begin
+    SysClockNanosleep64 := -EFAULT;
+    Exit;
+  End;
+  Ts64To32(Req, S);
+  R := SysClockNanosleep(Clk, Flags, S, S + 8);
+  If (R = -EINTR) And (Rem <> 0) And ((Flags And 1) = 0) Then
+    If EnsureUser(Rem, 16, True) Then Ts32To64(S + 8, Rem);
+  SysClockNanosleep64 := R;
+End;
+
+Function SysFutex64(UAddr, Op, Val, Timeout, UAddr2, Val3 : LongInt) : LongInt;
+Var S : LongInt;
+Begin
+  If Timeout <> 0 Then
+  Begin
+    S := Scratch(8);
+    If (S = 0) Or Not EnsureUser(Timeout, 16, False) Then
+    Begin
+      SysFutex64 := -EFAULT;
+      Exit;
+    End;
+    Ts64To32(Timeout, S);
+    Timeout := S;
+  End;
+  SysFutex64 := SysFutex(UAddr, Op, Val, Timeout, UAddr2);
+End;
+
+Function SysUtimensat64(Dirfd, PathA, Times, Flags : LongInt) : LongInt;
+Var S : LongInt;
+Begin
+  If Times <> 0 Then
+  Begin
+    S := Scratch(16);
+    If (S = 0) Or Not EnsureUser(Times, 32, False) Then
+    Begin
+      SysUtimensat64 := -EFAULT;
+      Exit;
+    End;
+    Ts64To32(Times, S);
+    Ts64To32(Times + 16, S + 8);
+    Times := S;
+  End;
+  SysUtimensat64 := SysUtimensat(Dirfd, PathA, Times, Flags);
+End;
+
+Function SysTimerfdSettime64(Fd, Flags, NewP, OldP : LongInt) : LongInt;
+Var S, R : LongInt;
+Begin
+  S := Scratch(32);
+  If (S = 0) Or Not EnsureUser(NewP, 32, False) Then
+  Begin
+    SysTimerfdSettime64 := -EFAULT;
+    Exit;
+  End;
+  Ts64To32(NewP, S);
+  Ts64To32(NewP + 16, S + 8);
+  R := SysTimerfdSettime(Fd, Flags, S, S + 16);
+  If (R = 0) And (OldP <> 0) And EnsureUser(OldP, 32, True) Then
+  Begin
+    Ts32To64(S + 16, OldP);
+    Ts32To64(S + 24, OldP + 16);
+  End;
+  SysTimerfdSettime64 := R;
+End;
+
+Function SysTimerfdGettime64(Fd, CurP : LongInt) : LongInt;
+Var S, R : LongInt;
+Begin
+  S := Scratch(16);
+  If (S = 0) Or Not EnsureUser(CurP, 32, True) Then
+  Begin
+    SysTimerfdGettime64 := -EFAULT;
+    Exit;
+  End;
+  R := SysTimerfdGettime(Fd, S);
+  If R = 0 Then
+  Begin
+    Ts32To64(S, CurP);
+    Ts32To64(S + 8, CurP + 16);
+  End;
+  SysTimerfdGettime64 := R;
+End;
+
+{ timeout (timespec 32 ou 64 bits) -> millisecondes ; -1 si Ts = 0 }
+Function TsToMs(Ts : LongInt; Wide : Boolean; Var Ms : LongInt) : LongInt;
+Var Sec, Ns : LongInt;
+Begin
+  TsToMs := 0;
+  If Ts = 0 Then
+  Begin
+    Ms := -1;
+    Exit;
+  End;
+  If Not EnsureUser(Ts, 8 + Ord(Wide) * 8, False) Then
+  Begin
+    TsToMs := -EFAULT;
+    Exit;
+  End;
+  Sec := MemL[0:Ts];
+  If Wide Then Ns := MemL[0:Ts + 8] Else Ns := MemL[0:Ts + 4];
+  If (Sec < 0) Or (Ns < 0) Or (Ns >= 1000000000) Then
+  Begin
+    TsToMs := -EINVAL;
+    Exit;
+  End;
+  If Sec > 2000000 Then Ms := 2000000000 Else Ms := Sec * 1000 + (Ns + 999999)
+      Div 1000000;
+End;
+
+Function DoPpoll(Fds, N, Ts, Mask, Sz : LongInt; Wide : Boolean) : LongInt;
+Var Ms, R, S : LongInt;
+Begin
+  R := TsToMs(Ts, Wide, Ms);
+  If R <> 0 Then
+  Begin
+    DoPpoll := R;
+    Exit;
+  End;
+  S := 0;
+  If Mask <> 0 Then
+  Begin
+    S := Scratch(8);
+    If (S = 0) Or (Sz < 8) Then
+    Begin
+      If Sz < 8 Then DoPpoll := -EINVAL Else DoPpoll := -EFAULT;
+      Exit;
+    End;
+    R := SysRtSigprocmask(2, Mask, S, 8);
+    If R < 0 Then
+    Begin
+      DoPpoll := R;
+      Exit;
+    End;
+  End;
+  R := SysPoll(Fds, N, Ms);
+  If S <> 0 Then SysRtSigprocmask(2, S, 0, 8);
+  DoPpoll := R;
+End;
+
+Function SysPpoll(Fds, N, Ts, Mask, Sz : LongInt) : LongInt;
+Begin
+  SysPpoll := DoPpoll(Fds, N, Ts, Mask, Sz, False);
+End;
+
+Function SysPpoll64(Fds, N, Ts, Mask, Sz : LongInt) : LongInt;
+Begin
+  SysPpoll64 := DoPpoll(Fds, N, Ts, Mask, Sz, True);
+End;
+
+Function DoPselect(N, Rd, Wr, Ex, Ts, SigArg : LongInt; Wide : Boolean)
+    : LongInt;
+Var S, M, Sz, R, Ms, Tv : LongInt;
+Begin
+  Tv := 0;
+  If Ts <> 0 Then
+  Begin
+    R := TsToMs(Ts, Wide, Ms);
+    If R <> 0 Then
+    Begin
+      DoPselect := R;
+      Exit;
+    End;
+    Tv := Scratch(24);
+    If Tv = 0 Then
+    Begin
+      DoPselect := -EFAULT;
+      Exit;
+    End;
+    MemL[0:Tv] := Ms Div 1000;
+    MemL[0:Tv + 4] := (Ms Mod 1000) * 1000;
+  End;
+  S := 0;
+  If SigArg <> 0 Then
+  Begin
+    If Not EnsureUser(SigArg, 8, False) Then
+    Begin
+      DoPselect := -EFAULT;
+      Exit;
+    End;
+    M := MemL[0:SigArg]; Sz := MemL[0:SigArg + 4];
+    If M <> 0 Then
+    Begin
+      S := Scratch(8) - 16;
+      If (Sz < 8) Or (S <= 0) Then
+      Begin
+        DoPselect := -EINVAL;
+        Exit;
+      End;
+      If SysRtSigprocmask(2, M, S, 8) < 0 Then
+      Begin
+        DoPselect := -EFAULT;
+        Exit;
+      End;
+    End;
+  End;
+  DoPselect := SysNewselect(N, Rd, Wr, Ex, Tv);
+  If S <> 0 Then SysRtSigprocmask(2, S, 0, 8);
+End;
+
+Function SysPselect6(N, Rd, Wr, Ex, Ts, SigArg : LongInt) : LongInt;
+Begin
+  SysPselect6 := DoPselect(N, Rd, Wr, Ex, Ts, SigArg, False);
+End;
+
+Function SysPselect6_64(N, Rd, Wr, Ex, Ts, SigArg : LongInt) : LongInt;
+Begin
+  SysPselect6_64 := DoPselect(N, Rd, Wr, Ex, Ts, SigArg, True);
+End;
+
+Function SysEpollPwait2(Epfd, Evs, Max, Ts, Mask, Sz : LongInt) : LongInt;
+Var Ms, R : LongInt;
+Begin
+  R := TsToMs(Ts, False, Ms);
+  If R <> 0 Then
+  Begin
+    SysEpollPwait2 := R;
+    Exit;
+  End;
+  SysEpollPwait2 := SysEpollPwait(Epfd, Evs, Max, Ms, Mask);
+End;
+
+{ adjtimex / clock_adjtime : lecture complete ; reglages acceptes (CAP_SYS_TIME)
+  mais sans discipline d'horloge }
+Function DoAdjtimex(Tx : LongInt) : LongInt;
+Begin
+  If Not EnsureUser(Tx, 128, True) Then
+  Begin
+    DoAdjtimex := -EFAULT;
+    Exit;
+  End;
+  If MemL[0:Tx] <> 0 Then
+  Begin
+    If Not Capable(25) Then
+    Begin
+      DoAdjtimex := -EPERM;
+      Exit;
+    End;
+    If (MemL[0:Tx] And $8000) <> 0 Then
+    Begin
+      DoAdjtimex := -EINVAL;
+      Exit;
+    End;
+  End;
+  MemL[0:Tx + 4] := 0; MemL[0:Tx + 8] := 0; MemL[0:Tx + 12] := 0;
+  MemL[0:Tx + 16] := 0; MemL[0:Tx + 20] := $40; MemL[0:Tx + 24] := 2;
+  MemL[0:Tx + 28] := 1; MemL[0:Tx + 32] := 32768000;
+  MemL[0:Tx + 36] := XTime; MemL[0:Tx + 40] := XUsec;
+  MemL[0:Tx + 44] := 1000000 Div HZ;
+  DoAdjtimex := 5;
+End;
+
+Function SysAdjtimex(Tx : LongInt) : LongInt;
+Begin
+  SysAdjtimex := DoAdjtimex(Tx);
+End;
+
+Function SysClockAdjtime(Clk, Tx : LongInt) : LongInt;
+Begin
+  If Clk <> 0 Then SysClockAdjtime := -EOPNOTSUPP
+  Else SysClockAdjtime := DoAdjtimex(Tx);
+End;
+
+{ ---- Divers : memfd_create, ustat, ioperm/iopl ---- }
+
+Var MemfdSeq : LongInt;
+
+Function SysMemfdCreate(NameA, Flags : LongInt) : LongInt;
+Var Nm, P : String; R : LongInt; F : PFile;
+Begin
+  If (Flags And Not 3) <> 0 Then
+  Begin
+    SysMemfdCreate := -EINVAL;
+    Exit;
+  End;
+  R := GetUserStr(NameA, Nm);
+  If R < 0 Then
+  Begin
+    SysMemfdCreate := R;
+    Exit;
+  End;
+  If Length(Nm) > 249 Then
+  Begin
+    SysMemfdCreate := -EINVAL;
+    Exit;
+  End;
+  Inc(MemfdSeq);
+  P := '/dev/.memfd-' + IntStr(MemfdSeq);
+  R := VfsOpen(P, O_CREAT Or O_EXCL Or O_RDWR, $180, F);
+  If R <> 0 Then
+  Begin
+    SysMemfdCreate := R;
+    Exit;
+  End;
+  VfsUnlink(P, False);
+  R := FdInstall(F, 0, (Flags And 1) <> 0);
+  If R < 0 Then FilePut(LongInt(F));
+  SysMemfdCreate := R;
+End;
+
+Function SysUstat(Dev, Ubuf : LongInt) : LongInt;
+Var I, Fn : LongInt; Tmp : Array[0..7] Of LongInt;
+Begin
+  For I := 0 To MaxSupers - 1 Do
+    If (Supers[I] <> Nil) And (Supers[I]^.Dev = Dev) Then
+    Begin
+      If Not EnsureUser(Ubuf, 20, True) Then
+      Begin
+        SysUstat := -EFAULT;
+        Exit;
+      End;
+      MemFill(LongInt(@Tmp[0]), 0, 32);
+      Fn := GetOp(Supers[I]^.SOps, SoStatfs);
+      If Fn <> 0 Then Call2(Fn, LongInt(Supers[I]), LongInt(@Tmp[0]));
+      MemFill(Ubuf, 0, 20);
+      MemL[0:Ubuf] := Tmp[2];
+      MemL[0:Ubuf + 4] := Tmp[5];
+      SysUstat := 0;
+      Exit;
+    End;
+  SysUstat := -EINVAL;
+End;
+
+{ iopl / ioperm : accordent l'acces aux ports par le niveau IOPL des EFLAGS
+  de l'espace utilisateur (pas de bitmap par port : ioperm accorde donc
+  tous les ports) ; CAP_SYS_RAWIO requis }
+Function SysIopl(Level : LongInt) : LongInt;
+Var Fr : PFrame;
+Begin
+  If (Level < 0) Or (Level > 3) Then
+  Begin
+    SysIopl := -EINVAL;
+    Exit;
+  End;
+  If Not Capable(17) Then
+  Begin
+    SysIopl := -EPERM;
+    Exit;
+  End;
+  Fr := Pointer(Cur^.Frame);
+  Fr^.Eflags := (Fr^.Eflags And Not $3000) Or (Level Shl 12);
+  SysIopl := 0;
+End;
+
+Function SysIoperm(From, Num, On_ : LongInt) : LongInt;
+Begin
+  If (From < 0) Or (Num < 0) Or (From + Num > 65536) Then
+  Begin
+    SysIoperm := -EINVAL;
+    Exit;
+  End;
+  If Not Capable(17) Then
+  Begin
+    SysIoperm := -EPERM;
+    Exit;
+  End;
+  If On_ <> 0 Then SysIopl(3) Else If Num >= 65536 Then SysIopl(0);
+  SysIoperm := 0;
+End;
+
+Function SysSetfsuid16(U : LongInt) : LongInt;
+Begin
+  SysSetfsuid16 := SysSetfsuid(Id16(U));
+End;
+
+Function SysSetfsgid16(G : LongInt) : LongInt;
+Begin
+  SysSetfsgid16 := SysSetfsgid(Id16(G));
+End;
+
+{ ---- Appels non pris en charge : ENOSYS explicite et documente ---- }
+{ ENOSYS-LIST }
+Const
+  EnosysList = '17,18,28,31,32,35,44,51,53,56,58,59,84,86,89,98,109,112,113,'
+    + '123,127,128,129,130,131,134,135,137,149,166,167,169,188,189,253,257,'
+    + '283,286,287,288,294,315,317,336,338,339,341,342,350,357,374,380,381,'
+    + '382,384,385,386,425,426,427,428,429,430,431,432,433,438,440,442,443,'
+    + '444,445,446,447,448,449,450,451,453,457,458,459,460,461';
+
+Procedure RegisterEnosys;
+Var I, V : LongInt; S : String;
+Begin
+  S := EnosysList;
+  V := 0;
+  For I := 1 To Length(S) Do
+    If S[I] = ',' Then
+    Begin
+      If SysFn[V] = 0 Then SysReg(V, LongInt(@SysEnosys), 0);
+      V := 0;
+    End
+    Else V := V * 10 + (Ord(S[I]) - 48);
+  If SysFn[V] = 0 Then SysReg(V, LongInt(@SysEnosys), 0);
+End;
+
+{ ---- Enregistrement ---- }
+
+Procedure InitSyscalls2;
+Begin
+  RegisterEnosys;
+  SysReg(0, LongInt(@SysRestartSyscall), 0);
+  SysReg(136, LongInt(@SysPersonality), 1);
+  SysReg(154, LongInt(@SysSchedSetparam), 2);
+  SysReg(155, LongInt(@SysSchedGetparam), 2);
+  SysReg(156, LongInt(@SysSchedSetscheduler), 3);
+  SysReg(157, LongInt(@SysSchedGetscheduler), 1);
+  SysReg(161, LongInt(@SysSchedRrGetInterval), 2);
+  SysReg(241, LongInt(@SysSchedSetaffinity), 3);
+  SysReg(242, LongInt(@SysSchedGetaffinity), 3);
+  SysReg(318, LongInt(@SysGetcpu), 3);
+  SysReg(351, LongInt(@SysSchedSetattr), 3);
+  SysReg(352, LongInt(@SysSchedGetattr), 4);
+  SysReg(289, LongInt(@SysIoprioSet), 3);
+  SysReg(290, LongInt(@SysIoprioGet), 2);
+  SysReg(184, LongInt(@SysCapget), 2);
+  SysReg(185, LongInt(@SysCapset), 2);
+  SysReg(187, LongInt(@SysSendfile), 4);
+  SysReg(239, LongInt(@SysSendfile64), 4);
+  SysReg(377, LongInt(@SysCopyFileRange), 6);
+  SysReg(313, LongInt(@SysSplice), 6);
+  SysReg(316, LongInt(@SysVmsplice), 4);
+  SysReg(333, LongInt(@SysPreadv), 5);
+  SysReg(334, LongInt(@SysPwritev), 5);
+  SysReg(378, LongInt(@SysPreadv2), 6);
+  SysReg(379, LongInt(@SysPwritev2), 6);
+  SysReg(324, LongInt(@SysFallocate), 6);
+  SysReg(344, LongInt(@SysSyncfs), 1);
+  SysReg(314, LongInt(@SysSyncFileRange), 6);
+  SysReg(225, LongInt(@SysReadahead), 4);
+  SysReg(250, LongInt(@SysFadvise64), 5);
+  SysReg(272, LongInt(@SysFadvise64_64), 6);
+  SysReg(302, LongInt(@SysRenameatNew), 4);
+  SysReg(353, LongInt(@SysRenameat2), 5);
+  SysReg(439, LongInt(@SysFaccessat2), 4);
+  SysReg(452, LongInt(@SysFchmodat2), 4);
+  SysReg(437, LongInt(@SysOpenat2), 4);
+  SysReg(358, LongInt(@SysExecveat), 5);
+  SysReg(436, LongInt(@SysCloseRange), 3);
+  SysReg(383, LongInt(@SysStatx), 5);
+  SysReg(150, LongInt(@SysMlock), 2);
+  SysReg(151, LongInt(@SysMunlock), 2);
+  SysReg(152, LongInt(@SysMlockall), 1);
+  SysReg(153, LongInt(@SysMunlockall), 0);
+  SysReg(376, LongInt(@SysMlock2), 3);
+  SysReg(218, LongInt(@SysMincore), 3);
+  SysReg(219, LongInt(@SysMadviseReal), 3);
+  SysReg(284, LongInt(@SysWaitid), 5);
+  SysReg(311, LongInt(@SysSetRobustList), 2);
+  SysReg(312, LongInt(@SysGetRobustList), 3);
+  SysReg(310, LongInt(@SysUnshare), 1);
+  SysReg(349, LongInt(@SysKcmp), 5);
+  SysReg(347, LongInt(@SysProcessVmReadv), 6);
+  SysReg(348, LongInt(@SysProcessVmWritev), 6);
+  SysReg(375, LongInt(@SysMembarrier), 3);
+  SysReg(264, LongInt(@SysClockSettime), 2);
+  SysReg(124, LongInt(@SysAdjtimex), 1);
+  SysReg(343, LongInt(@SysClockAdjtime), 2);
+  SysReg(403, LongInt(@SysClockGettime64), 2);
+  SysReg(404, LongInt(@SysClockSettime64), 2);
+  SysReg(406, LongInt(@SysClockGetres64), 2);
+  SysReg(407, LongInt(@SysClockNanosleep64), 4);
+  SysReg(422, LongInt(@SysFutex64), 6);
+  SysReg(412, LongInt(@SysUtimensat64), 4);
+  SysReg(410, LongInt(@SysTimerfdGettime64), 2);
+  SysReg(411, LongInt(@SysTimerfdSettime64), 4);
+  SysReg(309, LongInt(@SysPpoll), 5);
+  SysReg(414, LongInt(@SysPpoll64), 5);
+  SysReg(308, LongInt(@SysPselect6), 6);
+  SysReg(413, LongInt(@SysPselect6_64), 6);
+  SysReg(441, LongInt(@SysEpollPwait2), 6);
+  SysReg(356, LongInt(@SysMemfdCreate), 2);
+  SysReg(62, LongInt(@SysUstat), 2);
+  SysReg(101, LongInt(@SysIoperm), 3);
+  SysReg(110, LongInt(@SysIopl), 1);
+  SysReg(138, LongInt(@SysSetfsuid16), 1);
+  SysReg(139, LongInt(@SysSetfsgid16), 1);
+End;
+
+{ ==================================================================== }
 { Partie 17 - Programmes embarques, init, programme principal          }
 { ==================================================================== }
 
@@ -25091,8 +27317,8 @@ End;
   encodes en base64, ecrits dans le tmpfs racine au demarrage. }
 
 Const
-  EmbCount = 32;
-  EmbPath : Array[0..31] Of String[20] = (
+  EmbCount = 33;
+  EmbPath : Array[0..32] Of String[20] = (
     '/sbin/init',
     '/bin/hello',
     '/bin/forkwait',
@@ -25124,21 +27350,22 @@ Const
     '/bin/killtest',
     '/bin/idetest',
     '/bin/preempttest',
-    '/bin/pstress');
-  EmbSize : Array[0..31] Of LongInt = (
-    3508, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
+    '/bin/pstress',
+    '/bin/syscalltest');
+  EmbSize : Array[0..32] Of LongInt = (
+    3544, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
     2320, 1104, 11936, 2476, 3268, 8720, 2376, 2004, 5100, 3248, 1712, 3568,
-    2812, 10656, 2748, 2640, 2196, 2560, 2552, 4028);
-  EmbStart : Array[0..32] Of LongInt = (
-    0, 78, 116, 160, 211, 262, 312, 400, 438, 475, 527, 628, 689, 741, 766,
-    1032, 1088, 1161, 1355, 1408, 1453, 1567, 1640, 1679, 1759, 1822, 2059,
-    2121, 2180, 2229, 2286, 2343, 2433);
-  EmbData : Array[0..2432] Of String[60] = (
-    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAACcDAAAAAAAADQAIAAC',
-    'ACgABwAGAAEAAAAAAAAAAIAECACABAjcCgAA3AoAAAUAAAAAEAAAUeV0ZAAA',
+    2812, 10656, 2748, 2640, 2196, 2560, 2552, 4028, 12104);
+  EmbStart : Array[0..33] Of LongInt = (
+    0, 79, 117, 161, 212, 263, 313, 401, 439, 476, 528, 629, 690, 742, 767,
+    1033, 1089, 1162, 1356, 1409, 1454, 1568, 1641, 1680, 1760, 1823, 2060,
+    2122, 2181, 2230, 2287, 2344, 2434, 2703);
+  EmbData : Array[0..2702] Of String[60] = (
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAADADAAAAAAAADQAIAAC',
+    'ACgABwAGAAEAAAAAAAAAAIAECACABAgACwAAAAsAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuBQAAACJ5VdWU4Pk8IHskAUA',
     'AM2ASHQUuFiHBAjoRQUAALgBAAAA6bsEAAC4QgAAAM2AuHiHBAgx/zHb6CYF',
-    'AACLDJ1gigQIhcl0XzHSiYwkkAEAAInIQ4mUJJQBAACNlCSQAQAAiUwkDOgB',
+    'AACLDJ2AigQIhcl0XzHSiYwkkAEAAInIQ4mUJJQBAACNlCSQAQAAiUwkDOgB',
     'BQAAica4qYcECOjsBAAAi0QkDOjjBAAAuLGHBAiF9nQXuLaHBAhH6M8EAACJ',
     '8OhjBQAAuFaHBAjovgQAAOuWuMSHBAjosgQAAInY6EYFAAC414cECOihBAAA',
     'ifjoNQUAALhWhwQI6JAEAACDfQgBfjOLRQy63ocECItABOg9BAAAicaFwHUd',
@@ -25168,7 +27395,7 @@ Const
     'HItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADNgDHtieCD5PBQ6DUBAABV',
     'ieVWicZTMdsPtgQeD7YMGoTAdAVDOMh071spyF5dw1WJ0THSieVTicOAPBEA',
     'dANC6/e4BAAAAM2AW13DicK4AQAAAOvaVYnlV1ZTg+wsiUXUuAIAAACJVdDN',
-    'gIXAdViNfdi+QIoECLkEAAAAi13U86WNVdi4CwAAAItN0M2AugCHBAi4AgAA',
+    'gIXAdViNfdi+YIoECLkEAAAAi13U86WNVdi4CwAAAItN0M2AugCHBAi4AgAA',
     'ALt/AAAA6I3///+LVdS4AgAAAOiA////ugmHBAi4AgAAAOhx////uAEAAADN',
     'gOv+icO4/////3gPjU3YuAcAAAAx0s2Ai0XYg8QsW15fXcNVieVWU4nDg+ww',
     'xkX3AIXAeQ732LkhAAAAvgoAAADrDXXyxkX2MLkgAAAA6x+FwHQRMdJJ9/aK',
@@ -25192,26 +27419,27 @@ Const
     'dGVzdAAvYmluL21vdXNldGVzdAAvYmluL25ldHRlc3QAL2Jpbi9pc290ZXN0',
     'AC9iaW4vZmF0dGVzdAAvYmluL2ZidGVzdAAvYmluL3N3YXB0ZXN0AC9iaW4v',
     'a2lsbHRlc3QAL2Jpbi9pZGV0ZXN0AC9iaW4vcHJlZW1wdHRlc3QAL2Jpbi9w',
-    'c3RyZXNzAAAAAAAAAAAThwQILIcECDeHBAgAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AKSIBAiviAQIvYgECMuIBAjYiAQI5ogECPOIBAgAiQQID4kECByJBAgqiQQI',
-    'OIkECESJBAhSiQQIX4kECG6JBAh8iQQIiYkECJaJBAijiQQIsIkECL+JBAjM',
-    'iQQI2YkECOaJBAjyiQQIAIoECA6KBAgbigQILIoECAAAAABHQ0M6IChVYnVu',
-    'dHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/wgAAACfhQQIIAAAAAIAAQAPAAAA',
-    'v4UECB0AAAACAAEAFwAAANyFBAgJAAAAAgABABwAAADlhQQIkgAAAAIAAQAg',
-    'AAAAd4YECF0AAAACAAEAJQAAAGCKBAh8AAAAAQACACsAAADUhgQIKQAAABIA',
-    'AQAxAAAAZIUECAAAAAAQAAEAOAAAAIuFBAgAAAAAEAABAEoAAACShQQIAAAA',
-    'ABAAAQBFAAAA3JoECAAAAAAQAAIALAAAAHSABAjwBAAAEgABAFEAAADcmgQI',
-    'AAAAABAAAgBYAAAA3JoECAAAAAAQAAIAAGluaXQuYwBzdHJjbXAAcHV0c19m',
-    'ZABwdXRzAHJ1bgBwdXRkAHRlc3RzAGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVf',
-    'cnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAu',
-    'c2hzdHJ0YWIALnRleHQALnJvZGF0YQAuY29tbWVudAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAHSABAh0',
-    'AAAAiQYAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAAAIAAAAAhwQIAAcAANwD',
-    'AAAAAAAAAAAAACAAAAAAAAAAKQAAAAEAAAAwAAAAAAAAANwKAAAtAAAAAAAA',
-    'AAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAAAMCwAAAAEAAAUAAAAIAAAA',
-    'BAAAABAAAAAJAAAAAwAAAAAAAAAAAAAADAwAAF0AAAAAAAAAAAAAAAEAAAAA',
-    'AAAAEQAAAAMAAAAAAAAAAAAAAGkMAAAyAAAAAAAAAAAAAAABAAAAAAAAAA==',
+    'c3RyZXNzAC9iaW4vc3lzY2FsbHRlc3QAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'ABOHBAgshwQIN4cECAAAAAAAAAAAAAAAAAAAAAAAAAAApIgECK+IBAi9iAQI',
+    'y4gECNiIBAjmiAQI84gECACJBAgPiQQIHIkECCqJBAg4iQQIRIkECFKJBAhf',
+    'iQQIbokECHyJBAiJiQQIlokECKOJBAiwiQQIv4kECMyJBAjZiQQI5okECPKJ',
+    'BAgAigQIDooECBuKBAgsigQIOYoECAAAAABHQ0M6IChVYnVudHUgMTMuMy4w',
+    'LTZ1YnVudHUyfjI0LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AQAAAAAAAAAAAAAABADx/wgAAACfhQQIIAAAAAIAAQAPAAAAv4UECB0AAAAC',
+    'AAEAFwAAANyFBAgJAAAAAgABABwAAADlhQQIkgAAAAIAAQAgAAAAd4YECF0A',
+    'AAACAAEAJQAAAICKBAiAAAAAAQACACsAAADUhgQIKQAAABIAAQAxAAAAZIUE',
+    'CAAAAAAQAAEAOAAAAIuFBAgAAAAAEAABAEoAAACShQQIAAAAABAAAQBFAAAA',
+    'AJsECAAAAAAQAAIALAAAAHSABAjwBAAAEgABAFEAAAAAmwQIAAAAABAAAgBY',
+    'AAAAAJsECAAAAAAQAAIAAGluaXQuYwBzdHJjbXAAcHV0c19mZABwdXRzAHJ1',
+    'bgBwdXRkAHRlc3RzAGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nf',
+    'c3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIA',
+    'LnRleHQALnJvZGF0YQAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAHSABAh0AAAAiQYAAAAA',
+    'AAAAAAAAAQAAAAAAAAAhAAAAAQAAAAIAAAAAhwQIAAcAAAAEAAAAAAAAAAAA',
+    'ACAAAAAAAAAAKQAAAAEAAAAwAAAAAAAAAAALAAAtAAAAAAAAAAAAAAABAAAA',
+    'AQAAAAEAAAACAAAAAAAAAAAAAAAwCwAAAAEAAAUAAAAIAAAABAAAABAAAAAJ',
+    'AAAAAwAAAAAAAAAAAAAAMAwAAF0AAAAAAAAAAAAAAAEAAAAAAAAAEQAAAAMA',
+    'AAAAAAAAAAAAAI0MAAAyAAAAAAAAAAAAAAABAAAAAAAAAA==',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAOYIECDQAAABYBQAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAinAwAApwMAAAUAAAAAEAAAAQAAAKgD',
     'AACokwQIqJMECAAAAAAIAAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -27566,7 +29794,276 @@ Const
     'AAABAAAAMAAAAAAAAAB9DAAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAA',
     'AAAAAAAAAAAArAwAACABAAAGAAAACgAAAAQAAAAQAAAACQAAAAMAAAAAAAAA',
     'AAAAAMwNAAB2AAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAABC',
-    'DgAANwAAAAAAAAAAAAAAAQAAAAAAAAA=');
+    'DgAANwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAA+qEECDQAAADgLQAAAAAAADQAIAAD',
+    'ACgACQAIAAEAAAAAAAAAAIAECACABAhgKwAAYCsAAAUAAAAAEAAAAQAAAGAr',
+    'AABguwQIYLsECEAAAABIIQAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAI1MJASD5PAxwP9x/FWJ5VdWU1GB7AgBAADNgDHSg/j8',
+    'uHSjBAgPlMKDzv/oEyIAALqIAAAAifOJ0M2AhcB0BDHS6yy7AAAEAInQzYCJ',
+    'wYXAde2J0InzzYA9AAAEAHXgidCJy82AMdI9AAAEAA+UwriIowQI6MohAAC4',
+    'ewAAAM2Ag/jadAQx0uszuIMAAADNgIP42nXwuGUBAADNgIP42nXkuHYBAADN',
+    'gIP42nXYuMABAADNgDHSg/jaD5TCuJijBAjofSEAALiPAQAAzYAx0oP42nUP',
+    'uMwBAADNgDHSg/jaD5TCuKijBAi+nQAAADHb6E8hAAAx0onwx4Uo////CgAA',
+    'AImVLP///4mVSP///4mVTP///82AMdKFwL+cAAAAuLujBAgPlMLoFyEAALkB',
+    'AAAAifiNlSj////NgInHhcB0BDHS6yaJ8In7zYBIdfONjUj///+4mwAAAM2A',
+    'hcB14jHSg71I////Cg+UwrjOowQI6M4gAAAxwDHJjZUo////iYUo////icu4',
+    'nAAAAM2AMdKFwHUOuJ0AAADNgDHShcAPlMK43aMECDHb6JUgAAC4nAAAALkB',
+    'AAAAx4Uo////yAAAAI2VKP///82AMdKD+Op1FLidAAAAu5+GAQDNgDHSg/j9',
+    'D5TCuO2jBAgx2+hSIAAAuKEAAACNjWj////HhWj///8JAAAAx4Vs////CQAA',
+    'AM2AMdILhWj///91DDHSg71s////AA+fwrj6owQIMdvoDyAAADHAuQQAAACN',
+    'lWj///+JhWj///+48gAAAM2AiYX0/v//g/gEdAQx0utCg71o////AXXzvvEA',
+    'AACLjfT+//+NlWj///+J8M2AiceFwHXYx4Vo////AgAAAInwifuLjfT+///N',
+    'gDHSg/jqD5TCuAykBAgx9o2dIP///+iSHwAAuD4BAACNjWj///+J8seFIP//',
+    '/wkAAADHhWj///8JAAAAzYCLlSD///8LlWj///+NvWz///+J8wnCuBukBAgP',
+    'lMIPttLoSR8AAInwuQsAAAC6MAAAAPOruGABAACNjWj////HhWj///8wAAAA',
+    'zYAx0guFbP///7gopAQID5TC6A8fAAAxwI2NaP///4nyiYVs////uF8BAADH',
+    'hXj///8FAAAAzYCJx4XAdAQx0usuMcCJ+42NaP///7owAAAAiYV4////if64',
+    'YAEAAM2AhcB12jHSg714////BQ+Uwrg2pAQI6KweAAAxwDHSjY1o////iYV4',
+    '////idO4XwEAAM2AviEBAAC7AQAAAInRifDNgInHhcB0BDHS6yK4IgEAAIn5',
+    'zYCJwoXAde2J8LsJAAAAidHNgDHSg/jqD5TCuESkBAgx/42dGP///+hFHgAA',
+    'ib0c////jY1I////uLgAAADHhRj///8iBQggzYAx0oXAdRKLhUj///8jhUz/',
+    '//8x0kAPlMK4UaQECOgGHgAAuLgAAACNjUj////HhRj///9FIwEAzYAx0oP4',
+    '6nUPMdKBvRj///8iBQggD5TCuGGkBAjozx0AALgCAAAAzYCJw4XAD4UAAQAA',
+    'Mdsx9o2NaP///7q4AAAAiZ0k////idCNnSD////HhSD///8iBQggx4Uo////',
+    'AMqaO4m1LP///82AgaVo/////////b65AAAAgaVs/////////YnwzYCJx4XA',
+    'dAu4AQAAAInDzYDr/o2NKP///7gIAQAAifvNgEB0DrgBAAAAuwIAAADNgOv+',
+    'ifCNnSD////HhWj/////////jY1o////zYBAdA64AQAAALsDAAAAzYDr/rgX',
+    'AAAAu+gDAADNgIXAdA64AQAAALsEAAAAzYDr/onQjZ0g////jY1o////zYC4',
+    'AQAAAIudaP///wudbP///3QJuwUAAADNgOv+zYDr/jH2uAcAAACNjQT///+J',
+    '8s2AMdK4caQECL8FAAAAg70E////AA+UwruapAQI6I0cAAC6haQECLiapAQI',
+    '6BkcAACJ+InxifLNgLuipAQIuUICAAC6pAEAAImF9P7//4n4zYCJx74KAAAA',
+    'uO8AAADHhWj///8FAAAAi430/v//jZVo////ifvNgIP4CnQEMdLrOIO9aP//',
+    '/w9187pAAAAAuKKkBAjoaxsAAIP4CnXfuqqkBAi5CgAAALiguwQI6C0bAAAx',
+    '0oXAD5TCuLWkBAi7YwAAAL4EAAAA6OIbAACLjfT+//+4uwAAADHSzYAx0oP4',
+    '97jFpAQIifsPlMLovxsAADHSMcm4EwAAAImVaP///4nKx4VI////AgAAAM2A',
+    'jYVo////UWoAagZQjYVI////V1D/tfT+//9oeQEAAOhzGgAAg8QgMdKD+AZ1',
+    'PIO9SP///wh1M4O9aP///wZ1KrpAAAAAuKKkBAjoqBoAALrZpAQIuQYAAAC4',
+    'oLsECOhvGgAAMdKFwA+UwrjlpAQI6C4bAAC6BgAAAIud9P7//4nQzYCJ0In7',
+    'zYC+BQAAADHSu5qkBAiJ8InRzYC7+qQECLlCAgAAuqQBAACJhfD+//+JtfT+',
+    '//+4BQAAAM2AiYX0/v//jZ0I////uCoAAADNgDHAiYVo////UI2FaP///2oA',
+    'agxqAP+1DP///1D/tfD+//9oOQEAAOibGQAAg8QgMdKD+Ax1DDHSg71o////',
+    'DA+UwrgCpQQI6IYaAABQagBqDGoA/7X0/v//agD/tQj///9oOQEAAOhcGQAA',
+    'g8Qgg/gMdAQx0usvukAAAAC4+qQECOihGQAAg/gMdei6EaUECLkMAAAAuKC7',
+    'BAjoYxkAADHShcAPlMK4HqUECI29aP///74gqwQI6BcaAABQagBqBGoA/7X0',
+    '/v//agD/tfD+//9oOQEAAOjtGAAAg8QgMdKD+Oq4LqUECA+UwujjGQAAuQQA',
+    'AACLnQz///+4PAEAAPOlugIAAAAx9jH/iY3s/v//jY1o////zYCD+AV0BDHS',
+    '6zeLnQj///+4AwAAALoIAAAAuaC7BAjNgIP4BXXgukGlBAi5BQAAALiguwQI',
+    '6LEYAAAx0oXAD5TCuEelBAjocBkAALoGAAAAi53w/v//idDNgIud9P7//4nQ',
+    'zYCLnQj///+J0M2Ai50M////idDNgLlCAgAAuqQBAAC4BQAAALtVpQQIzYC+',
+    'MKsECLkEAAAAugIAAACJhfT+//+NvUj///+NhSD////HhWz///8DAAAAi530',
+    '/v//86WJhWj///8x/42FKP///4mFcP///74EAAAAuE4BAADHhXT///8DAAAA',
+    'iY3w/v//jY1I////zYAx0oP4BrhdpQQID5TC6LIYAACLnfT+//+4TQEAAIu9',
+    '8P7//42NaP///7oCAAAAzYAx24P4BnU1uQMAAAC6aqUECI2FIP///+ioFwAA',
+    'hcB1HLkDAAAAum6lBAiNhSj///8x2+iNFwAAhcAPlMOJ2rhypQQIvgQAAAAx',
+    '/+hFGAAAi530/v//uHoBAACNjWj///+6AgAAAM2AugEAAAC4fqUECL8BAAAA',
+    'MfboFxgAAIud9P7//7hNAQAAjY1o////ugIAAADNgDHSg/jluJGlBAgPlMLo',
+    '7RcAAFBqAGpkagBqAGoA/7X0/v//aEQBAADoxxYAAIPEIDHJhcB1GrgTAAAA',
+    'i530/v//ugIAAADNgDHJg/hkD5TBicq4o6UECOijFwAAV2oAaPQBAABqAGoA',
+    'agH/tfT+//9oRAEAAOh6FgAAg8QgMcmFwHUauBMAAAC6AgAAAIud9P7//82A',
+    'McmD+GQPlMGJyri3pQQI6FYXAABWagBqCGoAagBqA/+19P7//2hEAQAA6DAW',
+    'AACDxCCJwoXAdAQx0us6i530/v//uBMAAAC5BAAAAM2AuAMAAAC6BgAAALmg',
+    'uwQIi530/v//zYCD+AZ1zjHSgD2guwQIAA+UwrjLpQQI6OoWAABTagBqCGoA',
+    'agBqCP+19P7//2hEAQAA6MQVAACDxCAx0oP4objgpQQID5TC6LoWAACLnfT+',
+    '//+4WAEAAM2AhcB0BDHS6z9RagBqAGoAagBqAP+19P7//2g6AQAA6H8VAACD',
+    'xCCJwoXAddi44QAAAL4KAAAAi530/v//idHNgDHShcAPlMK4+qUECL8DAAAA',
+    '6FcWAAAx0oud9P7//7j6AAAAidGJ1s2AhcB1JlJqCWoAagBqAGoA/7X0/v//',
+    'aBABAADoGhUAADHSg8Qgg/jqD5TCuAamBAi+/wcAAL+g2wQI6AYWAACLnfT+',
+    '//+4fwEAALkTqwQIugAQAADNgInChcB1K4M9zNsECAB1JIM9yNsECGR1G2aB',
+    'PbzbBAikgXUQMdKDPbDbBAgBD5TC6wIx0rgTpgQIu5z///++/wcAAL+g2wQI',
+    '6KMVAAC4fwEAADHSuVWlBAjNgIXAdROhyNsECDHSg/BkCwXM2wQID5TCuB6m',
+    'BAi+/wcAALuc////v6DbBAjoZRUAALh/AQAAuS6mBAgx0s2AMdKD+P64O6YE',
+    'CA+UwuhFFQAAi530/v//uAYAAADNgLpNpgQIuE+mBAi7nP///75XpgQI6LoU',
+    'AAC6FasECLhXpgQIvwEAAADophQAALhhAQAAuU+mBAiJ2s2AMdKD+O+4X6YE',
+    'CL8CAAAAD5TC6OYUAAC4YQEAALlPpgQIidrNgIXAdAQx0us5uggAAAC4T6YE',
+    'COgWFAAASHXqgD2guwQIQnXhuggAAAC4V6YECOj7EwAASHXPMdKAPaC7BAhB',
+    'D5TCuHimBAgx/76QpgQI6IYUAAC6nP///7hhAQAAuU+mBAiJ082AMdKFwHUT',
+    'icu4BQAAAInRzYAx0oP4/g+UwriYpgQIu62mBAjoSxQAALgnAAAAue0BAADN',
+    'gDH/uQAAAQC4BQAAAIn6zYC7nP///7mQpgQIvr2mBAiJhfT+//+4LgEAAIuV',
+    '9P7//82AMdKFwHUVuggAAAC4taYECOhNEwAAMdJID5TCuMOmBAi/twEAADH2',
+    '6OETAACLnfT+//+6BAAAAIn4ub2mBAjNgImF8P7//4XAdAQx0us+i5Xw/v//',
+    'i530/v//ifi516YECInWzYCD+P514In4vgBAAAC5vaYECIud9P7//4uV8P7/',
+    '/82AMdKD+OoPlMK43KYECL/EAQAAMfbocBMAAIud9P7//7qAAQAAifi5vaYE',
+    'CM2AiceFwHQEMdLrMIn6i530/v//uH8BAAC+/wcAALm9pgQIv6DbBAjNgIXA',
+    'ddox0maBPbzbBAiAgQ+UwrjspgQIu7UBAAC+GAAAADH/6AwTAAAxwLm9pgQI',
+    'jZVo////iYVo////iYVs////iYVw////iYV0////iYV4////iYV8////idiL',
+    'nfT+///NgDHSicOFwHgXuAMAAAC6BAAAALmguwQIzYAx0kgPlMK4+6YECOio',
+    'EgAAhdt4B7gGAAAAzYAxwIud9P7//zH/vhgAAACJhXz///+5vaYECLi1AQAA',
+    'jZVo////x4V4////AQAAAM2AMdKD+KG4CKcECA+UwuhaEgAAi530/v//uAYA',
+    'AADNgL4FAAAAu5qkBAiJ+Yn6ifDNgImF8P7//4nwzYCJhez+//+4BQAAAIm1',
+    '9P7//82AugQAAACJhfT+//+LnfD+//+4tAEAAIuN9P7//82AMdKFwHUXuDcA',
+    'AAC5AQAAAIud7P7//82Ag+ABicK4KKcECL60AQAA6NQRAACLnfD+//8x0onw',
+    'i430/v//zYCJxoXAdAQx0utFvwMAAACLnez+//+6AQAAALmguwQIifjNgIP4',
+    '93Xei530/v//ifjNgIP493XPuLQBAAC7BQAAAIn5ifLNgDHSg/jqD5TCuEGn',
+    'BAi+ZAEAALtYpwQI6F8RAAC5AQAAAInwzYAx0onGhcB4Drg3AAAAifPNgIPg',
+    'AYnCuF2nBAiJ8+g0EQAAuAQAAAC5aqcECLoLAAAAzYCD+At0BDHS60Ax0rgT',
+    'AAAAidHNgIXAde24AwAAALoQAAAAuaC7BAjNgIP4C3XXumqnBAi5CwAAALig',
+    'uwQI6BEQAAAx0oXAD5TCuHanBAjo0BAAAFBqAFZqAWoDaAAQAABqAGjAAAAA',
+    '6KwPAACDxCAx0oXAfg2AOG11CMYATboBAAAAuH+nBAiJ8+iVEAAAMdK4EwAA',
+    'AInRzYC4AwAAALoEAAAAuaC7BAjNgLoBAAAAuIqnBAi7HKYECOhlEAAAuGQB',
+    'AAC5gAAAAM2AMdKD+Oq4m6cECInzD5TC6EUQAAC4BgAAAM2AUGoAav9qImoD',
+    'aACAAABqAGjAAAAA6BkPAAC5AIAAAI2VaP///4nHxgABxoAAMAAAAYn7uNoA',
+    'AADNgInCg8QghcB1H/aFaP///wF0GPaFa////wF0D4qVaf////fSg+IB6wIx',
+    '0riopwQIvtoAAACNnwCAAADoxQ8AAInwuQAQAACNlWj////NgDHSg/j0uLSn',
+    'BAiJ+w+UwuiiDwAAuQAgAAC4lgAAAM2AhcB0BDHS6xeJ8I2VaP///82AhcB1',
+    '7oqVaf///4PiAbjHpwQIifvoaw8AALkAIAAAuJcAAADNgDHShcCNnwBwAAC4',
+    '0acECA+UwuhIDwAAuJYAAAC5ACAAAM2AMdKD+PS43acECLsDAAAAD5TC6CUP',
+    'AAC6mAAAAInQzYCFwHQEMdLrGbiZAAAAzYCJw4XAde+J0M2AMdKD+OoPlMK4',
+    '7qcECI2fAFAAAOjrDgAAuNsAAAC5ABAAAMaHAFAAAAe6BAAAAM2AMdKFwHUM',
+    'MdKAvwBQAAAAD5TCuPunBAi+2wAAAIn76LAOAAC5ABAAADHSifDNgImF9P7/',
+    '/4XAdAQx0usjifC6ZAAAAM2Ag/jqde6NXwGJ8IuV9P7//82AMdKD+OoPlMK4',
+    'EKgECL4CAAAA6GUOAACJ8M2AicOFwHVhMcCNjUj///+7CAAAAImFSP///4mF',
+    'TP///7hLAAAAzYC6FwAAALvoAwAAidDNgInChcB0C7gBAAAAicPNgOv+uJYA',
+    'AAC5ABAAAIn7zYBAuAEAAAB0BonzzYDr/onTzYDr/rgHAAAAMdKNjQT////N',
+    'gDHSg70E////ALgjqAQIifsPlMLo0w0AALhbAAAAuQCAAADNgInwzYCJwYXA',
+    'dQ64AQAAALsHAAAAzYDr/o2FaP///4nCjX3oQMYCADn4dfO4HAEAALsBAAAA',
+    'vgQAAAEx/42VaP///82AicKFwHUog71o////EXUhg71w////AXUYOY10////',
+    'dRAx0oO9fP///wcPlMLrAjHSuDqoBAiJjfT+//+7AQAAADH/6DwNAAC+BAAA',
+    'ALgcAQAAi430/v//jZVo////zYAx0oXAdQwx0oO9fP///wcPlMK4RqgECImN',
+    '9P7//7sBAAAAMf/o+wwAAL4EAAAAuBwBAACLjfT+//+NlWj////NgDHJg/j2',
+    'dRO4HAEAAInLic7NgDHJg/jqD5TBicq4YKgECLsABAAA6LgMAAC6NgEAAInQ',
+    'zYAxyYXAdRGJ0LsAAABAzYAxyYP46g+UwYnKuHOoBAi+NwEAALsAEAAA6IIM',
+    'AACJ8LkMAAAAzYAx0oXAdROJ8LkIAAAAidPNgDHSg/jqD5TCMdu4hqgECOhU',
+    'DAAAiZ1I////uDgBAACNjUj///+JnWj///+NlWj///8x282AicKFwHUagb1I',
+    '////ABAAAHUQMdKDvWj///8MD5TC6wIx0riXqAQI6AcMAAC4FAAAAM2AicG4',
+    'FAAAAM2AMfaJw7oCAAAAuF0BAACJ982AiYX0/v//hcB0BDHS63SLjfT+//+4',
+    'BQAAALuapAQIicrNgInHuBQAAADNgInBuBQAAADNgIuV9P7//4nDuF0BAACJ',
+    '1s2AicaJ+7gGAAAAzYCF9n62uBQAAADNgInBuBQAAADNgIu19P7//4nDugkA',
+    'AAC4XQEAAIn3zYAx0oP46g+UwrisqAQIvncBAADoVAsAADHSifCJ04nRzYCF',
+    'wH8EMdLrJLsIAAAAifDNgInHhcB17Ynwu2MAAACJ+Yn6zYAx0oP46g+Uwri2',
+    'qAQIjbVo////6A4LAACJtRj///+J8I1ViMeFHP///xIAAADHhSD///9guwQI',
+    'x4Uk////EgAAAInBQMYBADnQdfa4AgAAAM2AicOFwA+FjAAAADHAipDGqAQI',
+    'QIiQX7sECITSde+JtSj///+4QAAAAMeFLP///xIAAADHhUj///9guwQIx4VM',
+    '////EgAAAM2AjZVI////UbsBAAAAagBqAVKNlSj///9qAVJQaFsBAADoXAkA',
+    'AIPEIIP4EnUYuRIAAAC62KgECInwMdvofAkAAIXAD5XDuAEAAADNgOv+uAcA',
+    'AAAx0o2NBP///82AMdKDvQT///8AuOuoBAgPlMLoGQoAALgUAAAAzYBSjZUg',
+    '////agBqAVKNlRj///9qAVJQaFsBAADo5wgAAIPEIDHSg/gSdRi62KgECLkS',
+    'AAAAifDoBwkAADHShcAPlMK4AakECLuAAAAA6MEJAAC6AQAAALhlAAAAidHN',
+    'gDHShcB1ELhuAAAAidPNgDHShcAPlMK4FqkECLsBAAAA6I4JAACNjSj///+4',
+    'CQEAAM2AhcB0BDHS6ya4kwEAAI2NSP///82Ai70o////Ob1I////fOEx0guF',
+    'TP///w+UwrgnqQQIMdvoRwkAALiWAQAAjY1I////zYAx0oXAdQwx0oO9UP//',
+    '/wAPn8Ix9rg8qQQIMf+7AQAAAOgVCQAAibVo////uJMBAACNjUj///+JtWz/',
+    '///HhXD///+A8PoCib10////zYCLhVD///++QEIPADHJab1I////6AMAAJn3',
+    '/o2VaP///4nOAce4lwEAAM2AMdKFwLhQqQQID5TC6LAIAAC4kwEAAI2NSP//',
+    '/82Ai4VQ////vkBCDwBpjUj////oAwAAmff+Kfkx0o1EAdg9ZwEAALhhqQQI',
+    'D5bC6HEIAAC4kwEAAI2NSP///82Ai5VQ////i4VI////jYoAh5MDiYVo////',
+    'gfn/yZo7fwiJjXD////rE4HqAEMHOECJlXD///+JhWj///+7AQAAALiXAQAA',
+    'MfaJ2Y2VaP///82AMdKFwHVFuJMBAACNjUj////NgIuFUP///7lAQg8AaZ1I',
+    '////6AMAAGm1aP///+gDAACZ9/kBw4uFcP///5n3+THSjUQG+znDD53CuHap',
+    'BAjovgcAAI2FaP///4nBicKNfehAxgIAOfh187h8AAAAicvNgIXAeQQx0usp',
+    'gX2MAMqaO37zulcBAAAx24nQzYCFwHjkidC7AQAAAM2AMdKD+KEPlMK4i6kE',
+    'CDH26GMHAACJ842NaP///8eFaP///wUAAADHhWz///8AlDV3uAgBAADNgDHS',
+    'g/jquJ6pBAgPlMIx2+gsBwAAMcmJnVT///+4KgAAAImdIP///42dEP///4mN',
+    'SP///4mNTP///8eFUP///4DDyQHHhST///+Aw8kBzYCLhRD///+/CAAAAMeF',
+    'HP///wEAAACNnRj///+5AQAAAI2VIP///4mFGP///7g1AQAAzYAx0oXAuLep',
+    'BAgPlMLorQYAAI2VSP///7ieAQAAuQEAAADNgDHShcC4yqkECA+UwuiKBgAA',
+    'i50U////uAQAAAC5HKYECLoBAAAAzYC4NQEAAInRjZ0Y////jZUg////zYAx',
+    '0kh1CmaLlR7///+D4gG436kECL4BAAAA6EAGAACLnRD///+4AwAAAInyuaC7',
+    'BAjNgIuNEP///4nwjb1o////0+BBiYVo////McCJhWz///9QjYUg////agBQ',
+    'agBqAFdRaDQBAADo6AQAAIPEILoBAAAAuPCpBAjo4QUAAIuNEP///4nwifKL',
+    'nRT////T4LlMqgQIiYVo////uAQAAADNgI2FIP///1JqAFCLhRD///9qAEBq',
+    'AFdQaDQBAADokQQAAIPEIDHSg/gBdROLjRD///8x0tPgI4Vo////D5XCuAaq',
+    'BAjodQUAAIudEP///7gDAAAAuaC7BAi6AQAAAM2AMf+4SQEAAIn7zYCJhfT+',
+    '//8xwIuVEP///7kBAAAAiYUw////i530/v//uP8AAACNtSj////HhSj///8B',
+    'AAAAx4Us////BQAAAM2AuLkBAACLnfT+//+NjWj///+6AgAAAI21IP///82A',
+    'MdKFwLgaqgQID5TC6OQEAACLnRT///+4BAAAALk0qgQIugEAAADNgLi5AQAA',
+    'i530/v//ugIAAACNjWj////NgDHSSHUUi4Vs////MdKD8AULhXD///8PlMK4',
+    'NqoECOiSBAAAugYAAACLnfT+//+J0M2Ai50Q////idDNgIudFP///4nQzYAx',
+    '0rsBAAAAuEIBAACJ0c2AuQgAAACJhfT+//+J0I29KP////Org730/v//AMeF',
+    'QP///wBaYgJ4II21SP///7ibAQAAi530/v//jZUo////zYAxyYXAD5TBicq4',
+    'TqoECOgLBAAAMcCLnfT+//+NjWj///+JhWj///+6CAAAAImFbP///7gDAAAA',
+    'zYAx0oP4CHURMdKLhWj///8LhWz///8PlcK4ZaoECOjDAwAAi530/v//uJoB',
+    'AACNjWj////NgDHShcC4d6oECA+UwuifAwAAi530/v//uAYAAADNgDHSMcmN',
+    'tUj///+4pgEAAImVKP///42dKP///4mVSP///4mVTP///zHSiY1U////ideJ',
+    '0ceFUP///wAtMQHNgLoBAAAAuI6qBAi/kwEAALsBAAAA6DoDAACJ+I2NaP//',
+    '/82Ai4Vo////iYX0/v//i4Vw////iYXw/v//UI2FKP///2oAagBWagBqAFBo',
+    'pgEAAOjyAQAAjY1o////icKJ+M2AMcmLvWj///+LhXD///+DxCCD+pJ1NrlA',
+    'Qg8Amff5af/oAwAAaZ30/v//6AMAAAHHi4Xw/v//mff5MckBw4n4KdiD6A89',
+    'HAEAAA+WwYnKuKiqBAi7AQAAAOiUAgAAuJMBAACNjWj////NgIuVcP///4uF',
+    'aP///42KgMPJAYmFSP///4H5/8maO38IiY1Q////6xOB6oAG0TlAiZVQ////',
+    'iYVI////UI2FKP///7sBAAAAav9qAFZqAGoJUGimAQAA6CEBAACNjWj///+J',
+    'xriTAQAAzYAx0oPEIIP+knU4i4Vw////uUBCDwBpnWj////oAwAAabVI////',
+    '6AMAAJn3+QHDi4VQ////mff5MdKNRAb7OcMPncK4wKoECLv//wAA6MwBAAC4',
+    'PgAAALmg2wQIzYAx0oP46rjbqgQIvkCrBAgPlMKNvWj///+7nP///+ieAQAA',
+    'uhymBAi47aoECOgqAQAAuQgAAACNlWj///+4nAEAAPOlv+2qBAgx9omN9P7/',
+    '/4n5zYCFwHQEMdLrLbjDAAAAifu5oNsECM2AhcB16oE96NsECACrkEF13jHS',
+    'gT3g2wQIAMqaOw+Uwrj1qgQI6C0BAAC4BqsECOgDAQAAMcCDPaDcBAgAD5XA',
+    'jWXwWVteX12NYfzDVVdWU4tEJBSLXCQYi0wkHItUJCCLdCQki3wkKItsJCzN',
+    'gFteX13DuK0AAADNgDHtieCD5PBQ6BQBAABVAcGJ5VaJ1lOJww+2Aw+2FjjQ',
+    'dAQp0OsIQ0Y5y3XsMcBbXl3DVYnlVonWMdJTidGJw7gFAAAAzYCJw4XAeCaN',
+    'Vv+4AwAAALmguwQIzYAx0oXAD0nQuAYAAADGgqC7BAgAzYCJ04nYW15dw1W5',
+    'QQIAAInlV4nXuqQBAABWvgUAAABTicOJ8M2AMdKJxoA8FwB0A0Lr94X2eBK4',
+    'BAAAAInzifnNgLgGAAAAzYBbXl9dw1WJwTHSieVTgDwRAHQDQuv3uAQAAAC7',
+    'AQAAAM2AW13DVYnlVonGuGyjBAhTidPozf///4nw6Mb///+F27hlowQIumCj',
+    'BAgPRcLosv///4XbdAj/BaTcBAjrBv8FoNwECFteXcNVieVTg+wIi0UIixCN',
+    'SASNRJAIUFFS6F7d//+Jw7gBAAAAzYCDxBDr/gAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAgT0sKACBGQUlMCgBLVEVTVDogAHN5cy5yZXN0YXJ0X3N5',
+    'c2NhbGwAc3lzLnBlcnNvbmFsaXR5AHN5cy5lbm9zeXNfbGlzdABzeXMudW5r',
+    'bm93bl9lbm9zeXMAc2NoZWQuZ2V0c2NoZWR1bGVyAHNjaGVkLnNldF9maWZv',
+    'AHNjaGVkLnNldF9vdGhlcgBzY2hlZC5laW52YWwAc2NoZWQucnJfaW50ZXJ2',
+    'YWwAc2NoZWQuYWZmaW5pdHkAc2NoZWQuZ2V0Y3B1AHNjaGVkLmdldGF0dHIA',
+    'c2NoZWQuc2V0YXR0cgBzY2hlZC5pb3ByaW8AY2FwLmNhcGdldF9yb290AGNh',
+    'cC5iYWRfdmVyc2lvbgBjYXAuZHJvcF9hbmRfc2V0dWlkADAxMjM0NTY3ODlh',
+    'YmNkZWZnaGlqAC90bXAvc2EAL3RtcC9zYgA1Njc4OWFiY2RlAGZpbGUuc2Vu',
+    'ZGZpbGU2NABmaWxlLnNlbmRmaWxlX2JhZGZkADIzNDU2N2FiY2RlAGZpbGUu',
+    'Y29weV9maWxlX3JhbmdlAC90bXAvc2MAZmlsZS5zcGxpY2VfaW4AMDEyMzQ1',
+    'Njc4OWFiAGZpbGUuc3BsaWNlX291dABmaWxlLnNwbGljZV9laW52YWwAQUJD',
+    'REUAZmlsZS52bXNwbGljZQAvdG1wL3NkAGZpbGUucHdyaXRldgBIRUwATE8h',
+    'AGZpbGUucHJlYWR2AGZpbGUucHJlYWR2Ml9mbGFncwBmaWxlLnByZWFkdl9l',
+    'ZmJpZwBmaWxlLmZhbGxvY2F0ZV9ncm93AGZpbGUuZmFsbG9jYXRlX2tlZXAA',
+    'ZmlsZS5mYWxsb2NhdGVfcHVuY2gAZmlsZS5mYWxsb2NhdGVfZW9wbm90c3Vw',
+    'cABmaWxlLnN5bmNmcwBmaWxlLmZhZHZpc2UAZmlsZS5zdGF0eABmaWxlLnN0',
+    'YXR4X3BhdGgAL3RtcC9uZXhpc3RlAGZpbGUuc3RhdHhfZW5vZW50AEEAL3Rt',
+    'cC9yYQAvdG1wL3JiAGZpbGUucmVuYW1lYXQyX25vcmVwbGFjZQBmaWxlLnJl',
+    'bmFtZWF0Ml9leGNoYW5nZQAvdG1wL3JjAGZpbGUucmVuYW1lYXQyX3BsYWlu',
+    'AC90bXAvZGQAL3RtcC9kZC9tb3ZlZABmaWxlLnJlbmFtZWF0X2RpcmZkAG5v',
+    'cGUAZmlsZS5mYWNjZXNzYXQyAGZpbGUuZmNobW9kYXQyAGZpbGUub3BlbmF0',
+    'MgBmaWxlLm9wZW5hdDJfcmVzb2x2ZV9lb3Bub3RzdXBwAGZpbGUuY2xvc2Vf',
+    'cmFuZ2VfY2xvZXhlYwBmaWxlLmNsb3NlX3JhbmdlX2Nsb3NlAHRlc3QAbWVt',
+    'ZmQuY3JlYXRlAG1lbW9yeSBmaWxlAG1lbWZkLnJ3AG1lbWZkLm1tYXAAbWVt',
+    'ZmQubW1hcF9tc3luYwBtZW1mZC5laW52YWwAbWVtLm1pbmNvcmUAbWVtLm1p',
+    'bmNvcmVfZW5vbWVtAG1lbS5tbG9jawBtZW0ubXVubG9jawBtZW0ubWxvY2tf',
+    'ZW5vbWVtAG1lbS5tbG9ja2FsbABtZW0ubWFkdmlzZV9kb250bmVlZABtZW0u',
+    'bWFkdmlzZV9ub3JtYWwAbWVtLm1sb2NrX3JsaW1pdF9lcGVybQBwcm9jLndh',
+    'aXRpZABwcm9jLndhaXRpZF93bm93YWl0X2FnYWluAHByb2Mud2FpdGlkX2Vj',
+    'aGlsZABwcm9jLnVuc2hhcmVfZmlsZXMAcHJvYy5yb2J1c3RfbGlzdABwcm9j',
+    'LmdldF9yb2J1c3RfbGlzdABwcm9jLmtjbXAAcHJvYy5tZW1iYXJyaWVyAGNo',
+    'aWxkIGVkaXRlZCB0ZXh0AGZyb20gcGFyZW50IG1lbW9yeQBwcm9jLnByb2Nl',
+    'c3Nfdm1fcmVhZHYAcHJvYy5wcm9jZXNzX3ZtX3NlbGYAcHJvYy5pb3Blcm1f',
+    'cm9vdAB0aW1lLmNsb2NrX2dldHRpbWU2NAB0aW1lLmNsb2NrX2dldHJlczY0',
+    'AHRpbWUubmFub3NsZWVwNjQAdGltZS5uYW5vc2xlZXA2NF9kdXIAdGltZS5u',
+    'YW5vc2xlZXA2NF9hYnMAdGltZS5hZGp0aW1leF9yZWFkAHRpbWUuY2xvY2tf',
+    'c2V0dGltZV9yYW5nZQBwb2xsLnBwb2xsX3RpbWVvdXQAcG9sbC5wcG9sbDY0',
+    'X3RpbWVvdXQAcG9sbC5wcG9sbF9yZWFkeQBwb2xsLnBzZWxlY3Q2X3RpbWVv',
+    'dXQAcG9sbC5wc2VsZWN0Nl9yZWFkeQBwb2xsLmVwb2xsX3B3YWl0Ml90aW1l',
+    'b3V0AHoAcG9sbC5lcG9sbF9wd2FpdDJfcmVhZHkAdGltZS50aW1lcmZkX3Nl',
+    'dHRpbWU2NAB0aW1lLnRpbWVyZmRfcmVhZAB0aW1lLnRpbWVyZmRfZ2V0dGlt',
+    'ZTY0AHRpbWUuZnV0ZXhfdGltZTY0X3RpbWVvdXQAdGltZS5mdXRleF93YWl0',
+    'X3RpbWVvdXQAdGltZS5mdXRleF93YWl0X2JpdHNldF9hYnMAbWlzYy51c3Rh',
+    'dF9laW52YWwAL3RtcC91dAB0aW1lLnV0aW1lbnNhdDY0AHN5c2NhbGwgRE9O',
+    'RQoAQUIAAAAAAAAAAAAAFKsECAIAAABDpQQIAwAAAGqlBAgDAAAAbqUECAMA',
+    'AAAAypo7AAAAAAAAAAAAAAAAAKuQQQAAAAAAAAAAAAAAAGZyb20gcGFyZW50',
+    'IG1lbW9yeQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAABHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEp',
+    'IDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx/w8A',
+    'AAAHogQIJQAAAAIAAQAXAAAALKIECEYAAAACAAEAKQAAAKC7BAgAIAAAAQAE',
+    'AC0AAAByogQIRQAAAAIAAQA6AAAAt6IECCAAAAACAAEAPwAAANeiBAhEAAAA',
+    'AgABAEUAAACk3AQIBAAAAAEABABNAAAAoNwECAQAAAABAAQAVQAAAKDbBAgA',
+    'AQAAAQAEAFgAAABguwQIQAAAAAEAAwBhAAAAG6MECCkAAAASAAEAZwAAAMyh',
+    'BAgAAAAAEAABAG4AAADzoQQIAAAAABAAAQCAAAAA+qEECAAAAAAQAAEAewAA',
+    'AKC7BAgAAAAAEAAEAGIAAACUgAQIOCEAABIAAQCHAAAAoLsECAAAAAAQAAMA',
+    'jgAAAKjcBAgAAAAAEAAEAABzeXNjYWxsdGVzdC5jAG1lbWNtcF8AcmZpbGUu',
+    'Y29uc3Rwcm9wLjAAYnVmAHdmaWxlLmlzcmEuMABwdXRzAGt0ZXN0AGt1X3Bh',
+    'c3MAa3VfZmFpbABzYgBzaGFyZWQuMABjbWFpbgBrdV9zYzYAX19yZXN0b3Jl',
+    'X3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIA',
+    'LnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmRhdGEALmJzcwAuY29tbWVudAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEA',
+    'AAAGAAAAlIAECJQAAACwIgAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAAgAA',
+    'AGCjBAhgIwAAAAgAAAAAAAAAAAAAIAAAAAAAAAApAAAAAQAAAAMAAABguwQI',
+    'YCsAAEAAAAAAAAAAAAAAACAAAAAAAAAALwAAAAgAAAADAAAAoLsECKArAAAI',
+    'IQAAAAAAAAAAAAAgAAAAAAAAADQAAAABAAAAMAAAAAAAAACgKwAALQAAAAAA',
+    'AAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAA0CsAAEABAAAHAAAADAAA',
+    'AAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAABAtAACTAAAAAAAAAAAAAAABAAAA',
+    'AAAAABEAAAADAAAAAAAAAAAAAACjLQAAPQAAAAAAAAAAAAAAAQAAAAAAAAA=');
 
 { END-EMBED }
 { Installer les programmes embarques dans le tmpfs racine }
@@ -27824,6 +30321,7 @@ Begin
   InitIdt;
   InitTasks;
   InitSyscalls;
+  InitSyscalls2;
   HostName := 'linux0';
   DomainName := '(none)';
   InitTime;

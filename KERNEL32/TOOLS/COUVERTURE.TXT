@@ -1,0 +1,593 @@
+COUVERTURE DE KERNEL32 PAR RAPPORT A LINUX i386
+genere par TOOLS/COUVERTURE.PY (ne pas editer a la main)
+========================================================================
+
+A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
+   reel = fonction implementee ; stub = renvoie une constante sans agir ;
+   enosys = refus explicite et documente (-ENOSYS) ; absent = non enregistre
+   (ENOSYS implicite). Test : programme de TESTS/K qui l'appelle.
+
+  nr  nom                    etat     test
+   0  restart_syscall        stub     
+   1  exit                   reel     ku.h
+   2  fork                   reel     ku.h
+   3  read                   reel     ku.h
+   4  write                  reel     ku.h
+   5  open                   reel     ku.h
+   6  close                  reel     ku.h
+   7  waitpid                reel     ku.h
+   8  creat                  reel     ku.h
+   9  link                   reel     ku.h
+  10  unlink                 reel     ku.h
+  11  execve                 reel     ku.h
+  12  chdir                  reel     ku.h
+  13  time                   reel     devtest.c,ku.h,schedtest.c
+  14  mknod                  reel     ku.h
+  15  chmod                  reel     ku.h
+  16  lchown                 reel     ext2test.c,fattest.c
+  17  break                  enosys   
+  18  oldstat                enosys   
+  19  lseek                  reel     ku.h
+  20  getpid                 reel     ku.h
+  21  mount                  reel     ku.h
+  22  umount                 reel     ku.h
+  23  setuid                 reel     dirtest.c,ku.h,misctest.c,syscalltest.c
+  24  getuid                 reel     ku.h
+  25  stime                  reel     
+  26  ptrace                 stub     
+  27  alarm                  reel     ku.h
+  28  oldfstat               enosys   
+  29  pause                  reel     ku.h
+  30  utime                  reel     
+  31  stty                   enosys   
+  32  gtty                   enosys   
+  33  access                 reel     ku.h
+  34  nice                   reel     ku.h
+  35  ftime                  enosys   
+  36  sync                   reel     ku.h
+  37  kill                   reel     ku.h
+  38  rename                 reel     ku.h
+  39  mkdir                  reel     ku.h
+  40  rmdir                  reel     ku.h
+  41  dup                    reel     ku.h
+  42  pipe                   reel     ku.h
+  43  times                  reel     ku.h,schedtest.c
+  44  prof                   enosys   
+  45  brk                    reel     ku.h
+  46  setgid                 reel     
+  47  getgid                 reel     
+  48  signal                 reel     
+  49  geteuid                reel     
+  50  getegid                reel     
+  51  acct                   enosys   
+  52  umount2                reel     ext2test.c,fattest.c,mounttest.c
+  53  lock                   enosys   
+  54  ioctl                  reel     ku.h
+  55  fcntl                  reel     ku.h
+  56  mpx                    enosys   
+  57  setpgid                reel     ku.h
+  58  ulimit                 enosys   
+  59  oldolduname            enosys   
+  60  umask                  reel     ku.h
+  61  chroot                 reel     ku.h
+  62  ustat                  reel     syscalltest.c
+  63  dup2                   reel     ku.h
+  64  getppid                reel     ku.h
+  65  getpgrp                reel     ku.h
+  66  setsid                 reel     ku.h
+  67  sigaction              reel     ku.h,misctest.c
+  68  sgetmask               reel     
+  69  ssetmask               reel     
+  70  setreuid               reel     
+  71  setregid               reel     
+  72  sigsuspend             reel     ku.h
+  73  sigpending             reel     
+  74  sethostname            reel     
+  75  setrlimit              reel     limtest.c,syscalltest.c
+  76  getrlimit              reel     misctest.c
+  77  getrusage              reel     
+  78  gettimeofday           reel     devtest.c,ku.h,preempttest.c,pstress.c,schedtest.c
+  79  settimeofday           reel     
+  80  getgroups              reel     
+  81  setgroups              reel     
+  82  select                 reel     
+  83  symlink                reel     ku.h
+  84  oldlstat               enosys   
+  85  readlink               reel     ku.h
+  86  uselib                 enosys   
+  87  swapon                 reel     swaptest.c
+  88  reboot                 reel     ku.h
+  89  readdir                enosys   
+  90  mmap                   reel     
+  91  munmap                 reel     ku.h
+  92  truncate               reel     ext2test.c,fattest.c,misctest.c
+  93  ftruncate              reel     dirtest.c,ext2test.c,fattest.c,ku.h
+  94  fchmod                 reel     ext2test.c,fattest.c
+  95  fchown                 reel     
+  96  getpriority            reel     ku.h
+  97  setpriority            reel     
+  98  profil                 enosys   
+  99  statfs                 reel     ext2test.c,fattest.c,isotest.c,misctest.c,stress.c
+ 100  fstatfs                reel     
+ 101  ioperm                 reel     syscalltest.c
+ 102  socketcall             reel     
+ 103  syslog                 reel     
+ 104  setitimer              reel     misctest.c
+ 105  getitimer              reel     
+ 106  stat                   reel     misctest.c
+ 107  lstat                  reel     
+ 108  fstat                  reel     
+ 109  olduname               enosys   
+ 110  iopl                   reel     syscalltest.c
+ 111  vhangup                stub     
+ 112  idle                   enosys   
+ 113  vm86old                enosys   
+ 114  wait4                  reel     ku.h
+ 115  swapoff                reel     swaptest.c
+ 116  sysinfo                reel     ku.h,misctest.c
+ 117  ipc                    absent   
+ 118  fsync                  reel     ext2test.c,fattest.c
+ 119  sigreturn              reel     
+ 120  clone                  reel     ku.h
+ 121  setdomainname          reel     
+ 122  uname                  reel     ku.h
+ 123  modify_ldt             enosys   
+ 124  adjtimex               reel     syscalltest.c
+ 125  mprotect               reel     ku.h
+ 126  sigprocmask            reel     
+ 127  create_module          enosys   
+ 128  init_module            enosys   
+ 129  delete_module          enosys   
+ 130  get_kernel_syms        enosys   
+ 131  quotactl               enosys   
+ 132  getpgid                reel     
+ 133  fchdir                 reel     
+ 134  bdflush                enosys   
+ 135  sysfs                  enosys   
+ 136  personality            reel     syscalltest.c
+ 137  afs_syscall            enosys   
+ 138  setfsuid               reel     
+ 139  setfsgid               reel     
+ 140  _llseek                reel     
+ 141  getdents               reel     ku.h
+ 142  _newselect             reel     misctest.c
+ 143  flock                  stub     
+ 144  msync                  reel     shmtest.c
+ 145  readv                  reel     misctest.c
+ 146  writev                 reel     misctest.c
+ 147  getsid                 reel     
+ 148  fdatasync              reel     
+ 149  _sysctl                enosys   
+ 150  mlock                  reel     syscalltest.c
+ 151  munlock                reel     syscalltest.c
+ 152  mlockall               reel     syscalltest.c
+ 153  munlockall             reel     
+ 154  sched_setparam         reel     
+ 155  sched_getparam         reel     syscalltest.c
+ 156  sched_setscheduler     reel     syscalltest.c
+ 157  sched_getscheduler     reel     syscalltest.c
+ 158  sched_yield            reel     ku.h
+ 159  sched_get_priority_max reel     
+ 160  sched_get_priority_min reel     
+ 161  sched_rr_get_interval  reel     syscalltest.c
+ 162  nanosleep              reel     fbtest.c,killtest.c,ku.h
+ 163  mremap                 reel     
+ 164  setresuid              reel     
+ 165  getresuid              reel     
+ 166  vm86                   enosys   
+ 167  query_module           enosys   
+ 168  poll                   reel     evttest.c,ku.h,kusock.h,misctest.c,mousetest.c,ptytest.c
+ 169  nfsservctl             enosys   
+ 170  setresgid              reel     
+ 171  getresgid              reel     
+ 172  prctl                  reel     
+ 173  rt_sigreturn           reel     
+ 174  rt_sigaction           reel     ku.h
+ 175  rt_sigprocmask         reel     ku.h
+ 176  rt_sigpending          reel     
+ 177  rt_sigtimedwait        absent   
+ 178  rt_sigqueueinfo        absent   
+ 179  rt_sigsuspend          reel     
+ 180  pread64                reel     ext2test.c,misctest.c
+ 181  pwrite64               reel     ext2test.c,fattest.c
+ 182  chown                  reel     ext2test.c,fattest.c
+ 183  getcwd                 reel     ku.h
+ 184  capget                 reel     syscalltest.c
+ 185  capset                 reel     syscalltest.c
+ 186  sigaltstack            reel     
+ 187  sendfile               reel     syscalltest.c
+ 188  getpmsg                enosys   
+ 189  putpmsg                enosys   
+ 190  vfork                  reel     ku.h,misctest.c
+ 191  ugetrlimit             reel     
+ 192  mmap2                  reel     ku.h
+ 193  truncate64             reel     
+ 194  ftruncate64            reel     
+ 195  stat64                 reel     dirtest.c,ext2test.c,fattest.c,ku.h,misctest.c,socktest.c,syscalltest.c
+ 196  lstat64                reel     dirtest.c,ext2test.c,ku.h
+ 197  fstat64                reel     dirtest.c,ext2test.c,fattest.c,ku.h
+ 198  lchown32               reel     
+ 199  getuid32               reel     
+ 200  getgid32               reel     
+ 201  geteuid32              reel     
+ 202  getegid32              reel     
+ 203  setreuid32             reel     
+ 204  setregid32             reel     
+ 205  getgroups32            reel     
+ 206  setgroups32            reel     
+ 207  fchown32               reel     
+ 208  setresuid32            reel     
+ 209  getresuid32            reel     
+ 210  setresgid32            reel     
+ 211  getresgid32            reel     
+ 212  chown32                reel     
+ 213  setuid32               reel     
+ 214  setgid32               reel     
+ 215  setfsuid32             reel     
+ 216  setfsgid32             reel     
+ 217  pivot_root             reel     mounttest.c
+ 218  mincore                reel     syscalltest.c
+ 219  madvise                reel     syscalltest.c
+ 220  getdents64             reel     ext2test.c,fattest.c,ku.h
+ 221  fcntl64                reel     
+ 224  gettid                 reel     ku.h
+ 225  readahead              reel     syscalltest.c
+ 226  setxattr               absent   
+ 227  lsetxattr              absent   
+ 228  fsetxattr              absent   
+ 229  getxattr               absent   
+ 230  lgetxattr              absent   
+ 231  fgetxattr              absent   
+ 232  listxattr              absent   
+ 233  llistxattr             absent   
+ 234  flistxattr             absent   
+ 235  removexattr            absent   
+ 236  lremovexattr           absent   
+ 237  fremovexattr           absent   
+ 238  tkill                  reel     
+ 239  sendfile64             reel     syscalltest.c
+ 240  futex                  reel     
+ 241  sched_setaffinity      reel     syscalltest.c
+ 242  sched_getaffinity      reel     syscalltest.c
+ 243  set_thread_area        reel     
+ 244  get_thread_area        stub     
+ 245  io_setup               absent   
+ 246  io_destroy             absent   
+ 247  io_getevents           absent   
+ 248  io_submit              absent   
+ 249  io_cancel              absent   
+ 250  fadvise64              reel     syscalltest.c
+ 252  exit_group             reel     
+ 253  lookup_dcookie         enosys   
+ 254  epoll_create           reel     
+ 255  epoll_ctl              reel     evttest.c,syscalltest.c
+ 256  epoll_wait             reel     evttest.c
+ 257  remap_file_pages       enosys   
+ 258  set_tid_address        reel     
+ 259  timer_create           absent   
+ 260  timer_settime          absent   
+ 261  timer_gettime          absent   
+ 262  timer_getoverrun       absent   
+ 263  timer_delete           absent   
+ 264  clock_settime          reel     syscalltest.c
+ 265  clock_gettime          reel     ku.h,misctest.c,syscalltest.c
+ 266  clock_getres           reel     
+ 267  clock_nanosleep        reel     
+ 268  statfs64               reel     
+ 269  fstatfs64              reel     
+ 270  tgkill                 reel     
+ 271  utimes                 reel     ext2test.c,fattest.c,misctest.c
+ 272  fadvise64_64           reel     syscalltest.c
+ 273  vserver                absent   
+ 274  mbind                  absent   
+ 275  get_mempolicy          absent   
+ 276  set_mempolicy          absent   
+ 277  mq_open                absent   
+ 278  mq_unlink              absent   
+ 279  mq_timedsend           absent   
+ 280  mq_timedreceive        absent   
+ 281  mq_notify              absent   
+ 282  mq_getsetattr          absent   
+ 283  kexec_load             enosys   
+ 284  waitid                 reel     syscalltest.c
+ 286  add_key                enosys   
+ 287  request_key            enosys   
+ 288  keyctl                 enosys   
+ 289  ioprio_set             reel     syscalltest.c
+ 290  ioprio_get             reel     syscalltest.c
+ 291  inotify_init           reel     
+ 292  inotify_add_watch      reel     evttest.c
+ 293  inotify_rm_watch       reel     evttest.c
+ 294  migrate_pages          enosys   
+ 295  openat                 reel     
+ 296  mkdirat                reel     
+ 297  mknodat                reel     
+ 298  fchownat               reel     
+ 299  futimesat              absent   
+ 300  fstatat64              reel     
+ 301  unlinkat               reel     
+ 302  renameat               reel     
+ 303  linkat                 reel     
+ 304  symlinkat              reel     
+ 305  readlinkat             reel     
+ 306  fchmodat               reel     
+ 307  faccessat              reel     
+ 308  pselect6               reel     syscalltest.c
+ 309  ppoll                  reel     
+ 310  unshare                reel     syscalltest.c
+ 311  set_robust_list        reel     syscalltest.c
+ 312  get_robust_list        reel     syscalltest.c
+ 313  splice                 reel     syscalltest.c
+ 314  sync_file_range        reel     syscalltest.c
+ 315  tee                    enosys   
+ 316  vmsplice               reel     
+ 317  move_pages             enosys   
+ 318  getcpu                 reel     syscalltest.c
+ 319  epoll_pwait            reel     
+ 320  utimensat              reel     
+ 321  signalfd               absent   
+ 322  timerfd_create         reel     evttest.c,syscalltest.c
+ 323  eventfd                reel     
+ 324  fallocate              reel     syscalltest.c
+ 325  timerfd_settime        reel     evttest.c
+ 326  timerfd_gettime        reel     evttest.c
+ 327  signalfd4              absent   
+ 328  eventfd2               reel     evttest.c
+ 329  epoll_create1          reel     evttest.c,syscalltest.c
+ 330  dup3                   reel     
+ 331  pipe2                  reel     
+ 332  inotify_init1          reel     evttest.c
+ 333  preadv                 reel     
+ 334  pwritev                reel     
+ 335  rt_tgsigqueueinfo      absent   
+ 336  perf_event_open        enosys   
+ 337  recvmmsg               absent   
+ 338  fanotify_init          enosys   
+ 339  fanotify_mark          enosys   
+ 340  prlimit64              reel     
+ 341  name_to_handle_at      enosys   
+ 342  open_by_handle_at      enosys   
+ 343  clock_adjtime          reel     syscalltest.c
+ 344  syncfs                 reel     syscalltest.c
+ 345  sendmmsg               absent   
+ 346  setns                  absent   
+ 347  process_vm_readv       reel     syscalltest.c
+ 348  process_vm_writev      reel     
+ 349  kcmp                   reel     syscalltest.c
+ 350  finit_module           enosys   
+ 351  sched_setattr          reel     syscalltest.c
+ 352  sched_getattr          reel     syscalltest.c
+ 353  renameat2              reel     
+ 354  seccomp                absent   
+ 355  getrandom              reel     
+ 356  memfd_create           reel     syscalltest.c
+ 357  bpf                    enosys   
+ 358  execveat               reel     
+ 359  socket                 reel     kusock.h
+ 360  socketpair             reel     evttest.c,kusock.h
+ 361  bind                   reel     kusock.h
+ 362  connect                reel     kusock.h
+ 363  listen                 reel     kusock.h
+ 364  accept4                reel     kusock.h
+ 365  getsockopt             reel     kusock.h
+ 366  setsockopt             reel     kusock.h
+ 367  getsockname            reel     kusock.h
+ 368  getpeername            reel     kusock.h
+ 369  sendto                 reel     kusock.h
+ 370  sendmsg                reel     kusock.h
+ 371  recvfrom               reel     kusock.h
+ 372  recvmsg                reel     kusock.h
+ 373  shutdown               reel     kusock.h
+ 374  userfaultfd            enosys   
+ 375  membarrier             reel     syscalltest.c
+ 376  mlock2                 reel     
+ 377  copy_file_range        reel     syscalltest.c
+ 378  preadv2                reel     
+ 379  pwritev2               reel     
+ 380  pkey_mprotect          enosys   
+ 381  pkey_alloc             enosys   
+ 382  pkey_free              enosys   
+ 383  statx                  reel     syscalltest.c
+ 384  arch_prctl             enosys   
+ 385  io_pgetevents          enosys   
+ 386  rseq                   enosys   
+ 393  semget                 absent   
+ 394  semctl                 absent   
+ 395  shmget                 absent   
+ 396  shmctl                 absent   
+ 397  shmat                  absent   
+ 398  shmdt                  absent   
+ 399  msgget                 absent   
+ 400  msgsnd                 absent   
+ 401  msgrcv                 absent   
+ 402  msgctl                 absent   
+ 403  clock_gettime64        reel     syscalltest.c
+ 404  clock_settime64        reel     
+ 405  clock_adjtime64        absent   
+ 406  clock_getres_time64    reel     syscalltest.c
+ 407  clock_nanosleep_time64 reel     syscalltest.c
+ 408  timer_gettime64        absent   
+ 409  timer_settime64        absent   
+ 410  timerfd_gettime64      reel     syscalltest.c
+ 411  timerfd_settime64      reel     syscalltest.c
+ 412  utimensat_time64       reel     syscalltest.c
+ 413  pselect6_time64        reel     
+ 414  ppoll_time64           reel     
+ 416  io_pgetevents_time64   absent   
+ 417  recvmmsg_time64        absent   
+ 418  mq_timedsend_time64    absent   
+ 419  mq_timedreceive_time64 absent   
+ 420  semtimedop_time64      absent   
+ 421  rt_sigtimedwait_time64 absent   
+ 422  futex_time64           reel     syscalltest.c
+ 423  sched_rr_get_interval_time64 absent   
+ 424  pidfd_send_signal      absent   
+ 425  io_uring_setup         enosys   
+ 426  io_uring_enter         enosys   
+ 427  io_uring_register      enosys   
+ 428  open_tree              enosys   
+ 429  move_mount             enosys   
+ 430  fsopen                 enosys   
+ 431  fsconfig               enosys   
+ 432  fsmount                enosys   
+ 433  fspick                 enosys   
+ 434  pidfd_open             absent   
+ 435  clone3                 absent   
+ 436  close_range            reel     syscalltest.c
+ 437  openat2                reel     
+ 438  pidfd_getfd            enosys   
+ 439  faccessat2             reel     syscalltest.c
+ 440  process_madvise        enosys   
+ 441  epoll_pwait2           reel     
+ 442  mount_setattr          enosys   
+ 443  quotactl_fd            enosys   
+ 444  landlock_create_ruleset enosys   
+ 445  landlock_add_rule      enosys   
+ 446  landlock_restrict_self enosys   
+ 447  memfd_secret           enosys   
+ 448  process_mrelease       enosys   
+ 449  futex_waitv            enosys   
+ 450  set_mempolicy_home_node enosys   
+ 451  cachestat              enosys   
+ 452  fchmodat2              reel     syscalltest.c
+ 453  map_shadow_stack       enosys   
+ 454  futex_wake             absent   
+ 455  futex_wait             absent   
+ 456  futex_requeue          absent   
+ 457  statmount              enosys   
+ 458  listmount              enosys   
+ 459  lsm_get_self_attr      enosys   
+ 460  lsm_set_self_attr      enosys   
+ 461  lsm_list_modules       enosys   
+
+Total : 451 appels ; reels 293 (65.0 %), stubs 5, ENOSYS explicites 84, absents 69
+
+B1. FAMILLES D'IOCTL
+   TCGETS/TCSETS (termios)            present  
+   TIOCGWINSZ/TIOCSWINSZ              present  
+   TIOCGPGRP/TIOCSPGRP                present  
+   TIOCSCTTY                          present  
+   TIOCSTI                            absent   injection de caractere
+   TIOCGPTN/TIOCSPTLCK (pty)          present  
+   FIONREAD                           present  
+   FIONBIO/FIOCLEX                    present  
+   VT_* / KD_* (consoles virtuelles)  present  
+   KDSETMODE/KDGKBMODE                present  
+   BLKGETSIZE/BLKGETSIZE64/BLKFLSBUF  present  
+   HDIO_GETGEO                        absent   
+   FBIOGET_*SCREENINFO                present  
+   SIOCGIFADDR/SIOCSIFADDR (reseau)   present  
+   SIOCGIFCONF/SIOCGIFHWADDR          present  
+   RTC_RD_TIME/RTC_SET_TIME           present  
+   LOOP_SET_FD (loop)                 absent   
+   EVIOCG* (evdev)                    present  
+   TUNSETIFF (tun/tap)                absent   
+   SNDCTL_* (son)                     absent   
+   CDROM* / SG_IO (SCSI)              absent   
+   FS_IOC_GETFLAGS (chattr)           absent   
+   FIFREEZE/FITRIM                    absent   
+   -> 15 / 23
+
+B2. SYSTEMES DE FICHIERS
+   ext2                               present  
+   ext3 (journal rejoue)              present  monte comme ext2 sinon
+   ext4 (extents)                     absent   
+   tmpfs/ramfs                        present  
+   devtmpfs                           present  
+   proc                               present  
+   sysfs                              present  
+   devpts                             present  
+   iso9660                            present  
+   vfat/msdos                         present  
+   minix                              absent   
+   squashfs                           absent   
+   cramfs                             absent   
+   romfs                              absent   
+   overlayfs                          absent   
+   initramfs (cpio newc)              present  
+   loop (/dev/loopN)                  absent   
+   9p / nfs                           absent   hors perimetre
+   cgroup                             absent   
+   debugfs/tracefs                    absent   ENOSYS honnete
+   -> 10 / 20
+
+B3. PILOTES ET PERIPHERIQUES
+   IDE/ATA PIO (hda..hdd)             present  
+   ATAPI CD-ROM                       present  
+   disquette FDC                      present  
+   ramdisk                            present  
+   clavier PS/2 + keymaps             present  
+   souris PS/2                        present  
+   port serie 16550 (COM1)            present  
+   4 ports serie                      absent   
+   port parallele                     absent   
+   console VGA texte + VT             present  
+   framebuffer Bochs                  present  
+   RTL8139                            present  
+   virtio-net/blk/rng/console         absent   
+   AHCI/SATA                          absent   
+   NVMe                               absent   
+   USB UHCI/EHCI                      absent   
+   E1000 / NE2000 / PCnet             absent   
+   son SB16/AC97                      absent   
+   evdev /dev/input/event*            absent   
+   SMP (APIC/IOAPIC/AP)               absent   
+   ACPI (arret, MADT)                 absent   
+   HPET                               absent   
+   PCI (config + /proc/bus/pci)       present  
+   /dev/null zero full random urandom present  
+   /dev/mem kmem port kmsg            present  
+   /dev/rtc                           present  
+   /dev/tty* /dev/ptmx pts            present  
+   -> 15 / 27
+
+B4. /PROC ET /SYS
+   /proc/meminfo uptime version cmdline present  
+   /proc/cpuinfo stat loadavg         present  
+   /proc/mounts filesystems           present  
+   /proc/PID/stat status cmdline maps present  
+   /proc/PID/fd fdinfo exe cwd root environ absent   
+   /proc/PID/smaps statm limits io    absent   
+   /proc/PID/mountinfo wchan task/    absent   
+   /proc/net/dev route                present  
+   /proc/net/tcp udp arp              absent   
+   /proc/devices partitions interrupts absent   
+   /proc/iomem ioports locks swaps    absent   
+   /proc/modules kallsyms             absent   
+   /proc/sys (sysctl ecriture)        absent   
+   /sys/block class kernel            present  
+   /sys/bus /sys/devices PCI          absent   
+   /sys/fs/cgroup                     absent   
+   -> 6 / 16
+
+B5. FAMILLES DE SOCKETS
+   AF_UNIX stream/dgram/socketpair    present  
+   AF_INET TCP/UDP                    present  
+   AF_INET raw / ICMP                 present  
+   AF_INET6                           absent   
+   AF_PACKET                          absent   
+   AF_NETLINK                         absent   
+   SCM_RIGHTS / SCM_CREDENTIALS       present  
+   multicast UDP                      absent   
+   netfilter                          absent   
+   TCP SACK / window scale            absent   
+   -> 4 / 10
+
+B6. DRAPEAUX mmap / clone / open
+   MAP_SHARED/PRIVATE/FIXED/ANONYMOUS present  
+   MAP_GROWSDOWN                      present  
+   MAP_POPULATE/MAP_LOCKED/MAP_HUGETLB absent   
+   MAP_NORESERVE                      absent   
+   CLONE_VM/FS/FILES/SIGHAND          present  
+   CLONE_THREAD                       present  
+   CLONE_SETTLS / PARENT_SETTID / CHILD_CLEARTID present  
+   CLONE_NEWNS/NEWPID/NEWUTS/NEWIPC/NEWNET absent   
+   O_CREAT/EXCL/TRUNC/APPEND/NONBLOCK/DIRECTORY present  
+   O_CLOEXEC / O_NOFOLLOW             present  
+   O_SYNC/O_DSYNC/O_DIRECT/O_TMPFILE/O_PATH absent   
+   O_LARGEFILE / fichiers > 2 Go      present  drapeau accepte
+   -> 8 / 12
+
+C. SYNTHESE
+   appels reels : 293 / 451 (65.0 %) ; stubs 5 ; ENOSYS explicites 84 ; absents 69
+   familles B1-B6 presentes : 58 / 108 (53.7 %)
