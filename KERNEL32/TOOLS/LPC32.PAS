@@ -8035,6 +8035,8 @@ Type
     Offset  : Integer;     { offset dans la pile [EBP+N]           }
     IsVar   : Boolean;     { parametre VAR (par reference) ?       }
     IsConst : Boolean;     { parametre CONST (lecture seule) ?     }
+    IsOpen  : Boolean;     { LPC32 : Array Of T (adresse + High)   }
+    IsHigh  : Boolean;     { LPC32 : High cache d un tableau ouvert }
   End;
 
   { Une variable locale }
@@ -8145,6 +8147,60 @@ Begin
     Begin
       FindLocal := J;
       Exit;
+    End;
+End;
+
+{ LPC32 : tableaux ouverts (Array Of T). Un parametre `A : Array Of T`
+  devient deux parametres : A (adresse, type tableau 0..16777215 de T) puis
+  HIGH$A (LongInt, indice maximal). OpenArrayTypeAt lit `Array Of T`. }
+Function OpenArrayTypeAt(Var I : Integer) : Integer;
+Var TI : Integer;
+Begin
+  OpenArrayTypeAt := -1;
+  If Not (TokIsKw(I, 'ARRAY') And TokIsKw(I + 1, 'OF')) Then Exit;
+  TI := ParseTypeExprAt(I);
+  If (TI >= 0) And (TI < TypeCount) And (TypeTab[TI].Kind = TYK_ARRAY) Then
+  Begin
+    TypeTab[TI].Lo := 0;
+    TypeTab[TI].Hi := 16777215;
+    TypeTab[TI].Size := 4;
+  End;
+  OpenArrayTypeAt := TI;
+End;
+
+{ ExpandOpenGroup : le groupe de noms GrpStart..PC-1 vient d etre declare de
+  type tableau ouvert TIdx : chaque nom devient (adresse, HIGH$nom) }
+Procedure ExpandOpenGroup(PI, GrpStart : Integer; Var PC : Integer;
+                          Var VM : LongInt; TIdx : Integer);
+Var
+  Names : Array[0..MAX_PARAM - 1] Of TString;
+  N, K  : Integer;
+  Cst   : Boolean;
+Begin
+  N := PC - GrpStart;
+  If N <= 0 Then Exit;
+  Cst := ProcTab[PI].Params[GrpStart].IsConst;
+  For K := 0 To N - 1 Do Names[K] := ProcTab[PI].Params[GrpStart + K].Name;
+  PC := GrpStart;
+  VM := VM And ((LongInt(1) Shl GrpStart) - 1);
+  For K := 0 To N - 1 Do
+    If PC + 1 < MAX_PARAM Then
+    Begin
+      ProcTab[PI].Params[PC].Name    := Names[K];
+      ProcTab[PI].Params[PC].IsVar   := True;
+      ProcTab[PI].Params[PC].IsConst := Cst;
+      ProcTab[PI].Params[PC].IsOpen  := True;
+      ProcTab[PI].Params[PC].IsHigh  := False;
+      ProcTab[PI].Params[PC].TypeIdx := TIdx;
+      VM := VM Or (LongInt(1) Shl PC);
+      Inc(PC);
+      ProcTab[PI].Params[PC].Name    := 'HIGH$' + Names[K];
+      ProcTab[PI].Params[PC].IsVar   := False;
+      ProcTab[PI].Params[PC].IsConst := False;
+      ProcTab[PI].Params[PC].IsOpen  := False;
+      ProcTab[PI].Params[PC].IsHigh  := True;
+      ProcTab[PI].Params[PC].TypeIdx := TY_IDX_LONGINT;
+      Inc(PC);
     End;
 End;
 
@@ -8557,6 +8613,8 @@ Var
                 ProcTab[NI].Params[NPC].Name    := StrUpperCase(TokenPool[I].Val);
                 ProcTab[NI].Params[NPC].IsVar   := NIsVarP;
                 ProcTab[NI].Params[NPC].IsConst := NIsConstP;
+                ProcTab[NI].Params[NPC].IsOpen  := False;
+                ProcTab[NI].Params[NPC].IsHigh  := False;
                 ProcTab[NI].Params[NPC].TypeIdx := TY_IDX_INTEGER;
                 ProcTab[NI].Params[NPC].Offset  := 0;
                 If NIsVarP Then
@@ -8571,7 +8629,10 @@ Var
                (TokenPool[I].Val = ':') Then
             Begin
               Inc(I);
-              If (I < TokenCount) And
+              NTIdx := OpenArrayTypeAt(I);
+              If NTIdx >= 0 Then
+                ExpandOpenGroup(NI, NGrpSt, NPC, NVM, NTIdx)
+              Else If (I < TokenCount) And
                  ((TokenPool[I].Kind = TK_IDENT) Or
                   (TokenPool[I].Kind = TK_KEYWORD)) Then
               Begin
@@ -8970,6 +9031,8 @@ Begin
                 ProcTab[PI].Params[PC].Name    := StrUpperCase(TokenPool[I].Val);
                 ProcTab[PI].Params[PC].IsVar   := IsVarP;
                 ProcTab[PI].Params[PC].IsConst := IsConstP;
+                ProcTab[PI].Params[PC].IsOpen  := False;
+                ProcTab[PI].Params[PC].IsHigh  := False;
                 ProcTab[PI].Params[PC].TypeIdx := TY_IDX_INTEGER;
                 ProcTab[PI].Params[PC].Offset  := 0;
                 If IsVarP Then
@@ -8989,7 +9052,10 @@ Begin
                (TokenPool[I].Val = ':') Then
             Begin
               Inc(I);
-              If (I < TokenCount) And
+              TIdx := OpenArrayTypeAt(I);
+              If TIdx >= 0 Then
+                ExpandOpenGroup(PI, GrpStart, PC, VM, TIdx)
+              Else If (I < TokenCount) And
                  ((TokenPool[I].Kind = TK_IDENT) Or
                   (TokenPool[I].Kind = TK_KEYWORD)) Then
               Begin
@@ -29028,7 +29094,10 @@ Begin
       Else
         EmitInstr('MOV EAX,' + 'DWORD PTR ' +
           EBPOfs(ProcTab[FI].RetOffset));
-    End;
+    End
+    Else If ProcModInit[FI] Then
+      { LPC32 : Procedure ModuleInit : le noyau lit EAX comme code d erreur }
+      EmitInstr('XOR EAX,EAX');
 
     If ProcIntr[FI] And AsmNative Then
     Begin
