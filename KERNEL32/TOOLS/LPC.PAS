@@ -19258,6 +19258,8 @@ Procedure Help;Begin
    'ring 0, multiboot');
  WriteLn('  -3B<hexa> = Adresse de liaison du noyau (defaut C0100000, ' +
    'paddr = vaddr-C0000000)');
+ WriteLn('  -3M = Module du noyau : ELF32 ET_REL (.ko), symboles importes par ' +
+   'nom (External;), Export; ModuleInit; ModuleExit;');
  WriteLn('  -3X = Programme Linux i386 : ELF32 statique en 08048000, ' +
    'appels systeme INT 80h');
 End;
@@ -19271,7 +19273,7 @@ Begin
  For I:=1 To ParamCount Do Begin
   A:=ParamStr(I);
   If (Length(A)>=3) And (A[1] In ['-','/']) And (A[2]='3') And
-    (UpCase(A[3]) In ['K','X']) Then Want32:=True;
+    (UpCase(A[3]) In ['K','X','M']) Then Want32:=True;
  End;
 End;
 

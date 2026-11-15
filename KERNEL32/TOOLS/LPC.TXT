@@ -22,6 +22,7 @@ Options
  -3X        programme utilisateur Linux i386 : ELF32 statique lie a
             08048000h, appels systeme INT 80h, runtime Pascal lie dans le
             programme (WriteLn, ReadLn, fichiers, unites Dos et Crt...).
+ -3M        module du noyau : fichier .ko ELF32 ET_REL i386 (voir "Cible -3M")
  -3B<hexa> adresse de liaison (defaut -3K : C0100000h ; -3X : 08048000h).
  -asm       ecrit aussi le listing assembleur (fichier .asm)
  -nogc      -3K/-3X : garde tout le code et les donnees (par defaut le
@@ -62,6 +63,24 @@ Cible -3K
   qu'a l'usage : GetMem/New appellent HeapAlloc, WriteLn appelle WriteFile...
   Chaque API (noms de style Win32, voir OS2PC) est la procedure Pascal du
   meme nom ecrite dans le noyau (parametres LongInt) ; sinon ApiMissing.
+
+Cible -3M (modules du noyau)
+----------------------------
+lpc -3M MODULE.PAS -> MODULE.ko, ELF32 ET_REL (readelf, objdump, nm, ld de
+l'hote le lisent). Le source est un Program compile comme -3K (symbole
+LINUX0MODULE en plus de LINUX0KERNEL). Directives apres l'en-tete d'une
+procedure : ModuleInit; (symbole global init_module), ModuleExit;
+(cleanup_module), Export; (symbole global _TPF_NOM). Les autres procedures et
+les variables sont des symboles locaux. Un appel au noyau se declare
+`Procedure printk(Const S : String); External;` : symbole non defini
+_TPF_PRINTK, relocation R_386_PC32 (addend -4). Les adresses de donnees et
+de procedures sont des R_386_32 contre .text/.data/.bss. Sections : .text
+.data .bss .rel.text .rel.data .modinfo .symtab .strtab .shstrtab. Le code
+mort est elimine (racines : procedures exportees) ; si le runtime appelle une
+API Win32 (WriteLn, GetMem, fichiers), c'est une erreur de compilation : un
+module appelle le noyau par des procedures External. Anneau de chaines
+temporaires : 32 tampons (8 Ko de .bss). Details de convention d'appel :
+DEMANDES_A.md ("[E] -3M"). Test : TESTS/C/TM1.PAS (RUN.SH : nm + ld).
 
 Assembleur natif (blocs asm...end, -3K/-3X)
 -------------------------------------------
@@ -172,6 +191,13 @@ imbriquees ou recursives : tree), Write(#0) et Write de chaine par la
 longueur (octets nuls : gzip), parametres PChar (Inc(P)), 'x' In ensemble,
 Include/Exclude de caracteres, WriteLn(S = T), ReadLn(A[i]), tas : le bloc
 reserve un octet pour le NUL des chaines.
+
+Langage : une procedure ou fonction de premier niveau definie deux fois est
+une erreur "identificateur deja declare". La concatenation de chaines (+) se
+fait par les longueurs : #0 est conserve (le resultat est une chaine Pascal).
+Heure locale : variable TZ (NOM[+-]hh[:mm], sans heure d'ete) ou fichier
+/etc/TZ ; GetLocalTime, dates de fichiers et SetLocalTime l'appliquent.
+SysLLSeek (llseek) : decalages 64 bits.
 
 Pieges du langage connus (Pascal est insensible a la casse)
 -----------------------------------------------------------

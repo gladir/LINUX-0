@@ -252,6 +252,7 @@ Var
   { LPC32 : mode Linux 32 bits (L32_MODE_*), adresse de liaison choisie par
     -3B (0 = defaut), procedure d amorce (directive Boot) }
   L32Mode    : Integer;
+  L32Module  : Boolean;       { -3M : module noyau ELF32 ET_REL }
   L32BaseOpt : LongInt;
   L32BootProc: Integer;
   L32ApiDone : Boolean;
@@ -467,6 +468,7 @@ Begin
   Opts.DestTarget  := DEST_OS2;
   Opts.Os2Flat     := OS2F_NONE;
   L32Mode := L32_MODE_NONE;
+  L32Module := False;
   L32BaseOpt := 0;
   L32BootProc := -1;
 End;
@@ -641,6 +643,13 @@ Begin
       { LPC32 : noyau Linux 32 bits (ELF32, assembleur natif 386) }
       Opts.DestTarget := DEST_OS2KRNL;
       L32Mode := L32_MODE_KRNL;
+    End
+    Else If (UA = '-3M') Then
+    Begin
+      { LPC32 : module du noyau (ELF32 ET_REL, symboles importes par nom) }
+      Opts.DestTarget := DEST_OS2KRNL;
+      L32Mode := L32_MODE_KRNL;
+      L32Module := True;
     End
     Else If (UA = '-NOGC') Then
       L32NoGc := True
@@ -874,6 +883,8 @@ Begin
       Opts.OutFile := ReplaceExt(Opts.SrcFile, '.abs')
     Else If Opts.TO7 Then
       Opts.OutFile := ReplaceExt(Opts.SrcFile, '.bin')
+    Else If L32Module Then
+      Opts.OutFile := ReplaceExt(Opts.SrcFile, '.ko')
     Else If (Opts.Os2Flat <> OS2F_NONE) Or (Opts.DestTarget = DEST_OS2KRNL) Or
             (L32Mode <> L32_MODE_NONE) Then
       { OS2BOOT, OS2LDR et OS2KRNL n ont pas d extension (comme sous OS/2) }
@@ -2603,6 +2614,7 @@ Begin
     DefineAdd('CPU386');
     If L32Mode = L32_MODE_USER Then DefineAdd('LINUX0USER')
     Else DefineAdd('LINUX0KERNEL');
+    If L32Module Then DefineAdd('LINUX0MODULE');
   End
   Else If Not D16Selected Then
   Begin
@@ -8019,6 +8031,9 @@ Var
     pile contient un code d erreur) }
   ProcNaked : Array[0..MAX_PROC - 1] Of Boolean;
   ProcBoot  : Array[0..MAX_PROC - 1] Of Boolean;
+  ProcExport  : Array[0..MAX_PROC - 1] Of Boolean;   { -3M : Export; }
+  ProcModInit : Array[0..MAX_PROC - 1] Of Boolean;   { -3M : ModuleInit; }
+  ProcModExit : Array[0..MAX_PROC - 1] Of Boolean;   { -3M : ModuleExit; }
   ProcIntrErr : Array[0..MAX_PROC - 1] Of Boolean;
   { OS/2 : procedure External 'DLL' [Name 'nom'] : importation d une DLL }
   ProcExtDll  : Array[0..MAX_PROC - 1] Of String[63];
@@ -8835,6 +8850,16 @@ Begin
 
         If PI < 0 Then
         Begin
+          { LPC32 : une procedure ou fonction de meme nom deja definie }
+          If L32Mode <> L32_MODE_NONE Then
+            For J := 0 To ProcCount - 1 Do
+              If (ProcTab[J].Name = PName) And (ProcTab[J].ParentIdx = -1) And
+                 (Not ProcTab[J].IsForward) Then
+              Begin
+                WriteLn(Opts.SrcFile, '(', TokenPool[I - 1].Line,
+                        ') : erreur : identificateur deja declare : ', PName);
+                Halt(EXIT_ERROR);
+              End;
           PI := ProcCount;
           Inc(ProcCount);  { reserver l entree : les procedures imbriquees en creent d autres }
           ProcTab[PI].Name        := PName;
@@ -8990,10 +9015,24 @@ Begin
                (L32Mode <> L32_MODE_NONE) And
                ((StrUpperCase(TokenPool[I].Val) = 'NAKED') Or
                 (StrUpperCase(TokenPool[I].Val) = 'BOOT') Or
+                (StrUpperCase(TokenPool[I].Val) = 'EXPORT') Or
+                (StrUpperCase(TokenPool[I].Val) = 'MODULEINIT') Or
+                (StrUpperCase(TokenPool[I].Val) = 'MODULEEXIT') Or
                 (StrUpperCase(TokenPool[I].Val) = 'INTERRUPTERR'))) And
               (TokenPool[I + 1].Kind = TK_PUNCT) And (TokenPool[I + 1].Val = ';') Do
         Begin
           If StrUpperCase(TokenPool[I].Val) = 'INTERRUPT' Then ProcIntr[PI] := True;
+          If StrUpperCase(TokenPool[I].Val) = 'EXPORT' Then ProcExport[PI] := True;
+          If StrUpperCase(TokenPool[I].Val) = 'MODULEINIT' Then
+          Begin
+            ProcModInit[PI] := True;
+            ProcExport[PI] := True;
+          End;
+          If StrUpperCase(TokenPool[I].Val) = 'MODULEEXIT' Then
+          Begin
+            ProcModExit[PI] := True;
+            ProcExport[PI] := True;
+          End;
           If StrUpperCase(TokenPool[I].Val) = 'INTERRUPTERR' Then
           Begin
             ProcIntr[PI] := True;
@@ -20016,6 +20055,59 @@ Begin
     { --- Concatenation de chaines avec + (TODO 16) --- }
     { gauche : chaine ou Char ; la gauche est copiee dans un tampon sur la pile }
     { pour que l evaluation de la droite puisse utiliser STRBUF1 (imbrication)  }
+    { LPC32 : concatenation par les longueurs (les #0 sont conserves) : les
+      deux operandes sont convertis au format Pascal, le resultat (STRBUF1)
+      est une chaine Pascal }
+    If (Op = '+') And (LeftIsStr Or (LastVarTypeIdx = TY_IDX_CHAR)) And
+       (L32Mode <> L32_MODE_NONE) And
+       (Not Is68kTarget) And (Opts.DestTarget <> DEST_CRAY1) Then
+    Begin
+      EmitInstr('SUB ESP,512');
+      EmitInstr('MOV EDI,ESP');
+      If LeftIsStr Then
+      Begin
+        EmitInstr('MOV ESI,EAX');
+        If LeftPascal Then
+          EmitInstr('CALL ' + TP_RT_PFX + 'PSTRASSIGN')
+        Else
+          EmitInstr('CALL ' + TP_RT_PFX + 'STRASSIGN');
+      End
+      Else
+      Begin
+        EmitInstr('MOV BYTE PTR [EDI],1');
+        EmitInstr('MOV BYTE PTR [EDI+1],AL');
+        EmitInstr('MOV BYTE PTR [EDI+2],0');
+      End;
+      ParseExprPrec(PI, Prec + 1);
+      CoerceCharArray;
+      If (LastVarTypeIdx = TY_IDX_CHAR) And (Not LastExprIsPascalStr) Then
+      Begin
+        EmitInstr('MOV BYTE PTR [CHRBUF],1');
+        EmitInstr('MOV BYTE PTR [CHRBUF+1],AL');
+        EmitInstr('MOV BYTE PTR [CHRBUF+2],0');
+        EmitInstr('LEA EDI,[CHRBUF]');
+        EmitInstr('MOV ESI,ESP');
+        EmitInstr('CALL ' + TP_RT_PFX + 'PCAT_P');
+      End
+      Else
+      Begin
+        EmitInstr('MOV EDI,EAX');
+        EmitInstr('MOV ESI,ESP');
+        If LastExprIsPascalStr Then
+          EmitInstr('CALL ' + TP_RT_PFX + 'PCAT_P')
+        Else
+          EmitInstr('CALL ' + TP_RT_PFX + 'PCAT_Z');
+      End;
+      EmitInstr('MOV ESI,ESP');
+      EmitInstr('LEA EDI,[STRBUF1]');
+      EmitInstr('CALL ' + TP_RT_PFX + 'PSTRASSIGN');
+      EmitInstr('ADD ESP,512');
+      EmitInstr('LEA EAX,[STRBUF1]');
+      LastVarTypeIdx := TY_IDX_STRING;
+      LastExprIsPascalStr := True;
+      Continue;
+    End;
+
     If (Op = '+') And (LeftIsStr Or (LastVarTypeIdx = TY_IDX_CHAR)) And
        (Not Is68kTarget) And (Opts.DestTarget <> DEST_CRAY1) Then
     Begin
@@ -32165,6 +32257,43 @@ Begin
   EmitInstr('POP ESI');
   EmitInstr('RET');
 
+  { ------ _TPRT_PCAT_P / PCAT_Z (LPC32) : ajouter a la chaine Pascal ESI la chaine }
+  { Pascal (octet de longueur) ou ASCIIZ EDI ; tronque a 255 ; les #0 sont gardes   }
+  EmitBlankLine;
+  EmitLabel(TP_RT_PFX + 'PCAT_P');
+  EmitInstr('PUSHAD');
+  EmitInstr('MOVZX ECX,BYTE PTR [EDI]');
+  EmitInstr('INC EDI');
+  EmitInstr('JMP ' + TP_RT_PFX + 'PCAT_C');
+  EmitLabel(TP_RT_PFX + 'PCAT_Z');
+  EmitInstr('PUSHAD');
+  EmitInstr('XOR ECX,ECX');
+  EmitLabel(TP_RT_PFX + 'PCAT_ZL');
+  EmitInstr('CMP BYTE PTR [EDI+ECX],0');
+  EmitInstr('JE ' + TP_RT_PFX + 'PCAT_C');
+  EmitInstr('INC ECX');
+  EmitInstr('JMP ' + TP_RT_PFX + 'PCAT_ZL');
+  EmitLabel(TP_RT_PFX + 'PCAT_C');
+  EmitInstr('MOVZX EAX,BYTE PTR [ESI]');
+  EmitInstr('MOV EDX,255');
+  EmitInstr('SUB EDX,EAX');
+  EmitInstr('CMP ECX,EDX');
+  EmitInstr('JBE ' + TP_RT_PFX + 'PCAT_K');
+  EmitInstr('MOV ECX,EDX');
+  EmitLabel(TP_RT_PFX + 'PCAT_K');
+  EmitInstr('MOV EBX,ESI');
+  EmitInstr('ADD EBX,EAX');
+  EmitInstr('INC EBX');
+  EmitInstr('ADD EAX,ECX');
+  EmitInstr('MOV BYTE PTR [ESI],AL');
+  EmitInstr('MOV ESI,EDI');
+  EmitInstr('MOV EDI,EBX');
+  EmitInstr('CLD');
+  EmitInstr('REP MOVSB');
+  EmitInstr('MOV BYTE PTR [EDI],0');
+  EmitInstr('POPAD');
+  EmitInstr('RET');
+
   { ------ _TPRT_CONCAT : concatener ESI + EDI -> ESI -------- }
   { Entree : ESI = destination (ASCIIZ, deja remplie)           }
   {          EDI = source a ajouter (ASCIIZ)                    }
@@ -32199,7 +32328,8 @@ Begin
   EmitInstr('PUSH EDI');
   EmitInstr('MOV EAX,[STRRINGIDX]');
   EmitInstr('INC EAX');
-  EmitInstr('AND EAX,255');   { anneau de 256 tampons (OS2PC) }
+  If L32Module Then EmitInstr('AND EAX,31')   { module : anneau de 32 tampons }
+  Else EmitInstr('AND EAX,255');   { anneau de 256 tampons (OS2PC) }
   EmitInstr('MOV [STRRINGIDX],EAX');
   EmitInstr('SHL EAX,8');
   EmitInstr('MOV EDI,OFFSET STRRING');
@@ -32218,7 +32348,8 @@ Begin
   EmitInstr('PUSH ESI');
   EmitInstr('MOV EAX,[STRRINGIDX]');
   EmitInstr('INC EAX');
-  EmitInstr('AND EAX,255');   { anneau de 256 tampons (OS2PC) }
+  If L32Module Then EmitInstr('AND EAX,31')   { module : anneau de 32 tampons }
+  Else EmitInstr('AND EAX,255');   { anneau de 256 tampons (OS2PC) }
   EmitInstr('MOV [STRRINGIDX],EAX');
   EmitInstr('SHL EAX,8');
   EmitInstr('MOV EDI,OFFSET STRRING');
@@ -44180,7 +44311,8 @@ Begin
   { Variables Strings/Printer/Overlay/Objects }
   BcDefineDataLabel('STR_TMPBUF'); BcDataZeros(256);
   BcDefineDataLabel('STR_PASBUF'); BcDataZeros(256);
-  BcDefineDataLabel('STRRING'); BcDataZeros(65536);
+  BcDefineDataLabel('STRRING');
+  If L32Module Then BcDataZeros(8192) Else BcDataZeros(65536);
   BcDefineDataLabel('STRRINGIDX'); BcDataD(0);
   BcDefineDataLabel('PRN_HANDLE'); BcDataD(-1);
   BcDefineDataLabel('PRN_FNAME');  BcDataStr('NUL');
@@ -47527,6 +47659,14 @@ Begin
   { ---- racines ---- }
   Sp := 0;
   If L32BootProc >= 0 Then MarkCodeName(ProcTab[L32BootProc].MangledName);
+  If L32Module Then
+  Begin
+    { module : racines = procedures exportees (Export; ModuleInit; ModuleExit;) }
+    For I := 0 To ProcCount - 1 Do
+      If ProcExport[I] And (Not ProcTab[I].IsForward) And
+         (Not ProcTab[I].IsExternal) Then MarkCodeName(ProcTab[I].MangledName);
+  End
+  Else
   MarkCodeName(TP_FUNC_PFX + 'Main');
   For I := 0 To ProcCount - 1 Do
     If (ProcTab[I].Name = 'KSTART') And Not ProcTab[I].IsForward And
@@ -47958,6 +48098,358 @@ Begin
             ' entree=', EntryP, ')');
   Close(PEBinF);
   L32MakeExec(FileName);
+End;
+
+
+{ ============================================================ }
+{ LPC32 -3M : module du noyau, ELF32 ET_REL (relogeable)         }
+{ Sections : .text .data .bss .rel.text .rel.data .modinfo       }
+{ .symtab .strtab .shstrtab. Symboles : les procedures declarees }
+{ Export; (_TPF_NOM) et init_module / cleanup_module (directives  }
+{ ModuleInit; ModuleExit;) sont globaux ; les procedures du      }
+{ noyau appelees par External; sont des symboles non definis     }
+{ _TPF_NOM (R_386_PC32 dans le code) ; locaux : le reste.        }
+{ Le runtime Pascal qui appelle l API (WriteLn, GetMem...) n est  }
+{ pas disponible dans un module (erreur a la compilation).       }
+{ ============================================================ }
+Procedure WriteElfRelFile(FileName: TString);
+Const
+  MAXS = 16384;
+  MAXR = 65536;
+Var
+  FileDataLen, BssLen, I, J, T, X, F, NSym, NLoc, NUnd, NRT, NRD : LongInt;
+  NGlobAll : LongInt;
+  StrPos, TextOfs, DataOfs, RelTOfs, RelDOfs, MiOfs, SymOfs, StrOfs : LongInt;
+  ShStrOfs, ShOfs, Sec, Typ : LongInt;
+  Nm : TString;
+  Und : Array[0..4095] Of TString;
+  RTOfs, RTSym, RTTyp : Array[0..MAXR - 1] Of LongInt;   { .rel.text }
+  RDOfs, RDSym, RDTyp : Array[0..MAXR - 1] Of LongInt;   { .rel.data }
+  SymName, SymVal : Array[0..MAXS - 1] Of LongInt;
+  SymInfo : Array[0..MAXS - 1] Of Byte;
+  SymShndx : Array[0..MAXS - 1] Of Word;
+  StrBuf : Array[0..262143] Of Char;
+  ShStr, MiStr, Base : String;
+
+  { identifiant de symbole non defini : 100000 + indice ; section : 1..3 }
+  Function UndefId(Const N: TString): LongInt;
+  Var K: LongInt;
+  Begin
+    For K := 0 To NUnd - 1 Do
+      If Und[K] = N Then
+      Begin
+        UndefId := 100000 + K;
+        Exit;
+      End;
+    If NUnd > 4095 Then FatalError('module : trop de symboles importes');
+    Und[NUnd] := N;
+    Inc(NUnd);
+    UndefId := 100000 + NUnd - 1;
+  End;
+
+  Procedure PatchCode(Ofs, V: LongInt);
+  Begin
+    BcCode[Ofs] := Byte(V);
+    BcCode[Ofs + 1] := Byte(V Shr 8);
+    BcCode[Ofs + 2] := Byte(V Shr 16);
+    BcCode[Ofs + 3] := Byte(V Shr 24);
+  End;
+
+  Procedure PatchData(Ofs, V: LongInt);
+  Begin
+    BcData[Ofs] := Byte(V);
+    BcData[Ofs + 1] := Byte(V Shr 8);
+    BcData[Ofs + 2] := Byte(V Shr 16);
+    BcData[Ofs + 3] := Byte(V Shr 24);
+  End;
+
+  Procedure AddRelT(Ofs, Sym, Typ, Addend: LongInt);
+  Begin
+    If NRT >= MAXR Then FatalError('module : trop de relocations');
+    RTOfs[NRT] := Ofs; RTSym[NRT] := Sym; RTTyp[NRT] := Typ;
+    Inc(NRT);
+    PatchCode(Ofs, Addend);
+  End;
+
+  Procedure AddRelD(Ofs, Sym, Typ, Addend: LongInt);
+  Begin
+    If NRD >= MAXR Then FatalError('module : trop de relocations');
+    RDOfs[NRD] := Ofs; RDSym[NRD] := Sym; RDTyp[NRD] := Typ;
+    Inc(NRD);
+    PatchData(Ofs, Addend);
+  End;
+
+  { section et decalage d une adresse de donnees }
+  Procedure DataSec(D: LongInt; Var SecId, Ofs: LongInt);
+  Begin
+    If D < FileDataLen Then
+    Begin
+      SecId := 2; Ofs := D;
+    End
+    Else
+    Begin
+      SecId := 3; Ofs := D - FileDataLen;
+    End;
+  End;
+
+  Procedure AddStr(Const N: TString; Var Ofs: LongInt);
+  Var K: LongInt;
+  Begin
+    Ofs := StrPos;
+    For K := 1 To Length(N) Do
+    Begin
+      StrBuf[StrPos] := N[K];
+      Inc(StrPos);
+    End;
+    StrBuf[StrPos] := #0;
+    Inc(StrPos);
+  End;
+
+  Procedure AddSym(Const N: TString; V: LongInt; Info: Byte; Sh: Word);
+  Var O: LongInt;
+  Begin
+    If NSym >= MAXS Then FatalError('module : trop de symboles');
+    If N = '' Then O := 0 Else AddStr(N, O);
+    SymName[NSym] := O; SymVal[NSym] := V; SymInfo[NSym] := Info;
+    SymShndx[NSym] := Sh;
+    Inc(NSym);
+  End;
+
+  Function SymIdx(Id: LongInt): LongInt;
+  Begin
+    If Id >= 100000 Then SymIdx := NLoc + NGlobAll + (Id - 100000)
+    Else SymIdx := Id;
+  End;
+
+Begin
+  NRT := 0; NRD := 0; NUnd := 0;
+  If Not L32NoGc Then L32Gc;
+  { runtime : aucune API }
+  If BcImportCnt > 0 Then
+    FatalError('module : le runtime Pascal appelle l''API ' +
+               BcImports[0].ApiName + ' (WriteLn, GetMem, fichiers...) : ' +
+               'non disponible dans un module ; appeler le noyau par une ' +
+               'procedure External;');
+  { donnees : le BSS est la queue de zeros ; les cibles des adresses
+    rangees dans les donnees restent dans .data }
+  FileDataLen := BcDataLen;
+  While (FileDataLen > 0) And (BcData[FileDataLen - 1] = 0) Do Dec(FileDataLen);
+  For I := 0 To BcDFixCnt - 1 Do
+    If (BcDFixOfs[I] >= 0) And (BcDFixOfs[I] + 4 > FileDataLen) Then
+      FileDataLen := BcDFixOfs[I] + 4;
+  If FileDataLen > BcDataLen Then FileDataLen := BcDataLen;
+  BssLen := BcDataLen - FileDataLen;
+
+  { ---- relocations de .data (adresses rangees dans les donnees) ---- }
+  For I := 0 To BcDFixCnt - 1 Do
+  Begin
+    F := BcDFixOfs[I];
+    If (F < 0) Or (F + 3 >= BcDataLen) Then Continue;
+    Nm := BcDFixLbl[I];
+    If (Length(Nm) > 1) And (Nm[1] = '@') Then
+    Begin
+      Nm := Copy(Nm, 2, 255);
+      T := BcFindDataLabel(TP_VAR_PFX + Nm);
+      If T >= 0 Then
+      Begin
+        DataSec(T, Sec, X);
+        AddRelD(F, Sec, 1, X);
+      End
+      Else
+      Begin
+        T := BcFindLabel(TP_FUNC_PFX + Nm);
+        If T >= 0 Then AddRelD(F, 1, 1, T)
+        Else AddRelD(F, UndefId(TP_FUNC_PFX + StrUpperCase(Nm)), 1, 0);
+      End;
+    End
+    Else
+    Begin
+      T := BcFindDataLabel(Nm);
+      If T >= 0 Then
+      Begin
+        DataSec(T, Sec, X);
+        AddRelD(F, Sec, 1, X);
+      End
+      Else AddRelD(F, UndefId(Nm), 1, 0);
+    End;
+  End;
+
+  { ---- relocations de .text ---- }
+  For I := 0 To BcFixupCnt - 1 Do
+  Begin
+    F := BcFixups[I].CodeOfs;
+    If F + 1 >= BcCodeLen Then Continue;
+    Nm := BcFixups[I].LblName;
+    Case BcFixups[I].Kind Of
+      BC_FIX_REL32:
+      Begin
+        T := BcFindLabel(Nm);
+        If T >= 0 Then PatchCode(F, T - (F + 4))
+        Else AddRelT(F, UndefId(Nm), 2, -4);
+      End;
+      BC_FIX_ABS32_CODE:
+      Begin
+        T := BcFindLabel(Nm);
+        If T >= 0 Then AddRelT(F, 1, 1, T + BcFixups[I].Addend)
+        Else AddRelT(F, UndefId(Nm), 1, BcFixups[I].Addend);
+      End;
+      BC_FIX_ABS32_DATA:
+      Begin
+        T := BcFindDataLabel(Nm);
+        If T >= 0 Then
+        Begin
+          DataSec(T + BcFixups[I].Addend, Sec, X);
+          AddRelT(F, Sec, 1, X);
+        End
+        Else
+        Begin
+          T := BcFindLabel(Nm);
+          If T >= 0 Then AddRelT(F, 1, 1, T + BcFixups[I].Addend)
+          Else AddRelT(F, UndefId(Nm), 1, BcFixups[I].Addend);
+        End;
+      End;
+      BC_FIX_REL8_X:
+      Begin
+        T := BcFindLabel(Nm);
+        If T < 0 Then FatalError('label de saut court inconnu : ' + Nm);
+        X := T - (F + 1);
+        If (X < -128) Or (X > 127) Then FatalError('saut court hors de portee vers ' + Nm);
+        BcCode[F] := Byte(X);
+      End;
+      BC_FIX_REL16:
+      Begin
+        T := BcFindLabel(Nm);
+        If T >= 0 Then
+        Begin
+          X := T - (F + 2);
+          BcCode[F] := Byte(X);
+          BcCode[F + 1] := Byte(X Shr 8);
+        End;
+      End;
+    End;
+  End;
+
+  If Opts.Verbose Then
+    For I := 0 To BcDLabelCnt - 1 Do
+      If BcDLabels[I].Offset >= 0 Then
+        WriteLn('  donnee ', BcDLabels[I].Name, ' @', BcDLabels[I].Offset);
+  { ---- table des symboles : nul, 3 sections, locaux, globaux, non definis ---- }
+  NSym := 0; StrPos := 1; StrBuf[0] := #0;
+  AddSym('', 0, 0, 0);
+  AddSym('', 0, 3, 1);          { .text }
+  AddSym('', 0, 3, 2);          { .data }
+  AddSym('', 0, 3, 3);          { .bss  }
+  For I := 0 To ProcCount - 1 Do
+    If (ProcTab[I].ParentIdx = -1) And (Not ProcTab[I].IsForward) And
+       (Not ProcTab[I].IsExternal) And (Not ProcExport[I]) Then
+    Begin
+      T := BcFindLabel(ProcTab[I].MangledName);
+      If T >= 0 Then AddSym(ProcTab[I].MangledName, T, $02, 1);
+    End;
+  For I := 0 To BcDLabelCnt - 1 Do
+    If (Copy(BcDLabels[I].Name, 1, 5) = TP_VAR_PFX) And (BcDLabels[I].Offset >= 0) Then
+    Begin
+      DataSec(BcDLabels[I].Offset, Sec, X);
+      AddSym(BcDLabels[I].Name, X, $01, Sec);
+    End;
+  NLoc := NSym;
+  For I := 0 To ProcCount - 1 Do
+    If ProcExport[I] And (Not ProcTab[I].IsForward) And (Not ProcTab[I].IsExternal) Then
+    Begin
+      T := BcFindLabel(ProcTab[I].MangledName);
+      If T < 0 Then Continue;
+      AddSym(ProcTab[I].MangledName, T, $12, 1);
+      If ProcModInit[I] Then AddSym('init_module', T, $12, 1);
+      If ProcModExit[I] Then AddSym('cleanup_module', T, $12, 1);
+    End;
+  NGlobAll := NSym - NLoc;
+  For I := 0 To NUnd - 1 Do AddSym(Und[I], 0, $10, 0);
+
+  { ---- mise en page du fichier ---- }
+  Base := FileName;
+  For I := Length(FileName) DownTo 1 Do
+    If FileName[I] = '/' Then
+    Begin
+      Base := Copy(FileName, I + 1, 255);
+      Break;
+    End;
+  If (Length(Base) > 3) And (Copy(Base, Length(Base) - 2, 3) = '.ko') Then
+    Base := Copy(Base, 1, Length(Base) - 3);
+  MiStr := 'license=GPL'#0'name=' + Base + #0'author=LPC32'#0 +
+           'vermagic=linux0-k32'#0;
+  ShStr := #0'.text'#0'.data'#0'.bss'#0'.rel.text'#0'.rel.data'#0 +
+           '.modinfo'#0'.symtab'#0'.strtab'#0'.shstrtab'#0;
+  TextOfs := 64;
+  DataOfs := TextOfs + ((BcCodeLen + 15) And (Not 15));
+  RelTOfs := DataOfs + ((FileDataLen + 15) And (Not 15));
+  RelDOfs := RelTOfs + NRT * 8;
+  MiOfs := RelDOfs + NRD * 8;
+  SymOfs := (MiOfs + Length(MiStr) + 3) And (Not 3);
+  StrOfs := SymOfs + NSym * 16;
+  ShStrOfs := StrOfs + StrPos;
+  ShOfs := (ShStrOfs + Length(ShStr) + 3) And (Not 3);
+
+  Assign(PEBinF, FileName);
+  Rewrite(PEBinF, 1);
+  PEWrB($7F); PEWrB(Ord('E')); PEWrB(Ord('L')); PEWrB(Ord('F'));
+  PEWrB(1); PEWrB(1); PEWrB(1); PEWrB(0);
+  PEWrZeros(8);
+  PEWrW(1);                     { ET_REL }
+  PEWrW(3);                     { EM_386 }
+  PEWrD(1);
+  PEWrD(0); PEWrD(0); PEWrD(ShOfs); PEWrD(0);
+  PEWrW(52); PEWrW(0); PEWrW(0);
+  PEWrW(40); PEWrW(10); PEWrW(9);
+  PEPadTo(TextOfs);
+  For I := 0 To BcCodeLen - 1 Do PEWrB(BcCode[I]);
+  PEPadTo(DataOfs);
+  For I := 0 To FileDataLen - 1 Do PEWrB(BcData[I]);
+  PEPadTo(RelTOfs);
+  For I := 0 To NRT - 1 Do
+  Begin
+    PEWrD(RTOfs[I]);
+    PEWrD((SymIdx(RTSym[I]) Shl 8) Or RTTyp[I]);
+  End;
+  For I := 0 To NRD - 1 Do
+  Begin
+    PEWrD(RDOfs[I]);
+    PEWrD((SymIdx(RDSym[I]) Shl 8) Or RDTyp[I]);
+  End;
+  PEWrStrNoZ(MiStr);
+  PEPadTo(SymOfs);
+  For I := 0 To NSym - 1 Do
+  Begin
+    PEWrD(SymName[I]); PEWrD(SymVal[I]); PEWrD(0);
+    PEWrB(SymInfo[I]); PEWrB(0); PEWrW(SymShndx[I]);
+  End;
+  BlockWrite(PEBinF, StrBuf, StrPos);
+  PEWrStrNoZ(ShStr);
+  PEPadTo(ShOfs);
+  { en-tetes : nul .text .data .bss .rel.text .rel.data .modinfo .symtab .strtab .shstrtab }
+  PEWrZeros(40);
+  PEWrD(1); PEWrD(1); PEWrD(6); PEWrD(0); PEWrD(TextOfs); PEWrD(BcCodeLen);
+  PEWrD(0); PEWrD(0); PEWrD(16); PEWrD(0);
+  PEWrD(7); PEWrD(1); PEWrD(3); PEWrD(0); PEWrD(DataOfs); PEWrD(FileDataLen);
+  PEWrD(0); PEWrD(0); PEWrD(16); PEWrD(0);
+  PEWrD(13); PEWrD(8); PEWrD(3); PEWrD(0); PEWrD(RelTOfs); PEWrD(BssLen);
+  PEWrD(0); PEWrD(0); PEWrD(16); PEWrD(0);
+  PEWrD(18); PEWrD(9); PEWrD(0); PEWrD(0); PEWrD(RelTOfs); PEWrD(NRT * 8);
+  PEWrD(7); PEWrD(1); PEWrD(4); PEWrD(8);
+  PEWrD(28); PEWrD(9); PEWrD(0); PEWrD(0); PEWrD(RelDOfs); PEWrD(NRD * 8);
+  PEWrD(7); PEWrD(2); PEWrD(4); PEWrD(8);
+  PEWrD(38); PEWrD(1); PEWrD(2); PEWrD(0); PEWrD(MiOfs); PEWrD(Length(MiStr));
+  PEWrD(0); PEWrD(0); PEWrD(1); PEWrD(0);
+  PEWrD(47); PEWrD(2); PEWrD(0); PEWrD(0); PEWrD(SymOfs); PEWrD(NSym * 16);
+  PEWrD(8); PEWrD(NLoc); PEWrD(4); PEWrD(16);
+  PEWrD(55); PEWrD(3); PEWrD(0); PEWrD(0); PEWrD(StrOfs); PEWrD(StrPos);
+  PEWrD(0); PEWrD(0); PEWrD(1); PEWrD(0);
+  PEWrD(63); PEWrD(3); PEWrD(0); PEWrD(0); PEWrD(ShStrOfs); PEWrD(Length(ShStr));
+  PEWrD(0); PEWrD(0); PEWrD(1); PEWrD(0);
+  If Opts.Verbose Then
+    WriteLn('  Module ELF32 ET_REL genere : ', FileName, ' (code=', BcCodeLen,
+            ' data=', FileDataLen, ' bss=', BssLen, ' reloc=', NRT + NRD,
+            ' importes=', NUnd, ')');
+  Close(PEBinF);
 End;
 
 { --- WriteCOFFFile : generation d un fichier objet COFF --- }
@@ -60721,7 +61213,7 @@ Var
 { Nombre de lignes et texte d une ligne d un source integre }
 { BEGIN L32API : genere par MKAPI.PAS depuis L32API.PAS (ne pas editer) }
 Const
-  L32API_N = 3267;
+  L32API_N = 3339;
   L32API : Array[1..L32API_N] Of String[120] = (
     '{ @author: Sylvain Maltais (support@gladir.com)',
     '  @created: 2026',
@@ -61334,10 +61826,70 @@ Const
     '  LnxDaysFromCivil := Era * 146097 + Doe - 719468;',
     'End;',
     '',
-    '{ secondes Unix -> date et heure DOS (UTC) }',
+    '{ fuseau horaire : variable TZ (NOM[+-]hh[:mm], sans heure d''ete) ou fichier',
+    '  /etc/TZ ; decalage en secondes a l''est de UTC }',
+    'Var',
+    '  LnxTzDone, LnxTzOff : LongInt;',
+    '',
+    'Function LnxTz : LongInt;',
+    'Var S : String; I, Sg, H, M, F : LongInt; C : Char;',
+    'Begin',
+    '  If LnxTzDone = 0 Then',
+    '  Begin',
+    '    LnxTzDone := 1;',
+    '    LnxTzOff := 0;',
+    '    S := SysGetEnv(''TZ'');',
+    '    If S = '''' Then',
+    '    Begin',
+    '      F := SysOpen(''/etc/TZ'', 0, 0);',
+    '      If F >= 0 Then',
+    '      Begin',
+    '        If Not SysReadLine(F, S) Then S := '''';',
+    '        SysClose(F);',
+    '      End;',
+    '    End;',
+    '    I := 1;',
+    '    If (S <> '''') And (S[1] = '':'') Then I := 2;',
+    '    While (I <= Length(S)) And (((S[I] >= ''A'') And (S[I] <= ''Z'')) Or',
+    '          ((S[I] >= ''a'') And (S[I] <= ''z''))) Do Inc(I);',
+    '    If (I <= Length(S)) And ((S[I] = ''+'') Or (S[I] = ''-'') Or',
+    '       ((S[I] >= ''0'') And (S[I] <= ''9''))) Then',
+    '    Begin',
+    '      Sg := 1;',
+    '      If S[I] = ''-'' Then',
+    '      Begin',
+    '        Sg := -1;',
+    '        Inc(I);',
+    '      End',
+    '      Else If S[I] = ''+'' Then Inc(I);',
+    '      H := 0;',
+    '      M := 0;',
+    '      While (I <= Length(S)) And (S[I] >= ''0'') And (S[I] <= ''9'') Do',
+    '      Begin',
+    '        H := H * 10 + Ord(S[I]) - 48;',
+    '        Inc(I);',
+    '      End;',
+    '      If (I <= Length(S)) And (S[I] = '':'') Then',
+    '      Begin',
+    '        Inc(I);',
+    '        While (I <= Length(S)) And (S[I] >= ''0'') And (S[I] <= ''9'') Do',
+    '        Begin',
+    '          M := M * 10 + Ord(S[I]) - 48;',
+    '          Inc(I);',
+    '        End;',
+    '      End;',
+    '      { POSIX : le decalage est compte vers l''ouest }',
+    '      LnxTzOff := -Sg * (H * 3600 + M * 60);',
+    '    End;',
+    '  End;',
+    '  LnxTz := LnxTzOff;',
+    'End;',
+    '',
+    '{ secondes Unix -> date et heure DOS (heure locale) }',
     'Function LnxToDos(T : LongInt) : LongInt;',
     'Var Days, Secs, Y, M, D : LongInt;',
     'Begin',
+    '  T := T + LnxTz;',
     '  If T < 0 Then T := 0;',
     '  Days := T Div 86400;',
     '  Secs := T Mod 86400;',
@@ -61354,9 +61906,15 @@ Const
     'Function LnxFromDos(V : LongInt) : LongInt;',
     'Var Dd, Tt : LongInt;',
     'Begin',
+    '  LnxFromDos := LnxFromDosUtc(V) - LnxTz;',
+    'End;',
+    '',
+    'Function LnxFromDosUtc(V : LongInt) : LongInt;',
+    'Var Dd, Tt : LongInt;',
+    'Begin',
     '  Dd := (V Shr 16) And $FFFF;',
     '  Tt := V And $FFFF;',
-    '  LnxFromDos := LnxDaysFromCivil(((Dd Shr 9) And 127) + 1980, (Dd Shr 5)',
+    '  LnxFromDosUtc := LnxDaysFromCivil(((Dd Shr 9) And 127) + 1980, (Dd Shr 5)',
     '      And 15, Dd And 31) * 86400 +',
     '    ((Tt Shr 11) And 31) * 3600 + ((Tt Shr 5) And 63) * 60 + (Tt And 31) * 2;',
     'End;',
@@ -61365,7 +61923,7 @@ Const
     'Var Sec, Usec, Days, Y, M, D, Secs : LongInt;',
     'Begin',
     '  LnxSys3(78, LongInt(@LnxTmp), 0, 0);',
-    '  Sec := LnxTmp[0];',
+    '  Sec := LnxTmp[0] + LnxTz;',
     '  Usec := LnxTmp[1];',
     '  Days := Sec Div 86400;',
     '  Secs := Sec Mod 86400;',
@@ -61384,7 +61942,7 @@ Const
     'Var T : LongInt;',
     'Begin',
     '  T := LnxDaysFromCivil(MemW[0:P], MemW[0:P + 2], MemW[0:P + 6]) * 86400 +',
-    '       MemW[0:P + 8] * 3600 + MemW[0:P + 10] * 60 + MemW[0:P + 12];',
+    '       MemW[0:P + 8] * 3600 + MemW[0:P + 10] * 60 + MemW[0:P + 12] - LnxTz;',
     '  LnxTmp[0] := T;',
     '  LnxTmp[1] := 0;',
     '  If LnxCheck(LnxSys3(79, LongInt(@LnxTmp), 0, 0)) < 0 Then SetLocalTime := 0',
@@ -63174,6 +63732,12 @@ Const
     '  SysLSeek := LnxRes(LnxSys3(19, Fd, Offset, Whence));',
     'End;',
     '',
+    '{ lseek 64 bits (llseek, 140) : decalage Hi:Lo, Res = adresse de 2 LongInt (Lo, Hi) }',
+    'Function SysLLSeek(Fd, Hi, Lo, Res, Whence : LongInt) : LongInt;',
+    'Begin',
+    '  SysLLSeek := LnxRes(LnxSys6(140, Fd, Hi, Lo, Res, Whence, 0));',
+    'End;',
+    '',
     'Function SysIoctl(Fd, Request : LongInt; Var Arg) : LongInt;',
     'Begin',
     '  SysIoctl := LnxRes(LnxSys3(54, Fd, Request, LongInt(@Arg)));',
@@ -64808,6 +65372,9 @@ Begin
     ProcIntr[I] := False;
     ProcNaked[I] := False;
     ProcBoot[I] := False;
+    ProcExport[I] := False;
+    ProcModInit[I] := False;
+    ProcModExit[I] := False;
     ProcIntrErr[I] := False;
   End;
   L32BootProc := -1;
@@ -64945,7 +65512,7 @@ Begin
     End;
 
     { Noyau OS/2-0 : couche API (thunks + exportations) }
-    If Opts.DestTarget = DEST_OS2KRNL Then
+    If (Opts.DestTarget = DEST_OS2KRNL) And (Not L32Module) Then
       EmitOs2KrnlThunks;
     { OS/2-0 : souches des importations External 'DLL', exportations }
     EmitOs2DllStubs;
@@ -65081,6 +65648,8 @@ Begin
       If Opts.Verbose Then
         WriteLn('  Cray-1 COS Absolute Binary genere : ', Opts.OutFile);
     End
+    Else If L32Module Then
+      WriteElfRelFile(Opts.OutFile)
     Else If L32Mode <> L32_MODE_NONE Then
       WriteElf32File(Opts.OutFile)
     Else

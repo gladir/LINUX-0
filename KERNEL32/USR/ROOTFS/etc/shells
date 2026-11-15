@@ -1,0 +1,3 @@
+# /etc/shells : shells de connexion valides
+/bin/sh
+/bin/ash

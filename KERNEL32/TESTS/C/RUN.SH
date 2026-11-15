@@ -45,6 +45,29 @@ for SRC in "$HERE"/TK*.PAS; do
     echo "ECHEC $N : sortie serie differente ($W/$N.ser)"; FAIL=$((FAIL+1))
   fi
 done
+# --- modules -3M : ELF32 ET_REL ; symboles globaux (nm -g) compares a TMn.SYM,
+#     puis edition de liens avec ld (TMn.STUB : procedures du noyau factices) ---
+for SRC in "$HERE"/TM*.PAS; do
+  N=$(basename "$SRC" .PAS)
+  [ -f "$HERE/$N.SYM" ] || continue
+  cp "$SRC" "$W/$N.PAS"
+  rm -f "$W/$N.ko"
+  if ! "$LPC" -3M -q "$W/$N.PAS" >"$W/$N.log" 2>&1; then
+    echo "ECHEC $N : compilation (voir $W/$N.log)"; FAIL=$((FAIL+1)); continue
+  fi
+  nm -g "$W/$N.ko" | sed 's/^[0-9a-f]* //' | sort > "$W/$N.sym"
+  if ! readelf -h "$W/$N.ko" | grep -q 'Type:.*REL' || ! cmp -s "$W/$N.sym" "$HERE/$N.SYM"; then
+    echo "ECHEC $N : module ET_REL attendu / symboles differents ($W/$N.sym)"
+    FAIL=$((FAIL+1)); continue
+  fi
+  if command -v ld >/dev/null && [ -f "$HERE/$N.STUB" ]; then
+    as --32 "$HERE/$N.STUB" -o "$W/$N.stub.o" &&
+      ld -m elf_i386 -e init_module -o "$W/$N.linked" "$W/$N.ko" "$W/$N.stub.o" \
+      >"$W/$N.ld.log" 2>&1 || { echo "ECHEC $N : edition de liens (voir $W/$N.ld.log)";
+      FAIL=$((FAIL+1)); continue; }
+  fi
+  echo "ok    $N"; PASS=$((PASS+1))
+done
 # --- programmes utilisateur -3X, executes sur l'hote ---
 if cp "$HERE/UX1.PAS" "$W/UXPROBE.PAS" && "$LPC" -3X -q "$W/UXPROBE.PAS" >/dev/null 2>&1 \
    && "$W/UXPROBE" >/dev/null 2>&1; then

@@ -1,0 +1,5 @@
+.globl _TPF_PRINTK, _TPF_KMALLOC
+.text
+_TPF_PRINTK: ret
+_TPF_KMALLOC: mov $5,%eax
+ ret

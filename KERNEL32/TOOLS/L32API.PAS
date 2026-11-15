@@ -609,10 +609,70 @@ Begin
   LnxDaysFromCivil := Era * 146097 + Doe - 719468;
 End;
 
-{ secondes Unix -> date et heure DOS (UTC) }
+{ fuseau horaire : variable TZ (NOM[+-]hh[:mm], sans heure d'ete) ou fichier
+  /etc/TZ ; decalage en secondes a l'est de UTC }
+Var
+  LnxTzDone, LnxTzOff : LongInt;
+
+Function LnxTz : LongInt;
+Var S : String; I, Sg, H, M, F : LongInt; C : Char;
+Begin
+  If LnxTzDone = 0 Then
+  Begin
+    LnxTzDone := 1;
+    LnxTzOff := 0;
+    S := SysGetEnv('TZ');
+    If S = '' Then
+    Begin
+      F := SysOpen('/etc/TZ', 0, 0);
+      If F >= 0 Then
+      Begin
+        If Not SysReadLine(F, S) Then S := '';
+        SysClose(F);
+      End;
+    End;
+    I := 1;
+    If (S <> '') And (S[1] = ':') Then I := 2;
+    While (I <= Length(S)) And (((S[I] >= 'A') And (S[I] <= 'Z')) Or
+          ((S[I] >= 'a') And (S[I] <= 'z'))) Do Inc(I);
+    If (I <= Length(S)) And ((S[I] = '+') Or (S[I] = '-') Or
+       ((S[I] >= '0') And (S[I] <= '9'))) Then
+    Begin
+      Sg := 1;
+      If S[I] = '-' Then
+      Begin
+        Sg := -1;
+        Inc(I);
+      End
+      Else If S[I] = '+' Then Inc(I);
+      H := 0;
+      M := 0;
+      While (I <= Length(S)) And (S[I] >= '0') And (S[I] <= '9') Do
+      Begin
+        H := H * 10 + Ord(S[I]) - 48;
+        Inc(I);
+      End;
+      If (I <= Length(S)) And (S[I] = ':') Then
+      Begin
+        Inc(I);
+        While (I <= Length(S)) And (S[I] >= '0') And (S[I] <= '9') Do
+        Begin
+          M := M * 10 + Ord(S[I]) - 48;
+          Inc(I);
+        End;
+      End;
+      { POSIX : le decalage est compte vers l'ouest }
+      LnxTzOff := -Sg * (H * 3600 + M * 60);
+    End;
+  End;
+  LnxTz := LnxTzOff;
+End;
+
+{ secondes Unix -> date et heure DOS (heure locale) }
 Function LnxToDos(T : LongInt) : LongInt;
 Var Days, Secs, Y, M, D : LongInt;
 Begin
+  T := T + LnxTz;
   If T < 0 Then T := 0;
   Days := T Div 86400;
   Secs := T Mod 86400;
@@ -629,9 +689,15 @@ End;
 Function LnxFromDos(V : LongInt) : LongInt;
 Var Dd, Tt : LongInt;
 Begin
+  LnxFromDos := LnxFromDosUtc(V) - LnxTz;
+End;
+
+Function LnxFromDosUtc(V : LongInt) : LongInt;
+Var Dd, Tt : LongInt;
+Begin
   Dd := (V Shr 16) And $FFFF;
   Tt := V And $FFFF;
-  LnxFromDos := LnxDaysFromCivil(((Dd Shr 9) And 127) + 1980, (Dd Shr 5)
+  LnxFromDosUtc := LnxDaysFromCivil(((Dd Shr 9) And 127) + 1980, (Dd Shr 5)
       And 15, Dd And 31) * 86400 +
     ((Tt Shr 11) And 31) * 3600 + ((Tt Shr 5) And 63) * 60 + (Tt And 31) * 2;
 End;
@@ -640,7 +706,7 @@ Procedure GetLocalTime(P : LongInt);
 Var Sec, Usec, Days, Y, M, D, Secs : LongInt;
 Begin
   LnxSys3(78, LongInt(@LnxTmp), 0, 0);
-  Sec := LnxTmp[0];
+  Sec := LnxTmp[0] + LnxTz;
   Usec := LnxTmp[1];
   Days := Sec Div 86400;
   Secs := Sec Mod 86400;
@@ -659,7 +725,7 @@ Function SetLocalTime(P : LongInt) : LongInt;
 Var T : LongInt;
 Begin
   T := LnxDaysFromCivil(MemW[0:P], MemW[0:P + 2], MemW[0:P + 6]) * 86400 +
-       MemW[0:P + 8] * 3600 + MemW[0:P + 10] * 60 + MemW[0:P + 12];
+       MemW[0:P + 8] * 3600 + MemW[0:P + 10] * 60 + MemW[0:P + 12] - LnxTz;
   LnxTmp[0] := T;
   LnxTmp[1] := 0;
   If LnxCheck(LnxSys3(79, LongInt(@LnxTmp), 0, 0)) < 0 Then SetLocalTime := 0
@@ -2447,6 +2513,12 @@ End;
 Function SysLSeek(Fd, Offset, Whence : LongInt) : LongInt;
 Begin
   SysLSeek := LnxRes(LnxSys3(19, Fd, Offset, Whence));
+End;
+
+{ lseek 64 bits (llseek, 140) : decalage Hi:Lo, Res = adresse de 2 LongInt (Lo, Hi) }
+Function SysLLSeek(Fd, Hi, Lo, Res, Whence : LongInt) : LongInt;
+Begin
+  SysLLSeek := LnxRes(LnxSys6(140, Fd, Hi, Lo, Res, Whence, 0));
 End;
 
 Function SysIoctl(Fd, Request : LongInt; Var Arg) : LongInt;

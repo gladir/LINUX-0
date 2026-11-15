@@ -160,6 +160,24 @@ def generate(D):
             L.append('case "$o" in *%s*) ok %s;; *) ko %s "sortie";; esac' % (shq(exp), line, line))
         elif mode == 'rc':
             L.append('[ $r = %d ] && ok %s || ko %s "rc=$r"' % (exp, line, line))
+    # programmes de USR/ (lot 2) : essais sous KERNEL32 seulement
+    L += ['U=/tmp/ubench; rm -rf $U; mkdir -p $U/a/b $U/o; echo hello > $U/a/f.txt',
+          'ln -s f.txt $U/a/l; [ "$(readlink $U/a/l)" = f.txt ] && ok "ln -s, readlink" || ko "ln -s, readlink" x',
+          '[ "$(realpath $U/a/b/../l)" = $U/a/f.txt ] && ok realpath || ko realpath x',
+          '[ "$(find $U/a -name "*.txt")" = $U/a/f.txt ] && ok "find -name" || ko "find -name" x',
+          'tar cf $U/x.tar -C $U a && tar xf $U/x.tar -C $U/o && cmp $U/a/f.txt $U/o/a/f.txt && ok "tar c/x" || ko "tar c/x" x',
+          '[ "$(tar tf $U/x.tar | head -n 1)" = a/ ] && ok "tar t" || ko "tar t" x',
+          '[ "$(echo a b | xargs echo X)" = "X a b" ] && ok xargs || ko xargs x',
+          '[ "$(nice -n 3 echo hi)" = hi ] && ok nice || ko nice x',
+          'timeout 1 sleep 5; [ $? = 124 ] && ok timeout || ko timeout "rc=$?"',
+          'free | grep -q Mem && ok free || ko free x',
+          'uptime | grep -q up && ok uptime || ko uptime x',
+          '[ "$(printenv LANGUAGE)" = EN ] && ok printenv || ko printenv x',
+          'chown 0:0 $U/a/f.txt && ok chown || ko chown x',
+          'mknod $U/pp p && [ -p $U/pp ] && ok mknod || ko mknod x',
+          'pgrep init > /dev/null && ok pgrep || ko pgrep x',
+          'dmesg | grep -q . && ok dmesg || ko dmesg x',
+          'usleep 1000 && ok usleep || ko usleep x']
     L.append('echo "BENCH-FIN ok=$P ko=$F"')
     # essai "aide /?" de tous les programmes de /bin (code de sortie < 128)
     L += ['H=0; K=0',
