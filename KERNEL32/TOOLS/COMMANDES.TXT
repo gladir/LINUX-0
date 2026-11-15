@@ -18,7 +18,7 @@ ETAT : marche = fonctionne conformement a son aide pour les essais faits ;
 QEMU : ok = meme resultat sous KERNEL32 ; KO = difference ; aide = seul l'essai
        d'aide a ete fait ; - = non essaye.
 
-Resume : 176 marchent, 2 avec reserves, 0 echouent (sur 178 programmes)
+Resume : 178 marchent, 0 avec reserves, 0 echouent (sur 178 programmes)
 
 COMMANDE     ETAT      QEMU  ESSAI                                        REMARQUE
 ----------   --------  ----  ------------------------------------------   --------------------
@@ -34,7 +34,7 @@ anytopnm     marche    aide  aide /?                                      demarr
 ar           marche    aide  aide /?                                      demarre et affiche son aide
 asciitopgm   marche    aide  aide /?                                      demarre et affiche son aide
 atktopbm     marche    aide  aide /?                                      demarre et affiche son aide
-awk          reserves  KO    awk {print $2}; awk {s+=$1} END {print s} nu interprete AWK minimal du depot : la plupart des mots (print $N, if, w
+awk          marche    ok    awk {print $2}; awk {s+=$1} END {print s} nu ms.t
 banner       marche    ok    banner OK                                    
 base64       marche    ok    base64 a.txt                                 
 basename     marche    ok    basename /a/b/c.txt; basename a.txt .txt     
@@ -102,7 +102,7 @@ glookbib     marche    aide  aide /?                                      demarr
 gperf        marche    aide  aide /?                                      demarre et affiche son aide
 gpic         marche    aide  aide /?                                      demarre et affiche son aide
 grefer       marche    aide  aide /?                                      demarre et affiche son aide
-grep         marche    ok    grep alpha in.txt; grep LIGNE in.txt /I      
+grep         marche    ok    grep alpha in.txt; grep LIGNE in.txt /I; gre p -c
 grodvi       marche    aide  aide /?                                      demarre et affiche son aide
 groff        marche    aide  aide /?                                      demarre et affiche son aide
 groupdel     marche    aide  aide /?                                      demarre et affiche son aide
@@ -122,7 +122,7 @@ id           marche    ok    id
 ifconfig     marche    ok    aide /?                                      demarre et affiche son aide
 ispell       marche    aide  aide /?                                      demarre et affiche son aide
 join         marche    ok    join j1.txt j2.txt                           
-ksh          reserves  aide  aide /?                                      shell interactif : l'aide /? attend l'entree
+ksh          marche    aide  aide /?                                      demarre et affiche son aide
 lastlog      marche    aide  aide /?                                      demarre et affiche son aide
 ldd          marche    aide  aide /?                                      demarre et affiche son aide
 less         marche    aide  aide /?                                      demarre et affiche son aide
@@ -168,7 +168,7 @@ rm           marche    ok    rm /tmp/linux0-cmdbench/mv.out
 rmdir        marche    ok    rmdir /tmp/linux0-cmdbench/dd/ee             
 s2p          marche    aide  aide /?                                      demarre et affiche son aide
 sdiff        marche    ok    sdiff a.txt b.txt                            
-sed          marche    ok    sed s/a/A/g a.txt; sed -e s/a/A/ a.txt       
+sed          marche    ok    sed s/a/A/g a.txt; sed -e s/a/A/ a.txt; sed  -n 2
 seq          marche    ok    seq 1 5; seq 3                               
 sh           marche    aide  aide /?                                      demarre et affiche son aide
 sleep        marche    ok    sleep 0                                      
@@ -206,11 +206,13 @@ PROGRAMMES DE USR/ (ecrits pour KERNEL32, installes par BUILD.SH)
 QEMU : ok = essai fonctionnel dans run.sh ; sess = verifie par les sessions
        (init, getty, login, sh, installateur, RUNU power/install) ; aide = essai /?
 
+awk          ok
 chown        ok
 dmesg        ok
 find         ok
 free         ok
 getty        sess
+grep         ok
 halt         sess
 hostname     sess
 hwclock      ok
@@ -226,6 +228,7 @@ mkdir        ok
 mknod        ok
 mkpasswd     sess
 mkswap       ok
+modtool      sess
 mount        sess
 nc           aide
 nice         ok
@@ -244,18 +247,26 @@ renice       ok
 rm           ok
 rmdir        ok
 route        ok
+sed          ok
 sh           sess
+shuf         aide
 su           ok
 swapon       aide
 sync         sess
 sysctl       aide
+syslogd      aide
 tar          ok
+telinit      aide
+test         ok
 time         ok
 timeout      ok
+top          aide
 tty          aide
 umount       sess
 uptime       ok
+usermgr      aide
 usleep       ok
 watch        aide
 wget         aide
+who          ok
 xargs        ok
