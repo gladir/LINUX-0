@@ -71,6 +71,9 @@ Parties ajoutees en phase 2 (placees physiquement avant la partie 14) :
 | 26 | swap : `swapon`/`swapoff` (87/115) sur un peripherique `mkswap` (SWAPSPACE2 v1, 128 Mo au plus) ou `swap=/dev/hdXN` au demarrage ; `SwapReclaim` (appele par `AllocPages` sous 96 pages libres) ecrit sur disque les pages anonymes privees a une seule reference (seconde chance par bit "accede"), PTE non present portant la case (bit 9), page-in dans la faute de page (aussi en mode noyau), cases comptees pour `fork`, `/proc/meminfo` SwapTotal/SwapFree |
 | 30 | IPC SysV : memoire partagee (`shmget/shmat/shmdt/shmctl`, segments de 16 Mo au plus, VMA `VmShm`, pages hors comptage, detachement a la sortie, `IPC_RMID` differe), semaphores (`semget/semop/semtimedop/semctl`, blocage, `IPC_NOWAIT`, `SEM_UNDO` applique a la sortie, `GETVAL/SETALL`...), files de messages (`msgget/msgsnd/msgrcv/msgctl`, types >0, <0, `MSG_EXCEPT`, `MSG_NOERROR`, qbytes), `ipc(2)` et appels directs 392-402, droits uid/gid/mode, `IPC_STAT/SET/INFO` |
 | 31 | files de messages POSIX (`mq_open/unlink/timedsend/timedreceive/notify/getsetattr`, descripteurs pollables, priorites, notification par signal `SI_MESGQ`), AIO (`io_setup/submit/getevents/cancel/destroy`, execution synchrone a la soumission, notification eventfd), `sendmmsg/recvmmsg`, futex complets (`WAIT/WAKE`, bitsets, delais absolus, `REQUEUE/CMP_REQUEUE/WAKE_OP`, `LOCK_PI/UNLOCK_PI/TRYLOCK_PI` sans elevation de priorite, cle physique pour les pages partagees, listes robustes traitees a la sortie) |
+| 32 | ptrace et seccomp : `ptrace(2)` complet (TRACEME, ATTACH/SEIZE/DETACH/INTERRUPT, PEEK/POKE TEXT/DATA/USER avec ecriture forcee dans le code, GETREGS/SETREGS, GETFPREGS/GETFPXREGS, GETREGSET, CONT/SYSCALL/SINGLESTEP/SYSEMU/SYSEMU_SINGLESTEP/KILL, SETOPTIONS : TRACESYSGOOD/FORK/VFORK/CLONE/EXEC/VFORKDONE/EXIT/SECCOMP/EXITKILL, GETEVENTMSG, GETSIGINFO/SETSIGINFO, GET_SYSCALL_INFO, PEEKSIGINFO, GETSIGMASK, GET_THREAD_AREA), arrets aux signaux, aux appels systeme (entree/sortie) et aux evenements `PTRACE_EVENT_*`, attachement automatique des fils, retour du zombie au vrai pere, tracee detache a la mort du traceur ; `int3` (gate DPL 3), pas a pas par `TF` (y compris au travers de `INT 80h`), registres de debogage DR0-DR7 (`POKEUSER`, commutes par tache, points d'arret materiels d'execution et d'ecriture/lecture, `DR6`) ; seccomp : `SECCOMP_MODE_STRICT`, `SECCOMP_MODE_FILTER` (interpreteur BPF classique complet, validation du programme, filtres empiles, heritage par fork, `TSYNC` (teste sur un seul fil)), retours `ALLOW/LOG/ERRNO/TRAP(SIGSYS)/TRACE/KILL_THREAD/KILL_PROCESS`, `prctl(PR_SET_SECCOMP, PR_GET_SECCOMP, PR_SET_NO_NEW_PRIVS, PR_GET_NO_NEW_PRIVS)`, `seccomp(2)` (354), `/proc/PID/status` (`TracerPid`, `Seccomp`, `NoNewPrivs`) |
+| 33 | attributs etendus et ACL POSIX : `setxattr/getxattr/listxattr/removexattr` (+ `l*` et `f*`, 226-237), espaces `user.`, `trusted.`, `security.`, `system.posix_acl_access/default` ; magasin en memoire (tmpfs, devtmpfs, ramfs) et ext2 (bloc d'attributs `i_file_acl`, hachage des entrees, copie sur ecriture d'un bloc partage, fonctionnalite `ext_attr`, valide par `e2fsck` et `debugfs ea_list`) ; ACL : validation, equivalence avec les bits de mode, controle des droits (algorithme `posix_acl_permission`), `chmod` qui met a jour le masque, ACL par defaut heritee a la creation (fichiers, repertoires, `mknod`) sans umask |
+| 34 | `clone3` (435, arguments 64 bits, `pidfd`, `parent_tid`, `child_tid`, pile), `clone` avec `CLONE_PIDFD/CHILD_SETTID`, `unshare` et `setns` (346) sur les espaces `CLONE_NEW*`, `/proc/PID/ns/*` (liens magiques `type:[ino]` lisibles et ouvrables, repertoire listable). Reels : UTS (noms d'hote et de domaine par espace), IPC (cles et identifiants SysV par espace), PID (pid virtuels : `getpid/getppid/gettid`, valeur de retour de `fork/clone/wait4`, `kill/tkill/pidfd_open` ; le premier processus de l'espace est le pid 1 et sa mort tue les autres). Identite seulement, sans isolation : montages (NS), reseau (NET), utilisateurs (USER : pas de `uid_map`), cgroup, temps |
 | 29 | signaux temps reel : file d'attente de `siginfo` par tache (16 entrees, signaux < 32 non empiles, RT empiles), `si_code/si_pid/si_uid/si_value`, `si_addr` des SIGSEGV, `rt_sigtimedwait(+64)`, `rt_sigqueueinfo`, `rt_tgsigqueueinfo`, `signalfd/signalfd4`, minuteries POSIX (`timer_create/settime/gettime/getoverrun/delete` + 64 bits, SIGEV_SIGNAL/NONE/THREAD_ID, resolution 10 ms, supprimees a l'execve), `pidfd_open`, `pidfd_send_signal`, `waitid(P_PIDFD)`, verrous de fichiers reels : `flock`, `fcntl` POSIX (F_GETLK/SETLK/SETLKW, 32 et 64 bits, decoupe des plages, liberes a la fermeture de tout descripteur du fichier et a la sortie du processus) et OFD (F_OFD_*), `F_GETPIPE_SZ` |
 | 28 | appels systeme complementaires issus de l'audit (lot A1, apres la partie 16) : ordonnancement (`sched_*`, `getcpu`, affinite), capacites (`capget/capset`, `Capable`, regles setuid/execve), `personality`, `sendfile/sendfile64/copy_file_range/splice/vmsplice`, `preadv/pwritev(+2)`, `fallocate`, `syncfs`, `statx`, `renameat2`, `openat2`, `faccessat2`, `fchmodat2`, `execveat`, `close_range`, `memfd_create`, `mlock*/mincore/madvise` reels (`VmLocked`, RLIMIT_MEMLOCK), `waitid`, `process_vm_readv/writev`, `kcmp`, `unshare(FILES/FS)`, `membarrier`, horloges 64 bits (`clock_*64`, `futex_time64`, `ppoll/pselect6`, `epoll_pwait2`, `timerfd*64`, `utimensat_time64`), `adjtimex`, `ioperm/iopl`, ENOSYS explicites (`EnosysList`) |
 | 25 | framebuffer Bochs/QEMU VGA : `fb=LxH` sur la ligne de commande programme le mode 32 bits (registres VBE 1CEh/1CFh), memoire video (BAR 0 PCI) mappee en F8000000h, `/dev/fb0` (29:0) : read, write, lseek, `FBIOGET_FSCREENINFO/VSCREENINFO`, `mmap` partage (VMA `VmPhys`, PTE hors comptage) |
@@ -354,7 +357,8 @@ reels depuis la partie 29. Correction au passage :
 
 ### Tests (suite)
 
-* `RUNK.SH` : 34 programmes embarques, 586 verifications (dont `syscalltest` : 94
+* `RUNK.SH` : 38 programmes embarques, 758 verifications (dont `ptracetest`, `seccomptest`, `xattrtest`, `nstest` des lots A2c/A2d ; `xattrtest` est aussi execute sur ext2 par `ext2test`)
+  ; avant ces lots : 34 programmes, 586 verifications (dont `syscalltest` : 94
   verifications du lot A1, `sigrttest` : 58 du lot A2a, `ipctest` et
   `mqfutextest` du lot A2b) (`fattest`, `fbtest`,
   `swaptest`, `idetest` s'ignorent sans le materiel voulu ; `killtest` :
@@ -373,11 +377,22 @@ reels depuis la partie 29. Correction au passage :
   `RESULTAT : SUCCES` (ou `ECHEC` avec le dossier des traces). Avec `-n`, ils
   ne regenerent pas les programmes embarques.
 
+### Lots A2c et A2d (ptrace, seccomp, xattr/ACL, clone3/espaces de noms)
+
+Limites connues : `PTRACE_SINGLEBLOCK` et `SET_THREAD_AREA` refusent (`EIO`) ;
+`PTRACE_LISTEN` ne fait que valider ; `SECCOMP_RET_USER_NOTIF` repond `ENOSYS` ;
+au plus 8 filtres seccomp empiles par tache ; les attributs etendus ext2 n'ont
+qu'un bloc (pas d'attributs dans l'inode, pas de partage de blocs a la creation) ;
+FAT, iso9660, proc et sysfs repondent `EOPNOTSUPP` aux xattr (sauf sysfs, tmpfs) ;
+les espaces de noms NS/NET/USER/CGROUP/TIME sont des objets d'identite sans
+isolation ; `/proc`, les groupes (`kill(0/-1/-pgrp)`, `getpgid`, `setsid`) et les `si_pid` ne sont pas traduits par espace de pid ; pas de `set_tid` dans
+`clone3` ; fichiers de plus de 2 Go : non realises (positions et tailles 32 bits).
+
 ### Plan restant
 
 Verrous fins a la place du verrou unique du noyau (ext2/FAT/reseau/VFS
 independants), SMP, modules, journal ext3/ext4, FAT comme racine, DHCP/DNS dans
-le noyau.
+le noyau, fichiers de plus de 2 Go, isolation reelle des montages et du reseau.
 
 ---
 

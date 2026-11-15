@@ -155,7 +155,7 @@ int main(void){
    ktest("proc.waitid",sc5(284,1,pid,(long)si,4|0x01000000,0)==0&&si[0]==17&&si[2]==1&&(int)si[3]==pid&&si[5]==7);
    ktest("proc.waitid_wnowait_again",sc5(284,1,pid,(long)si,4,0)==0&&si[5]==7);
    ktest("proc.waitid_echild",sc5(284,1,pid,(long)si,4,0)==-10&&sc5(284,0,0,(long)si,0,0)==-22);}
-  ktest("proc.unshare_files",sc1(310,0x400)==0&&sc1(310,0x40000000)==-22);
+  ktest("proc.unshare_files",sc1(310,0x400)==0&&sc1(310,0x1)==-22);
   ktest("proc.robust_list",sc2(311,0x1000,12)==0&&sc2(311,0,8)==-22);
   {unsigned head=0,len=0;ktest("proc.get_robust_list",sc3(312,0,(long)&head,(long)&len)==0&&head==0x1000&&len==12);}
   ktest("proc.kcmp",sc5(349,getpid(),getpid(),2,0,0)==0&&({int ff=open("/tmp/sa",O_RDONLY,0);int rr=sc5(349,getpid(),getpid(),0,0,ff);close(ff);rr>0;})&&sc5(349,getpid(),getpid(),9,0,0)==-22);

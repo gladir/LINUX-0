@@ -377,6 +377,43 @@ static void t_sysemu(void){
   ktest("ptrace.sysemu_result",WIFEXITED(st)&&WEXITSTATUS(st)==0);
 }
 
+/* 14 : evenements vfork / vfork_done et clone (thread) */
+static long thread_clone(void*top,long flags){
+  long r;
+  __asm__ volatile("int $0x80\n\ttest %%eax,%%eax\n\tjnz 1f\n\tmov $1,%%eax\n\txor %%ebx,%%ebx\n\tint $0x80\n1:"
+    :"=a"(r):"0"(120),"b"(flags),"c"(top),"d"(0),"S"(0),"D"(0):"memory");
+  return r;
+}
+static char thr_stack[4096] __attribute__((aligned(16)));
+static void t_vfork_clone(void){
+  int pid=fork(),st,i;int ev2=0,ev5=0,ev3=0,gstop=0,tstop=0,cst=-1;long msg=0;
+  if(pid==0){pt(PT_TRACEME,0,0,0);kill(getpid(),SIGSTOP);
+    {long v=sc0(190);if(v==0)_exit(4);}
+    thread_clone(thr_stack+4096,0x100|0x200|0x400|0x800|0x10000);
+    nap(30);
+    _exit(0);}
+  stopped(pid,&st);
+  pt(PT_SETOPTIONS,pid,0,4|8|32);
+  pt(PT_CONT,pid,0,0);
+  for(i=0;i<60;i++){
+    int w=waitpid(-1,&st,WALL);
+    if(w<0)break;
+    if(WIFEXITED(st)){if(w==pid){cst=WEXITSTATUS(st);break;}continue;}
+    if(!WIFSTOPPED(st))continue;
+    { int ev=(st>>16)&0xff;
+      if(w==pid&&ev==2){ev2=1;pt(PT_GETEVENTMSG,w,0,(long)&msg);}
+      else if(w==pid&&ev==5)ev5=1;
+      else if(w==pid&&ev==3)ev3=1;
+      else if(w!=pid&&WSTOPSIG(st)==SIGSTOP){if(ev2&&!ev3)gstop=1;else tstop=1;}
+      pt(PT_CONT,w,0,0); }
+  }
+  ktest("ptrace.event_vfork",ev2&&msg>1);
+  ktest("ptrace.event_vfork_done",ev5);
+  ktest("ptrace.event_clone_thread",ev3);
+  ktest("ptrace.vfork_clone_autoattach",gstop&&tstop);
+  ktest("ptrace.vfork_clone_exit",cst==0);
+}
+
 int main(void){
   t_basic();
   t_inject();
@@ -391,6 +428,7 @@ int main(void){
   t_tracer_exit();
   t_fp();
   t_sysemu();
+  t_vfork_clone();
   puts("ptrace DONE\n");
   return ku_fail?1:0;
 }
