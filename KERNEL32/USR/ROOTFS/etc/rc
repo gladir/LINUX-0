@@ -2,4 +2,6 @@
 mount -o remount,rw / 2>/dev/null
 [ -f /etc/hostname ] && hostname `cat /etc/hostname` 2>/dev/null
 rm -rf /tmp/* 2>/dev/null
+[ -x /sbin/syslogd ] && /sbin/syslogd 2>/dev/null
+[ -x /bin/logger ] && logger -t init "system started" 2>/dev/null
 echo "LINUX-0 : systeme demarre"

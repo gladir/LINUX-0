@@ -179,6 +179,48 @@ o=$(basename 'a.txt' '.txt' < /dev/null 2>&1); r=$?
 [ "$o" = 'a' ] && ok 'basename a.txt .txt' || ko 'basename a.txt .txt' "sortie"
 o=$(ed 'a.txt' < /usr/share/bench/in/90 2>&1); r=$?
 case "$o" in *'apple'*) ok 'ed a.txt';; *) ko 'ed a.txt' "sortie";; esac
+o=$(test '-d' '/tmp' < /dev/null 2>&1); r=$?
+[ $r = 0 ] && ok 'test -d /tmp' || ko 'test -d /tmp' "rc=$r"
+o=$(test 'a' '=' 'b' < /dev/null 2>&1); r=$?
+[ $r = 1 ] && ok 'test a = b' || ko 'test a = b' "rc=$r"
+o=$(test '3' '-lt' '10' '-a' '-n' 'x' < /dev/null 2>&1); r=$?
+[ $r = 0 ] && ok 'test 3 -lt 10 -a -n x' || ko 'test 3 -lt 10 -a -n x' "rc=$r"
+o=$(grep '-c' '-E' 'a(l|n)' 'in.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/94)" ] && ok 'grep -c -E a(l|n) in.txt' || ko 'grep -c -E a(l|n) in.txt' "sortie"
+o=$(grep '-n' '-i' 'ZEBRA' 'in.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/95)" ] && ok 'grep -n -i ZEBRA in.txt' || ko 'grep -n -i ZEBRA in.txt' "sortie"
+o=$(grep '-o' '-E' '[a-z]+ [0-9]' 'in.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/96)" ] && ok 'grep -o -E [a-z]+ [0-9] in.txt' || ko 'grep -o -E [a-z]+ [0-9] in.txt' "sortie"
+o=$(grep '-v' '-e' 'a' '-e' 'e' 'in.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/97)" ] && ok 'grep -v -e a -e e in.txt' || ko 'grep -v -e a -e e in.txt' "sortie"
+o=$(grep '-w' 'alpha' 'in.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/98)" ] && ok 'grep -w alpha in.txt' || ko 'grep -w alpha in.txt' "sortie"
+o=$(sed '-n' '2,3p' 'in.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/99)" ] && ok 'sed -n 2,3p in.txt' || ko 'sed -n 2,3p in.txt' "sortie"
+o=$(sed '-E' 's/(a+)/<\1>/g' 'a.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/100)" ] && ok 'sed -E s/(a+)/<\1>/g a.txt' || ko 'sed -E s/(a+)/<\1>/g a.txt' "sortie"
+o=$(sed '$!N;s/\n/ /' 'in.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/101)" ] && ok 'sed $!N;s/\n/ / in.txt' || ko 'sed $!N;s/\n/ / in.txt' "sortie"
+o=$(sed '1!G;h;$!d' 'a.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/102)" ] && ok 'sed 1!G;h;$!d a.txt' || ko 'sed 1!G;h;$!d a.txt' "sortie"
+o=$(awk '-F' ',' '{print $2}' 'csv.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/103)" ] && ok 'awk -F , {print $2} csv.txt' || ko 'awk -F , {print $2} csv.txt' "sortie"
+o=$(awk 'BEGIN{printf "%05.1f|%s\n", 3.14159, toupper("x")}' < /dev/null 2>&1); r=$?
+[ "$o" = '003.1|X' ] && ok 'awk BEGIN{printf "%05.1f|%s\n", 3.14159, toupper("x")}' || ko 'awk BEGIN{printf "%05.1f|%s\n", 3.14159, toupper("x")}' "sortie"
+o=$(awk '{a[$1]++} END{n=0; for(k in a) n++; print n}' 'in.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/105)" ] && ok 'awk {a[$1]++} END{n=0; for(k in a) n++; print n} in.txt' || ko 'awk {a[$1]++} END{n=0; for(k in a) n++; print n} in.txt' "sortie"
+o=$(awk 'function f(n){return n<2?n:f(n-1)+f(n-2)} BEGIN{print f(15)}' < /dev/null 2>&1); r=$?
+[ "$o" = '610' ] && ok 'awk function f(n){return n<2?n:f(n-1)+f(n-2)} BEGIN{print f(15)}' || ko 'awk function f(n){return n<2?n:f(n-1)+f(n-2)} BEGIN{print f(15)}' "sortie"
+o=$(awk '{ $2 = toupper($2); print }' 'in.txt' < /dev/null 2>&1); r=$?
+[ "$o" = "$(cat /usr/share/bench/exp/107)" ] && ok 'awk { $2 = toupper($2); print } in.txt' || ko 'awk { $2 = toupper($2); print } in.txt' "sortie"
+o=$(who  < /dev/null 2>&1); r=$?
+case "$o" in *'root'*) ok 'who ';; *) ko 'who ' "sortie";; esac
+o=$(users  < /dev/null 2>&1); r=$?
+case "$o" in *'root'*) ok 'users ';; *) ko 'users ' "sortie";; esac
+o=$(last  < /dev/null 2>&1); r=$?
+case "$o" in *'root'*) ok 'last ';; *) ko 'last ' "sortie";; esac
+o=$(w  < /dev/null 2>&1); r=$?
+case "$o" in *'USER'*) ok 'w ';; *) ko 'w ' "sortie";; esac
 U=/tmp/ubench; rm -rf $U; mkdir -p $U/a/b $U/o; echo hello > $U/a/f.txt
 ln -s f.txt $U/a/l; [ "$(readlink $U/a/l)" = f.txt ] && ok "ln -s, readlink" || ko "ln -s, readlink" x
 [ "$(realpath $U/a/b/../l)" = $U/a/f.txt ] && ok realpath || ko realpath x

@@ -252,6 +252,7 @@ BEGIN
  Repeat
   ShowPrompt;
   ReadLn(CmdStr);
+  If Eof Then Terminated:=True;   { fin de l'entree : arret }
   ExtractCommand;
   CommandFound:=False;
   For J:=Low(CommandList) to High(CommandList) do Begin

@@ -9,8 +9,6 @@
 import sys, re
 host, qemu, out = sys.argv[1:4]
 NOTES = {
- 'awk': ('reserves', "interprete AWK minimal du depot : la plupart des mots (print $N, if, while...) ne sont pas implantes"),
- 'ksh': ('reserves', "shell interactif : l'aide /? attend l'entree"),
  'yes': ('marche', "boucle infinie par nature : essai par tube vers head"),
 }
 rows = []

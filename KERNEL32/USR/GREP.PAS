@@ -612,6 +612,12 @@ Begin
   While I < NArg Do
   Begin
     A := SysArgStr(I);
+    { options a la DOS (/I /V /N /C /L /W /X /H), compatibles avec l'ancien
+      grep du depot }
+    If (Not EndOpt) And (Length(A) = 2) And (A[1] = '/') And
+       (Pos(A[2], 'IiVvNnCcLlWwXx') > 0) Then
+      A := '-' + Chr(Ord(A[2]) Or 32);
+    If (Not EndOpt) And (Length(A) = 2) And (A = '/?') Then Usage;
     If (Not EndOpt) And (Length(A) > 1) And (A[1] = '-') Then
     Begin
       If A = '--' Then EndOpt := True

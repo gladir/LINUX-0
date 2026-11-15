@@ -5,6 +5,8 @@
 # @description: Banc d'essai rejouable du systeme utilisateur de KERNEL32
 #   (agent E). RUNU.SH [etapes...]   etapes : sh host qemu power net install
 #   (defaut : toutes)
+#     mod      modules du noyau : insmod/lsmod/rmmod de /lib/modules/hello.ko
+#              (SKIP si le noyau n'a pas encore le chargeur init_module)
 #     sh       shell USR/SH.PAS contre dash (TESTS/U/shtest.sh)
 #     host     compile les commandes du depot (LPC -3X) et lance cmdbench.py
 #              sur l'hote (ELF32 statique) : tableau marche/reserves/echoue
@@ -28,7 +30,7 @@ W=${W:-/tmp/linux0-u-tests}
 QT=${QEMU_T:-600}
 export LPC W
 mkdir -p "$W/bin" "$W/src"
-STEPS=${*:-sh host qemu power net install}
+STEPS=${*:-sh host qemu power net install mod}
 FAIL=0
 build() {
   [ -n "$IMAGE" ] && return 0
@@ -45,6 +47,13 @@ for st in $STEPS; do
     ls "$K32"/../*.PAS | xargs -n1 basename | sed 's/\.PAS$//' |
       grep -v '^HALT$\|^REBOOT$' |
       xargs -P4 -I{} sh -c "cd $W/src && $LPC -3X -q {}.PAS >/dev/null 2>$W/bin/{}.err || echo ECHEC compilation {}; mv {} $W/bin/ 2>/dev/null"
+    # versions de USR/ qui remplacent celles du depot (awk, sed, grep)
+    cp "$K32"/USR/*.INC "$K32"/USR/AWK.PAS "$K32"/USR/SED.PAS \
+       "$K32"/USR/GREP.PAS "$W/src/"
+    for n in AWK SED GREP; do
+      ( cd "$W/src" && $LPC -3X -q $n.PAS > /dev/null 2> "$W/bin/$n.err" &&
+        mv $n "$W/bin/$n" ) || echo "ECHEC compilation USR/$n"
+    done
     CMDBIN=$W/bin python3 "$HERE/cmdbench.py" -o "$W/host.txt" | tail -1 ;;
   qemu)
     build
@@ -89,6 +98,20 @@ for st in $STEPS; do
       if grep -q "$pat" "$W/net.txt"; then echo "ok    net : $pat"
       else echo "ECHEC net : $pat (voir $W/net.txt)"; FAIL=$((FAIL+1)); fi
     done ;;
+  mod)
+    build
+    [ -f "$IMAGE" ] || { FAIL=1; continue; }
+    cp "$IMAGE" "$W/m.img"
+    python3 "$K32/TESTS/QEMU.PY" run "$W/m.img" -m 64 -t 90 \
+      -c 'login: =root' -c 'Mot de passe : =root' \
+      -c '=modinfo hello; insmod /lib/modules/hello.ko; lsmod; rmmod hello; lsmod; dmesg | tail -4' \
+      -c '=echo MFIN' -s 'MFIN$' > "$W/mod.txt" 2>&1
+    if grep -q 'hello: module charge' "$W/mod.txt" &&
+       grep -q 'hello: module decharge' "$W/mod.txt"; then
+      echo "ok    modules : insmod, lsmod, rmmod, journal du noyau"
+    elif grep -qi 'non implant\|not implemented\|ENOSYS' "$W/mod.txt"; then
+      echo "SKIP  modules : le noyau n'a pas encore init_module (voir $W/mod.txt)"
+    else echo "ECHEC modules (voir $W/mod.txt)"; FAIL=1; fi ;;
   install)
     build
     [ -f "$IMAGE" ] || { echo "image absente : lancer BUILD.SH"; FAIL=1; continue; }

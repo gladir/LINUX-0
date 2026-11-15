@@ -7,7 +7,8 @@
       [:alpha:], references arriere \1..\9), partage par grep, sed et awk
       par la directive include de REGEX.INC. Le programme est compile en
       instructions d'une machine a retour arriere (adresses relatives).
-      Recherche de la plus longue correspondance (POSIX) quand le motif contient une alternative.
+      Recherche de la plus longue correspondance (POSIX) quand le motif
+      contient une alternative.
       Interface : ReCompile(Pat, Ere, Icase) -> programme (ou -1, ReErr),
       ReSearch(Prog, Base, Len, From, Longest) : le texte est lu par
       Mem[0:Base + i] ; resultats ReCap[2k], ReCap[2k+1] (debut, fin du

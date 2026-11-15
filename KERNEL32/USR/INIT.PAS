@@ -25,12 +25,14 @@
 
 Program Init;
 
+{$I UTMP.INC}
+
 {$I-}
 
 Const
   MAXENT = 32;
   aSysinit = 1; aWait = 2; aOnce = 3; aRespawn = 4; aCtrlAltDel = 5;
-  aShutdown = 6;
+  aShutdown = 6; aInitDef = 7;
   { messages : colonnes FR, EN, GR (allemand), SP, IT }
   M : Array[1..5, 1..5] Of PChar = (
     ('init : demarrage de LINUX-0', 'init: starting LINUX-0',
@@ -53,6 +55,7 @@ Const
 Type
   TEntry = Record
     Id : String[8];
+    Lv : String[8];                 { niveaux d'execution }
     Action : LongInt;
     Cmd : String[200];
     Pid : LongInt;
@@ -66,7 +69,9 @@ Var
   LangName : String;
   SigFlag : LongInt;     { signal recu : 0 aucun }
   IsInit : Boolean;
+  RunLevel, DefLevel, PrevLevel : Char;
   I, W, St : LongInt;
+  UB : TUtmp;
 
 Function Msg(Id : LongInt) : String;
 Var P : PChar; X : String;
@@ -132,6 +137,7 @@ Begin
   If NE >= MAXENT Then Exit;
   Inc(NE);
   E[NE].Id := Id;
+  E[NE].Lv := '';
   E[NE].Action := Act;
   E[NE].Cmd := Cmd;
   E[NE].Pid := 0;
@@ -147,7 +153,8 @@ Begin
   Else If S = 'once' Then ActionOf := aOnce
   Else If S = 'respawn' Then ActionOf := aRespawn
   Else If S = 'ctrlaltdel' Then ActionOf := aCtrlAltDel
-  Else If S = 'shutdown' Then ActionOf := aShutdown;
+  Else If S = 'shutdown' Then ActionOf := aShutdown
+  Else If S = 'initdefault' Then ActionOf := aInitDef;
 End;
 
 Function Exists(Const P : String) : Boolean;
@@ -157,7 +164,7 @@ Begin
 End;
 
 Procedure ReadInittab;
-Var F : Text; S, Id, A : String; K, Act : LongInt;
+Var F : Text; S, Id, A, Lv : String; K, Act : LongInt;
 Begin
   NE := 0;
   Assign(F, '/etc/inittab');
@@ -173,15 +180,24 @@ Begin
       If K = 0 Then Continue;
       Id := Copy(S, 1, K - 1);
       Delete(S, 1, K);
-      K := Pos(':', S);                  { niveaux d'execution : ignores }
+      K := Pos(':', S);                  { niveaux d'execution }
       If K = 0 Then Continue;
+      Lv := Copy(S, 1, K - 1);
       Delete(S, 1, K);
       K := Pos(':', S);
       If K = 0 Then Continue;
       A := Copy(S, 1, K - 1);
       Delete(S, 1, K);
       Act := ActionOf(A);
-      If (Act <> 0) And (S <> '') Then AddEntry(Id, Act, S);
+      If Act = aInitDef Then
+      Begin
+        If Lv <> '' Then DefLevel := Lv[1];
+      End
+      Else If (Act <> 0) And (S <> '') Then
+      Begin
+        AddEntry(Id, Act, S);
+        E[NE].Lv := Lv;
+      End;
     End;
     Close(F);
     Exit;
@@ -260,6 +276,17 @@ Begin
   SysExit(127);
 End;
 
+{ l'entree K s'applique-t-elle au niveau d'execution courant ? }
+Function InLevel(K : LongInt) : Boolean;
+Begin
+  InLevel := (E[K].Lv = '') Or (Pos(RunLevel, E[K].Lv) > 0);
+End;
+
+Function InLevelOf(K : LongInt; L : Char) : Boolean;
+Begin
+  InLevelOf := (E[K].Lv = '') Or (Pos(L, E[K].Lv) > 0);
+End;
+
 Function FindPid(P : LongInt) : LongInt;
 Var K : LongInt;
 Begin
@@ -316,7 +343,7 @@ Procedure RunAll(Act : LongInt; Wait : Boolean);
 Var K : LongInt; P : LongInt;
 Begin
   For K := 1 To NE Do
-    If E[K].Action = Act Then
+    If (E[K].Action = Act) And InLevel(K) Then
     Begin
       P := Spawn(E[K].Cmd);
       If Wait And (P > 0) Then WaitFor(P)
@@ -370,8 +397,74 @@ Begin
   SysExit(0);
 End;
 
+{ /var/run/runlevel : "precedent courant" (lu par la commande runlevel) }
+Procedure WriteRunLevel;
+Var Fd : LongInt;
+Begin
+  Fd := SysOpen('/var/run/runlevel', $241, 420);
+  If Fd >= 0 Then
+  Begin
+    SysPut(Fd, PrevLevel + ' ' + RunLevel + #10);
+    SysClose(Fd);
+  End;
+End;
+
+{ passage au niveau d'execution New (telinit) }
+Procedure ChangeLevel(New : Char);
+Var OldE : Array[1..MAXENT] Of TEntry; NOld, J, K : LongInt; Found : Boolean;
+    Pd : LongInt;
+Begin
+  If (New = '0') Then
+  Begin
+    Shutdown(LINUX_REBOOT_POWER_OFF);
+    Exit;
+  End;
+  If New = '6' Then
+  Begin
+    Shutdown(LINUX_REBOOT_RESTART);
+    Exit;
+  End;
+  NOld := NE;
+  For K := 1 To NE Do OldE[K] := E[K];
+  PrevLevel := RunLevel;
+  RunLevel := New;
+  ReadInittab;
+  { les processus deja lances (meme id et meme commande) sont conserves }
+  For K := 1 To NE Do
+    For J := 1 To NOld Do
+      If (OldE[J].Id = E[K].Id) And (OldE[J].Cmd = E[K].Cmd) Then
+      Begin
+        E[K].Pid := OldE[J].Pid;
+        E[K].T0 := OldE[J].T0; E[K].T1 := OldE[J].T1;
+        E[K].T2 := OldE[J].T2; E[K].T3 := OldE[J].T3;
+        E[K].T4 := OldE[J].T4; E[K].Hold := OldE[J].Hold;
+        OldE[J].Pid := 0;
+      End;
+  { arret des sessions qui ne sont plus de ce niveau }
+  For J := 1 To NOld Do
+    If OldE[J].Pid > 0 Then SysKill(OldE[J].Pid, SIGTERM);
+  For K := 1 To NE Do
+    If (E[K].Pid > 0) And (Not InLevel(K)) Then
+    Begin
+      SysKill(E[K].Pid, SIGTERM);
+      E[K].Pid := 0;
+    End;
+  { wait / once du nouveau niveau, puis sessions }
+  For K := 1 To NE Do
+    If ((E[K].Action = aWait) Or (E[K].Action = aOnce)) And InLevel(K) And
+       (E[K].Lv <> '') And (Not InLevelOf(K, PrevLevel)) Then
+    Begin
+      Pd := Spawn(E[K].Cmd);
+      If (E[K].Action = aWait) And (Pd > 0) Then WaitFor(Pd);
+    End;
+  For K := 1 To NE Do
+    If (E[K].Action = aRespawn) And InLevel(K) And (E[K].Pid = 0) Then
+      StartRespawn(K);
+  WriteRunLevel;
+End;
+
 Procedure HandleSignal;
-Var S, K : LongInt;
+Var S, K : LongInt; Fd : LongInt; B : Array[0..7] Of Char; L : Char;
 Begin
   S := SigFlag;
   SigFlag := 0;
@@ -392,10 +485,18 @@ Begin
       End;
     SIGHUP :
       Begin
-        { relire /etc/inittab : on garde les processus actifs de meme id }
-        ReadInittab;
-        For K := 1 To NE Do
-          If E[K].Action = aRespawn Then StartRespawn(K);
+        { telinit : /var/run/init.req contient le niveau demande (q : relire) }
+        L := RunLevel;
+        Fd := SysOpen('/var/run/init.req', 0, 0);
+        If Fd >= 0 Then
+        Begin
+          If SysRead(Fd, B, 1) = 1 Then L := B[0];
+          SysClose(Fd);
+          SysUnlink('/var/run/init.req');
+        End;
+        If (L = 'q') Or (L = 'Q') Then L := RunLevel;
+        If (L = 's') Or (L = 'S') Then L := '1';
+        ChangeLevel(L);
       End;
   End;
 End;
@@ -429,12 +530,25 @@ BEGIN
   SysSigAction(SIGHUP, LongInt(@OnSignal), 0);
   SysSigAction(SIGQUIT, SIG_IGN, 0);
   SysSigAction(SIGTSTP, SIG_IGN, 0);
+  DefLevel := '3';
+  RunLevel := '3';
+  PrevLevel := 'N';
   ReadInittab;
+  RunLevel := DefLevel;
+  If IsInit Then
+  Begin
+    { utmp vide, enregistrement de demarrage dans wtmp }
+    SysUnlink('/var/run/utmp');
+    UtFill(UB, UtBoot, 0, '~', 'reboot', '');
+    UtPutUtmp(UB);
+    UtAppend('/var/log/wtmp', UB);
+  End;
+  WriteRunLevel;
   RunAll(aSysinit, True);
   RunAll(aWait, True);
   RunAll(aOnce, False);
   For I := 1 To NE Do
-    If E[I].Action = aRespawn Then StartRespawn(I);
+    If (E[I].Action = aRespawn) And InLevel(I) Then StartRespawn(I);
   While True Do
   Begin
     W := SysWaitPid(-1, St, 0);
@@ -442,17 +556,19 @@ BEGIN
     If W > 0 Then
     Begin
       I := FindPid(W);
+      UtLogoff(W);
       If I > 0 Then
       Begin
         E[I].Pid := 0;
-        If E[I].Action = aRespawn Then StartRespawn(I);
+        If (E[I].Action = aRespawn) And InLevel(I) Then StartRespawn(I);
       End;
     End
     Else If (W < 0) And (SysErrno = 10) Then
     Begin
       { plus aucun fils : relancer les sessions suspendues puis attendre }
       For I := 1 To NE Do
-        If (E[I].Action = aRespawn) And (E[I].Pid = 0) Then StartRespawn(I);
+        If (E[I].Action = aRespawn) And (E[I].Pid = 0) And InLevel(I) Then
+          StartRespawn(I);
       SysSleep(1);
       If SigFlag <> 0 Then HandleSignal;
     End;

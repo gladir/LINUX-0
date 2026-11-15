@@ -83,7 +83,7 @@ echo "== Programmes (LPC -3X)"
 rm -rf "$W/root"
 mkdir -p "$W/root/sbin" "$W/root/bin" "$W/root/etc" "$W/root/dev" \
   "$W/root/tmp" "$W/root/proc" "$W/root/sys" "$W/root/boot" "$W/root/home" \
-  "$W/root/root" "$W/root/usr/bin" "$W/root/usr/sbin" "$W/root/var/log" \
+  "$W/root/root" "$W/root/usr/bin" "$W/root/usr/sbin" "$W/root/var/log" "$W/root/var/run" \
   "$W/root/var/tmp" "$W/root/mnt" "$W/root/lib"
 mkdir -p "$W/usr"
 N=0
@@ -92,6 +92,7 @@ build_one() {
   local f=$1 dst=$2 n
   n=$(basename "$f" .PAS)
   cp "$f" "$W/usr/"
+  cp "$HERE"/USR/*.INC "$W/usr/" 2>/dev/null || true
   if ( cd "$W/usr" && "$LPC" -3X -q "$n.PAS" ) > "$W/log/$n.log" 2>&1; then
     install -m 755 "$W/usr/$n" "$W/root/$dst"
     N=$((N + 1))
@@ -105,10 +106,14 @@ for f in "$HERE"/USR/*.PAS; do
   n=$(basename "$f" .PAS); l=$(echo "$n" | tr A-Z a-z)
   case $n in
     INIT) build_one "$f" sbin/init ;;
-    GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKPASSWD|NOLOGIN|IFCONFIG|ROUTE|MKSWAP|SWAPON|SYSCTL|HWCLOCK|LSMOD)
+    GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKPASSWD|NOLOGIN|IFCONFIG|ROUTE|MKSWAP|SWAPON|SYSCTL|HWCLOCK|LSMOD|USERMGR|TELINIT|SYSLOGD|MODTOOL)
       build_one "$f" sbin/$l ;;
     *) build_one "$f" bin/$l ;;
   esac
+done
+# egrep et fgrep : meme programme que grep (nom lu dans argv[0])
+for n in egrep fgrep; do
+  [ -f "$W/root/bin/grep" ] && ln -sf grep "$W/root/bin/$n" 2>/dev/null || true
 done
 # commandes du depot (racine) : /bin, sans ecraser les versions de USR/
 if [ -z "$NOCMDS" ]; then
@@ -120,14 +125,36 @@ if [ -z "$NOCMDS" ]; then
     build_one "$f" bin/$l
   done
 fi
+# modules d'exemple (lpc -3M) : /lib/modules/NOM.ko
+mkdir -p "$W/root/lib/modules"
+for f in "$HERE"/USR/MODULES/*.PAS; do
+  [ -f "$f" ] || continue
+  n=$(basename "$f" .PAS); l=$(echo "$n" | tr A-Z a-z)
+  cp "$f" "$W/usr/"
+  if ( cd "$W/usr" && "$LPC" -3M -q "$n.PAS" ) > "$W/log/$n.log" 2>&1; then
+    install -m 644 "$W/usr/$n.ko" "$W/root/lib/modules/$l.ko"
+  else
+    echo "   avertissement : module $n ignore ($(tail -1 "$W/log/$n.log"))"
+  fi
+done
 ln -sf sh "$W/root/bin/ash" 2>/dev/null || true
 # programmes USR/ servant sous plusieurs noms (argv[0]) : nouveau ancien dossier
 for l in "chgrp chown bin" "realpath readlink bin" "pkill pgrep bin" \
          "pidof pgrep bin" "killall pgrep bin" "swapoff swapon sbin" \
-         "insmod lsmod sbin" "rmmod lsmod sbin"; do
+         "insmod lsmod sbin" "rmmod lsmod sbin" "[ test bin" \
+         "useradd usermgr sbin" "userdel usermgr sbin" \
+         "usermod usermgr sbin" "groupadd usermgr sbin" \
+         "groupdel usermgr sbin" "groupmod usermgr sbin" \
+         "adduser usermgr sbin" "addgroup usermgr sbin" \
+         "deluser usermgr sbin" "delgroup usermgr sbin" \
+         "chpasswd usermgr sbin" "runlevel telinit sbin" \
+         "shutdown telinit sbin" "users who bin" "w who bin" \
+         "last who bin" "logger syslogd sbin" "vmstat top bin" "modinfo modtool sbin" \
+         "modprobe modtool sbin" "depmod modtool sbin"; do
   set -- $l
   [ -f "$W/root/$3/$2" ] && ln -sf "$2" "$W/root/$3/$1" 2>/dev/null || true
 done
+ln -sf ../sbin/syslogd "$W/root/bin/logger" 2>/dev/null || true
 # commandes dont le nom de fichier se termine par _ (STRINGS_.PAS : mot reserve)
 for f in "$W"/root/bin/*_; do
   [ -f "$f" ] && ln -sf "$(basename "$f")" "${f%_}" 2>/dev/null || true

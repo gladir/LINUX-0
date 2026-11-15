@@ -126,6 +126,28 @@ t('compress', ['-c', 'a.txt'], None, 'rt', 'gzip')
 t('chmod', ['644', '/tmp/linux0-cmdbench/ls/f1'], None, 'rc', 0)
 t('basename', ['a.txt', '.txt'], None, 'is', 'a\n')
 t('ed', ['a.txt'], '1p\nq\n', 'has', 'apple')
+t('test', ['-d', '/tmp'], None, 'rc', 0)
+t('test', ['a', '=', 'b'], None, 'rc', 1)
+t('test', ['3', '-lt', '10', '-a', '-n', 'x'], None, 'rc', 0)
+t('grep', ['-c', '-E', 'a(l|n)', 'in.txt'], None, 'ref', 'grep -c -E "a(l|n)" in.txt')
+t('grep', ['-n', '-i', 'ZEBRA', 'in.txt'], None, 'ref', 'grep -n -i ZEBRA in.txt')
+t('grep', ['-o', '-E', '[a-z]+ [0-9]', 'in.txt'], None, 'ref', 'grep -o -E "[a-z]+ [0-9]" in.txt')
+t('grep', ['-v', '-e', 'a', '-e', 'e', 'in.txt'], None, 'ref', 'grep -v -e a -e e in.txt')
+t('grep', ['-w', 'alpha', 'in.txt'], None, 'ref', 'grep -w alpha in.txt')
+t('sed', ['-n', '2,3p', 'in.txt'], None, 'ref', 'sed -n 2,3p in.txt')
+t('sed', ['-E', 's/(a+)/<\\1>/g', 'a.txt'], None, 'ref', "sed -E 's/(a+)/<\\1>/g' a.txt")
+t('sed', ['$!N;s/\\n/ /', 'in.txt'], None, 'ref', "sed '$!N;s/\\n/ /' in.txt")
+t('sed', ['1!G;h;$!d', 'a.txt'], None, 'ref', "sed '1!G;h;$!d' a.txt")
+t('awk', ['-F', ',', '{print $2}', 'csv.txt'], None, 'ref', "awk -F, '{print $2}' csv.txt")
+t('awk', ['BEGIN{printf "%05.1f|%s\\n", 3.14159, toupper("x")}'], None, 'is', '003.1|X\n')
+t('awk', ['{a[$1]++} END{n=0; for(k in a) n++; print n}', 'in.txt'], None, 'ref', "awk '{a[$1]++} END{n=0; for(k in a) n++; print n}' in.txt")
+t('awk', ['function f(n){return n<2?n:f(n-1)+f(n-2)} BEGIN{print f(15)}'], None, 'is', '610\n')
+t('awk', ['{ $2 = toupper($2); print }', 'in.txt'], None, 'ref', "awk '{ $2 = toupper($2); print }' in.txt")
+t('shuf', ['-i', '3-3'], None, 'is', '3\n')
+t('who', [], None, 'qhas', 'root')
+t('users', [], None, 'qhas', 'root')
+t('last', [], None, 'qhas', 'root')
+t('w', [], None, 'qhas', 'USER')
 
 def shq(x):
     return "'" + x.replace("'", "'\\''") + "'"
@@ -144,6 +166,7 @@ def generate(D):
          'ok() { echo "BENCH-OK $1"; P=$((P+1)); }', 'ko() { echo "BENCH-KO $1 : $2"; F=$((F+1)); }']
     for i, (cmd, a, stdin, mode, exp) in enumerate(T):
         if mode in ('yeshead', 'rt'): continue
+        if mode[0] == 'q': mode = mode[1:]       # essais propres a QEMU
         line = shq(cmd.lower() + ' ' + ' '.join(a))
         args = ' '.join(shq(x) for x in a)
         src = ' < /usr/share/bench/in/%d' % i if stdin is not None else ' < /dev/null'
@@ -225,6 +248,7 @@ if '--gen' in args:
 def main():
     res = {}
     for cmd, a, stdin, mode, exp in T:
+        if mode[0] == 'q': continue              # essais propres a QEMU
         prepare()
         if mode == 'yeshead': rc, so, se = 0, b'', b''   # commande sans fin
         else: rc, so, se = run(cmd, a, stdin)

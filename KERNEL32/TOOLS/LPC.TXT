@@ -109,7 +109,12 @@ bornes de types, procedures imbriquees avec acces aux variables englobantes
 (affichage : recursivite et appels entre soeurs corrects), PChar compare
 comme un pointeur. Un identificateur non declare est une erreur
 "fichier(ligne) : erreur : identificateur non declare : NOM" ; un symbole
-non defini l'est a l'edition de liens. Limite : String[n] occupe 256 octets.
+non defini l'est a l'edition de liens. String[n] (n < 255) a une taille
+reelle de n + 2 octets (longueur, n caracteres, NUL) : l'affectation,
+Read/ReadLn et Str tronquent a n comme Turbo Pascal ; String et String[255]
+restent a 256 octets. Insert dans une String[n], et un sous-programme qui
+ecrit dans un parametre Var S : String recu d'une String[n] plus courte, ne
+tronquent pas (depassement possible, comme Turbo Pascal sans {$V+}).
 
 Cible -3X
 ---------
@@ -208,11 +213,16 @@ SysLLSeek (llseek) : decalages 64 bits.
 
 Pieges du langage connus (Pascal est insensible a la casse)
 -----------------------------------------------------------
-- Non detectes par le compilateur (a surveiller) : affecter une chaine a une
-  variable LongInt, passer le nom d'une fonction comme parametre Var, un
-  parametre `Var X : Array Of T` (tableaux ouverts non geres : declarer un
-  type de tableau), Move d'un litteral chaine (la source est l'octet de
-  longueur).
+- Non detectes par le compilateur (a surveiller) : passer le nom d'une
+  fonction comme parametre Var, un parametre `Var X : Array Of T` (tableaux
+  ouverts non geres : declarer un type de tableau), Move d'un litteral chaine
+  (la source est l'octet de longueur), Mem[0:adr] passe comme parametre Var
+  (utiliser SysCall ou un tableau), un cast PType(x)^.champ en debut
+  d'instruction ou en argument (le cast ne marche que dans une expression :
+  utiliser une variable pointeur typee ou des tableaux), des noms de variables
+  globales identiques (a la casse pres) a ceux d'une procedure du programme
+  (Ev/EV).
+- Detectes : affecter une chaine a un nombre (erreur "types incompatibles").
 - Auto-hebergement (compiler LPC32.PAS avec LPC -3X) : impossible pour
   l'instant ; LPC32 est une unite FPC (Uses/Unit non geres entre fichiers) et
   LPC.PAS/LPC32.PAS partagent des centaines de noms (erreur "identificateur
@@ -224,7 +234,17 @@ Pieges du langage connus (Pascal est insensible a la casse)
   parametre ; ne pas lire les parametres d'une procedure englobante depuis une
   procedure imbriquee (preferer une procedure de premier niveau).
 - Comparer deux chaines temporaires (A + B = C + D) peut ecraser un tampon.
-- String[n] occupe 256 octets quelle que soit n ; Integer fait 16 bits.
+- Integer fait 16 bits ; String[n] est tronquee a n caracteres (voir plus haut).
+- Segment de donnees (variables globales) : 32 Mo au plus (erreur sinon) ; au
+  dela de 8 Mo les anciennes versions tronquaient sans erreur.
+- Litteraux reels : toujours en double precision (100.0 / 3.0 est exact).
+- Une variable locale ou un parametre du meme nom qu'une fonction du programme
+  masque cette fonction (corrige : une fonction `Cur` du programme faussait
+  LnxGrow, le tas de la couche API).
+- {$I fichier.inc} : inclusion (relatif au dossier du source).
+- Un identificateur d'un programme peut entrer en collision avec un nom interne
+  du compilateur : NPre, PwL (variables globales) faisaient echouer la
+  compilation ou le programme ; les renommer.
 - Une boucle FOR garde sa limite dans le cadre de la procedure (recursivite
   sure : rm -r, sort...).
 

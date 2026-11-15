@@ -41,7 +41,7 @@ Var
   ScrN, SP : LongInt;
   Pat, Tmp, Hold, LA : Array[0..LM] Of Char;
   PLen, HLen, LALen, TLen : LongInt;
-  LAValid, LANoNL, CurNoNL : Boolean;
+  LAValid, LANoNL, CurNoNL, HoldNoNL : Boolean;
   OutBuf : Array[0..32767] Of Char;
   OutN : LongInt;
   OutFd : LongInt;
@@ -1219,9 +1219,11 @@ Begin
           Begin
             Move(Hold[0], Pat[0], HLen);
             PLen := HLen;
+            CurNoNL := HoldNoNL;
           End;
         'G' :
           Begin
+            CurNoNL := CurNoNL And HoldNoNL;
             Pat[PLen] := #10;
             Inc(PLen);
             Move(Hold[0], Pat[PLen], HLen);
@@ -1231,9 +1233,11 @@ Begin
           Begin
             Move(Pat[0], Hold[0], PLen);
             HLen := PLen;
+            HoldNoNL := CurNoNL;
           End;
         'H' :
           Begin
+            HoldNoNL := HoldNoNL And CurNoNL;
             Hold[HLen] := #10;
             Inc(HLen);
             Move(Pat[0], Hold[HLen], PLen);
@@ -1247,6 +1251,12 @@ Begin
             PLen := HLen;
             Move(Tmp[0], Hold[0], TLen);
             HLen := TLen;
+            Replaced := Replaced;
+            If CurNoNL <> HoldNoNL Then
+            Begin
+              CurNoNL := Not CurNoNL;
+              HoldNoNL := Not HoldNoNL;
+            End;
           End;
         'z' : PLen := 0;
         '=' :

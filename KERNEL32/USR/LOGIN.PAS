@@ -20,6 +20,8 @@
 
 Program Login;
 
+{$I UTMP.INC}
+
 Const
   M : Array[1..6, 1..5] Of PChar = (
     ('Mot de passe : ', 'Password: ', 'Passwort: ', 'Contrasena: ',
@@ -43,7 +45,7 @@ Const
      'Apre una sessione (nome e password da /etc/passwd).'));
 
 Var
-  Name, Pw, S, Base, LangName, Term, Path : String;
+  Name, Pw, S, Base, LangName, Term, Path, Tty : String;
   P : TSysPasswd;
   Found : Boolean;
   Tries, K : LongInt;
@@ -204,6 +206,11 @@ BEGIN
     P.Home := '/';
     SysChdir('/');
   End;
+  { utmp / wtmp (avant de quitter les droits de root) }
+  Tty := SysReadlink('/proc/self/fd/0');
+  If Copy(Tty, 1, 5) = '/dev/' Then Tty := Copy(Tty, 6, 40);
+  If Tty = '' Then Tty := 'console';
+  UtLogon(SysGetPid, Tty, Name, '');
   If (SysSetGid(P.Gid) < 0) Or (SysSetUid(P.Uid) < 0) Then
   Begin
     SysPut(1, Msg(4) + SysErrorText(SysErrno) + #10);

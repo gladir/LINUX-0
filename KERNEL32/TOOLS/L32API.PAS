@@ -382,6 +382,9 @@ Begin
     R := LnxSys3(4, H, Buf + Done, N - Done);
     If R <= 0 Then
     Begin
+      { tube ferme (EPIPE) sur la sortie standard : fin silencieuse comme
+        sous SIGPIPE (statut 141), au lieu d'une erreur d'execution }
+      If (R = -32) And ((H = 1) Or (H = 2)) Then LnxSys3(252, 141, 0, 0);
       If R < 0 Then LnxErrno := LnxWinErr(-R);
       If PWritten <> 0 Then MemL[0:PWritten] := Done;
       WriteFile := 0;
@@ -3648,4 +3651,168 @@ Begin
     End;
   End;
   SysClose(Fd);
+End;
+
+{ ---------- sous-ensemble de SysUtils (chaines, fichiers) ---------- }
+
+Function IntToStr(N : LongInt) : String;
+Var S : String;
+Begin
+  Str(N, S);
+  IntToStr := S;
+End;
+
+Function StrToInt(Const S : String) : LongInt;
+Var V, E : LongInt;
+Begin
+  Val(S, V, E);
+  If E <> 0 Then V := 0;
+  StrToInt := V;
+End;
+
+Function StrToIntDef(Const S : String; D : LongInt) : LongInt;
+Var V, E : LongInt;
+Begin
+  Val(S, V, E);
+  If E <> 0 Then V := D;
+  StrToIntDef := V;
+End;
+
+Function UpperCase(Const S : String) : String;
+Var K : LongInt; R : String;
+Begin
+  R := S;
+  For K := 1 To Length(R) Do
+    If (R[K] >= 'a') And (R[K] <= 'z') Then R[K] := Chr(Ord(R[K]) - 32);
+  UpperCase := R;
+End;
+
+Function LowerCase(Const S : String) : String;
+Var K : LongInt; R : String;
+Begin
+  R := S;
+  For K := 1 To Length(R) Do
+    If (R[K] >= 'A') And (R[K] <= 'Z') Then R[K] := Chr(Ord(R[K]) + 32);
+  LowerCase := R;
+End;
+
+Function TrimLeft(Const S : String) : String;
+Var K : LongInt;
+Begin
+  K := 1;
+  While (K <= Length(S)) And (S[K] <= ' ') Do Inc(K);
+  TrimLeft := Copy(S, K, 255);
+End;
+
+Function TrimRight(Const S : String) : String;
+Var K : LongInt;
+Begin
+  K := Length(S);
+  While (K > 0) And (S[K] <= ' ') Do Dec(K);
+  TrimRight := Copy(S, 1, K);
+End;
+
+Function Trim(Const S : String) : String;
+Begin
+  Trim := TrimRight(TrimLeft(S));
+End;
+
+Function CompareStr(Const A, B : String) : LongInt;
+Begin
+  If A < B Then CompareStr := -1
+  Else If A > B Then CompareStr := 1
+  Else CompareStr := 0;
+End;
+
+Function CompareText(Const A, B : String) : LongInt;
+Begin
+  CompareText := CompareStr(UpperCase(A), UpperCase(B));
+End;
+
+Function SameText(Const A, B : String) : Boolean;
+Begin
+  SameText := UpperCase(A) = UpperCase(B);
+End;
+
+Function IntToHex(V : LongInt; Digits : LongInt) : String;
+Var S : String; D : LongInt;
+Begin
+  S := '';
+  If V = 0 Then S := '0';
+  While V <> 0 Do
+  Begin
+    D := V And 15;
+    If D < 10 Then S := Chr(48 + D) + S Else S := Chr(55 + D) + S;
+    V := (V Shr 4) And $0FFFFFFF;
+  End;
+  While Length(S) < Digits Do S := '0' + S;
+  IntToHex := S;
+End;
+
+Function FileExists(Const Path : String) : Boolean;
+Var St : TSysStat;
+Begin
+  FileExists := (SysStat(Path, St) = 0) And ((St.Mode And $F000) <> $4000);
+End;
+
+Function DirectoryExists(Const Path : String) : Boolean;
+Var St : TSysStat;
+Begin
+  DirectoryExists := (SysStat(Path, St) = 0) And ((St.Mode And $F000) = $4000);
+End;
+
+Function ExtractFileName(Const Path : String) : String;
+Var K : LongInt;
+Begin
+  K := Length(Path);
+  While (K > 0) And (Path[K] <> '/') Do Dec(K);
+  ExtractFileName := Copy(Path, K + 1, 255);
+End;
+
+Function ExtractFilePath(Const Path : String) : String;
+Var K : LongInt;
+Begin
+  K := Length(Path);
+  While (K > 0) And (Path[K] <> '/') Do Dec(K);
+  ExtractFilePath := Copy(Path, 1, K);
+End;
+
+Function ExtractFileExt(Const Path : String) : String;
+Var K : LongInt;
+Begin
+  K := Length(Path);
+  While (K > 0) And (Path[K] <> '.') And (Path[K] <> '/') Do Dec(K);
+  If (K > 0) And (Path[K] = '.') Then ExtractFileExt := Copy(Path, K, 255)
+  Else ExtractFileExt := '';
+End;
+
+Function ChangeFileExt(Const Path, Ext : String) : String;
+Var K : LongInt;
+Begin
+  K := Length(Path);
+  While (K > 0) And (Path[K] <> '.') And (Path[K] <> '/') Do Dec(K);
+  If (K > 0) And (Path[K] = '.') Then
+    ChangeFileExt := Copy(Path, 1, K - 1) + Ext
+  Else ChangeFileExt := Path + Ext;
+End;
+
+{ remplace toutes les occurrences de Old par New }
+Function StringReplace(Const S, Old, New : String) : String;
+Var R, Acc : String; K : LongInt;
+Begin
+  R := S;
+  If Old = '' Then
+  Begin
+    StringReplace := R;
+    Exit;
+  End;
+  K := Pos(Old, R);
+  Acc := '';
+  While K > 0 Do
+  Begin
+    Acc := Acc + Copy(R, 1, K - 1) + New;
+    R := Copy(R, K + Length(Old), 255);
+    K := Pos(Old, R);
+  End;
+  StringReplace := Acc + R;
 End;
