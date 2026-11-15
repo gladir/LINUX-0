@@ -17,7 +17,7 @@ Const
       'Uso: id [nombre]',
      'Uso: id [nome]'));
 
-Var U, G : LongInt; P : TSysPasswd; S : String;
+Var U, G, I : LongInt; P : TSysPasswd; S, Opt, Arg : String;
 
 Function Msg(Id : LongInt) : String;
 Var P : PChar; X : String;
@@ -51,17 +51,24 @@ Begin
 End;
 
 BEGIN
-  If SysArgCount > 1 Then
+  Opt := '';
+  Arg := '';
+  For I := 1 To SysArgCount - 1 Do
   Begin
-    S := SysArgStr(1);
+    S := SysArgStr(I);
     If (S = '-h') Or (S = '--help') Or (S = '/?') Then
     Begin
       SysPut(1, Msg(2) + #10);
       SysExit(0);
     End;
-    If Not SysGetPwNam(S, P) Then
+    If (Length(S) > 1) And (S[1] = '-') Then Opt := Opt + Copy(S, 2, 10)
+    Else Arg := S;
+  End;
+  If Arg <> '' Then
+  Begin
+    If Not SysGetPwNam(Arg, P) Then
     Begin
-      SysPut(2, Msg(1) + S + #10);
+      SysPut(2, Msg(1) + Arg + #10);
       SysExit(1);
     End;
     U := P.Uid;
@@ -71,6 +78,18 @@ BEGIN
   Begin
     U := SysGetUid;
     G := SysGetGid;
+  End;
+  If Pos('u', Opt) > 0 Then
+  Begin
+    If Pos('n', Opt) > 0 Then SysPut(1, NameOf(U) + #10)
+    Else SysPut(1, Num(U) + #10);
+    SysExit(0);
+  End;
+  If Pos('g', Opt) > 0 Then
+  Begin
+    If Pos('n', Opt) > 0 Then SysPut(1, GName(G) + #10)
+    Else SysPut(1, Num(G) + #10);
+    SysExit(0);
   End;
   S := 'uid=' + Num(U) + '(' + NameOf(U) + ') gid=' + Num(G) + '(' + GName(G)
     + ')';

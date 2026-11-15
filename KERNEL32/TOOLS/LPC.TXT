@@ -171,6 +171,13 @@ Cible -3X
   Les noms de constantes O_*, SIG*, TTY_*, S_IF*, MS_*, LINUX_REBOOT_* sont
   predefinis.
 
+Reseau (L32API.PAS) : SysSocket, SysConnect, SysBind, SysListen, SysAccept,
+SysSendTo, SysRecvFrom, SysSetSockOpt, SysShutdown, SysPoll (appels directs
+359-373 et poll 168), type TSockAddrIn, SysIp/SysIpStr/SysParseIp/SysSockAddr/
+SysSwap16, SysServPort (/etc/services), SysResolve (adresse numerique,
+/etc/hosts, puis requete DNS A par UDP vers les nameserver de
+/etc/resolv.conf). Fuseau : TZ ; llseek : SysLLSeek.
+
 Elimination du code mort (-3K, -3X)
 -----------------------------------
 Apres la compilation, LPC32 decoupe le code en morceaux (un par label de
@@ -201,6 +208,15 @@ SysLLSeek (llseek) : decalages 64 bits.
 
 Pieges du langage connus (Pascal est insensible a la casse)
 -----------------------------------------------------------
+- Non detectes par le compilateur (a surveiller) : affecter une chaine a une
+  variable LongInt, passer le nom d'une fonction comme parametre Var, un
+  parametre `Var X : Array Of T` (tableaux ouverts non geres : declarer un
+  type de tableau), Move d'un litteral chaine (la source est l'octet de
+  longueur).
+- Auto-hebergement (compiler LPC32.PAS avec LPC -3X) : impossible pour
+  l'instant ; LPC32 est une unite FPC (Uses/Unit non geres entre fichiers) et
+  LPC.PAS/LPC32.PAS partagent des centaines de noms (erreur "identificateur
+  deja declare" une fois fusionnes).
 - Un type et une constante qui ne different que par la casse (TWord/tWord)
   se confondent. Une variable locale du nom d'une fonction du programme la
   masque (Num(X) n'est plus l'appel).

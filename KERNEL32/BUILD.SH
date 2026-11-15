@@ -105,7 +105,7 @@ for f in "$HERE"/USR/*.PAS; do
   n=$(basename "$f" .PAS); l=$(echo "$n" | tr A-Z a-z)
   case $n in
     INIT) build_one "$f" sbin/init ;;
-    GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKPASSWD|NOLOGIN)
+    GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKPASSWD|NOLOGIN|IFCONFIG|ROUTE|MKSWAP|SWAPON|SYSCTL|HWCLOCK|LSMOD)
       build_one "$f" sbin/$l ;;
     *) build_one "$f" bin/$l ;;
   esac
@@ -121,11 +121,12 @@ if [ -z "$NOCMDS" ]; then
   done
 fi
 ln -sf sh "$W/root/bin/ash" 2>/dev/null || true
-# programmes USR/ servant sous plusieurs noms (argv[0])
-for l in "chgrp chown" "realpath readlink" "pkill pgrep" "pidof pgrep" \
-         "killall pgrep"; do
+# programmes USR/ servant sous plusieurs noms (argv[0]) : nouveau ancien dossier
+for l in "chgrp chown bin" "realpath readlink bin" "pkill pgrep bin" \
+         "pidof pgrep bin" "killall pgrep bin" "swapoff swapon sbin" \
+         "insmod lsmod sbin" "rmmod lsmod sbin"; do
   set -- $l
-  [ -f "$W/root/bin/$2" ] && ln -sf "$2" "$W/root/bin/$1" 2>/dev/null || true
+  [ -f "$W/root/$3/$2" ] && ln -sf "$2" "$W/root/$3/$1" 2>/dev/null || true
 done
 # commandes dont le nom de fichier se termine par _ (STRINGS_.PAS : mot reserve)
 for f in "$W"/root/bin/*_; do
