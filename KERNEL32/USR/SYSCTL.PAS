@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/sysctl : parametres du noyau (/proc/sys) : sysctl [-a] [-w] nom[=valeur].
+  @description: /sbin/sysctl : parametres du noyau (/proc/sys) :
+      sysctl [-a] [-w] nom[=valeur].
 }
 
 Program SYSCTL;
@@ -79,7 +80,8 @@ Begin
   While SysReadDir(D, Nm, Ino) Do
     If (Nm <> '.') And (Nm <> '..') Then
     Begin
-      If (SysStat(Dir + '/' + Nm, St) = 0) And ((St.Mode And $F000) = $4000) Then
+      If (SysStat(Dir + '/' + Nm, St) = 0) And
+         ((St.Mode And $F000) = $4000) Then
         Walk(Dir + '/' + Nm, Pfx + Nm + '.')
       Else
       Begin

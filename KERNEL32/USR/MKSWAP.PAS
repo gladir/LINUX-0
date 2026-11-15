@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/mkswap : prepare une zone d echange (fichier ou partition) : mkswap [-s Ko] [-L nom] peripherique (-s cree le fichier).
+  @description: /sbin/mkswap : prepare une zone d echange (fichier ou
+      partition) : mkswap [-s Ko] [-L nom] peripherique (-s cree le fichier).
 }
 
 Program MKSWAP;

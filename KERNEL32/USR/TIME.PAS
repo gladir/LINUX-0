@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /usr/bin/time : mesure la duree d une commande (time commande [args...]).
+  @description: /usr/bin/time : mesure la duree d une commande
+      (time commande [args...]).
 }
 
 Program TIME;
@@ -111,7 +112,8 @@ BEGIN
   End;
   SysWaitPid(Pid, St, 0);
   M1 := Ms - M0;
-  SysPut(2, 'real ' + NumS(M1 Div 1000) + '.' + Copy(NumS(1000 + M1 Mod 1000), 2, 3) + 's' + #10);
+  SysPut(2, 'real ' + NumS(M1 Div 1000) + '.' +
+         Copy(NumS(1000 + M1 Mod 1000), 2, 3) + 's' + #10);
   If SysWIfExited(St) Then SysExit(SysWExitStatus(St));
   SysExit(128 + SysWTermSig(St));
 END.

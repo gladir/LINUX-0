@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/swapon, /sbin/swapoff : active ou desactive une zone d echange (swapon [-s] dev ; swapoff dev).
+  @description: /sbin/swapon, /sbin/swapoff : active ou desactive une zone
+      d echange (swapon [-s] dev ; swapoff dev).
 }
 
 Program SWAPON;
@@ -67,7 +68,8 @@ BEGIN
   Off := Pos('swapoff', SysArgStr(0)) > 0;
   Show := False;
   Rc := 0;
-  If (SysArgCount > 1) And ((SysArgStr(1) = '-s') Or (SysArgStr(1) = '--summary')) Then
+  If (SysArgCount > 1) And ((SysArgStr(1) = '-s') Or
+     (SysArgStr(1) = '--summary')) Then
     Show := True;
   If Show Or (SysArgCount < 2) Then
   Begin

@@ -1707,7 +1707,7 @@ Begin
     Begin
       { avec exposant : exact seulement si la valeur est un entier pas trop grand }
       If (Not NegExp) And (FltVal = Int(FltVal)) And (Abs(FltVal) < 16777216.0) Then
-        CurToken.RealKind := 4
+        CurToken.RealKind := 8   { LPC32 : jamais Single (100.0 / 3.0) }
       Else If (Not NegExp) And (FltVal = Int(FltVal)) And (Abs(FltVal) < 9007199254740992.0) Then
         CurToken.RealKind := 8;
     End
@@ -1721,8 +1721,7 @@ Begin
         Mant := Trunc(RInt);
         For K := 1 To FracDig Do Mant := Mant * 2;
         Mant := Mant + FracInt Div Pow5;
-        If Mant < 16777216 Then CurToken.RealKind := 4
-        Else If Mant < 9007199254740992 Then CurToken.RealKind := 8;
+        If Mant < 9007199254740992 Then CurToken.RealKind := 8;
       End;
     End;
     If FltVal > 2147483647.0 Then N := 2147483647
@@ -4342,6 +4341,43 @@ Begin
   Inc(TypeCount);
 End;
 
+{ LPC32 : String[n] : type a taille reelle (octet de longueur, n caracteres,
+  NUL final : n + 2 octets ; Hi = n). String et String[255] : TY_IDX_STRING }
+Var
+  StrSizedIdx : Array[0..255] Of Integer;
+  StrSizedInit : Boolean;
+
+Function StrTypeSized(N : LongInt) : Integer;
+Var K : Integer;
+Begin
+  If Not StrSizedInit Then
+  Begin
+    For K := 0 To 255 Do StrSizedIdx[K] := -1;
+    StrSizedInit := True;
+  End;
+  If (N >= 255) Or (N < 1) Then
+  Begin
+    StrTypeSized := 6;
+    Exit;
+  End;
+  If StrSizedIdx[N] < 0 Then
+  Begin
+    StrSizedIdx[N] := TypeAdd(TYK_STRING, '', N + 2, 1, False, -1);
+    If StrSizedIdx[N] >= 0 Then TypeTab[StrSizedIdx[N]].Hi := N;
+  End;
+  StrTypeSized := StrSizedIdx[N];
+End;
+
+{ LPC32 : longueur maximale d'une chaine de type T (255 pour String) }
+Function StrCapOf(T : Integer) : LongInt;
+Begin
+  StrCapOf := 255;
+  If (T >= 0) And (T < TypeCount) Then
+    If TypeTab[T].Kind = TYK_STRING Then
+      If (TypeTab[T].Hi > 0) And (TypeTab[T].Hi < 255) Then
+        StrCapOf := TypeTab[T].Hi;
+End;
+
 { ------------------------------------------------------------ }
 { TypeInit : initialiser la table des types avec les types      }
 { primitifs de Turbo Pascal                                    }
@@ -6638,7 +6674,14 @@ Begin
   If Up = 'STRING' Then
   Begin
     Inc(I);
-    If TokIsPunct(I, '[') Then SkipBalancedAt(I);
+    If TokIsPunct(I, '[') Then
+    Begin
+      Inc(I);
+      Lo := ConstTokExprAt(I);
+      If TokIsPunct(I, ']') Then Inc(I);
+      ParseTypeExprAt := StrTypeSized(Lo);
+      Exit;
+    End;
     ParseTypeExprAt := TY_IDX_STRING;
     Exit;
   End;
@@ -7504,6 +7547,14 @@ Begin
 
           { Trouver le type dans TypeTab }
           TIdx := TypeFindByName(TName);
+          { LPC32 : String[n] : taille reelle }
+          If (TName = 'STRING') And TokIsPunct(I, '[') Then
+          Begin
+            Inc(I);
+            ArrLo := ConstTokExprAt(I);
+            If TokIsPunct(I, ']') Then Inc(I);
+            TIdx := StrTypeSized(ArrLo);
+          End;
 
           { ^T non nomme : type pointeur anonyme (la base peut etre declaree plus loin) }
           If (TIdx < 0) And (Length(TName) > 1) And (TName[1] = '^') Then
@@ -9917,6 +9968,14 @@ Begin
             BaseTN := StrUpperCase(TokenPool[I].Val);
             Inc(I);
             BTIdx := TypeFindByName(BaseTN);
+            If (BaseTN = 'STRING') And TokIsPunct(I, '[') Then
+            Begin
+              { LPC32 : Type S = String[n] : taille reelle }
+              Inc(I);
+              ArrLo := ConstTokExprAt(I);
+              If TokIsPunct(I, ']') Then Inc(I);
+              BTIdx := StrTypeSized(ArrLo);
+            End;
             If BTIdx >= 0 Then
             Begin
               TIdx := TypeAdd(TypeTab[BTIdx].Kind, TName,
@@ -10692,6 +10751,25 @@ End;
 { l adresse EBX selon le type T de la destination               }
 { ------------------------------------------------------------ }
 
+{ LPC32 : appel de STRASSIGN/PSTRASSIGN (ESI source, EDI destination) ; la
+  destination de type T (String[n]) tronque a n caracteres }
+Var ReadStrT : Integer;
+
+Procedure EmitStrAssignTo(Pascal : Boolean; T : Integer);
+Var Cap : LongInt;
+Begin
+  Cap := 255;
+  If (T >= 0) And (T < TypeCount) Then Cap := StrCapOf(TypeResolve(T));
+  If Cap < 255 Then
+  Begin
+    EmitInstr('MOV EDX,' + IntToStr_(Cap));
+    If Pascal Then EmitInstr('CALL ' + TP_RT_PFX + 'PSTRASSIGNC')
+    Else EmitInstr('CALL ' + TP_RT_PFX + 'STRASSIGNC');
+  End
+  Else If Pascal Then EmitInstr('CALL ' + TP_RT_PFX + 'PSTRASSIGN')
+  Else EmitInstr('CALL ' + TP_RT_PFX + 'STRASSIGN');
+End;
+
 Procedure GenStoreToAddr(T : Integer);
 Begin
   If (T >= 0) And (T < TypeCount) Then
@@ -10704,12 +10782,12 @@ Begin
         CoerceCharArray;
         EmitInstr('MOV ESI,EAX');
         EmitInstr('MOV EDI,EBX');
-        EmitInstr('CALL ' + TP_RT_PFX + 'PSTRASSIGN');
+        EmitStrAssignTo(True, T);
         Exit;
       End;
       GenStrSourceESI;
       EmitInstr('MOV EDI,EBX');
-      EmitInstr('CALL ' + TP_RT_PFX + 'STRASSIGN');
+      EmitStrAssignTo(False, T);
       Exit;
     End;
     If W32IsAggregate(T) Then
@@ -11229,7 +11307,25 @@ End;
 { quand l expression est deja du type etroit de la destination (Byte := Byte).            }
 Procedure GenRangeCheckAssign(T : Integer);
 Var Lo, Hi : LongInt;
+    RT : Integer;
 Begin
+  { LPC32 : chaine affectee a un entier, un reel ou un booleen : erreur }
+  If (L32Mode <> L32_MODE_NONE) And LastExprIsPascalStr And (T >= 0) And
+     (LastVarTypeIdx >= 0) And TypeIsString(LastVarTypeIdx) And
+     Not TypeIsPChar(LastVarTypeIdx) Then
+  Begin
+    RT := TypeResolve(T);
+    If (RT >= 0) And (RT < TypeCount) Then
+      If TypeTab[RT].Kind In [TYK_INTEGER, TYK_WORD, TYK_BYTE, TYK_SHORTINT,
+         TYK_BOOLEAN, TYK_SUBRANGE, TYK_ENUM, TYK_REAL, TYK_SINGLE,
+         TYK_DOUBLE, TYK_EXTENDED, TYK_COMP] Then
+      Begin
+        WriteLn(Opts.SrcFile, '(', TokenPool[EP - 1].Line,
+                ') : erreur : types incompatibles (chaine affectee a un ',
+                'nombre)');
+        Halt(EXIT_ERROR);
+      End;
+  End;
   If (EP >= 2) And (TokenPool[EP - 1].Kind = TK_INTEGER) And
      (TokenPool[EP - 2].Kind = TK_OP) And (TokenPool[EP - 2].Val = ':=') Then Exit;
   If (LastVarTypeIdx >= 0) And (T >= 0) And (LastVarTypeIdx <> TY_IDX_INTEGER) And
@@ -11464,6 +11560,7 @@ End;
 
 Procedure ParsePrimaryInner(PI : Integer);
 Var
+  ShadowLoc : Boolean;
   Up     : TString;
   GmCast : Boolean;    { GetMem(Pointer(V), n) }
   Lbl    : TString;
@@ -19194,6 +19291,16 @@ Begin
 
     { Appel de procedure/fonction ? }
     SI := SymFind(Up);
+    ShadowLoc := False;
+    { LPC32 : une variable locale ou un parametre du meme nom masque la
+      fonction (sauf le nom de la fonction en cours : appel recursif) }
+    If (SI >= 0) And (L32Mode <> L32_MODE_NONE) And (PI >= 0) Then
+      If (FindLocal(PI, Up) >= 0) Or (FindParam(PI, Up) >= 0) Then
+        If Not ((ProcTab[PI].Name = Up) And ProcTab[PI].IsFunction) Then
+        Begin
+          SI := -1;
+          ShadowLoc := True;
+        End;
     If (SI >= 0) And ((SymTab[SI].Kind = SK_PROC) Or (WantProcAddr And (SymTab[SI].Kind = SK_FUNC))) And
        (Not SymTab[SI].IsExternal) And
        Not ((EP + 1 < EPEnd) And (TokenPool[EP + 1].Kind = TK_PUNCT) And
@@ -19224,7 +19331,7 @@ Begin
     End;
 
     { Verifier aussi dans ProcTab }
-    If SI < 0 Then
+    If (SI < 0) And (Not ShadowLoc) Then
     Begin
       LI := 0;
       While LI < ProcCount Do
@@ -19373,6 +19480,9 @@ Begin
   If Up = '' Then Exit;
   SI := SymFind(Up);
   If (SI < 0) Or (SymTab[SI].Kind <> SK_FUNC) Then Exit;
+  { variable locale ou parametre du meme nom : la fonction est masquee }
+  If (PI >= 0) And ((FindLocal(PI, Up) >= 0) Or (FindParam(PI, Up) >= 0)) And
+     Not ((ProcTab[PI].Name = Up) And ProcTab[PI].IsFunction) Then Exit;
   If SymTab[SI].IsExternal Then
   Begin
     { fonction integree }
@@ -22373,7 +22483,7 @@ Begin
       Begin
         EmitInstr('LEA ESI,[INBUF]');
         EmitInstr('POP EDI');
-        EmitInstr('CALL ' + TP_RT_PFX + 'STRASSIGN');
+        EmitStrAssignTo(False, TIdx);
       End
       Else If TIdx = TY_IDX_CHAR Then
       Begin
@@ -22422,6 +22532,7 @@ Begin
         LI := GetVarTypeIdx(PI, Up);
         If LI >= 0 Then TIdx := LI;
         If (TIdx >= 0) And (TIdx < TypeCount) Then TIdx := TypeResolve(TIdx);
+        ReadStrT := TIdx;
         If TypeIsString(TIdx) Then TIdx := TY_IDX_STRING;
       End;
       If (TIdx = TY_IDX_STRING) Or (TIdx = TY_IDX_PCHAR) Then
@@ -22431,7 +22542,7 @@ Begin
         GenLoadAddr(PI, VName);
         EmitInstr('MOV EDI,EAX');
         { Copier octet par octet }
-        EmitInstr('CALL ' + TP_RT_PFX + 'STRASSIGN');
+        EmitStrAssignTo(False, ReadStrT);
       End
       Else If TIdx = TY_IDX_CHAR Then
       Begin
@@ -22571,7 +22682,7 @@ Begin
   Begin
     EmitInstr('MOV EDI,EAX');
     EmitInstr('POP ESI');
-    EmitInstr('CALL ' + TP_RT_PFX + 'STRASSIGN');
+    EmitStrAssignTo(False, T);
   End
   Else
     EmitInstr('POP ESI');
@@ -32191,6 +32302,34 @@ Begin
   EmitInstr('MOVZX ECX,BYTE PTR [ESI]');
   EmitInstr('INC ESI');
   EmitInstr('MOV EBX,ESI');
+  EmitInstr('JMP ' + TP_RT_PFX + 'SASG_OK');
+
+  { LPC32 : variantes pour String[n] : EDX = longueur maximale n (< 255) }
+  EmitBlankLine;
+  EmitLabel(TP_RT_PFX + 'PSTRASSIGNC');
+  EmitInstr('PUSHAD');
+  EmitInstr('MOVZX ECX,BYTE PTR [ESI]');
+  EmitInstr('INC ESI');
+  EmitInstr('MOV EBX,ESI');
+  EmitInstr('CMP ECX,EDX');
+  EmitInstr('JLE ' + TP_RT_PFX + 'SASG_OK');
+  EmitInstr('MOV ECX,EDX');
+  EmitInstr('JMP ' + TP_RT_PFX + 'SASG_OK');
+  EmitBlankLine;
+  EmitLabel(TP_RT_PFX + 'STRASSIGNC');
+  EmitInstr('PUSHAD');
+  EmitInstr('XOR ECX,ECX');
+  EmitInstr('MOV EBX,ESI');
+  EmitLabel(TP_RT_PFX + 'SASGC_C');
+  EmitInstr('CMP BYTE PTR [ESI],0');
+  EmitInstr('JE ' + TP_RT_PFX + 'SASGC_D');
+  EmitInstr('INC ECX');
+  EmitInstr('INC ESI');
+  EmitInstr('JMP ' + TP_RT_PFX + 'SASGC_C');
+  EmitLabel(TP_RT_PFX + 'SASGC_D');
+  EmitInstr('CMP ECX,EDX');
+  EmitInstr('JLE ' + TP_RT_PFX + 'SASG_OK');
+  EmitInstr('MOV ECX,EDX');
   EmitInstr('JMP ' + TP_RT_PFX + 'SASG_OK');
 
   { ------ _TPRT_STRASSIGN_PCHAR : copier ASCIIZ brut -------- }

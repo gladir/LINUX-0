@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/hwclock : horloge materielle (/dev/rtc) : hwclock [-r] [-s] [-w] [--utc].
+  @description: /sbin/hwclock : horloge materielle (/dev/rtc) :
+      hwclock [-r] [-s] [-w] [--utc].
 }
 
 Program HWCLOCK;
@@ -114,7 +115,8 @@ BEGIN
   Mo := T[4] + 1;
   If Mode = 1 Then
   Begin
-    Secs := LnxDaysFromCivil(Y, Mo, T[3]) * 86400 + T[2] * 3600 + T[1] * 60 + T[0];
+    Secs := LnxDaysFromCivil(Y, Mo, T[3]) * 86400 + T[2] * 3600 +
+            T[1] * 60 + T[0];
     LnxTmp[0] := Secs;
     LnxTmp[1] := 0;
     If LnxSys3(79, LongInt(@LnxTmp), 0, 0) < 0 Then

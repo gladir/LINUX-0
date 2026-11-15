@@ -226,7 +226,8 @@ def main():
     res = {}
     for cmd, a, stdin, mode, exp in T:
         prepare()
-        rc, so, se = run(cmd, a, stdin)
+        if mode == 'yeshead': rc, so, se = 0, b'', b''   # commande sans fin
+        else: rc, so, se = run(cmd, a, stdin)
         label = cmd + ' ' + ' '.join(a)
         ok = False; note = ''
         if rc is None: note = 'absent'

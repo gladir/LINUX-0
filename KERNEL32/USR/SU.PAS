@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/su : change d identite (su [-] [utilisateur] [-c commande]) ; root est dispense de mot de passe.
+  @description: /bin/su : change d identite (su [-] [utilisateur]
+      [-c commande]) ; root est dispense de mot de passe.
 }
 
 Program SU;
@@ -159,7 +160,8 @@ BEGIN
     SysExit(1);
   End;
   SysArgReset;
-  If Login1 Then SysArgAdd('-' + BaseOf(P.Shell)) Else SysArgAdd(BaseOf(P.Shell));
+  If Login1 Then SysArgAdd('-' + BaseOf(P.Shell))
+  Else SysArgAdd(BaseOf(P.Shell));
   If Cmd <> '' Then
   Begin
     SysArgAdd('-c');

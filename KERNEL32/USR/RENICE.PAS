@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/renice : change la priorite de processus (renice [-n] priorite pid...).
+  @description: /bin/renice : change la priorite de processus
+      (renice [-n] priorite pid...).
 }
 
 Program RENICE;

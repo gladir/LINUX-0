@@ -2,7 +2,8 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /bin/watch : repete une commande (watch [-n secondes] commande...).
+  @description: /bin/watch : repete une commande
+      (watch [-n secondes] commande...).
 }
 
 Program WATCH;
@@ -75,7 +76,8 @@ BEGIN
   For K := I To SysArgCount - 1 Do Cmd := Cmd + SysArgStr(K) + ' ';
   While True Do
   Begin
-    SysPut(1, #27 + '[H' + #27 + '[2J' + 'Every ' + NumS(Secs) + 's: ' + Cmd + #10 + #10);
+    SysPut(1, #27 + '[H' + #27 + '[2J' + 'Every ' + NumS(Secs) + 's: ' +
+           Cmd + #10 + #10);
     Pid := SysFork;
     If Pid = 0 Then
     Begin

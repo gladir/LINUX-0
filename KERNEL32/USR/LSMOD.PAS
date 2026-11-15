@@ -2,7 +2,9 @@
   @created: 2026
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
-  @description: /sbin/lsmod, insmod, rmmod : modules du noyau (lsmod : /proc/modules ; insmod fichier.ko [param=val...] : init_module(2) ; rmmod nom : delete_module(2)).
+  @description: /sbin/lsmod, insmod, rmmod : modules du noyau (lsmod :
+      /proc/modules ; insmod fichier.ko [param=val...] : init_module(2) ;
+      rmmod nom : delete_module(2)).
 }
 
 Program LSMOD;
@@ -95,7 +97,8 @@ BEGIN
     End;
     SysExit(Rc);
   End;
-  { insmod : lire le fichier entier dans le tas (init_module(image, len, params)) }
+  { insmod : lire le fichier entier dans le tas
+    (init_module(image, len, params)) }
   Fd := SysOpen(SysArgStr(1), O_RDONLY, 0);
   If Fd < 0 Then
   Begin
