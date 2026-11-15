@@ -31,7 +31,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
   20  getpid                 reel     ku.h,ptracetest.c,seccomptest.c
   21  mount                  reel     ku.h
   22  umount                 reel     ku.h
-  23  setuid                 reel     dirtest.c,ku.h,misctest.c,nstest.c,seccomptest.c,syscalltest.c,xattrtest.c
+  23  setuid                 reel     dirtest.c,ku.h,misctest.c,modtest.c,nstest.c,seccomptest.c,syscalltest.c,xattrtest.c
   24  getuid                 reel     ku.h,seccomptest.c
   25  stime                  reel     
   26  ptrace                 reel     ptracetest.c,seccomptest.c
@@ -83,7 +83,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
   72  sigsuspend             reel     ku.h
   73  sigpending             reel     
   74  sethostname            reel     nstest.c
-  75  setrlimit              reel     limtest.c,syscalltest.c
+  75  setrlimit              reel     bigtest.c,limtest.c,syscalltest.c
   76  getrlimit              reel     misctest.c
   77  getrusage              reel     
   78  gettimeofday           reel     devtest.c,ipctest.c,ku.h,mqfutextest.c,preempttest.c,pstress.c,schedtest.c,sigrttest.c
@@ -101,22 +101,22 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
   90  mmap                   reel     
   91  munmap                 reel     ku.h
   92  truncate               reel     ext2test.c,fattest.c,misctest.c
-  93  ftruncate              reel     dirtest.c,ext2test.c,fattest.c,ku.h
+  93  ftruncate              reel     bigtest.c,dirtest.c,ext2test.c,fattest.c,ku.h
   94  fchmod                 reel     ext2test.c,fattest.c
   95  fchown                 reel     
   96  getpriority            reel     ku.h
   97  setpriority            reel     
   98  profil                 enosys   
-  99  statfs                 reel     ext2test.c,fattest.c,isotest.c,misctest.c,stress.c
+  99  statfs                 reel     bigtest.c,ext2test.c,fattest.c,isotest.c,misctest.c,stress.c
  100  fstatfs                reel     
  101  ioperm                 reel     syscalltest.c
  102  socketcall             reel     
  103  syslog                 reel     
  104  setitimer              reel     misctest.c
  105  getitimer              reel     
- 106  stat                   reel     misctest.c
+ 106  stat                   reel     bigtest.c,misctest.c
  107  lstat                  reel     
- 108  fstat                  reel     
+ 108  fstat                  reel     bigtest.c
  109  olduname               enosys   
  110  iopl                   reel     syscalltest.c
  111  vhangup                stub     
@@ -130,14 +130,14 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  119  sigreturn              reel     
  120  clone                  reel     ku.h,nstest.c
  121  setdomainname          reel     
- 122  uname                  reel     ku.h
+ 122  uname                  reel     ku.h,modtest.c
  123  modify_ldt             enosys   
  124  adjtimex               reel     syscalltest.c
  125  mprotect               reel     ku.h
  126  sigprocmask            reel     
  127  create_module          enosys   
- 128  init_module            enosys   
- 129  delete_module          enosys   
+ 128  init_module            reel     modtest.c
+ 129  delete_module          reel     modtest.c
  130  get_kernel_syms        enosys   
  131  quotactl               enosys   
  132  getpgid                reel     
@@ -188,8 +188,8 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  177  rt_sigtimedwait        reel     mqfutextest.c,sigrttest.c
  178  rt_sigqueueinfo        reel     sigrttest.c
  179  rt_sigsuspend          reel     
- 180  pread64                reel     ext2test.c,misctest.c
- 181  pwrite64               reel     ext2test.c,fattest.c
+ 180  pread64                reel     bigtest.c,ext2test.c,misctest.c
+ 181  pwrite64               reel     bigtest.c,ext2test.c,fattest.c
  182  chown                  reel     ext2test.c,fattest.c
  183  getcwd                 reel     ku.h
  184  capget                 reel     syscalltest.c
@@ -201,11 +201,11 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  190  vfork                  reel     ku.h,misctest.c
  191  ugetrlimit             reel     
  192  mmap2                  reel     ku.h,mqfutextest.c
- 193  truncate64             reel     
- 194  ftruncate64            reel     
- 195  stat64                 reel     dirtest.c,ext2test.c,fattest.c,ku.h,misctest.c,socktest.c,syscalltest.c,xattrtest.c
+ 193  truncate64             reel     bigtest.c
+ 194  ftruncate64            reel     bigtest.c
+ 195  stat64                 reel     bigtest.c,dirtest.c,ext2test.c,fattest.c,ku.h,misctest.c,modtest.c,socktest.c,syscalltest.c,xattrtest.c
  196  lstat64                reel     dirtest.c,ext2test.c,ku.h
- 197  fstat64                reel     dirtest.c,ext2test.c,fattest.c,ku.h
+ 197  fstat64                reel     bigtest.c,dirtest.c,ext2test.c,fattest.c,ku.h
  198  lchown32               reel     
  199  getuid32               reel     
  200  getgid32               reel     
@@ -229,7 +229,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  218  mincore                reel     syscalltest.c
  219  madvise                reel     syscalltest.c
  220  getdents64             reel     ext2test.c,fattest.c,ku.h
- 221  fcntl64                reel     
+ 221  fcntl64                reel     bigtest.c
  224  gettid                 reel     ku.h,seccomptest.c
  225  readahead              reel     syscalltest.c
  226  setxattr               reel     xattrtest.c
@@ -245,7 +245,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  236  lremovexattr           reel     xattrtest.c
  237  fremovexattr           reel     xattrtest.c
  238  tkill                  reel     
- 239  sendfile64             reel     syscalltest.c
+ 239  sendfile64             reel     bigtest.c,syscalltest.c
  240  futex                  reel     mqfutextest.c
  241  sched_setaffinity      reel     syscalltest.c
  242  sched_getaffinity      reel     syscalltest.c
@@ -328,7 +328,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  321  signalfd               reel     sigrttest.c
  322  timerfd_create         reel     evttest.c,syscalltest.c
  323  eventfd                reel     mqfutextest.c
- 324  fallocate              reel     syscalltest.c
+ 324  fallocate              reel     bigtest.c,syscalltest.c
  325  timerfd_settime        reel     evttest.c
  326  timerfd_gettime        reel     evttest.c
  327  signalfd4              reel     sigrttest.c
@@ -354,7 +354,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  347  process_vm_readv       reel     syscalltest.c
  348  process_vm_writev      reel     
  349  kcmp                   reel     syscalltest.c
- 350  finit_module           enosys   
+ 350  finit_module           reel     modtest.c
  351  sched_setattr          reel     syscalltest.c
  352  sched_getattr          reel     syscalltest.c
  353  renameat2              reel     
@@ -387,7 +387,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  380  pkey_mprotect          enosys   
  381  pkey_alloc             enosys   
  382  pkey_free              enosys   
- 383  statx                  reel     syscalltest.c
+ 383  statx                  reel     bigtest.c,syscalltest.c
  384  arch_prctl             enosys   
  385  io_pgetevents          enosys   
  386  rseq                   enosys   
@@ -460,7 +460,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  460  lsm_set_self_attr      enosys   
  461  lsm_list_modules       enosys   
 
-Total : 451 appels ; reels 354 (78.5 %), stubs 2, ENOSYS explicites 84, absents 11
+Total : 451 appels ; reels 357 (79.2 %), stubs 2, ENOSYS explicites 81, absents 11
 
 B1. FAMILLES D'IOCTL
    TCGETS/TCSETS (termios)            present  
@@ -539,7 +539,9 @@ B3. PILOTES ET PERIPHERIQUES
    /dev/mem kmem port kmsg            present  
    /dev/rtc                           present  
    /dev/tty* /dev/ptmx pts            present  
-   -> 15 / 27
+   modules du noyau (.ko ET_REL, insmod/rmmod) present  partie 36
+   swap sur fichier ordinaire         present  partie 36
+   -> 17 / 29
 
 B4. /PROC ET /SYS
    /proc/meminfo uptime version cmdline present  
@@ -552,13 +554,14 @@ B4. /PROC ET /SYS
    /proc/net/dev route                present  
    /proc/net/tcp udp arp              absent   
    /proc/devices partitions interrupts absent   
-   /proc/iomem ioports locks swaps    absent   
-   /proc/modules kallsyms             absent   
-   /proc/sys (sysctl ecriture)        absent   
+   /proc/iomem ioports locks          absent   
+   /proc/swaps                        present  partie 36
+   /proc/modules kallsyms             present  partie 36
+   /proc/sys (sysctl ecriture)        present  partie 36
    /sys/block class kernel            present  
    /sys/bus /sys/devices PCI          absent   
    /sys/fs/cgroup                     absent   
-   -> 6 / 16
+   -> 9 / 17
 
 B5. FAMILLES DE SOCKETS
    AF_UNIX stream/dgram/socketpair    present  
@@ -585,9 +588,9 @@ B6. DRAPEAUX mmap / clone / open
    O_CREAT/EXCL/TRUNC/APPEND/NONBLOCK/DIRECTORY present  
    O_CLOEXEC / O_NOFOLLOW             present  
    O_SYNC/O_DSYNC/O_DIRECT/O_TMPFILE/O_PATH absent   
-   O_LARGEFILE / fichiers > 2 Go      present  drapeau accepte
+   O_LARGEFILE / fichiers > 2 Go (64 bits) present  partie 35
    -> 9 / 12
 
 C. SYNTHESE
-   appels reels : 354 / 451 (78.5 %) ; stubs 2 ; ENOSYS explicites 84 ; absents 11
-   familles B1-B6 presentes : 59 / 108 (54.6 %)
+   appels reels : 357 / 451 (79.2 %) ; stubs 2 ; ENOSYS explicites 81 ; absents 11
+   familles B1-B6 presentes : 64 / 111 (57.7 %)

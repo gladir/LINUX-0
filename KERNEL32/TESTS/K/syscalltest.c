@@ -64,16 +64,16 @@ int main(void){
   /* ---- fichiers ---- */
   wfile("/tmp/sa","0123456789abcdefghij");
   fd=open("/tmp/sa",O_RDONLY,0);fd2=open("/tmp/sb",O_RDWR|O_CREAT|O_TRUNC,0644);
-  {long off=5;r=sc4(239,fd2,fd,(long)&off,10);
+  {long long off=5;r=sc4(239,fd2,fd,(long)&off,10);
    ktest("file.sendfile64",r==10&&off==15&&rfile("/tmp/sb",buf,64)==10&&memcmp_(buf,"56789abcde",10)==0);
    ktest("file.sendfile_badfd",sc4(187,99,fd,0,4)==-9);}
-  {long o1=2,o2=0;lseek(fd2,0,0);
+  {long long o1=2,o2=0;lseek(fd2,0,0);
    r=sc6(377,fd,(long)&o1,fd2,(long)&o2,6,0);
    ktest("file.copy_file_range",r==6&&o1==8&&o2==6&&({rfile("/tmp/sb",buf,64);memcmp_(buf,"234567abcde",6)==0;}));}
   close(fd);close(fd2);
   /* splice : fichier -> tube -> fichier */
   fd=open("/tmp/sa",O_RDONLY,0);fd2=open("/tmp/sc",O_RDWR|O_CREAT|O_TRUNC,0644);pipe(p);
-  {long off=0;r=sc6(313,fd,(long)&off,p[1],0,12,0);
+  {long long off=0;r=sc6(313,fd,(long)&off,p[1],0,12,0);
    ktest("file.splice_in",r==12&&off==12);
    r=sc6(313,p[0],0,fd2,0,12,0);
    ktest("file.splice_out",r==12&&rfile("/tmp/sc",buf,64)==12&&memcmp_(buf,"0123456789ab",12)==0);
@@ -87,7 +87,8 @@ int main(void){
    ktest("file.pwritev",S(334,fd,(long)w,2,4,0)==6);
    ktest("file.preadv",S(333,fd,(long)rd,2,4,0)==6&&memcmp_(a,"HEL",3)==0&&memcmp_(b,"LO!",3)==0);
    ktest("file.preadv2_flags",S(378,fd,(long)rd,2,4,0)==-1||1);
-   ktest("file.preadv_efbig",S(333,fd,(long)rd,2,0,1)==-27);}
+   ktest("file.preadv_far",S(333,fd,(long)rd,2,0,1)==0);
+   ktest("file.pwritev_efbig",S(334,fd,(long)w,2,0,1)==-27);}
   /* fallocate */
   ktest("file.fallocate_grow",sc6(324,fd,0,0,0,100,0)==0&&({lseek(fd,0,2)==100;}));
   ktest("file.fallocate_keep",sc6(324,fd,1,0,0,500,0)==0&&lseek(fd,0,2)==100);

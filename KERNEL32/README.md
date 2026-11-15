@@ -78,6 +78,8 @@ Parties ajoutees en phase 2 (placees physiquement avant la partie 14) :
 | 28 | appels systeme complementaires issus de l'audit (lot A1, apres la partie 16) : ordonnancement (`sched_*`, `getcpu`, affinite), capacites (`capget/capset`, `Capable`, regles setuid/execve), `personality`, `sendfile/sendfile64/copy_file_range/splice/vmsplice`, `preadv/pwritev(+2)`, `fallocate`, `syncfs`, `statx`, `renameat2`, `openat2`, `faccessat2`, `fchmodat2`, `execveat`, `close_range`, `memfd_create`, `mlock*/mincore/madvise` reels (`VmLocked`, RLIMIT_MEMLOCK), `waitid`, `process_vm_readv/writev`, `kcmp`, `unshare(FILES/FS)`, `membarrier`, horloges 64 bits (`clock_*64`, `futex_time64`, `ppoll/pselect6`, `epoll_pwait2`, `timerfd*64`, `utimensat_time64`), `adjtimex`, `ioperm/iopl`, ENOSYS explicites (`EnosysList`) |
 | 25 | framebuffer Bochs/QEMU VGA : `fb=LxH` sur la ligne de commande programme le mode 32 bits (registres VBE 1CEh/1CFh), memoire video (BAR 0 PCI) mappee en F8000000h, `/dev/fb0` (29:0) : read, write, lseek, `FBIOGET_FSCREENINFO/VSCREENINFO`, `mmap` partage (VMA `VmPhys`, PTE hors comptage) |
 | 24 | FAT12/16/32 et vfat (noms longs UTF-8/UCS-2, noms courts `~N`, indicateurs de casse NT), lecture/ecriture, repertoires qui grandissent, renommage, troncature, attribut lecture seule, dates, `statfs`, FSInfo FAT32 ; options `ro`, `rw`, `umask=`, `uid=`, `gid=` ; types `vfat`, `msdos`, `fat` |
+| 35 | fichiers de plus de 2 Go (physiquement apres la partie 2 pour l'arithmetique `U64*`, repartie dans le VFS, ext2, FAT, iso9660, le peripherique bloc, les verrous et les appels systeme) : voir la section "Partie 35" |
+| 36 | `/proc/sys` (sysctl en lecture et ecriture), `/proc/swaps`, swap sur fichier ordinaire, chargeur de modules (`init_module/delete_module/finit_module`, `.ko` de `lpc -3M`), `/proc/modules`, `/proc/kallsyms`, `request_irq` pour les modules : voir la section "Partie 36" |
 | ... | `/sys` (`PopulateSys`), pseudo-terminaux (maitre `PtmxXxx`, esclaves `Ttys[PtyBase+N]`, devpts = tmpfs a la partie 14), FPU/SSE (`FpuDetect`, FXSAVE), bind mounts / `pivot_root` / `MS_MOVE` (partie 12), racine reelle `TryRealRoot` (partie 17) |
 
 ## Carte memoire
@@ -207,7 +209,8 @@ lui qui doit etre prefere : voir `init=` et le plan ci-dessous.
 
 ### ext2 : limites
 
-Fichiers de 2 Go au plus ; pas d'extents, de journal (rejoue), d'attributs
+Fichiers jusqu'a 16 Go (blocs de 1 Ko) ou 2 To (blocs de 4 Ko) depuis la
+partie 35 (`i_size_high`, `large_file`) ; pas d'extents, de journal (rejoue), d'attributs
 etendus ni d'ACL (le bloc d'EA d'un fichier supprime est libere), de `meta_bg`,
 `64bit`, ni de repertoires indexes (le drapeau `INDEX_FL` est efface a toute
 modification) ; les sommes de controle (`gdt_csum`, `metadata_csum`) imposent la
@@ -347,7 +350,7 @@ couvre l'appel) et familles d'ioctl, systemes de fichiers, pilotes, entrees
 appels obsoletes (`break`, `stty`, `create_module`...) et ceux hors perimetre
 (`bpf`, `perf_event_open`, `io_uring`, nouvelle API de montage, `landlock`,
 `userfaultfd`, `quotactl`, `modify_ldt`, `vm86`...). Limites connues de ce lot :
-fichiers de plus de 2 Go non geres (positions 32 bits ; `EFBIG`), `ioperm`
+fichiers de plus de 2 Go : realises au lot suivant (partie 35), `ioperm`
 accorde tous les ports (IOPL), `fallocate` ne reserve pas de blocs,
 `renameat2(EXCHANGE)` non atomique, `openat2` refuse les `RESOLVE_*`,
 `adjtimex` ne discipline pas l'horloge, les verrous `flock`/`fcntl` sont
@@ -357,7 +360,7 @@ reels depuis la partie 29. Correction au passage :
 
 ### Tests (suite)
 
-* `RUNK.SH` : 38 programmes embarques, 758 verifications (dont `ptracetest`, `seccomptest`, `xattrtest`, `nstest` des lots A2c/A2d ; `xattrtest` est aussi execute sur ext2 par `ext2test`)
+* `RUNK.SH` : 40 programmes embarques, 849 verifications (dont `bigtest` et `modtest` des parties 35 et 36, qui ne font leurs essais de disque que sous `RUNBIG.SH` ; `ptracetest`, `seccomptest`, `xattrtest`, `nstest` des lots A2c/A2d ; `xattrtest` est aussi execute sur ext2 par `ext2test`)
   ; avant ces lots : 34 programmes, 586 verifications (dont `syscalltest` : 94
   verifications du lot A1, `sigrttest` : 58 du lot A2a, `ipctest` et
   `mqfutextest` du lot A2b) (`fattest`, `fbtest`,
@@ -372,10 +375,117 @@ reels depuis la partie 29. Correction au passage :
 * `RUNIDE.SH` : ext2 sur hda..hdd (index QEMU 0..3, jeux "2 3", "0 1 2 3", "3",
   "0 2", "1 3"), e2fsck propre. `RUNPREEMPT.SH [-r N] [-p 0|1]` : la suite
   complete avec disque ext2, N fois, puis e2fsck.
+* `RUNBIG.SH [-f ext2|fat] [-b 1024|4096]` (partie 35) : disque creux de 6 Go, `bigtest`, `e2fsck`/`fsck.vfat` ;
+  `RUNSWAP.SH -f [-b 4096]` : swap sur fichier d'un ext2 (partie 36) ;
+  `modtest` (dans `RUNK.SH`) : modules et sysctl.
 * `RUNEXT2.SH`, `RUNNET.SH`, `RUNMOUSE.SH`, `RUNISO.SH`, `RUNFAT.SH [12|16|32|fd]`, `RUNFB.SH`, `RUNSWAP.SH` :
   chacun fabrique son disque ou son reseau, lance QEMU et conclut par
   `RESULTAT : SUCCES` (ou `ECHEC` avec le dossier des traces). Avec `-n`, ils
   ne regenerent pas les programmes embarques.
+
+### Partie 35 : fichiers de plus de 2 Go (lot 1 de D3)
+
+Toutes les positions et les tailles sont des paires non signees (`Size`/`SizeHi`
+dans `TInode`, `Pos`/`PosHi` dans `TFile`, `TSuper.LargeFiles` pour les systemes
+de fichiers qui les gerent) avec l'arithmetique `U64Lt/U64Le/U64Add/U64Sub/
+U64ShrL/U64ShlL/Log2U` (partie 2). Realise :
+
+* VFS : `VfsLlseek` (SET/CUR/END, `SEEK_DATA/SEEK_HOLE`), `lseek` 32 bits avec
+  `EOVERFLOW`, `_llseek` (140), `pread64/pwrite64` et `preadv/pwritev(+2)` avec
+  position de 64 bits, `truncate64/ftruncate64` (`EFBIG` au-dela du maximum du
+  systeme de fichiers, taille restauree), `fallocate` 64 bits, `sendfile64`,
+  `copy_file_range`, `splice` (decalages de 8 octets), `fstat64/stat64/lstat64/
+  fstatat64/statx` (`st_size` et `st_blocks` sur 64 bits), `stat/fstat` 32 bits :
+  `EOVERFLOW` ; `open` sans `O_LARGEFILE` d'un fichier de 2 Go ou plus :
+  `EOVERFLOW` ; `write` sans `O_LARGEFILE` au-dela de 2 Go - 1 : `EFBIG` ; les
+  systemes de fichiers sans positions 64 bits (tmpfs, proc...) lisent
+  "fin de fichier" ou refusent `EFBIG` au-dela de 2 Go ; `RLIMIT_FSIZE` non
+  signee (limites de 2 Go a 4 Go - 2 exactes, `prlimit64` : au-dela de 32 bits =
+  infini) avec `SIGXFSZ` ; verrous `fcntl` (`F_SETLK64/GETLK64/OFD`, `flock64`)
+  sur des plages de 64 bits ; `FIONREAD` borne.
+* ext2 : `i_size_high` (`i_dir_acl` des fichiers ordinaires), fonctionnalite
+  `large_file` posee a l'ecriture (revision 1 forcee comme `ext2_write_inode`),
+  taille maximale calculee par bloc (1 Ko : 17 Go ; 4 Ko : 2 To, plafond
+  `i_blocks` 32 bits), troncature et ecriture a 64 bits. Disques de plus de
+  2 Go : correction du produit `bloc * taille` dans la couche bloc
+  (`BRead/BufWrite`) qui depassait 31 bits ; attente IDE bornee par le temps
+  (15 s) et non plus par un nombre d'iterations (un disque hote lent faisait
+  echouer des lectures).
+* FAT12/16/32 : fichiers jusqu'a 4 Go - 1 (taille de 32 bits non signee),
+  `EFBIG` au-dela. iso9660 : tailles de 32 bits non signees (adapte, non
+  teste au-dela de 2 Go : pas de fichier ISO de cette taille dans les essais).
+* Peripheriques blocs : `/dev/hdX` lu et ecrit sur plus de 4 Go, `BLKGETSIZE64`.
+* Limites : `mmap2` d'un fichier a un decalage de 2 Go ou plus : `EOVERFLOW`
+  (les VMA gardent un decalage de 32 bits) ; tmpfs et les systemes memoire
+  refusent les fichiers de plus de 2 Go (`EFBIG`) ; `fadvise/readahead/
+  sync_file_range` acceptent les decalages 64 bits sans les exploiter ;
+  `getdents64` renvoie `d_off` sur 32 bits utiles.
+* Essais : `TESTS/K/bigtest.c` + `RUNBIG.SH` : disque creux de 6 Go (ext2, blocs
+  de 1 Ko et 4 Ko, avec un fichier de remplissage de 2,2 Go pour que les
+  blocs alloues depassent 2^31 octets), 64 verifications (fichier creux a 3 Go et
+  5 Go, `llseek`, `SEEK_DATA/HOLE`, croisement de 4 Go, `EOVERFLOW`, verrous 64
+  bits, troncature et `fallocate`, `sendfile64`, `RLIMIT_FSIZE`, demontage et
+  remontage, donnees ecrites loin sur le disque, fichier de 3 Go ecrit par
+  l'hote lu a 2,5 Go) puis `e2fsck -fn` propre ; FAT32 de 3 Go avec un fichier
+  de 2300 Mo ecrit par `mcopy` (marqueurs a 2100 Mo et a la fin, ajout,
+  ecriture a 2200 Mo, reduction) puis `fsck.vfat -n` propre.
+
+### Partie 36 : sysctl, swap sur fichier, modules du noyau (lot 2 de D3)
+
+**`/proc/sys`** : arbre de parametres (`SyAddInt/SyAddStr`), lecture et ecriture
+par `write(2)` (valeur decimale, verification des bornes, `EINVAL`/`EACCES`/
+`EPERM`). Appliques par le noyau : `kernel/hostname` et `domainname` (par espace
+UTS, vus par `uname`), `kernel/pid_max` (`AllocPid`), `fs/file-max` (`ENFILE`
+dans `FileNew`), `vm/drop_caches` (purge du cache de tampons),
+`kernel/modules_disabled` (irreversible), `net/ipv4/ip_default_ttl`,
+`net/ipv4/icmp_echo_ignore_all` ; en lecture seule : `ostype`, `osrelease`,
+`version`, `threads-max`, `tainted`, `random/boot_id`, `random/uuid` (nouveau a
+chaque lecture), `fs/file-nr`, `inode-nr`... Conserves et relus mais **sans effet
+dans le noyau** : `randomize_va_space` (pas d'ASLR avant le lot G),
+`overcommit_memory/ratio`, `swappiness`, `panic*`, `sysrq`, `printk`, `core_pattern`,
+`shm*/msg*/sem`, `net/ipv4/ip_forward` (pas de routage avant le lot E), les
+parametres de tampons `net/core/*`, `fs/inotify/*`, `dirty_*`, `nr_hugepages`...
+(environ 65 entrees, `InitSysctl`).
+
+**`/proc/swaps`** (en-tete Linux) ; **swap sur fichier ordinaire** : `swapon` accepte
+un fichier d'un ext2 ou d'un FAT (operation `SoBmap` du superbloc : bloc logique
+-> secteur), refuse les fichiers a trous, garde l'inode (ecriture et troncature :
+`ETXTBSY`), priorite `SWAP_FLAG_PREFER`, `swapoff` par chemin ; un seul espace
+d'echange actif, 128 Mo au plus.
+
+**Modules** : `init_module(128)`, `finit_module(350)`, `delete_module(129)`.
+Chargeur ELF32 `ET_REL` i386 (modules de `lpc -3M`, format dans
+`DEMANDES_A.md`) : sections `SHF_ALLOC` placees (alignement, `.bss` mise a zero)
+dans un bloc de pages du noyau, relocations `R_386_32`, `R_386_PC32`,
+`R_386_PLT32`, symboles resolus par nom (`_TPF_NOM`) dans la table d'exports du
+noyau (`KsAdd`, `InitModules`) puis dans ceux des modules charges (procedures
+`Export;`) ; symboles inconnus : `ENOENT` ; image invalide : `ENOEXEC` ; module
+deja charge ou symbole deja exporte : `EEXIST` ; `init_module` retournant une
+erreur : le module est decharge et l'erreur renvoyee ; parametres `nom=valeur`
+(`module_param_int/str`) ; droits `CAP_SYS_MODULE`. Dependances : un module qui utilise
+les symboles d'un autre ne peut plus l'etre decharge (`EAGAIN`, comme
+`rmmod` sous Linux) ; comptage d'utilisation (un peripherique caractere d'un
+module est compte tant qu'un fichier est ouvert) ; `/proc/modules` (nom, taille,
+utilisation, dependants, etat, adresse), `/proc/kallsyms` (exports du noyau et
+des modules), `kernel/tainted` (4096 = module hors arbre, 1 = licence non GPL),
+`kernel/modules_disabled`. API exportee aux modules (`KsAdd`) : `printk`,
+`printk_int`, `kmalloc`, `kzalloc`, `kfree`, `get_jiffies`, `ksleep`,
+`copy_to_user`, `copy_from_user`, `put_user_long`, `get_user_long`,
+`register_chrdev(majeur, nom, table)` (table de 16 adresses : `FoRead`=0, `FoWrite`=1,
+`FoReaddir`=2, `FoIoctl`=3, `FoPoll`=4, `FoOpen`=5, `FoRelease`=6, `FoLlseek`=7,
+`FoFsync`=8 ; majeur 0 : attribution de 254 vers le bas), `unregister_chrdev`,
+`mknod_node`, `unlink_node`, `file_get_pos`, `file_set_pos`, `file_flags`,
+`module_param_int`, `module_param_str`, `request_irq(irq, procedure)` (IRQ 3 a 15
+libres, appelee comme les gestionnaires du noyau), `free_irq`, `get_pid`, `get_uid`,
+`panic`. Limites : `register_chrdev` et `request_irq` ne sont acceptes que pendant
+`init_module` ; pas de `/sys/module` ; pas d'API de systemes de fichiers, de
+reseau ni de blocs pour les modules ; pas de `query_module/create_module` (ENOSYS).
+Essais : `modtest` (51 verifications de modules : chargement, erreurs, parametres,
+peripherique, comptage, dependances, `finit_module`, `request_irq` sur l'IRQ 8 de
+l'horloge CMOS ; 34 de sysctl et /proc/swaps) avec les modules `TESTS/K/hello.pas`, `hello2.pas`
+(dependant de `hello`), `badinit.pas`, `unkmod.pas`, `irqmod.pas` ; `RUNSWAP.SH -f`
+(swap sur fichier ext2 de 24 Mo sous pression memoire, blocs de 1 Ko et 4 Ko,
+`e2fsck` propre).
 
 ### Lots A2c et A2d (ptrace, seccomp, xattr/ACL, clone3/espaces de noms)
 
@@ -386,13 +496,14 @@ qu'un bloc (pas d'attributs dans l'inode, pas de partage de blocs a la creation)
 FAT, iso9660, proc et sysfs repondent `EOPNOTSUPP` aux xattr (sauf sysfs, tmpfs) ;
 les espaces de noms NS/NET/USER/CGROUP/TIME sont des objets d'identite sans
 isolation ; `/proc`, les groupes (`kill(0/-1/-pgrp)`, `getpgid`, `setsid`) et les `si_pid` ne sont pas traduits par espace de pid ; pas de `set_tid` dans
-`clone3` ; fichiers de plus de 2 Go : non realises (positions et tailles 32 bits).
+`clone3` ; fichiers de plus de 2 Go : voir la partie 35.
 
 ### Plan restant
 
 Verrous fins a la place du verrou unique du noyau (ext2/FAT/reseau/VFS
-independants), SMP, modules, journal ext3/ext4, FAT comme racine, DHCP/DNS dans
-le noyau, fichiers de plus de 2 Go, isolation reelle des montages et du reseau.
+independants), SMP, journal ext3/ext4, FAT comme racine, DHCP/DNS dans
+le noyau, isolation reelle des montages et du reseau (fichiers de plus de 2 Go
+et modules : realises, parties 35 et 36).
 
 ---
 
@@ -435,6 +546,13 @@ actions `sysinit wait once respawn ctrlaltdel shutdown`) et, sans inittab,
 | `NICE`, `NOHUP`, `TIMEOUT`, `USLEEP`, `PRINTENV`, `TTY`, `NOLOGIN` | `/bin`, `/sbin/nologin` | lancement de commandes, delais, environnement |
 | `IFCONFIG`, `ROUTE`, `PING`, `NSLOOKUP`, `WGET`, `NC` | `/sbin`, `/bin` | reseau : ioctl SIOCGIF*/SIOCSIF*, `/proc/net/*`, sockets (API `SysSocket`, `SysConnect`, `SysSendTo`..., resolveur `SysResolve` : /etc/hosts puis DNS par UDP, `SysServPort`) ; valides sous QEMU (rtl8139 : ping, wget vers un serveur http de l'hote) |
 | `SU`, `MKSWAP`, `SWAPON` (+`swapoff`), `SYSCTL`, `HWCLOCK`, `RENICE`, `WATCH`, `TIME`, `LSMOD` (+`insmod`, `rmmod`) | `/bin`, `/sbin` | identite, zones d'echange, parametres, horloge, priorites, modules (`init_module`/`delete_module` : en attente du noyau) |
+| `REGEX.INC`, `GREP.PAS` (+`egrep`, `fgrep`), `SED.PAS`, `AWK.PAS` | `/bin` | [E2] moteur d'expressions regulieres POSIX (BRE/ERE, extensions GNU, references arriere, `[[:classes:]]`, plus longue correspondance) partage par include ; `grep` (-EFGiHhvwxclLoqsnbrR -e -f -A -B -C -m -a -z --include --exclude, DOS `/I`), `sed` GNU (s y d D p P n N g G h H x q Q l = a i c r R w W b t T z F { }, adresses N $ /re/ \\cREc N~M A,+N A,~N 0,/re/ !, -n -e -f -E -r -i -s -z -l), `awk` POSIX complet (BEGIN/END/plages, fonctions, tableaux associatifs, getline toutes formes, printf, tubes et fichiers, RS regex, ENVIRON/ARGV, -F -v -f) ; essais contre GNU grep/sed et mawk |
+| `TEST.PAS` | `/bin/test`, `/bin/[` | [E2] conditions POSIX (fichiers, chaines, entiers, -nt -ot -ef, ! ( ) -a -o) |
+| `USERMGR.PAS` | `/sbin/useradd` `userdel` `usermod` `groupadd` `groupdel` `groupmod` `adduser` `addgroup` `deluser` `delgroup` `chpasswd` | [E2] gestion de /etc/passwd, shadow, group (USERMGR_ROOT=dossier : autre racine) |
+| `UTMP.INC`, `WHO.PAS` | `/bin/who`, `users`, `w`, `last` | [E2] utmp/wtmp (struct utmp Linux 384 octets) ecrits par login et init (naissance/mort des sessions, enregistrement de demarrage) |
+| `TELINIT.PAS` | `/sbin/telinit`, `runlevel`, `shutdown` | [E2] niveaux d'execution d'init (inittab `id:niveaux:action:commande`, `initdefault`, `telinit N` par /var/run/init.req + SIGHUP, /var/run/runlevel), arret programme avec diffusion aux terminaux |
+| `SYSLOGD.PAS` | `/sbin/syslogd`, `/bin/logger` | [E2] journal systeme : /dev/log (AF_UNIX datagrammes), /etc/syslog.conf (facilite.niveau fichier), `logger -t -p -i` |
+| `TOP.PAS` | `/bin/top`, `vmstat` | [E2] etat du systeme par /proc |
 | `FIND`, `XARGS`, `TAR` | `/bin` | `find` (-name -iname -type -size -mtime -newer -empty -maxdepth -exec -delete), `xargs` (-n -0 -I -t), `tar` ustar c/x/t, v, z (via gzip), -C ; archives relues par GNU tar et inversement |
 
 Cinq langues : `FR` (defaut), `EN`, `GR` (allemand), `SP`, `IT`. La langue vient
@@ -484,7 +602,7 @@ d'`awk`, `mktemp`, `repeat`...) pour rester compatibles avec DOS.
 
 | Fichier | Contenu |
 |---|---|
-| `RUNU.SH [sh\|host\|qemu\|power\|install]` | orchestre tous les essais : construit l'image dans `$W` (pas `IMAGE/`), `KSRC=` choisit le noyau |
+| `RUNU.SH [sh\|host\|qemu\|power\|net\|install\|mod]` | orchestre tous les essais : construit l'image dans `$W` (pas `IMAGE/`), `KSRC=` choisit le noyau ; `mod` : insmod/lsmod/rmmod de `/lib/modules/hello.ko` (SKIP tant que le noyau n'a pas `init_module`) |
 | `shtest.sh`, `sh/*.sh` | le shell contre `dash` (5 scripts, sortie identique) |
 | `cmdbench.py` | essai fonctionnel de chaque commande (hote), `--gen DIR` fabrique `run.sh` pour QEMU |
 | `mkcmdtab.py` | fabrique `TOOLS/COMMANDES.TXT` (hote + QEMU) |

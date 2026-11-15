@@ -7,6 +7,7 @@
 static unsigned char pat(unsigned i){return (unsigned char)(i*13+(i>>7)+1);}
 static unsigned char wb[4096];
 int main(void){
+  if(ku_cmdline_has("bigtest"))return 0;
   static const char*devs[4]={"/dev/hda1","/dev/hdb1","/dev/hdc1","/dev/hdd1"};
   int d,n=0;
   for(d=0;d<4;d++){

@@ -201,6 +201,13 @@ static inline void putnum(long v,int base){
 static inline void putd(long v){putnum(v,10);}
 static inline void putx(long v){putnum(v,16);}
 
+/* la ligne de commande du noyau contient-elle le mot w ? */
+static inline int ku_cmdline_has(const char*w){
+  char cl[256];int fd=open("/proc/cmdline",O_RDONLY,0),m=0,k,l=strlen(w);
+  if(fd>=0){m=read(fd,cl,sizeof cl-1);close(fd);}
+  for(k=0;k+l<=m;k++)if(memcmp_(cl+k,w,l)==0)return 1;
+  return 0;}
+
 /* resultat d'un test : ligne "KTEST: nom OK|FAIL" lue par le banc d'essai */
 static int ku_pass=0, ku_fail=0;
 static inline void ktest(const char*name,int ok){

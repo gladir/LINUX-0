@@ -119,6 +119,7 @@ static unsigned freeblocks(void){unsigned long s[16];statfs("/mnt",s);return s[3
 static unsigned freeinodes(void){unsigned long s[16];statfs("/mnt",s);return s[6];}
 
 int main(void){
+  if(ku_cmdline_has("bigtest"))return 0;
   int fd,n,i,r;
   char b[512],c[300];
   unsigned fb0,fbs,fis,bsz;

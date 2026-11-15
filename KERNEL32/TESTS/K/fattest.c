@@ -135,6 +135,7 @@ static void mkname(char*d,const char*pre,int n){
 }
 
 int main(void){
+  if(ku_cmdline_has("bigtest"))return 0;
   int fd,n,i,r;
   char b[512],c[300],nm[300];
   const char*dev="/dev/hdb";

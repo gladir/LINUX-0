@@ -133,6 +133,8 @@ S.append(section('B3. PILOTES ET PERIPHERIQUES', [
     ('HPET', r'HPET', ''), ('PCI (config + /proc/bus/pci)', r'Function PciRead', ''),
     ('/dev/null zero full random urandom', r"MkDev\(1, 9\)", ''), ('/dev/mem kmem port kmsg', r"/dev/kmsg", ''),
     ('/dev/rtc', r'/dev/rtc', ''), ('/dev/tty* /dev/ptmx pts', r'/dev/ptmx', ''),
+    ('modules du noyau (.ko ET_REL, insmod/rmmod)', r'Function ModLoadImage', 'partie 36'),
+    ('swap sur fichier ordinaire', r'Function SwapBmap', 'partie 36'),
 ]))
 S.append(section('B4. /PROC ET /SYS', [
     ('/proc/meminfo uptime version cmdline', r"'meminfo'", ''), ('/proc/cpuinfo stat loadavg', r"'cpuinfo'", ''),
@@ -140,8 +142,9 @@ S.append(section('B4. /PROC ET /SYS', [
     ('/proc/PID/fd fdinfo exe cwd root environ', r"'environ'", ''), ('/proc/PID/smaps statm limits io', r"'smaps'", ''),
     ('/proc/PID/mountinfo wchan task/', r"'mountinfo'", ''), ('/proc/net/dev route', r"'route'", ''),
     ('/proc/net/tcp udp arp', r"'/proc/net/tcp'|net/tcp", ''), ('/proc/devices partitions interrupts', r"'partitions'", ''),
-    ('/proc/iomem ioports locks swaps', r"'iomem'", ''), ('/proc/modules kallsyms', r"'kallsyms'", ''),
-    ('/proc/sys (sysctl ecriture)', r"'sysctl'|/proc/sys/kernel", ''), ('/sys/block class kernel', r"/sys/block", ''),
+    ('/proc/iomem ioports locks', r"'iomem'", ''), ('/proc/swaps', r"PrSwaps", 'partie 36'),
+    ('/proc/modules kallsyms', r"'kallsyms'", 'partie 36'),
+    ('/proc/sys (sysctl ecriture)', r"SyAddStr\('kernel/hostname", 'partie 36'), ('/sys/block class kernel', r"/sys/block", ''),
     ('/sys/bus /sys/devices PCI', r"/sys/bus", ''), ('/sys/fs/cgroup', r"/sys/fs/cgroup", ''),
 ]))
 S.append(section('B5. FAMILLES DE SOCKETS', [
@@ -158,7 +161,7 @@ S.append(section('B6. DRAPEAUX mmap / clone / open', [
     ('CLONE_SETTLS / PARENT_SETTID / CHILD_CLEARTID', r'CLONE_SETTLS|CLONE_CHILD_CLEARTID', ''),
     ('CLONE_NEWNS/NEWPID/NEWUTS/NEWIPC/NEWNET', r'CLONE_NEWNS|CLONE_NEWPID', ''),
     ('O_CREAT/EXCL/TRUNC/APPEND/NONBLOCK/DIRECTORY', r'O_DIRECTORY', ''), ('O_CLOEXEC / O_NOFOLLOW', r'O_CLOEXEC', ''),
-    ('O_SYNC/O_DSYNC/O_DIRECT/O_TMPFILE/O_PATH', r'O_TMPFILE|O_PATH', ''), ('O_LARGEFILE / fichiers > 2 Go', r'O_LARGEFILE', 'drapeau accepte'),
+    ('O_SYNC/O_DSYNC/O_DIRECT/O_TMPFILE/O_PATH', r'O_TMPFILE|O_PATH', ''), ('O_LARGEFILE / fichiers > 2 Go (64 bits)', r'Function VfsLlseek', 'partie 35'),
 ]))
 P('')
 P('C. SYNTHESE')

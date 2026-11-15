@@ -34,7 +34,7 @@ int main(void){
   t0=us();c0=rdtsc();while(us()-t0<100000);t1=us();
   cycles_per_ms=(unsigned)(rdtsc()-c0)/(unsigned)((t1-t0)/1000);
   cpus=cycles_per_ms/1000;if(!cpus)cpus=1;
-  for(round=0;round<3;round++){
+  for(round=0;round<6;round++){
   maxgap=0;n=0;
   k0=kp(&on);
   p=fork();
