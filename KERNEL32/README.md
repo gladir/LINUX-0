@@ -69,6 +69,8 @@ Parties ajoutees en phase 2 (placees physiquement avant la partie 14) :
 | 22 | reseau : pilote RTL8139 (PCI, DMA, IRQ), ARP, IPv4, ICMP (echo), UDP, TCP reel (poignee de mains, retransmission, fenetre, MSS 1400, fermeture), `SIOCGIFADDR/SIOCSIFADDR/SIOCGIFFLAGS...`, `/proc/net/dev` et `route`, `ip=A.B.C.D` sur la ligne de commande |
 | 23 | iso9660 (CD-ROM, lecture seule, Rock Ridge : `NM`, `PX`, `SL`) sur ATAPI (commande PACKET en PIO, partie 11) |
 | 26 | swap : `swapon`/`swapoff` (87/115) sur un peripherique `mkswap` (SWAPSPACE2 v1, 128 Mo au plus) ou `swap=/dev/hdXN` au demarrage ; `SwapReclaim` (appele par `AllocPages` sous 96 pages libres) ecrit sur disque les pages anonymes privees a une seule reference (seconde chance par bit "accede"), PTE non present portant la case (bit 9), page-in dans la faute de page (aussi en mode noyau), cases comptees pour `fork`, `/proc/meminfo` SwapTotal/SwapFree |
+| 30 | IPC SysV : memoire partagee (`shmget/shmat/shmdt/shmctl`, segments de 16 Mo au plus, VMA `VmShm`, pages hors comptage, detachement a la sortie, `IPC_RMID` differe), semaphores (`semget/semop/semtimedop/semctl`, blocage, `IPC_NOWAIT`, `SEM_UNDO` applique a la sortie, `GETVAL/SETALL`...), files de messages (`msgget/msgsnd/msgrcv/msgctl`, types >0, <0, `MSG_EXCEPT`, `MSG_NOERROR`, qbytes), `ipc(2)` et appels directs 392-402, droits uid/gid/mode, `IPC_STAT/SET/INFO` |
+| 31 | files de messages POSIX (`mq_open/unlink/timedsend/timedreceive/notify/getsetattr`, descripteurs pollables, priorites, notification par signal `SI_MESGQ`), AIO (`io_setup/submit/getevents/cancel/destroy`, execution synchrone a la soumission, notification eventfd), `sendmmsg/recvmmsg`, futex complets (`WAIT/WAKE`, bitsets, delais absolus, `REQUEUE/CMP_REQUEUE/WAKE_OP`, `LOCK_PI/UNLOCK_PI/TRYLOCK_PI` sans elevation de priorite, cle physique pour les pages partagees, listes robustes traitees a la sortie) |
 | 29 | signaux temps reel : file d'attente de `siginfo` par tache (16 entrees, signaux < 32 non empiles, RT empiles), `si_code/si_pid/si_uid/si_value`, `si_addr` des SIGSEGV, `rt_sigtimedwait(+64)`, `rt_sigqueueinfo`, `rt_tgsigqueueinfo`, `signalfd/signalfd4`, minuteries POSIX (`timer_create/settime/gettime/getoverrun/delete` + 64 bits, SIGEV_SIGNAL/NONE/THREAD_ID, resolution 10 ms, supprimees a l'execve), `pidfd_open`, `pidfd_send_signal`, `waitid(P_PIDFD)`, verrous de fichiers reels : `flock`, `fcntl` POSIX (F_GETLK/SETLK/SETLKW, 32 et 64 bits, decoupe des plages, liberes a la fermeture de tout descripteur du fichier et a la sortie du processus) et OFD (F_OFD_*), `F_GETPIPE_SZ` |
 | 28 | appels systeme complementaires issus de l'audit (lot A1, apres la partie 16) : ordonnancement (`sched_*`, `getcpu`, affinite), capacites (`capget/capset`, `Capable`, regles setuid/execve), `personality`, `sendfile/sendfile64/copy_file_range/splice/vmsplice`, `preadv/pwritev(+2)`, `fallocate`, `syncfs`, `statx`, `renameat2`, `openat2`, `faccessat2`, `fchmodat2`, `execveat`, `close_range`, `memfd_create`, `mlock*/mincore/madvise` reels (`VmLocked`, RLIMIT_MEMLOCK), `waitid`, `process_vm_readv/writev`, `kcmp`, `unshare(FILES/FS)`, `membarrier`, horloges 64 bits (`clock_*64`, `futex_time64`, `ppoll/pselect6`, `epoll_pwait2`, `timerfd*64`, `utimensat_time64`), `adjtimex`, `ioperm/iopl`, ENOSYS explicites (`EnosysList`) |
 | 25 | framebuffer Bochs/QEMU VGA : `fb=LxH` sur la ligne de commande programme le mode 32 bits (registres VBE 1CEh/1CFh), memoire video (BAR 0 PCI) mappee en F8000000h, `/dev/fb0` (29:0) : read, write, lseek, `FBIOGET_FSCREENINFO/VSCREENINFO`, `mmap` partage (VMA `VmPhys`, PTE hors comptage) |
@@ -352,8 +354,9 @@ reels depuis la partie 29. Correction au passage :
 
 ### Tests (suite)
 
-* `RUNK.SH` : 32 programmes embarques, 485 verifications (dont `syscalltest` : 94
-  verifications du lot A1 et `sigrttest` : 58 du lot A2a) (`fattest`, `fbtest`,
+* `RUNK.SH` : 34 programmes embarques, 586 verifications (dont `syscalltest` : 94
+  verifications du lot A1, `sigrttest` : 58 du lot A2a, `ipctest` et
+  `mqfutextest` du lot A2b) (`fattest`, `fbtest`,
   `swaptest`, `idetest` s'ignorent sans le materiel voulu ; `killtest` :
   `kill(pid, 0, -pgrp, -1)` ; `preempttest` : latence d'un processus en mode
   utilisateur pendant de longs appels systeme d'un autre (trou maximal
@@ -415,6 +418,8 @@ actions `sysinit wait once respawn ctrlaltdel shutdown`) et, sans inittab,
 | `LN`, `CHOWN` (+`chgrp`), `MKNOD`, `READLINK` (+`realpath`) | `/bin` | liens, proprietaires (-R), fichiers speciaux, chemins canoniques |
 | `UPTIME`, `FREE`, `DMESG`, `PGREP` (+`pkill`, `pidof`, `killall`) | `/bin` | information systeme par `/proc` et `syslog(2)`, recherche et signaux par nom |
 | `NICE`, `NOHUP`, `TIMEOUT`, `USLEEP`, `PRINTENV`, `TTY`, `NOLOGIN` | `/bin`, `/sbin/nologin` | lancement de commandes, delais, environnement |
+| `IFCONFIG`, `ROUTE`, `PING`, `NSLOOKUP`, `WGET`, `NC` | `/sbin`, `/bin` | reseau : ioctl SIOCGIF*/SIOCSIF*, `/proc/net/*`, sockets (API `SysSocket`, `SysConnect`, `SysSendTo`..., resolveur `SysResolve` : /etc/hosts puis DNS par UDP, `SysServPort`) ; valides sous QEMU (rtl8139 : ping, wget vers un serveur http de l'hote) |
+| `SU`, `MKSWAP`, `SWAPON` (+`swapoff`), `SYSCTL`, `HWCLOCK`, `RENICE`, `WATCH`, `TIME`, `LSMOD` (+`insmod`, `rmmod`) | `/bin`, `/sbin` | identite, zones d'echange, parametres, horloge, priorites, modules (`init_module`/`delete_module` : en attente du noyau) |
 | `FIND`, `XARGS`, `TAR` | `/bin` | `find` (-name -iname -type -size -mtime -newer -empty -maxdepth -exec -delete), `xargs` (-n -0 -I -t), `tar` ustar c/x/t, v, z (via gzip), -C ; archives relues par GNU tar et inversement |
 
 Cinq langues : `FR` (defaut), `EN`, `GR` (allemand), `SP`, `IT`. La langue vient

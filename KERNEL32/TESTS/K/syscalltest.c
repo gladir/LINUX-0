@@ -22,7 +22,7 @@ int main(void){
   ktest("sys.restart_syscall",sc0(0)==-4);
   ktest("sys.personality",sc1(136,-1)==0&&sc1(136,0x40000)==0&&sc1(136,-1)==0x40000&&sc1(136,0)==0x40000);
   ktest("sys.enosys_list",sc0(123)==-38&&sc0(131)==-38&&sc0(357)==-38&&sc0(374)==-38&&sc0(448)==-38);
-  ktest("sys.unknown_enosys",sc0(399)==-38&&sc0(460)==-38);
+  ktest("sys.unknown_enosys",sc0(468)==-38&&sc0(460)==-38);
   /* ---- ordonnancement ---- */
   {int prm[2]={10,0},o[2]={0,0};
    ktest("sched.getscheduler",sc1(157,0)==0);
