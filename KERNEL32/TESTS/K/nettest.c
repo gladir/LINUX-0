@@ -268,6 +268,7 @@ int main(void){
      mksin(&a2,0x6300020a,9092);
      ktest("nat.dnat_send",sendto(us,"dnat-out",8,0,&a2,16)==8);
      for(i2=0;i2<300&&n2<=0;i2++){l2=sizeof f2;n2=recvfrom(us,b2,64,0x40,&f2,&l2);if(n2<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+     if(n2!=8||f2.addr!=0x6300020a){puts("  dnat n=");putd(n2);puts(" addr=");putd(f2.addr);puts(" port=");putd(hs(f2.port));puts("\n");}
      ktest("nat.dnat_reply_source",n2==8&&memcmp_(b2,"dnat-out",8)==0&&f2.addr==0x6300020a&&hs(f2.port)==9092);
      close(us);}
     /* retour a une table nat vide */
