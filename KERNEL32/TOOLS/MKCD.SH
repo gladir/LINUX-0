@@ -56,5 +56,6 @@ else
   echo "genisoimage ou mkisofs requis (xorriso ne sait pas fixer le segment de chargement)"; exit 1
 fi
 [ -s "$OUT" ] || { echo "echec de la fabrication de l'ISO"; exit 1; }
+IRDSZ=; [ -n "$IRD" ] && IRDSZ=", initrd $(stat -c %s "$IRD")"
+echo "$OUT : $(stat -c %s "$OUT") octets (noyau $(stat -c %s "$KERN")$IRDSZ)"
 rm -rf "$W"
-echo "$OUT : $(stat -c %s "$OUT") octets (noyau $(stat -c %s "$KERN")$( [ -n "$IRD" ] && echo ", initrd $(stat -c %s "$IRD")" ))"

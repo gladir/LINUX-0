@@ -44,7 +44,7 @@ Program Install;
 
 Const
   MAXGRP = 256;
-  MAXBLK = 2097152;           { 2 Go }
+  MAXBLK = 8388608;           { 8 M blocs : 2 Go en 1 Ko, 32 Go en 4 Ko }
   MAXDIRENT = 4000;
   MAXEXT = 8192;
   M : Array[1..18, 1..5] Of PChar = (
@@ -1653,7 +1653,8 @@ BEGIN
     Sectors := DiskSectors;
     If Mb > 0 Then
       If Mb * 2048 < Sectors Then Sectors := Mb * 2048;
-    If Sectors > 4000000 Then Sectors := 4000000;
+    If Sectors > MAXGRP * 8 * (BS Div 512) * BS Then
+      Sectors := MAXGRP * 8 * (BS Div 512) * BS;
     PartStart := 0;
     NBlocks := Sectors Div (BS Div 512);
     If NBlocks < 400 Then Die(Msg(12));
@@ -1678,7 +1679,8 @@ BEGIN
   If Mb > 0 Then
     If Mb * 2048 < Sectors Then Sectors := Mb * 2048;
   If Sectors < 4096 + 2048 Then Die(Msg(12));
-  If Sectors > 4000000 Then Sectors := 4000000;
+  If Sectors > MAXGRP * 8 * (BS Div 512) * BS Then
+    Sectors := MAXGRP * 8 * (BS Div 512) * BS;
   PartStart := 2048;
   PartSectors := Sectors - PartStart;
   NBlocks := PartSectors Div (BS Div 512);

@@ -1,0 +1,225 @@
+{ KEYMAPS.KRN : genere par MKDATA.PY depuis LAYOUTS.TXT (E5).
+  Procedure KbdLoadLayout(Const N : String) : remplit KbdMapLo/Hi/Alt
+  pour keymap=N (us uk fr be de chde chfr it es pt nl). }
+Procedure KbdLoadLayout(Const N : String);
+Begin
+  If N = 'us' Then
+  Begin
+    KbdRow(0, 41, '`');
+    KbdRow(0, 2, '1234567890-=');
+    KbdRow(0, 16, 'qwertyuiop[]');
+    KbdRow(0, 30, 'asdfghjkl;''');
+    KbdRow(0, 43, '\');
+    KbdRow(0, 44, 'zxcvbnm,./');
+    KbdRow(0, 86, '<');
+    KbdRow(1, 41, '~');
+    KbdRow(1, 2, '!@#$%^&*()_+');
+    KbdRow(1, 16, 'QWERTYUIOP{}');
+    KbdRow(1, 30, 'ASDFGHJKL:"');
+    KbdRow(1, 43, '|');
+    KbdRow(1, 44, 'ZXCVBNM<>?');
+    KbdRow(1, 86, '>');
+  End;
+  If N = 'uk' Then
+  Begin
+    KbdRow(0, 41, '`');
+    KbdRow(0, 2, '1234567890-=');
+    KbdRow(0, 16, 'qwertyuiop[]');
+    KbdRow(0, 30, 'asdfghjkl;''');
+    KbdRow(0, 43, '#');
+    KbdRow(0, 44, 'zxcvbnm,./');
+    KbdRow(0, 86, '\');
+    KbdRow(1, 41, #172);
+    KbdRow(1, 2, '!"'#163'$%^&*()_+');
+    KbdRow(1, 16, 'QWERTYUIOP{}');
+    KbdRow(1, 30, 'ASDFGHJKL:@');
+    KbdRow(1, 43, '~');
+    KbdRow(1, 44, 'ZXCVBNM<>?');
+    KbdRow(1, 86, '|');
+    KbdRow(2, 41, #166);
+    KbdRow(2, 16, #0#0#233#0#0#0#250#237#243#0#0#0);
+    KbdRow(2, 30, #225#0#0#0#0#0#0#0#0#0#0);
+  End;
+  If N = 'fr' Then
+  Begin
+    KbdRow(0, 41, #178);
+    KbdRow(0, 2, '&'#233'"''(-'#232'_'#231#224')=');
+    KbdRow(0, 16, 'azertyuiop^$');
+    KbdRow(0, 30, 'qsdfghjklm'#249);
+    KbdRow(0, 43, '*');
+    KbdRow(0, 44, 'wxcvbn,;:!');
+    KbdRow(0, 86, '<');
+    KbdRow(1, 2, '1234567890'#176'+');
+    KbdRow(1, 16, 'AZERTYUIOP'#168#163);
+    KbdRow(1, 30, 'QSDFGHJKLM%');
+    KbdRow(1, 43, #181);
+    KbdRow(1, 44, 'WXCVBN?./'#167);
+    KbdRow(1, 86, '>');
+    KbdRow(2, 2, #0'~#{[|`\^@]}');
+    KbdRow(2, 16, #0#0#0#0#0#0#0#0#0#0#0#164);
+  End;
+  If N = 'be' Then
+  Begin
+    KbdRow(0, 41, #178);
+    KbdRow(0, 2, '&'#233'"''('#167#232'!'#231#224')-');
+    KbdRow(0, 16, 'azertyuiop^$');
+    KbdRow(0, 30, 'qsdfghjklm'#249);
+    KbdRow(0, 43, #181);
+    KbdRow(0, 44, 'wxcvbn,;:=');
+    KbdRow(0, 86, '<');
+    KbdRow(1, 41, #179);
+    KbdRow(1, 2, '1234567890'#176'_');
+    KbdRow(1, 16, 'AZERTYUIOP'#168'*');
+    KbdRow(1, 30, 'QSDFGHJKLM%');
+    KbdRow(1, 43, #163);
+    KbdRow(1, 44, 'WXCVBN?./+');
+    KbdRow(1, 86, '>');
+    KbdRow(2, 2, '|@#'#0'[^'#0#0'{}'#0#0);
+    KbdRow(2, 16, #0#0#0#0#0#0#0#0#0#0'[]');
+    KbdRow(2, 30, #0#0#0#0#0#0#0#0#0#0#180);
+    KbdRow(2, 43, '`');
+    KbdRow(2, 44, #0#0#0#0#0#0#0#0#0'~');
+    KbdRow(2, 86, '\');
+  End;
+  If N = 'de' Then
+  Begin
+    KbdRow(0, 41, '^');
+    KbdRow(0, 2, '1234567890'#223#180);
+    KbdRow(0, 16, 'qwertzuiop'#252'+');
+    KbdRow(0, 30, 'asdfghjkl'#246#228);
+    KbdRow(0, 43, '#');
+    KbdRow(0, 44, 'yxcvbnm,.-');
+    KbdRow(0, 86, '<');
+    KbdRow(1, 41, #176);
+    KbdRow(1, 2, '!"'#167'$%&/()=?`');
+    KbdRow(1, 16, 'QWERTZUIOP'#220'*');
+    KbdRow(1, 30, 'ASDFGHJKL'#214#196);
+    KbdRow(1, 43, '''');
+    KbdRow(1, 44, 'YXCVBNM;:_');
+    KbdRow(1, 86, '>');
+    KbdRow(2, 2, #0#178#179#0#0#0'{[]}\'#0);
+    KbdRow(2, 16, '@'#0#0#0#0#0#0#0#0#0#0'~');
+    KbdRow(2, 44, #0#0#0#0#0#0#181#0#0#0);
+    KbdRow(2, 86, '|');
+  End;
+  If N = 'chde' Then
+  Begin
+    KbdRow(0, 41, #167);
+    KbdRow(0, 2, '1234567890''^');
+    KbdRow(0, 16, 'qwertzuiop'#252#168);
+    KbdRow(0, 30, 'asdfghjkl'#246#228);
+    KbdRow(0, 43, '$');
+    KbdRow(0, 44, 'yxcvbnm,.-');
+    KbdRow(0, 86, '<');
+    KbdRow(1, 41, #176);
+    KbdRow(1, 2, '+"*'#231'%&/()=?`');
+    KbdRow(1, 16, 'QWERTZUIOP'#232'!');
+    KbdRow(1, 30, 'ASDFGHJKL'#233#224);
+    KbdRow(1, 43, #163);
+    KbdRow(1, 44, 'YXCVBNM;:_');
+    KbdRow(1, 86, '>');
+    KbdRow(2, 2, #166'@#'#176#167#172'|'#162#0#0#180'~');
+    KbdRow(2, 16, #0#0#0#0#0#0#0#0#0#0'[]');
+    KbdRow(2, 30, #0#0#0#0#0#0#0#0#0#0'{');
+    KbdRow(2, 43, '}');
+    KbdRow(2, 86, '\');
+  End;
+  If N = 'chfr' Then
+  Begin
+    KbdRow(0, 41, #167);
+    KbdRow(0, 2, '1234567890''^');
+    KbdRow(0, 16, 'qwertzuiop'#232#168);
+    KbdRow(0, 30, 'asdfghjkl'#233#224);
+    KbdRow(0, 43, '$');
+    KbdRow(0, 44, 'yxcvbnm,.-');
+    KbdRow(0, 86, '<');
+    KbdRow(1, 41, #176);
+    KbdRow(1, 2, '+"*'#231'%&/()=?`');
+    KbdRow(1, 16, 'QWERTZUIOP'#252'!');
+    KbdRow(1, 30, 'ASDFGHJKL'#246#228);
+    KbdRow(1, 43, #163);
+    KbdRow(1, 44, 'YXCVBNM;:_');
+    KbdRow(1, 86, '>');
+    KbdRow(2, 2, #166'@#'#176#167#172'|'#162#0#0#180'~');
+    KbdRow(2, 16, #0#0#0#0#0#0#0#0#0#0'[]');
+    KbdRow(2, 30, #0#0#0#0#0#0#0#0#0#0'{');
+    KbdRow(2, 43, '}');
+    KbdRow(2, 86, '\');
+  End;
+  If N = 'it' Then
+  Begin
+    KbdRow(0, 41, '\');
+    KbdRow(0, 2, '1234567890'''#236);
+    KbdRow(0, 16, 'qwertyuiop'#232'+');
+    KbdRow(0, 30, 'asdfghjkl'#242#224);
+    KbdRow(0, 43, #249);
+    KbdRow(0, 44, 'zxcvbnm,.-');
+    KbdRow(0, 86, '<');
+    KbdRow(1, 41, '|');
+    KbdRow(1, 2, '!"'#163'$%&/()=?^');
+    KbdRow(1, 16, 'QWERTYUIOP'#233'*');
+    KbdRow(1, 30, 'ASDFGHJKL'#231#176);
+    KbdRow(1, 43, #167);
+    KbdRow(1, 44, 'ZXCVBNM;:_');
+    KbdRow(1, 86, '>');
+    KbdRow(2, 16, #0#0#0#0#0#0#0#0#0#0'[]');
+    KbdRow(2, 30, #0#0#0#0#0#0#0#0#0'@#');
+  End;
+  If N = 'es' Then
+  Begin
+    KbdRow(0, 41, #186);
+    KbdRow(0, 2, '1234567890'''#161);
+    KbdRow(0, 16, 'qwertyuiop`+');
+    KbdRow(0, 30, 'asdfghjkl'#241#180);
+    KbdRow(0, 43, #231);
+    KbdRow(0, 44, 'zxcvbnm,.-');
+    KbdRow(0, 86, '<');
+    KbdRow(1, 41, #170);
+    KbdRow(1, 2, '!"'#183'$%&/()=?'#191);
+    KbdRow(1, 16, 'QWERTYUIOP^*');
+    KbdRow(1, 30, 'ASDFGHJKL'#209#168);
+    KbdRow(1, 43, #199);
+    KbdRow(1, 44, 'ZXCVBNM;:_');
+    KbdRow(1, 86, '>');
+    KbdRow(2, 41, '\');
+    KbdRow(2, 2, '|@#~'#0#172#0#0#0#0#0#0);
+    KbdRow(2, 16, #0#0#0#0#0#0#0#0#0#0'[]');
+    KbdRow(2, 30, #0#0#0#0#0#0#0#0#0#0'{');
+    KbdRow(2, 43, '}');
+  End;
+  If N = 'pt' Then
+  Begin
+    KbdRow(0, 41, '\');
+    KbdRow(0, 2, '1234567890'''#171);
+    KbdRow(0, 16, 'qwertyuiop+'#180);
+    KbdRow(0, 30, 'asdfghjkl'#231#186);
+    KbdRow(0, 43, '~');
+    KbdRow(0, 44, 'zxcvbnm,.-');
+    KbdRow(0, 86, '<');
+    KbdRow(1, 41, '|');
+    KbdRow(1, 2, '!"#$%&/()=?'#187);
+    KbdRow(1, 16, 'QWERTYUIOP*`');
+    KbdRow(1, 30, 'ASDFGHJKL'#199#170);
+    KbdRow(1, 43, '^');
+    KbdRow(1, 44, 'ZXCVBNM;:_');
+    KbdRow(1, 86, '>');
+    KbdRow(2, 2, #0'@'#163#167#0#0'{[]}'#0#0);
+  End;
+  If N = 'nl' Then
+  Begin
+    KbdRow(0, 41, '`');
+    KbdRow(0, 2, '1234567890-=');
+    KbdRow(0, 16, 'qwertyuiop[]');
+    KbdRow(0, 30, 'asdfghjkl;''');
+    KbdRow(0, 43, '\');
+    KbdRow(0, 44, 'zxcvbnm,./');
+    KbdRow(0, 86, '<');
+    KbdRow(1, 41, '~');
+    KbdRow(1, 2, '!@#$%^&*()_+');
+    KbdRow(1, 16, 'QWERTYUIOP{}');
+    KbdRow(1, 30, 'ASDFGHJKL:"');
+    KbdRow(1, 43, '|');
+    KbdRow(1, 44, 'ZXCVBNM<>?');
+    KbdRow(1, 86, '>');
+  End;
+End;

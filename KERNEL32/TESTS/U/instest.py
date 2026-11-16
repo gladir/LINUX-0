@@ -1,0 +1,547 @@
+#!/usr/bin/env python3
+# @author: Sylvain Maltais (support@gladir.com)
+# @created: 2026
+# @website(https://www.gladir.com/linux-0)
+# @description: Essais de l'assistant d'installation (appele par RUNINST.SH) :
+#   tz        fuseaux horaires de L32API contre l'heure de l'hote (TZif, heure d'ete)
+#   auto-fr   CD amorce sous QEMU, installation automatique (preseed) en francais
+#             (AZERTY, Europe/Paris, ext4 + swap), puis amorce du disque installe
+#   auto-de   idem en allemand, partitionnement manuel (ext3 + swap + /home)
+#   ui-fr     interface : touches (sendkey) en francais, captures, installation
+#   ui-de     interface : souris + editeur de partitions en allemand, captures
+#   text      mode texte (console VGA) : captures
+#   Chaque installation est verifiee en amorcant le disque SANS le CD :
+#   connexion, nom de machine, langue, fuseau, utilisateur, clavier, fstab,
+#   noyau, puis e2fsck -fn de l'hote sur chaque partition.
+#   usage : instest.py WORK ROOT KERNEL.ELF CAPDIR scenario...
+import os, re, subprocess, sys, time
+exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       'QCTL.PY')).read().replace("if __name__ == '__main__':",
+                                                  "if False:"))
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+K32 = os.path.abspath(os.path.join(HERE, '..', '..'))
+WORK, ROOT, KERN, CAPDIR = sys.argv[1:5]
+SCEN = sys.argv[5:]
+LPC = os.environ.get('LPC', '/tmp/claude-0/work/k32/bin/lpc')
+RESULTS = []
+
+
+def check(name, ok, detail=''):
+    RESULTS.append((name, bool(ok)))
+    print(('ok    ' if ok else 'ECHEC ') + name + (' : ' + detail if detail and not ok else ''),
+          flush=True)
+    return ok
+
+
+def build_iso(name, cmdline, files=None):
+    iso = os.path.join(WORK, name + '.iso')
+    extra = os.path.join(WORK, name + '.cd')
+    subprocess.run(['rm', '-rf', extra])
+    os.makedirs(extra)
+    for k, v in (files or {}).items():
+        open(os.path.join(extra, k), 'w', encoding='utf-8').write(v)
+    env = dict(os.environ, LPC=LPC)
+    subprocess.run([K32 + '/TOOLS/MKINSTALLCD.SH', '-o', iso, '-R', ROOT, '-k',
+                    KERN, '-r', extra, '-c', cmdline, '-w',
+                    os.path.join(WORK, name + '.w')], check=True, env=env,
+                   stdout=subprocess.DEVNULL)
+    return iso
+
+
+def new_disk(name, mb):
+    d = os.path.join(WORK, name + '.img')
+    if os.path.exists(d):
+        os.unlink(d)
+    subprocess.run(['truncate', '-s', '%dM' % mb, d], check=True)
+    return d
+
+
+def cap(q, name, tag):
+    """capture -> CAPDIR/tag.png (PNG <= 300 Ko)"""
+    p = q.shot(name)
+    if p.endswith('.png') and CAPDIR:
+        os.makedirs(CAPDIR, exist_ok=True)
+        subprocess.run(['cp', p, os.path.join(CAPDIR, tag + '.png')])
+    return p
+
+
+def qemu_cd(name, iso, disk, mem=256):
+    return Q(os.path.join(WORK, name), ['-cdrom', iso, '-boot', 'd', '-m',
+             str(mem), '-vga', 'std', '-drive',
+             'file=%s,format=raw,if=ide,index=0' % disk], serial_io=True)
+
+
+def page(q, n, timeout=120, settle=0.8):
+    ok = q.wait(r'K32SETUP: page %d\b' % n, timeout)
+    time.sleep(settle)
+    return ok
+
+
+def fs_check(disk, parts):
+    """e2fsck -fn de l'hote sur chaque partition (debut, nombre de secteurs)"""
+    good = True
+    for i, (start, size) in enumerate(parts):
+        img = disk + '.p%d' % i
+        subprocess.run(['dd', 'if=' + disk, 'of=' + img, 'bs=512',
+                        'skip=%d' % start, 'count=%d' % size], stderr=subprocess.DEVNULL)
+        r = subprocess.run(['e2fsck', '-fn', img], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stdout[-800:])
+        good = good and r.returncode == 0
+        os.unlink(img)
+    return good
+
+
+def zone_copy_ok(disk, start, zone):
+    """/etc/localtime du disque installe = fichier TZif de l'hote"""
+    out = disk + '.lt'
+    subprocess.run(['debugfs', '-R', 'dump /etc/localtime ' + out,
+                    '%s?offset=%d' % (disk, start * 512)], capture_output=True)
+    try:
+        a = open(out, 'rb').read()
+        b = open('/usr/share/zoneinfo/' + zone, 'rb').read()
+        os.unlink(out)
+        return a == b
+    except OSError:
+        return False
+
+
+def read_table(disk):
+    """table MBR : [(type, start, size)]"""
+    d = open(disk, 'rb').read(512)
+    out = []
+    if d[510:512] != b'\x55\xaa':
+        return out
+    for i in range(4):
+        e = d[446 + 16 * i:462 + 16 * i]
+        t = e[4]
+        st = int.from_bytes(e[8:12], 'little')
+        sz = int.from_bytes(e[12:16], 'little')
+        out.append((t, st, sz, e[0] == 0x80))
+    return out
+
+
+def boot_verify(tag, disk, rootpw, checks, mem=128):
+    """amorce le disque installe SANS le CD, ouvre une session root et execute
+    les commandes ; checks = [(libelle, commande, regex attendue)]"""
+    q = Q(os.path.join(WORK, tag + '-boot'), ['-m', str(mem), '-drive',
+          'file=%s,format=raw,if=ide,index=0' % disk], serial_io=True)
+    ok = q.wait(r'login:', 90)
+    check(tag + ' : amorce du disque installe (login:)', ok)
+    if not ok:
+        q.quit()
+        return
+    q.serial('root\n')
+    time.sleep(1.5)
+    q.serial(rootpw + '\n')
+    time.sleep(2.5)
+    for n, (label, cmd, rx) in enumerate(checks):
+        mk = 'MK%d' % n
+        q.serial('echo %s-BEGIN; %s; echo %s-END\n' % (mk, cmd, mk))
+        q.wait(r'(?m)^%s-END' % mk, 30)
+        time.sleep(0.3)
+        t = q.text()
+        m = re.findall(r'(?m)^' + mk + r'-BEGIN\n(.*?)^' + mk + '-END', t, re.S)
+        out = m[-1] if m else ''
+        if callable(rx):
+            good = rx(out)
+        else:
+            good = re.search(rx, out) is not None
+        check(tag + ' : ' + label, good, 'sortie %r' % out[-200:])
+    q.serial('sync; poweroff\n')
+    time.sleep(2)
+    q.quit()
+
+
+def local_hhmm(zone):
+    """predicat : la sortie contient l'heure HH:MM de la zone (a 4 min pres)"""
+    from zoneinfo import ZoneInfo
+    from datetime import datetime
+
+    def f(out):
+        m = re.search(r'(\d\d):(\d\d)', out)
+        if not m:
+            return False
+        now = datetime.now(ZoneInfo(zone))
+        g = int(m.group(1)) * 60 + int(m.group(2))
+        h = now.hour * 60 + now.minute
+        return min((g - h) % 1440, (h - g) % 1440) <= 4
+    return f
+
+
+def host_offset(zone):
+    from zoneinfo import ZoneInfo
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).astimezone(ZoneInfo(zone)).utcoffset().total_seconds()
+
+
+# ---------------------------------------------------------------- tz
+def t_tz():
+    src = os.path.join(WORK, 'tz')
+    os.makedirs(src, exist_ok=True)
+    open(src + '/TZT.PAS', 'w').write("""Program TzT;
+Var I, T, E : LongInt;
+Begin
+  LnxTzSelect(SysArgStr(1));
+  For I := 2 To SysArgCount - 1 Do
+  Begin
+    Val(SysArgStr(I), T, E);
+    WriteLn(LnxTzAt(T), ' ', LnxTzUtcOf(T + LnxTzAt(T)) - T);
+  End;
+End.
+""")
+    r = subprocess.run([LPC, '-3X', '-q', 'TZT.PAS'], cwd=src, capture_output=True, text=True)
+    if not os.path.exists(src + '/TZT'):
+        check('tz : compilation', False, r.stdout + r.stderr)
+        return
+    zones = ['Europe/Paris', 'Europe/Berlin', 'Europe/London', 'America/New_York',
+             'America/Los_Angeles', 'America/Sao_Paulo', 'Asia/Tokyo', 'Asia/Kolkata',
+             'Australia/Sydney', 'Pacific/Auckland', 'Africa/Cairo', 'Europe/Moscow',
+             'UTC', 'Asia/Kathmandu', 'America/St_Johns', 'Europe/Lisbon']
+    stamps = []
+    t0 = 1262304000
+    for k in range(0, 56):
+        stamps.append(t0 + k * 8 * 86400 * 7 + 12345)
+    stamps += [1711846799, 1711846800, 1743296399, 1743296400, 1729990799,
+               1729990800, 2000000000, 2100000000]
+    bad = 0
+    n = 0
+    for z in zones:
+        out = subprocess.run([src + '/TZT', z] + [str(s) for s in stamps],
+                             capture_output=True, text=True).stdout.split('\n')
+        for s, line in zip(stamps, out):
+            exp = subprocess.run(['date', '-d', '@%d' % s, '+%z'],
+                                 env=dict(os.environ, TZ=z), capture_output=True,
+                                 text=True).stdout.strip()
+            sign = -1 if exp[0] == '-' else 1
+            e = sign * (int(exp[1:3]) * 3600 + int(exp[3:5]) * 60)
+            if s > 2145916800:      # TZif v1 : transitions jusqu'en 2037
+                continue
+            n += 1
+            if not line or int(line.split()[0]) != e:
+                bad += 1
+                if bad < 6:
+                    print('  tz', z, s, line, exp)
+    check('tz : decalages de %d zones x %d dates = hote (heure d\'ete comprise)'
+          % (len(zones), len(stamps)), bad == 0, '%d ecarts sur %d' % (bad, n))
+
+
+# ------------------------------------------------------------- auto-fr
+def t_auto_fr():
+    pre = """# reponses de l'installation automatique (essai)
+lang=fr
+keyboard=fr
+timezone=Europe/Paris
+clock=utc
+hostname=poste-fr
+rootpw=motdepasse
+user=marie
+fullname=Marie Curie
+userpw=secret
+partitioning=guided
+swap=64
+fs=ext4
+endwait=3
+reboot=halt
+"""
+    iso = build_iso('auto-fr', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
+                    {'preseed.cfg': pre})
+    disk = new_disk('auto-fr', 400)
+    q = qemu_cd('auto-fr', iso, disk)
+    ok = page(q, 11, 90)
+    check('auto-fr : page de progression affichee', ok)
+    time.sleep(6)
+    cap(q, 'fr-prog', 'auto-fr-installation')
+    ok = q.wait(r'K32SETUP: DONE', 240)
+    check('auto-fr : installation terminee (preseed, progression)', ok)
+    time.sleep(1.5)
+    cap(q, 'fr-fin', 'auto-fr-fin')
+    ended = False
+    for _ in range(40):
+        if not q.alive():
+            ended = True
+            break
+        time.sleep(1)
+    check('auto-fr : arret apres installation (reboot=halt)', ended)
+    q.quit()
+    tab = read_table(disk)
+    check('auto-fr : table MBR : Linux 83 active + swap 82',
+          len(tab) == 4 and tab[0][0] == 0x83 and tab[0][3] and tab[1][0] == 0x82,
+          str(tab))
+    check('auto-fr : e2fsck -fn propre', fs_check(disk, [(tab[0][1], tab[0][2])]))
+    check('auto-fr : /etc/localtime = fichier TZif Europe/Paris',
+          zone_copy_ok(disk, tab[0][1], 'Europe/Paris'))
+    checks = [
+        ('nom de machine', 'hostname', r'poste-fr'),
+        ('langue (LANGUAGE=FR)', '. /etc/profile; echo L=$LANGUAGE', r'L=FR'),
+        ('fuseau (/etc/timezone)', 'cat /etc/timezone', r'Europe/Paris'),
+        ('heure locale (date) = heure de Paris', 'date +%H:%M', local_hhmm('Europe/Paris')),
+        ('TZ=America/New_York date (L32API)', 'TZ=America/New_York date +%H:%M',
+         local_hhmm('America/New_York')),
+        ('TZ=Asia/Tokyo date (L32API)', 'TZ=Asia/Tokyo date +%H:%M', local_hhmm('Asia/Tokyo')),
+        ('utilisateur marie (uid 1000)', 'id marie', r'uid=1000\(marie\)'),
+        ('nom complet dans /etc/passwd', 'grep marie /etc/passwd', r'Marie Curie'),
+        ('clavier fr (/etc/default/keyboard)', 'cat /etc/default/keyboard', r'fr'),
+        ('fstab : racine ext4 + swap', 'cat /etc/fstab', r'hda1 / ext4(.|\n)*hda2 none swap'),
+        ('noyau et configuration du chargeur',
+         'ls /boot; cat /boot/linux0.cfg', r'linux0(.|\n)*root=/dev/hda1 rw(.|\n)*keymap=fr'),
+        ('racine montee (df)', 'df | grep hda1', r'/dev/hda1'),
+        ('ext4 (blkid)', 'blkid /dev/hda1', r'ext4'),
+        ('journal de l\'installation copie', 'ls /var/log/install.log', r'install.log'),
+        ('systeme de fichiers racine en ecriture', 'echo ok > /root/t; cat /root/t', r'^ok'),
+    ]
+    boot_verify('auto-fr', disk, 'motdepasse', checks)
+
+
+# ------------------------------------------------------------- auto-de
+def t_auto_de():
+    pre = """lang=de
+keyboard=de
+timezone=Europe/Berlin
+clock=local
+hostname=rechner-de
+rootpw=geheim
+user=hans
+fullname=Hans Müller
+userpw=passwort
+partitioning=manual
+parts=ext3:/:250M,swap:swap:32M,ext3:/home:*
+endwait=3
+reboot=halt
+"""
+    iso = build_iso('auto-de', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
+                    {'preseed.cfg': pre})
+    disk = new_disk('auto-de', 700)
+    q = qemu_cd('auto-de', iso, disk)
+    ok = page(q, 11, 90)
+    check('auto-de : page de progression affichee', ok)
+    time.sleep(5)
+    cap(q, 'de-prog', 'auto-de-installation')
+    ok = q.wait(r'K32SETUP: DONE', 300)
+    check('auto-de : installation terminee (manuel : ext3 + swap + /home)', ok)
+    time.sleep(1.5)
+    for _ in range(40):
+        if not q.alive():
+            break
+        time.sleep(1)
+    q.quit()
+    tab = read_table(disk)
+    check('auto-de : table MBR : 83, 82, 83',
+          len(tab) == 4 and [t[0] for t in tab[:3]] == [0x83, 0x82, 0x83], str(tab))
+    check('auto-de : e2fsck -fn propre (racine et /home)',
+          fs_check(disk, [(tab[0][1], tab[0][2]), (tab[2][1], tab[2][2])]))
+    checks = [
+        ('nom de machine', 'hostname', r'rechner-de'),
+        ('langue (LANGUAGE=DE)', '. /etc/profile; echo L=$LANGUAGE', r'L=DE'),
+        ('fuseau Europe/Berlin', 'cat /etc/timezone', r'Europe/Berlin'),
+        ('horloge materielle : heure locale (adjtime)', 'cat /etc/adjtime', r'LOCAL'),
+        ('heure locale (date) = heure de Berlin', 'date +%H:%M', local_hhmm('Europe/Berlin')),
+        ('utilisateur hans', 'id hans', r'uid=1000\(hans\)'),
+        ('nom complet en UTF-8', 'grep hans /etc/passwd', r'Hans M\xc3\xbcller|Hans M.*ller'),
+        ('clavier de', 'cat /etc/default/keyboard', r'de'),
+        ('fstab : ext3 / + /home + swap', 'cat /etc/fstab',
+         r'hda1 / ext3(.|\n)*hda2 none swap(.|\n)*hda3 /home ext3'),
+        ('/home monte', 'df | grep hda3', r'/home'),
+        ('ext3 : blkid', 'blkid /dev/hda1; blkid /dev/hda3', r'ext3(.|\n)*ext3'),
+        ('dossier personnel de hans (sur /home)', 'ls /home', r'hans'),
+        ('swap actif', 'cat /proc/swaps', r'hda2'),
+    ]
+    boot_verify('auto-de', disk, 'geheim', checks, mem=128)
+
+
+# --------------------------------------------------------------- ui-fr
+def t_ui_fr():
+    iso = build_iso('ui-fr', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'k32setup.verbose=/dev/ttyS0')
+    disk = new_disk('ui-fr', 500)
+    q = qemu_cd('ui-fr', iso, disk)
+    check('ui-fr : assistant lance au demarrage du CD (page 0)', page(q, 0, 90))
+    q.key('up')                                  # English -> Francais
+    time.sleep(0.8)
+    cap(q, 'a', 'fr-01-langue')
+    q.key('ret')
+    check('ui-fr : langue francaise -> page clavier', page(q, 1))
+    q.key('tab')
+    for k in ['q', 'w', 'e', 'r', 't', 'y', 'm', 'comma', '1']:   # azerty,; apres AZERTY
+        q.key(k)
+    time.sleep(0.6)
+    cap(q, 'b', 'fr-02-clavier')
+    q.key('ret')
+    check('ui-fr : page fuseau horaire', page(q, 2))
+    cap(q, 'c', 'fr-03-fuseau')
+    q.key('ret')
+    check('ui-fr : date et heure', page(q, 3))
+    cap(q, 'c2', 'fr-04-heure')
+    q.key('ret')
+    check('ui-fr : nom de machine', page(q, 4))
+    q.key('ret')
+    check('ui-fr : comptes', page(q, 5))
+    q.type('secret')
+    q.key('tab')
+    q.type('secret')
+    q.key('tab')
+    q.type('Jean Dupont')
+    q.key('tab')
+    q.type('jean')
+    q.key('tab')
+    q.type('motdepasse')
+    q.key('tab')
+    q.type('motdepasse')
+    time.sleep(0.5)
+    cap(q, 'd', 'fr-05-comptes')
+    q.key('ret')
+    check('ui-fr : disque', page(q, 6))
+    cap(q, 'e', 'fr-06-disque')
+    q.key('ret')
+    check('ui-fr : methode de partitionnement', page(q, 7))
+    cap(q, 'f', 'fr-07-partitionnement')
+    q.key('ret')
+    check('ui-fr : recapitulatif', page(q, 10))
+    q.key('spc')
+    time.sleep(0.4)
+    cap(q, 'g', 'fr-08-recapitulatif')
+    q.key('tab'); q.key('tab'); q.key('ret')
+    time.sleep(1.0)
+    cap(q, 'g2', 'fr-09-confirmation')
+    q.key('ret')
+    check('ui-fr : installation lancee', page(q, 11, 60))
+    time.sleep(12)
+    cap(q, 'h', 'fr-10-progression')
+    ok = q.wait(r'K32SETUP: page 12\b', 300)
+    check('ui-fr : fin de l\'installation (page finale)', ok)
+    time.sleep(1.5)
+    cap(q, 'i', 'fr-11-fin')
+    q.quit()
+    tab = read_table(disk)
+    check('ui-fr : e2fsck -fn propre', fs_check(disk, [(tab[0][1], tab[0][2])]))
+    t = q.text()
+    check('ui-fr : disposition AZERTY : les touches q w e r t y donnent azerty',
+          'keytest=azerty' in t.replace('\r', ''))
+    checks = [
+        ('nom de machine par defaut', 'hostname', r'linux0'),
+        ('langue FR', '. /etc/profile; echo L=$LANGUAGE', r'L=FR'),
+        ('utilisateur jean', 'id jean', r'uid=1000\(jean\)'),
+        ('fuseau Europe/Paris', 'cat /etc/timezone', r'Europe/Paris'),
+        ('clavier fr', 'cat /etc/default/keyboard', r'XKBLAYOUT="fr"'),
+    ]
+    boot_verify('ui-fr', disk, 'secret', checks)
+
+
+# --------------------------------------------------------------- ui-de
+def t_ui_de():
+    iso = build_iso('ui-de', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'k32setup.verbose=/dev/ttyS0')
+    disk = new_disk('ui-de', 700)
+    q = qemu_cd('ui-de', iso, disk)
+    check('ui-de : assistant lance (page 0)', page(q, 0, 90))
+    # souris : curseur en haut a gauche puis sur "Deutsch", clic, puis "Weiter"
+    q.move(-2000, -2000)
+    time.sleep(0.3)
+    q.move(100, 276)
+    time.sleep(0.3)
+    q.click()
+    time.sleep(0.8)
+    cap(q, 'a', 'de-01-sprache')
+    q.move(630, 385)
+    time.sleep(0.3)
+    q.click()
+    check('ui-de : clic souris sur Deutsch puis Weiter -> page Tastatur', page(q, 1))
+    q.key('tab')
+    for k in ['y', 'z', 'x', 'slash', 'minus', 'shift-2']:
+        q.key(k)
+    time.sleep(0.6)
+    cap(q, 'b', 'de-02-tastatur')
+    q.key('ret')
+    page(q, 2)
+    q.key('ret'); page(q, 3)
+    q.key('ret'); page(q, 4)
+    q.key('ret'); page(q, 5)
+    q.type('geheim'); q.key('tab'); q.type('geheim'); q.key('tab')
+    q.type('Hans Mueller'); q.key('tab'); q.type('hans'); q.key('tab')
+    q.type('passwort'); q.key('tab'); q.type('passwort')
+    q.key('ret'); page(q, 6)
+    q.key('ret'); page(q, 7)
+    q.key('down')                               # manuell
+    time.sleep(0.5)
+    cap(q, 'c', 'de-03-partitionierung')
+    q.key('ret')
+    check('ui-de : partitionnement manuel -> editeur', page(q, 8))
+    cap(q, 'd', 'de-04-editor-leer')
+    q.key('tab'); q.key('ret'); time.sleep(1.0)
+    q.type('300M')
+    cap(q, 'e', 'de-05-neue-partition')
+    q.key('ret'); page(q, 8)
+    q.key('down'); q.key('tab'); q.key('ret'); time.sleep(1.0)
+    q.type('64M'); q.key('tab'); q.key('down'); time.sleep(0.4)
+    q.key('ret'); page(q, 8)
+    time.sleep(0.5)
+    cap(q, 'f', 'de-06-editor')
+    q.key('ret')
+    check('ui-de : roles des partitions', page(q, 9))
+    cap(q, 'g', 'de-07-rollen')
+    q.key('ret')
+    check('ui-de : zusammenfassung', page(q, 10))
+    q.key('spc'); time.sleep(0.3)
+    cap(q, 'h', 'de-08-zusammenfassung')
+    q.key('tab'); q.key('tab'); q.key('ret'); time.sleep(0.8); q.key('ret')
+    check('ui-de : installation lancee', page(q, 11, 60))
+    time.sleep(14)
+    cap(q, 'i', 'de-09-fortschritt')
+    ok = q.wait(r'K32SETUP: page 12\b', 300)
+    check('ui-de : fin de l\'installation', ok)
+    time.sleep(1.5)
+    cap(q, 'j', 'de-10-fertig')
+    t = q.text().replace('\r', '')
+    check('ui-de : clavier QWERTZ (zyx-ß")', 'keytest=zyx-s" layout=de' in t)
+    q.quit()
+    tab = read_table(disk)
+    check('ui-de : table 83 (active) + 82', len(tab) == 4 and tab[0][0] == 0x83 and
+          tab[0][3] and tab[1][0] == 0x82, str(tab))
+    check('ui-de : e2fsck -fn propre', fs_check(disk, [(tab[0][1], tab[0][2])]))
+    checks = [
+        ('langue DE', '. /etc/profile; echo L=$LANGUAGE', r'L=DE'),
+        ('utilisateur hans', 'id hans', r'uid=1000\(hans\)'),
+        ('fuseau Europe/Berlin', 'cat /etc/timezone', r'Europe/Berlin'),
+        ('invite de connexion en allemand', 'echo x', r'x'),
+    ]
+    boot_verify('ui-de', disk, 'geheim', checks)
+
+
+# ---------------------------------------------------------------- text
+def t_text():
+    iso = build_iso('text', 'console=ttyS0 rw text k32setup.verbose=/dev/ttyS0')
+    disk = new_disk('text', 300)
+    q = qemu_cd('text', iso, disk)
+    check('text : assistant en mode texte sur la console VGA', page(q, 0, 90))
+    cap(q, 'a', 'text-01-langue')
+    q.key('up')
+    q.key('ret')
+    check('text : navigation au clavier (page clavier)', page(q, 1))
+    q.key('tab')
+    for k in ['q', 'w', 'e', 'r', 't', 'y']:
+        q.key(k)
+    time.sleep(0.5)
+    cap(q, 'b', 'text-02-clavier')
+    q.key('ret')
+    page(q, 2)
+    cap(q, 'c', 'text-03-fuseau')
+    q.quit()
+
+
+ALL = {'tz': t_tz, 'auto-fr': t_auto_fr, 'auto-de': t_auto_de, 'ui-fr': t_ui_fr,
+       'ui-de': t_ui_de, 'text': t_text}
+os.makedirs(WORK, exist_ok=True)
+for s in (SCEN or list(ALL)):
+    print('=== ' + s, flush=True)
+    try:
+        ALL[s]()
+    except Exception as e:                      # noqa
+        import traceback
+        traceback.print_exc()
+        check(s + ' : exception ' + repr(e), False)
+nok = sum(1 for _, o in RESULTS if o)
+print('RESULTAT : %d ok, %d echec' % (nok, len(RESULTS) - nok))
+sys.exit(0 if nok == len(RESULTS) else 1)

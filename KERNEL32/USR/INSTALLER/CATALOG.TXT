@@ -1,0 +1,1163 @@
+# CATALOG.TXT (UTF-8) : textes de l'assistant d'installation, une cle par
+# bloc, une ligne par langue (fr en de it es pt nl). \n = saut de ligne,
+# %1 et %2 = valeurs inserees. MKDATA.PY genere MSGS.INC (constantes M_xxx).
+@TITLE
+fr: Installation de LINUX-0 KERNEL32
+en: LINUX-0 KERNEL32 installation
+de: Installation von LINUX-0 KERNEL32
+it: Installazione di LINUX-0 KERNEL32
+es: Instalación de LINUX-0 KERNEL32
+pt: Instalação do LINUX-0 KERNEL32
+nl: Installatie van LINUX-0 KERNEL32
+@STEP
+fr: Étape
+en: Step
+de: Schritt
+it: Passo
+es: Paso
+pt: Passo
+nl: Stap
+@BACK
+fr: < Précédent
+en: < Back
+de: < Zurück
+it: < Indietro
+es: < Atrás
+pt: < Anterior
+nl: < Terug
+@NEXT
+fr: Suivant >
+en: Next >
+de: Weiter >
+it: Avanti >
+es: Siguiente >
+pt: Seguinte >
+nl: Volgende >
+@CANCEL
+fr: Annuler
+en: Cancel
+de: Abbrechen
+it: Annulla
+es: Cancelar
+pt: Cancelar
+nl: Annuleren
+@INSTALL
+fr: Installer
+en: Install
+de: Installieren
+it: Installa
+es: Instalar
+pt: Instalar
+nl: Installeren
+@YES
+fr: Oui
+en: Yes
+de: Ja
+it: Sì
+es: Sí
+pt: Sim
+nl: Ja
+@NO
+fr: Non
+en: No
+de: Nein
+it: No
+es: No
+pt: Não
+nl: Nee
+@OK
+fr: OK
+en: OK
+de: OK
+it: OK
+es: Aceptar
+pt: OK
+nl: OK
+@REBOOT
+fr: Redémarrer
+en: Reboot
+de: Neu starten
+it: Riavvia
+es: Reiniciar
+pt: Reiniciar
+nl: Herstarten
+@RETRY
+fr: Réessayer
+en: Retry
+de: Wiederholen
+it: Riprova
+es: Reintentar
+pt: Repetir
+nl: Opnieuw
+@QUIT
+fr: Quitter
+en: Quit
+de: Beenden
+it: Esci
+es: Salir
+pt: Sair
+nl: Afsluiten
+@FOOT
+fr: Tab : suivant  Entrée : valider  Échap : annuler  F2 : shell  F3 : texte
+en: Tab: next  Enter: confirm  Esc: cancel  F2: shell  F3: text mode
+de: Tab: weiter  Eingabe: OK  Esc: Abbruch  F2: Shell  F3: Textmodus
+it: Tab: avanti  Invio: conferma  Esc: annulla  F2: shell  F3: modo testo
+es: Tab: siguiente  Intro: aceptar  Esc: cancelar  F2: shell  F3: texto
+pt: Tab: seguinte  Enter: confirmar  Esc: cancelar  F2: shell  F3: texto
+nl: Tab: volgende  Enter: bevestig  Esc: annuleer  F2: shell  F3: tekst
+@ERR_T
+fr: Erreur
+en: Error
+de: Fehler
+it: Errore
+es: Error
+pt: Erro
+nl: Fout
+@WARN_T
+fr: Attention
+en: Warning
+de: Achtung
+it: Attenzione
+es: Atención
+pt: Atenção
+nl: Let op
+@LANG_T
+fr: Langue
+en: Language
+de: Sprache
+it: Lingua
+es: Idioma
+pt: Idioma
+nl: Taal
+@LANG_I
+fr: Choisissez la langue de l'installation et du système installé.
+en: Choose the language for the installation and for the installed system.
+de: Wählen Sie die Sprache für die Installation und das installierte System.
+it: Scegliete la lingua per l'installazione e per il sistema installato.
+es: Elija el idioma de la instalación y del sistema instalado.
+pt: Escolha o idioma da instalação e do sistema instalado.
+nl: Kies de taal voor de installatie en voor het geïnstalleerde systeem.
+@KEY_T
+fr: Clavier
+en: Keyboard
+de: Tastatur
+it: Tastiera
+es: Teclado
+pt: Teclado
+nl: Toetsenbord
+@KEY_I
+fr: Choisissez la disposition du clavier. Elle est appliquée tout de suite : essayez-la dans le champ de test.
+en: Choose the keyboard layout. It applies immediately: try it in the test field.
+de: Wählen Sie das Tastaturlayout. Es gilt sofort: Testen Sie es im Testfeld.
+it: Scegliete la disposizione della tastiera. Vale subito: provatela nel campo di prova.
+es: Elija la distribución del teclado. Se aplica al instante: pruébela en el campo de prueba.
+pt: Escolha a disposição do teclado. Aplica-se de imediato: experimente no campo de teste.
+nl: Kies de toetsenbordindeling. Ze geldt meteen: probeer ze in het testveld.
+@KEY_TEST
+fr: Test :
+en: Test:
+de: Test:
+it: Prova:
+es: Prueba:
+pt: Teste:
+nl: Test:
+@TZ_T
+fr: Fuseau horaire
+en: Time zone
+de: Zeitzone
+it: Fuso orario
+es: Zona horaria
+pt: Fuso horário
+nl: Tijdzone
+@TZ_I
+fr: Choisissez votre région puis votre ville : l'heure d'été est gérée automatiquement.
+en: Choose your region, then your city: daylight saving time is handled automatically.
+de: Wählen Sie Region und Stadt: die Sommerzeit wird automatisch berücksichtigt.
+it: Scegliete la regione e la città: l'ora legale è gestita automaticamente.
+es: Elija su región y su ciudad: el horario de verano se gestiona automáticamente.
+pt: Escolha a região e a cidade: o horário de verão é gerido automaticamente.
+nl: Kies uw regio en uw stad: zomertijd wordt automatisch verwerkt.
+@TZ_REG
+fr: Région
+en: Region
+de: Region
+it: Regione
+es: Región
+pt: Região
+nl: Regio
+@TZ_CITY
+fr: Ville
+en: City
+de: Stadt
+it: Città
+es: Ciudad
+pt: Cidade
+nl: Stad
+@TZ_NOW
+fr: Heure locale :
+en: Local time:
+de: Ortszeit:
+it: Ora locale:
+es: Hora local:
+pt: Hora local:
+nl: Lokale tijd:
+@CN0
+fr: Afrique
+en: Africa
+de: Afrika
+it: Africa
+es: África
+pt: África
+nl: Afrika
+@CN1
+fr: Amérique
+en: America
+de: Amerika
+it: America
+es: América
+pt: América
+nl: Amerika
+@CN2
+fr: Antarctique
+en: Antarctica
+de: Antarktis
+it: Antartide
+es: Antártida
+pt: Antártida
+nl: Antarctica
+@CN3
+fr: Arctique
+en: Arctic
+de: Arktis
+it: Artico
+es: Ártico
+pt: Ártico
+nl: Arctisch gebied
+@CN4
+fr: Asie
+en: Asia
+de: Asien
+it: Asia
+es: Asia
+pt: Ásia
+nl: Azië
+@CN5
+fr: Atlantique
+en: Atlantic
+de: Atlantik
+it: Atlantico
+es: Atlántico
+pt: Atlântico
+nl: Atlantische Oceaan
+@CN6
+fr: Australie
+en: Australia
+de: Australien
+it: Australia
+es: Australia
+pt: Austrália
+nl: Australië
+@CN7
+fr: Europe
+en: Europe
+de: Europa
+it: Europa
+es: Europa
+pt: Europa
+nl: Europa
+@CN8
+fr: Océan Indien
+en: Indian Ocean
+de: Indischer Ozean
+it: Oceano Indiano
+es: Océano Índico
+pt: Oceano Índico
+nl: Indische Oceaan
+@CN9
+fr: Pacifique
+en: Pacific
+de: Pazifik
+it: Pacifico
+es: Pacífico
+pt: Pacífico
+nl: Stille Oceaan
+@CN10
+fr: UTC
+en: UTC
+de: UTC
+it: UTC
+es: UTC
+pt: UTC
+nl: UTC
+@CLK_T
+fr: Date et heure
+en: Date and time
+de: Datum und Uhrzeit
+it: Data e ora
+es: Fecha y hora
+pt: Data e hora
+nl: Datum en tijd
+@CLK_I
+fr: Vérifiez la date et l'heure locales ; corrigez-les si besoin. Choisissez aussi comment l'horloge matérielle est réglée.
+en: Check the local date and time and correct them if needed. Also choose how the hardware clock is set.
+de: Prüfen Sie Datum und Ortszeit und korrigieren Sie sie bei Bedarf. Legen Sie auch fest, wie die Hardware-Uhr gestellt ist.
+it: Controllate data e ora locali e correggetele se necessario. Scegliete anche come è impostato l'orologio hardware.
+es: Compruebe la fecha y la hora locales y corríjalas si es preciso. Elija también cómo está ajustado el reloj de hardware.
+pt: Verifique a data e a hora locais e corrija-as se necessário. Escolha também como o relógio de hardware está acertado.
+nl: Controleer de lokale datum en tijd en pas ze zo nodig aan. Kies ook hoe de hardwareklok is ingesteld.
+@CLK_DATE
+fr: Date (AAAA-MM-JJ) :
+en: Date (YYYY-MM-DD):
+de: Datum (JJJJ-MM-TT):
+it: Data (AAAA-MM-GG):
+es: Fecha (AAAA-MM-DD):
+pt: Data (AAAA-MM-DD):
+nl: Datum (JJJJ-MM-DD):
+@CLK_TIME
+fr: Heure (HH:MM:SS) :
+en: Time (HH:MM:SS):
+de: Uhrzeit (HH:MM:SS):
+it: Ora (HH:MM:SS):
+es: Hora (HH:MM:SS):
+pt: Hora (HH:MM:SS):
+nl: Tijd (UU:MM:SS):
+@CLK_UTC
+fr: L'horloge matérielle est à l'heure UTC (recommandé)
+en: The hardware clock is set to UTC (recommended)
+de: Die Hardware-Uhr läuft in UTC (empfohlen)
+it: L'orologio hardware è in UTC (consigliato)
+es: El reloj de hardware está en UTC (recomendado)
+pt: O relógio de hardware está em UTC (recomendado)
+nl: De hardwareklok staat op UTC (aanbevolen)
+@CLK_LOC
+fr: L'horloge matérielle est à l'heure locale
+en: The hardware clock is set to local time
+de: Die Hardware-Uhr läuft in Ortszeit
+it: L'orologio hardware è all'ora locale
+es: El reloj de hardware está en hora local
+pt: O relógio de hardware está na hora local
+nl: De hardwareklok staat op lokale tijd
+@CLK_BAD
+fr: Date ou heure invalide.
+en: Invalid date or time.
+de: Ungültiges Datum oder ungültige Uhrzeit.
+it: Data o ora non valida.
+es: Fecha u hora no válida.
+pt: Data ou hora inválida.
+nl: Ongeldige datum of tijd.
+@HOST_T
+fr: Nom de la machine
+en: Host name
+de: Rechnername
+it: Nome del computer
+es: Nombre del equipo
+pt: Nome da máquina
+nl: Computernaam
+@HOST_I
+fr: Donnez un nom à cet ordinateur (lettres, chiffres, tirets et points).
+en: Give this computer a name (letters, digits, hyphens and dots).
+de: Geben Sie diesem Rechner einen Namen (Buchstaben, Ziffern, Bindestriche, Punkte).
+it: Date un nome a questo computer (lettere, cifre, trattini e punti).
+es: Dé un nombre a este equipo (letras, cifras, guiones y puntos).
+pt: Dê um nome a esta máquina (letras, algarismos, hífenes e pontos).
+nl: Geef deze computer een naam (letters, cijfers, koppeltekens en punten).
+@HOST_L
+fr: Nom de la machine :
+en: Host name:
+de: Rechnername:
+it: Nome del computer:
+es: Nombre del equipo:
+pt: Nome da máquina:
+nl: Computernaam:
+@HOST_BAD
+fr: Nom invalide : lettres, chiffres, tirets et points (63 caractères au plus), sans commencer par un tiret.
+en: Invalid name: letters, digits, hyphens and dots (63 characters at most), not starting with a hyphen.
+de: Ungültiger Name: Buchstaben, Ziffern, Bindestriche und Punkte (höchstens 63 Zeichen), kein Bindestrich am Anfang.
+it: Nome non valido: lettere, cifre, trattini e punti (al massimo 63 caratteri), senza trattino iniziale.
+es: Nombre no válido: letras, cifras, guiones y puntos (63 caracteres como máximo), sin guion inicial.
+pt: Nome inválido: letras, algarismos, hífenes e pontos (63 caracteres no máximo), sem hífen inicial.
+nl: Ongeldige naam: letters, cijfers, koppeltekens en punten (maximaal 63 tekens), niet beginnen met een koppelteken.
+@ACC_T
+fr: Comptes
+en: Accounts
+de: Konten
+it: Account
+es: Cuentas
+pt: Contas
+nl: Accounts
+@ACC_I
+fr: Choisissez le mot de passe de l'administrateur (root) et créez un utilisateur. Laissez l'identifiant vide pour ne créer aucun utilisateur.
+en: Choose the administrator (root) password and create a user. Leave the user name empty to create no user.
+de: Legen Sie das Administratorkennwort (root) fest und erstellen Sie einen Benutzer. Ohne Benutzername wird kein Benutzer angelegt.
+it: Scegliete la password dell'amministratore (root) e create un utente. Lasciate vuoto il nome utente per non creare alcun utente.
+es: Elija la contraseña del administrador (root) y cree un usuario. Deje el nombre vacío para no crear ningún usuario.
+pt: Escolha a palavra-passe do administrador (root) e crie um utilizador. Deixe o nome vazio para não criar utilizador.
+nl: Kies het wachtwoord van de beheerder (root) en maak een gebruiker aan. Laat de naam leeg om geen gebruiker te maken.
+@ACC_ROOT
+fr: Mot de passe de root :
+en: Root password:
+de: Root-Kennwort:
+it: Password di root:
+es: Contraseña de root:
+pt: Palavra-passe de root:
+nl: Root-wachtwoord:
+@ACC_AGAIN
+fr: Confirmation :
+en: Confirm:
+de: Bestätigung:
+it: Conferma:
+es: Confirmación:
+pt: Confirmação:
+nl: Bevestiging:
+@ACC_FULL
+fr: Nom complet :
+en: Full name:
+de: Vollständiger Name:
+it: Nome completo:
+es: Nombre completo:
+pt: Nome completo:
+nl: Volledige naam:
+@ACC_USER
+fr: Identifiant :
+en: User name:
+de: Benutzername:
+it: Nome utente:
+es: Usuario:
+pt: Utilizador:
+nl: Gebruikersnaam:
+@ACC_PW
+fr: Mot de passe :
+en: Password:
+de: Kennwort:
+it: Password:
+es: Contraseña:
+pt: Palavra-passe:
+nl: Wachtwoord:
+@ACC_E_ROOT
+fr: Le mot de passe de root ne peut pas être vide.
+en: The root password cannot be empty.
+de: Das Root-Kennwort darf nicht leer sein.
+it: La password di root non può essere vuota.
+es: La contraseña de root no puede estar vacía.
+pt: A palavra-passe de root não pode estar vazia.
+nl: Het root-wachtwoord mag niet leeg zijn.
+@ACC_E_MATCH
+fr: Les deux mots de passe ne sont pas identiques.
+en: The two passwords do not match.
+de: Die beiden Kennwörter stimmen nicht überein.
+it: Le due password non coincidono.
+es: Las dos contraseñas no coinciden.
+pt: As duas palavras-passe não coincidem.
+nl: De twee wachtwoorden komen niet overeen.
+@ACC_E_USER
+fr: Identifiant invalide : lettres minuscules, chiffres, - et _ ; il commence par une lettre.
+en: Invalid user name: lowercase letters, digits, - and _; it starts with a letter.
+de: Ungültiger Benutzername: Kleinbuchstaben, Ziffern, - und _; er beginnt mit einem Buchstaben.
+it: Nome utente non valido: lettere minuscole, cifre, - e _; inizia con una lettera.
+es: Usuario no válido: minúsculas, cifras, - y _; empieza por una letra.
+pt: Utilizador inválido: minúsculas, algarismos, - e _; começa por uma letra.
+nl: Ongeldige gebruikersnaam: kleine letters, cijfers, - en _; begint met een letter.
+@ACC_E_RES
+fr: Cet identifiant est réservé au système.
+en: This user name is reserved by the system.
+de: Dieser Benutzername ist vom System reserviert.
+it: Questo nome utente è riservato al sistema.
+es: Este usuario está reservado por el sistema.
+pt: Este utilizador está reservado pelo sistema.
+nl: Deze gebruikersnaam is gereserveerd door het systeem.
+@DISK_T
+fr: Disque dur
+en: Hard disk
+de: Festplatte
+it: Disco fisso
+es: Disco duro
+pt: Disco rígido
+nl: Harde schijf
+@DISK_I
+fr: Choisissez le disque où installer le système. Le CD-ROM d'installation et les disques en cours d'utilisation ne sont pas proposés.
+en: Choose the disk to install the system on. The installation CD-ROM and disks in use are not offered.
+de: Wählen Sie die Festplatte für die Installation. Die Installations-CD und benutzte Laufwerke werden nicht angeboten.
+it: Scegliete il disco su cui installare il sistema. Il CD-ROM di installazione e i dischi in uso non sono proposti.
+es: Elija el disco donde instalar el sistema. No se ofrecen el CD-ROM de instalación ni los discos en uso.
+pt: Escolha o disco onde instalar o sistema. O CD-ROM de instalação e os discos em uso não são propostos.
+nl: Kies de schijf voor de installatie. De installatie-cd en schijven die in gebruik zijn worden niet getoond.
+@DISK_NONE
+fr: Aucun disque disponible pour l'installation.
+en: No disk is available for the installation.
+de: Es ist keine Festplatte für die Installation verfügbar.
+it: Nessun disco disponibile per l'installazione.
+es: No hay ningún disco disponible para la instalación.
+pt: Nenhum disco disponível para a instalação.
+nl: Er is geen schijf beschikbaar voor de installatie.
+@METH_T
+fr: Partitionnement
+en: Partitioning
+de: Partitionierung
+it: Partizionamento
+es: Particionado
+pt: Particionamento
+nl: Partitioneren
+@METH_I
+fr: Comment partitionner %1 ?
+en: How do you want to partition %1?
+de: Wie soll %1 partitioniert werden?
+it: Come partizionare %1?
+es: ¿Cómo desea particionar %1?
+pt: Como particionar %1?
+nl: Hoe wilt u %1 partitioneren?
+@METH_GUIDED
+fr: Assisté : utiliser tout le disque
+en: Guided: use the entire disk
+de: Geführt: ganze Festplatte verwenden
+it: Guidato: usare l'intero disco
+es: Guiado: usar el disco completo
+pt: Guiado: usar o disco inteiro
+nl: Begeleid: de hele schijf gebruiken
+@METH_MANUAL
+fr: Manuel : modifier la table des partitions
+en: Manual: edit the partition table
+de: Manuell: Partitionstabelle bearbeiten
+it: Manuale: modificare la tabella delle partizioni
+es: Manual: editar la tabla de particiones
+pt: Manual: editar a tabela de partições
+nl: Handmatig: de partitietabel bewerken
+@METH_SWAP
+fr: Créer une partition d'échange (swap)
+en: Create a swap partition
+de: Auslagerungspartition (Swap) anlegen
+it: Creare una partizione di swap
+es: Crear una partición de intercambio (swap)
+pt: Criar uma partição de troca (swap)
+nl: Een swappartitie maken
+@METH_SWAPMB
+fr: Taille du swap (Mo) :
+en: Swap size (MB):
+de: Swap-Größe (MB):
+it: Dimensione dello swap (MB):
+es: Tamaño del swap (MB):
+pt: Tamanho do swap (MB):
+nl: Swapgrootte (MB):
+@METH_FS
+fr: Système de fichiers de la racine :
+en: Root file system:
+de: Dateisystem der Wurzel:
+it: File system della radice:
+es: Sistema de archivos de la raíz:
+pt: Sistema de ficheiros da raiz:
+nl: Bestandssysteem van de root:
+@METH_E_SWAP
+fr: Taille de swap invalide (entre 8 Mo et la moitié du disque).
+en: Invalid swap size (between 8 MB and half of the disk).
+de: Ungültige Swap-Größe (zwischen 8 MB und der Hälfte der Festplatte).
+it: Dimensione dello swap non valida (tra 8 MB e metà del disco).
+es: Tamaño de swap no válido (entre 8 MB y la mitad del disco).
+pt: Tamanho de swap inválido (entre 8 MB e metade do disco).
+nl: Ongeldige swapgrootte (tussen 8 MB en de helft van de schijf).
+@METH_E_SMALL
+fr: Le disque est trop petit : il faut au moins 64 Mo.
+en: The disk is too small: at least 64 MB are required.
+de: Die Festplatte ist zu klein: mindestens 64 MB erforderlich.
+it: Il disco è troppo piccolo: servono almeno 64 MB.
+es: El disco es demasiado pequeño: se necesitan al menos 64 MB.
+pt: O disco é demasiado pequeno: são precisos pelo menos 64 MB.
+nl: De schijf is te klein: minstens 64 MB nodig.
+@PED_T
+fr: Éditeur de partitions
+en: Partition editor
+de: Partitions-Editor
+it: Editor delle partizioni
+es: Editor de particiones
+pt: Editor de partições
+nl: Partitie-editor
+@PED_I
+fr: Disque %1. Rien n'est écrit sur le disque avant la confirmation finale.
+en: Disk %1. Nothing is written to the disk before the final confirmation.
+de: Festplatte %1. Vor der abschließenden Bestätigung wird nichts geschrieben.
+it: Disco %1. Nulla viene scritto sul disco prima della conferma finale.
+es: Disco %1. No se escribe nada en el disco antes de la confirmación final.
+pt: Disco %1. Nada é escrito no disco antes da confirmação final.
+nl: Schijf %1. Er wordt niets geschreven vóór de laatste bevestiging.
+@PED_HN
+fr: N°
+en: No.
+de: Nr.
+it: N.
+es: N.º
+pt: N.º
+nl: Nr.
+@PED_HB
+fr: Amorç.
+en: Boot
+de: Boot
+it: Avvio
+es: Arranq.
+pt: Arranque
+nl: Boot
+@PED_HS
+fr: Début Mo
+en: Start MB
+de: Start MB
+it: Inizio MB
+es: Inicio MB
+pt: Início MB
+nl: Begin MB
+@PED_HZ
+fr: Taille Mo
+en: Size MB
+de: Größe MB
+it: Dim. MB
+es: Tamaño MB
+pt: Tam. MB
+nl: Grootte MB
+@PED_FREE
+fr: espace libre
+en: free space
+de: freier Platz
+it: spazio libero
+es: espacio libre
+pt: espaço livre
+nl: vrije ruimte
+@PED_NEW
+fr: Créer
+en: New
+de: Neu
+it: Nuova
+es: Nueva
+pt: Nova
+nl: Nieuw
+@PED_DEL
+fr: Supprimer
+en: Delete
+de: Löschen
+it: Elimina
+es: Borrar
+pt: Apagar
+nl: Wissen
+@PED_TYPE
+fr: Type
+en: Type
+de: Typ
+it: Tipo
+es: Tipo
+pt: Tipo
+nl: Type
+@PED_BOOT
+fr: Amorçable
+en: Bootable
+de: Bootfähig
+it: Avviabile
+es: Arrancable
+pt: Arrancável
+nl: Opstartbaar
+@PED_CLEAR
+fr: Tout effacer
+en: Clear all
+de: Alles löschen
+it: Cancella tutto
+es: Borrar todo
+pt: Apagar tudo
+nl: Alles wissen
+@PED_NEWT
+fr: Nouvelle partition
+en: New partition
+de: Neue Partition
+it: Nuova partizione
+es: Nueva partición
+pt: Nova partição
+nl: Nieuwe partitie
+@PED_SIZE
+fr: Taille (ex. 500M ou 2G, vide = tout l'espace) :
+en: Size (e.g. 500M or 2G, empty = all the space):
+de: Größe (z. B. 500M oder 2G, leer = gesamter Platz):
+it: Dimensione (es. 500M o 2G, vuoto = tutto lo spazio):
+es: Tamaño (p. ej. 500M o 2G, vacío = todo el espacio):
+pt: Tamanho (ex. 500M ou 2G, vazio = todo o espaço):
+nl: Grootte (bijv. 500M of 2G, leeg = alle ruimte):
+@PED_NOSLOT
+fr: Les quatre partitions primaires sont déjà utilisées.
+en: All four primary partitions are already in use.
+de: Alle vier primären Partitionen sind bereits belegt.
+it: Le quattro partizioni primarie sono già usate.
+es: Las cuatro particiones primarias ya están en uso.
+pt: As quatro partições primárias já estão em uso.
+nl: Alle vier de primaire partities zijn al in gebruik.
+@PED_NOSPACE
+fr: Sélectionnez une ligne « espace libre ».
+en: Select a "free space" line.
+de: Wählen Sie eine Zeile „freier Platz“.
+it: Selezionate una riga «spazio libero».
+es: Seleccione una línea «espacio libre».
+pt: Selecione uma linha «espaço livre».
+nl: Selecteer een regel „vrije ruimte”.
+@PED_ERRSIZE
+fr: Taille invalide ou trop grande pour l'espace libre (1 Mo minimum).
+en: Invalid size, or larger than the free space (1 MB minimum).
+de: Ungültige Größe oder größer als der freie Platz (mindestens 1 MB).
+it: Dimensione non valida o superiore allo spazio libero (minimo 1 MB).
+es: Tamaño no válido o mayor que el espacio libre (mínimo 1 MB).
+pt: Tamanho inválido ou maior que o espaço livre (mínimo 1 MB).
+nl: Ongeldige grootte of groter dan de vrije ruimte (minimaal 1 MB).
+@PED_CONFDEL
+fr: Supprimer la partition %1 ?
+en: Delete partition %1?
+de: Partition %1 löschen?
+it: Eliminare la partizione %1?
+es: ¿Borrar la partición %1?
+pt: Apagar a partição %1?
+nl: Partitie %1 wissen?
+@PED_CONFCLR
+fr: Supprimer toutes les partitions du disque ?
+en: Delete all the partitions of the disk?
+de: Alle Partitionen der Festplatte löschen?
+it: Eliminare tutte le partizioni del disco?
+es: ¿Borrar todas las particiones del disco?
+pt: Apagar todas as partições do disco?
+nl: Alle partities van de schijf wissen?
+@PED_TLINUX
+fr: Linux (83)
+en: Linux (83)
+de: Linux (83)
+it: Linux (83)
+es: Linux (83)
+pt: Linux (83)
+nl: Linux (83)
+@PED_TSWAP
+fr: Linux swap (82)
+en: Linux swap (82)
+de: Linux-Swap (82)
+it: Linux swap (82)
+es: Linux swap (82)
+pt: Linux swap (82)
+nl: Linux swap (82)
+@ROLE_T
+fr: Points de montage
+en: Mount points
+de: Einhängepunkte
+it: Punti di mount
+es: Puntos de montaje
+pt: Pontos de montagem
+nl: Koppelpunten
+@ROLE_I
+fr: Indiquez le rôle de chaque partition (bouton « Rôle »). Une partition racine (/) est indispensable ; elle sera formatée.
+en: Set the role of each partition (« Role » button). One root partition (/) is required; it will be formatted.
+de: Legen Sie die Rolle jeder Partition fest (Schaltfläche „Rolle“). Eine Wurzelpartition (/) ist erforderlich; sie wird formatiert.
+it: Indicate il ruolo di ogni partizione (pulsante «Ruolo»). Serve una partizione radice (/); verrà formattata.
+es: Indique la función de cada partición (botón «Función»). Se necesita una partición raíz (/); se formateará.
+pt: Indique a função de cada partição (botão «Função»). É indispensável uma partição raiz (/); será formatada.
+nl: Geef de rol van elke partitie aan (knop „Rol”). Een rootpartitie (/) is vereist; ze wordt geformatteerd.
+@ROLE_B
+fr: Rôle
+en: Role
+de: Rolle
+it: Ruolo
+es: Función
+pt: Função
+nl: Rol
+@ROLE_NONE
+fr: inutilisée
+en: unused
+de: unbenutzt
+it: non usata
+es: sin usar
+pt: não usada
+nl: ongebruikt
+@ROLE_ROOT
+fr: / (racine, formatée)
+en: / (root, formatted)
+de: / (Wurzel, formatiert)
+it: / (radice, formattata)
+es: / (raíz, formateada)
+pt: / (raiz, formatada)
+nl: / (root, geformatteerd)
+@ROLE_SWAP
+fr: swap (formatée)
+en: swap (formatted)
+de: Swap (formatiert)
+it: swap (formattata)
+es: swap (formateada)
+pt: swap (formatada)
+nl: swap (geformatteerd)
+@ROLE_HOME
+fr: /home (formatée)
+en: /home (formatted)
+de: /home (formatiert)
+it: /home (formattata)
+es: /home (formateada)
+pt: /home (formatada)
+nl: /home (geformatteerd)
+@ROLE_FS
+fr: Système de fichiers :
+en: File system:
+de: Dateisystem:
+it: File system:
+es: Sistema de archivos:
+pt: Sistema de ficheiros:
+nl: Bestandssysteem:
+@ROLE_E_ROOT
+fr: Il faut exactement une partition racine (/).
+en: Exactly one root partition (/) is required.
+de: Es wird genau eine Wurzelpartition (/) benötigt.
+it: Serve esattamente una partizione radice (/).
+es: Se necesita exactamente una partición raíz (/).
+pt: É necessária exatamente uma partição raiz (/).
+nl: Er is precies één rootpartitie (/) nodig.
+@ROLE_E_ONE
+fr: Une seule partition swap et une seule partition /home sont admises.
+en: Only one swap partition and one /home partition are allowed.
+de: Es sind nur eine Swap- und eine /home-Partition erlaubt.
+it: È ammessa una sola partizione swap e una sola partizione /home.
+es: Solo se admite una partición swap y una partición /home.
+pt: Só é admitida uma partição swap e uma partição /home.
+nl: Slechts één swappartitie en één /home-partitie zijn toegestaan.
+@ROLE_E_SMALL
+fr: La partition racine est trop petite (64 Mo au moins).
+en: The root partition is too small (at least 64 MB).
+de: Die Wurzelpartition ist zu klein (mindestens 64 MB).
+it: La partizione radice è troppo piccola (almeno 64 MB).
+es: La partición raíz es demasiado pequeña (al menos 64 MB).
+pt: A partição raiz é demasiado pequena (pelo menos 64 MB).
+nl: De rootpartitie is te klein (minstens 64 MB).
+@SUM_T
+fr: Récapitulatif
+en: Summary
+de: Zusammenfassung
+it: Riepilogo
+es: Resumen
+pt: Resumo
+nl: Overzicht
+@SUM_I
+fr: Relisez ce qui va être fait avant de lancer l'installation.
+en: Review what is about to be done before starting the installation.
+de: Prüfen Sie, was geschehen wird, bevor Sie die Installation starten.
+it: Rileggete ciò che verrà fatto prima di avviare l'installazione.
+es: Revise lo que se va a hacer antes de iniciar la instalación.
+pt: Reveja o que vai ser feito antes de iniciar a instalação.
+nl: Controleer wat er gaat gebeuren voordat u de installatie start.
+@SUM_LANG
+fr: Langue : %1
+en: Language: %1
+de: Sprache: %1
+it: Lingua: %1
+es: Idioma: %1
+pt: Idioma: %1
+nl: Taal: %1
+@SUM_KEY
+fr: Clavier : %1
+en: Keyboard: %1
+de: Tastatur: %1
+it: Tastiera: %1
+es: Teclado: %1
+pt: Teclado: %1
+nl: Toetsenbord: %1
+@SUM_TZ
+fr: Fuseau horaire : %1
+en: Time zone: %1
+de: Zeitzone: %1
+it: Fuso orario: %1
+es: Zona horaria: %1
+pt: Fuso horário: %1
+nl: Tijdzone: %1
+@SUM_HOST
+fr: Machine : %1
+en: Host: %1
+de: Rechner: %1
+it: Computer: %1
+es: Equipo: %1
+pt: Máquina: %1
+nl: Computer: %1
+@SUM_USER
+fr: Utilisateur : %1
+en: User: %1
+de: Benutzer: %1
+it: Utente: %1
+es: Usuario: %1
+pt: Utilizador: %1
+nl: Gebruiker: %1
+@SUM_NOUSER
+fr: aucun
+en: none
+de: keiner
+it: nessuno
+es: ninguno
+pt: nenhum
+nl: geen
+@SUM_DISK
+fr: Disque : %1 (%2 Mo)
+en: Disk: %1 (%2 MB)
+de: Festplatte: %1 (%2 MB)
+it: Disco: %1 (%2 MB)
+es: Disco: %1 (%2 MB)
+pt: Disco: %1 (%2 MB)
+nl: Schijf: %1 (%2 MB)
+@SUM_PART
+fr: %1 : %2 Mo, %3
+en: %1: %2 MB, %3
+de: %1: %2 MB, %3
+it: %1: %2 MB, %3
+es: %1: %2 MB, %3
+pt: %1: %2 MB, %3
+nl: %1: %2 MB, %3
+@SUM_CONF
+fr: Je confirme : tout le contenu de %1 sera définitivement effacé.
+en: I confirm: all the contents of %1 will be permanently erased.
+de: Ich bestätige: der gesamte Inhalt von %1 wird endgültig gelöscht.
+it: Confermo: tutto il contenuto di %1 verrà cancellato definitivamente.
+es: Confirmo: todo el contenido de %1 se borrará definitivamente.
+pt: Confirmo: todo o conteúdo de %1 será apagado definitivamente.
+nl: Ik bevestig: alle gegevens op %1 worden definitief gewist.
+@SUM_ASK
+fr: Lancer l'installation maintenant ?
+en: Start the installation now?
+de: Installation jetzt starten?
+it: Avviare ora l'installazione?
+es: ¿Iniciar la instalación ahora?
+pt: Iniciar a instalação agora?
+nl: De installatie nu starten?
+@INST_T
+fr: Installation en cours
+en: Installing
+de: Installation läuft
+it: Installazione in corso
+es: Instalando
+pt: A instalar
+nl: Bezig met installeren
+@INST_1
+fr: Partitionnement du disque...
+en: Partitioning the disk...
+de: Festplatte wird partitioniert...
+it: Partizionamento del disco...
+es: Particionando el disco...
+pt: A particionar o disco...
+nl: Schijf partitioneren...
+@INST_2
+fr: Formatage des partitions...
+en: Formatting the partitions...
+de: Partitionen werden formatiert...
+it: Formattazione delle partizioni...
+es: Formateando las particiones...
+pt: A formatar as partições...
+nl: Partities formatteren...
+@INST_3
+fr: Montage des systèmes de fichiers...
+en: Mounting the file systems...
+de: Dateisysteme werden eingehängt...
+it: Montaggio dei file system...
+es: Montando los sistemas de archivos...
+pt: A montar os sistemas de ficheiros...
+nl: Bestandssystemen koppelen...
+@INST_4
+fr: Copie des fichiers du système...
+en: Copying the system files...
+de: Systemdateien werden kopiert...
+it: Copia dei file di sistema...
+es: Copiando los archivos del sistema...
+pt: A copiar os ficheiros do sistema...
+nl: Systeembestanden kopiëren...
+@INST_5
+fr: Configuration du système...
+en: Configuring the system...
+de: System wird konfiguriert...
+it: Configurazione del sistema...
+es: Configurando el sistema...
+pt: A configurar o sistema...
+nl: Systeem configureren...
+@INST_6
+fr: Installation du chargeur d'amorçage...
+en: Installing the boot loader...
+de: Bootlader wird installiert...
+it: Installazione del boot loader...
+es: Instalando el cargador de arranque...
+pt: A instalar o carregador de arranque...
+nl: Bootloader installeren...
+@INST_7
+fr: Finalisation...
+en: Finishing...
+de: Abschluss...
+it: Finalizzazione...
+es: Finalizando...
+pt: A finalizar...
+nl: Afronden...
+@INST_FAIL
+fr: L'installation a échoué. Les détails sont dans /var/log/install.log.
+en: The installation failed. Details are in /var/log/install.log.
+de: Die Installation ist fehlgeschlagen. Einzelheiten stehen in /var/log/install.log.
+it: L'installazione è fallita. I dettagli sono in /var/log/install.log.
+es: La instalación ha fallado. Los detalles están en /var/log/install.log.
+pt: A instalação falhou. Os detalhes estão em /var/log/install.log.
+nl: De installatie is mislukt. Details staan in /var/log/install.log.
+@L_PART
+fr: Écriture de la table des partitions sur %1
+en: Writing the partition table on %1
+de: Partitionstabelle wird auf %1 geschrieben
+it: Scrittura della tabella delle partizioni su %1
+es: Escribiendo la tabla de particiones en %1
+pt: A escrever a tabela de partições em %1
+nl: Partitietabel schrijven op %1
+@L_FMT
+fr: Formatage de %1 en %2
+en: Formatting %1 as %2
+de: %1 wird als %2 formatiert
+it: Formattazione di %1 come %2
+es: Formateando %1 como %2
+pt: A formatar %1 como %2
+nl: %1 formatteren als %2
+@L_SWAP
+fr: Préparation du swap %1
+en: Preparing swap %1
+de: Swap %1 wird vorbereitet
+it: Preparazione dello swap %1
+es: Preparando el swap %1
+pt: A preparar o swap %1
+nl: Swap %1 voorbereiden
+@L_MNT
+fr: Montage de %1 sur %2
+en: Mounting %1 on %2
+de: %1 wird auf %2 eingehängt
+it: Montaggio di %1 su %2
+es: Montando %1 en %2
+pt: A montar %1 em %2
+nl: %1 koppelen op %2
+@L_COPY
+fr: Copie du système depuis le CD-ROM
+en: Copying the system from the CD-ROM
+de: System wird von der CD-ROM kopiert
+it: Copia del sistema dal CD-ROM
+es: Copiando el sistema desde el CD-ROM
+pt: A copiar o sistema do CD-ROM
+nl: Systeem kopiëren van de cd-rom
+@L_CFG
+fr: Écriture de la configuration
+en: Writing the configuration
+de: Konfiguration wird geschrieben
+it: Scrittura della configurazione
+es: Escribiendo la configuración
+pt: A escrever a configuração
+nl: Configuratie schrijven
+@L_BOOT
+fr: Installation du noyau et du chargeur
+en: Installing the kernel and the boot loader
+de: Kernel und Bootlader werden installiert
+it: Installazione del kernel e del boot loader
+es: Instalando el núcleo y el cargador
+pt: A instalar o núcleo e o carregador
+nl: Kernel en bootloader installeren
+@L_FILES
+fr: %1 fichiers copiés
+en: %1 files copied
+de: %1 Dateien kopiert
+it: %1 file copiati
+es: %1 archivos copiados
+pt: %1 ficheiros copiados
+nl: %1 bestanden gekopieerd
+@E_PART
+fr: Impossible d'écrire la table des partitions sur %1.
+en: Cannot write the partition table on %1.
+de: Die Partitionstabelle auf %1 kann nicht geschrieben werden.
+it: Impossibile scrivere la tabella delle partizioni su %1.
+es: No se puede escribir la tabla de particiones en %1.
+pt: Não é possível escrever a tabela de partições em %1.
+nl: Kan de partitietabel op %1 niet schrijven.
+@E_REREAD
+fr: Le noyau n'a pas relu la table des partitions de %1.
+en: The kernel did not re-read the partition table of %1.
+de: Der Kernel hat die Partitionstabelle von %1 nicht neu gelesen.
+it: Il kernel non ha riletto la tabella delle partizioni di %1.
+es: El núcleo no ha vuelto a leer la tabla de particiones de %1.
+pt: O núcleo não voltou a ler a tabela de partições de %1.
+nl: De kernel heeft de partitietabel van %1 niet opnieuw gelezen.
+@E_FMT
+fr: Le formatage de %1 a échoué.
+en: Formatting %1 failed.
+de: Das Formatieren von %1 ist fehlgeschlagen.
+it: La formattazione di %1 è fallita.
+es: Ha fallado el formateo de %1.
+pt: A formatação de %1 falhou.
+nl: Het formatteren van %1 is mislukt.
+@E_MNT
+fr: Impossible de monter %1.
+en: Cannot mount %1.
+de: %1 kann nicht eingehängt werden.
+it: Impossibile montare %1.
+es: No se puede montar %1.
+pt: Não é possível montar %1.
+nl: Kan %1 niet koppelen.
+@E_CD
+fr: Le CD-ROM d'installation est introuvable (fichier system.tar).
+en: The installation CD-ROM cannot be found (file system.tar).
+de: Die Installations-CD wurde nicht gefunden (Datei system.tar).
+it: Il CD-ROM di installazione non è stato trovato (file system.tar).
+es: No se encuentra el CD-ROM de instalación (archivo system.tar).
+pt: O CD-ROM de instalação não foi encontrado (ficheiro system.tar).
+nl: De installatie-cd is niet gevonden (bestand system.tar).
+@E_COPY
+fr: Erreur pendant la copie : %1
+en: Error while copying: %1
+de: Fehler beim Kopieren: %1
+it: Errore durante la copia: %1
+es: Error durante la copia: %1
+pt: Erro durante a cópia: %1
+nl: Fout tijdens het kopiëren: %1
+@E_CFG
+fr: Impossible d'écrire la configuration : %1
+en: Cannot write the configuration: %1
+de: Die Konfiguration kann nicht geschrieben werden: %1
+it: Impossibile scrivere la configurazione: %1
+es: No se puede escribir la configuración: %1
+pt: Não é possível escrever a configuração: %1
+nl: Kan de configuratie niet schrijven: %1
+@E_BUSY
+fr: %1 est utilisé (monté) : choisissez un autre disque.
+en: %1 is in use (mounted): choose another disk.
+de: %1 wird benutzt (eingehängt): wählen Sie eine andere Festplatte.
+it: %1 è in uso (montato): scegliete un altro disco.
+es: %1 está en uso (montado): elija otro disco.
+pt: %1 está em uso (montado): escolha outro disco.
+nl: %1 is in gebruik (gekoppeld): kies een andere schijf.
+@END_T
+fr: Installation terminée
+en: Installation complete
+de: Installation abgeschlossen
+it: Installazione completata
+es: Instalación terminada
+pt: Instalação concluída
+nl: Installatie voltooid
+@END_I
+fr: LINUX-0 KERNEL32 est installé sur le disque dur.\n\nRetirez le CD-ROM d'installation, puis redémarrez l'ordinateur pour utiliser le nouveau système.
+en: LINUX-0 KERNEL32 is installed on the hard disk.\n\nRemove the installation CD-ROM, then restart the computer to use the new system.
+de: LINUX-0 KERNEL32 ist auf der Festplatte installiert.\n\nEntfernen Sie die Installations-CD und starten Sie den Rechner neu, um das neue System zu verwenden.
+it: LINUX-0 KERNEL32 è installato sul disco fisso.\n\nRimuovete il CD-ROM di installazione e riavviate il computer per usare il nuovo sistema.
+es: LINUX-0 KERNEL32 está instalado en el disco duro.\n\nRetire el CD-ROM de instalación y reinicie el equipo para usar el nuevo sistema.
+pt: O LINUX-0 KERNEL32 está instalado no disco rígido.\n\nRetire o CD-ROM de instalação e reinicie o computador para usar o novo sistema.
+nl: LINUX-0 KERNEL32 is geïnstalleerd op de harde schijf.\n\nVerwijder de installatie-cd en start de computer opnieuw op om het nieuwe systeem te gebruiken.
+@CANCEL_T
+fr: Quitter l'installation
+en: Quit the installation
+de: Installation beenden
+it: Esci dall'installazione
+es: Salir de la instalación
+pt: Sair da instalação
+nl: Installatie afsluiten
+@CANCEL_Q
+fr: Voulez-vous vraiment quitter l'installation ? Le disque dur ne sera pas modifié.
+en: Do you really want to quit the installation? The hard disk will not be modified.
+de: Möchten Sie die Installation wirklich beenden? Die Festplatte wird nicht verändert.
+it: Volete davvero uscire dall'installazione? Il disco fisso non verrà modificato.
+es: ¿Realmente desea salir de la instalación? El disco duro no se modificará.
+pt: Quer mesmo sair da instalação? O disco rígido não será modificado.
+nl: Wilt u de installatie echt afsluiten? De harde schijf wordt niet gewijzigd.
+@SHELL_Q
+fr: Ouvrir un shell de secours ? L'assistant reprendra à la fermeture du shell (commande exit).
+en: Open a rescue shell? The installer will resume when the shell is closed (exit command).
+de: Eine Rettungs-Shell öffnen? Der Assistent wird nach dem Schließen der Shell (Befehl exit) fortgesetzt.
+it: Aprire una shell di emergenza? L'assistente riprenderà alla chiusura della shell (comando exit).
+es: ¿Abrir un shell de rescate? El asistente continuará al cerrar el shell (orden exit).
+pt: Abrir uma shell de recuperação? O assistente continua ao fechar a shell (comando exit).
+nl: Een noodshell openen? De installatie gaat verder zodra de shell wordt gesloten (opdracht exit).
+@NOFB
+fr: Pas d'écran graphique : l'assistant utilise le mode texte.
+en: No graphics screen: the installer uses text mode.
+de: Kein Grafikbildschirm: der Assistent verwendet den Textmodus.
+it: Nessuno schermo grafico: l'assistente usa la modalità testo.
+es: Sin pantalla gráfica: el asistente usa el modo texto.
+pt: Sem ecrã gráfico: o assistente usa o modo de texto.
+nl: Geen grafisch scherm: de installatie gebruikt de tekstmodus.

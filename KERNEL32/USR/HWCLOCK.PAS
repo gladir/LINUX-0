@@ -3,7 +3,10 @@
   @website(https://www.gladir.com/linux-0)
   @abstract(Target: LPC -3X)
   @description: /sbin/hwclock : horloge materielle (/dev/rtc) :
-      hwclock [-r] [-s] [-w] [--utc].
+      hwclock [-r] [-s] [-w] [--utc | --localtime].
+      L'horloge materielle est lue/ecrite en UTC, ou en heure locale (fuseau
+      TZ ou /etc/localtime) si /etc/adjtime se termine par LOCAL ou avec
+      --localtime (--utc force UTC).
 }
 
 Program HWCLOCK;
@@ -63,6 +66,8 @@ Var
   A : String;
   T : Array[0..8] Of LongInt;
   Y, Mo, D, H, Mi, S, Secs : LongInt;
+  LocalClk : Boolean;
+  Ln : String;
 
 Function Two(V : LongInt) : String;
 Begin
@@ -71,9 +76,20 @@ End;
 
 BEGIN
   Mode := 0;
+  LocalClk := False;
+  Fd := SysOpen('/etc/adjtime', O_RDONLY, 0);
+  If Fd >= 0 Then
+  Begin
+    While SysReadLine(Fd, Ln) Do
+      If Ln = 'LOCAL' Then LocalClk := True
+      Else If Ln = 'UTC' Then LocalClk := False;
+    SysClose(Fd);
+  End;
   For I := 1 To SysArgCount - 1 Do
   Begin
     A := SysArgStr(I);
+    If A = '--localtime' Then LocalClk := True;
+    If A = '--utc' Then LocalClk := False;
     If (A = '-s') Or (A = '--hctosys') Then Mode := 1
     Else If (A = '-w') Or (A = '--systohc') Then Mode := 2
     Else If (A = '-r') Or (A = '--show') Then Mode := 0;
@@ -89,6 +105,7 @@ BEGIN
   Begin
     { struct rtc_time : sec min hour mday mon year wday yday isdst }
     Secs := SysTime;
+    If LocalClk Then Secs := Secs + LnxTzAt(Secs);
     LnxCivil(Secs Div 86400, Y, Mo, D);
     T[0] := Secs Mod 60;
     T[1] := (Secs Mod 3600) Div 60;
@@ -117,6 +134,7 @@ BEGIN
   Begin
     Secs := LnxDaysFromCivil(Y, Mo, T[3]) * 86400 + T[2] * 3600 +
             T[1] * 60 + T[0];
+    If LocalClk Then Secs := LnxTzUtcOf(Secs);
     LnxTmp[0] := Secs;
     LnxTmp[1] := 0;
     If LnxSys3(79, LongInt(@LnxTmp), 0, 0) < 0 Then

@@ -13,3 +13,26 @@ Verification : KERNEL32/TESTS/E2CHECK.SH IMAGE/LINUX32-HD.IMG
 L'image n'est pas conservee dans le depot (fichier creux de 64 Mo) : la
 regenerer par BUILD.SH (TESTKERNEL=1 tant que le noyau KERNEL32.PAS n'existe
 pas : noyau de test TESTS/B/TESTK.ASM).
+
+KERNEL32-INSTALL.ISO : CD-ROM d'installation graphique (non conserve dans le
+depot : le regenerer par  KERNEL32/BUILD.SH cd  ou
+KERNEL32/TOOLS/MKINSTALLCD.SH -o KERNEL32-INSTALL.ISO).
+  Contenu : /boot/linux0 (noyau de production), /boot/initrd.img (systeme live
+  + assistant /sbin/k32-setup), /system.tar (systeme a installer), README.TXT.
+  Amorcage : qemu-system-i386 -m 256 -vga std -cdrom IMAGE/KERNEL32-INSTALL.ISO \
+             -boot d -drive file=disque.img,format=raw,if=ide,index=0
+  (disque.img : un fichier creux, par exemple  truncate -s 1G disque.img ;
+  le CD est /dev/hdc, le disque /dev/hda). Les 7 langues (francais, English,
+  Deutsch, Italiano, Espanol, Portugues, Nederlands), la disposition du clavier,
+  le fuseau horaire, le partitionnement (assiste ou manuel) et le formatage
+  se choisissent a l'ecran, a la souris ou au clavier (Tab, Entree, Echap,
+  F2 : shell de secours, F3 : mode texte). Rien n'est ecrit sur le disque
+  avant la confirmation du recapitulatif.
+  Installation sans intervention : ajouter  preseed=/cdrom/preseed.cfg  a la
+  ligne de commande du noyau (fichier cle=valeur, voir KERNEL32/README.md,
+  "CD-ROM d'installation"). Apres l'installation : retirer le CD, redemarrer.
+  Journal : /var/log/install.log (copie dans le systeme installe).
+
+CAPTURES/ : captures d'ecran PNG de l'assistant (francais : fr-*, allemand :
+  de-*, installations automatiques : auto-*, mode texte : text-*), prises par
+  KERNEL32/TESTS/U/RUNINST.SH sous QEMU (screendump).

@@ -21,7 +21,7 @@ Const
 
 Var
   Src, Lpc, Dst : Text;
-  Lines : Array[1..4000] Of String;
+  Lines : Array[1..5000] Of String;
   N, I, J : LongInt;
   S, T : String;
   InBlock, Done : Boolean;
@@ -68,7 +68,7 @@ Begin
   Begin
     ReadLn(Src, S);
     While (Length(S) > 0) And (S[Length(S)] = ' ') Do Dec(S[0]);
-    If N >= 4000 Then Fail('L32API.PAS trop long');
+    If N >= 5000 Then Fail('L32API.PAS trop long');
     Inc(N);
     Lines[N] := S;
   End;

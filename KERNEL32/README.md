@@ -894,6 +894,15 @@ ext2 apres chaque etape, `e2fsck` propre ; GPT : montage). Limites : pas
 d'ecriture GPT par le noyau (c'est l'installateur), une table logique
 etendue n'est lue qu'en MBR, secteurs > 2^32 non geres.
 
+**Divers [E4]/[E5]** : `LOOP_CLR_FD` s'accepte sur une ouverture en lecture seule
+(`losetup -d`) ; `LO_FLAGS_AUTOCLEAR` (flag 4) libere la boucle a l'`umount` ;
+`mount --bind` apparait dans `/proc/mounts` (`rw,bind`) ; le cache de tampons
+a un maximum reglable `bufmax=N` (essais sous pression : `RUNLOOP.SH` avec
+`KARGS=bufmax=100` passe ; le defaut de reentrance de `BufShrink` n'a pas pu
+etre reproduit sans le correctif avec ce parametre, la garde `ShrinkBusy`
+reste la correction par construction). Non fait : rouvrir un tube par
+`/proc/self/fd/N`.
+
 **Noyau de production** : `TOOLS/MKPROD.SH [-o NOYAU.ELF]` compile
 `KERNEL32.PAS` sans les programmes de test embarques (2,6 Mo contre 3,4 Mo ; le
 reste est de la memoire initialisee a zero que le compilateur ecrit dans le

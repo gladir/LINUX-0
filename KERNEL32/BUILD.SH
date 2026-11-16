@@ -19,7 +19,12 @@
 #     USR/NOM.PAS -> /bin/nom). Boucle tolerante s'il n'y en a pas encore;
 #  5. cree IMAGE/LINUX32-HD.IMG par TOOLS/MKIMAGE.SH (MBR + chargeur + ext2).
 #
-#  Usage : KERNEL32/BUILD.SH [boot]       ("boot" : etape 2 seulement)
+#  6. "BUILD.SH cd" : au lieu de l'image de disque, fabrique le CD-ROM
+#     d'installation IMAGE/KERNEL32-INSTALL.ISO (TOOLS/MKINSTALLCD.SH : noyau
+#     de production, assistant graphique, systeme a installer). ROOTONLY=1 :
+#     s'arrete apres l'etape 4 (racine dans $W/root).
+#
+#  Usage : KERNEL32/BUILD.SH [boot|cd]    ("boot" : etape 2 seulement)
 #  Variables : W (dossier de travail, defaut /tmp/linux32-build), FPC, NASM,
 #              LPC (compilateur deja construit), TESTKERNEL=1, MB (taille du
 #              disque en Mo, KSRC (source du noyau), IMG (image produite), defaut 64), BS (blocs ext2, defaut 1024), INODE
@@ -28,6 +33,8 @@
 #              commandes du depot : systeme minimal).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
+CDMODE=
+[ "$1" = cd ] && { CDMODE=1; ROOTONLY=1; }
 W=${W:-/tmp/linux32-build}
 FPC=${FPC:-fpc}
 NASM=${NASM:-nasm}
@@ -199,6 +206,14 @@ chmod 4755 "$W/root/bin/sudo" 2>/dev/null || true
 mkdir -p "$W/root/home/linux"; chown 1000:1000 "$W/root/home/linux" 2>/dev/null || true
 chmod 1777 "$W/root/tmp" "$W/root/var/tmp"
 
+if [ -n "$ROOTONLY" ]; then
+  if [ -n "$CDMODE" ]; then
+    echo "== CD-ROM d'installation"
+    LPC=$LPC "$HERE/TOOLS/MKINSTALLCD.SH" -R "$W/root" -k "${KERNELELF:-}" \
+      -o "${ISO:-$HERE/IMAGE/KERNEL32-INSTALL.ISO}" -w "$W/installcd"
+  fi
+  exit 0
+fi
 echo "== Image disque"
 IMG=${IMG:-$HERE/IMAGE/LINUX32-HD.IMG}     # image produite
 mkdir -p "$(dirname "$IMG")"

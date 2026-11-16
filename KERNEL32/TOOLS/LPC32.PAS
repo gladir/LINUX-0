@@ -1874,69 +1874,24 @@ Var
   V : LongInt;
   S : TString;
   Ch : Char;
+  More : Boolean;
 Begin
   S := '';
-  { Scanner une sequence de #nn segments et concatener }
-  While (LexColNo <= Length(LexLine)) And (LexLine[LexColNo] = '#') Do
+  { alternance de #nn et de 'texte' : #27'[0m'#27'[2J' ; 'a'#10'b' }
+  More := True;
+  While More Do
   Begin
-    Inc(LexColNo); { sauter '#' }
-    V := 0;
-    If (LexColNo <= Length(LexLine)) And (LexLine[LexColNo] = '$') Then
-    Begin
-      Inc(LexColNo); { sauter '$' }
-      While (LexColNo <= Length(LexLine)) And IsHexDigit(LexLine[LexColNo]) Do
-      Begin
-        V := V * 16 + HexVal(LexLine[LexColNo]);
-        Inc(LexColNo);
-      End;
-    End
-    Else
-    Begin
-      While (LexColNo <= Length(LexLine)) And
-            (LexLine[LexColNo] >= '0') And (LexLine[LexColNo] <= '9') Do
-      Begin
-        V := V * 10 + (Ord(LexLine[LexColNo]) - Ord('0'));
-        Inc(LexColNo);
-      End;
-    End;
-    If Length(S) < MAX_STR Then
-      S := S + Chr(V And $FF);
-  End;
-
-  { Si suivi d une chaine 'xxx', concatener }
-  If (LexColNo <= Length(LexLine)) And (LexLine[LexColNo] = '''') Then
-  Begin
-    Inc(LexColNo); { sauter quote ouvrante }
-    While LexColNo <= Length(LexLine) Do
-    Begin
-      Ch := LexLine[LexColNo];
-      If Ch = '''' Then
-      Begin
-        Inc(LexColNo);
-        If (LexColNo <= Length(LexLine)) And (LexLine[LexColNo] = '''') Then
-        Begin
-          If Length(S) < MAX_STR Then S := S + '''';
-          Inc(LexColNo);
-        End
-        Else
-          Break;
-      End
-      Else
-      Begin
-        If Length(S) < MAX_STR Then
-          S := S + Ch;
-        Inc(LexColNo);
-      End;
-    End;
-    { Peut etre suivi d un autre #nn }
+    More := False;
     While (LexColNo <= Length(LexLine)) And (LexLine[LexColNo] = '#') Do
     Begin
-      Inc(LexColNo);
+      More := True;
+      Inc(LexColNo); { sauter '#' }
       V := 0;
       If (LexColNo <= Length(LexLine)) And (LexLine[LexColNo] = '$') Then
       Begin
-        Inc(LexColNo);
-        While (LexColNo <= Length(LexLine)) And IsHexDigit(LexLine[LexColNo]) Do
+        Inc(LexColNo); { sauter '$' }
+        While (LexColNo <= Length(LexLine)) And IsHexDigit(LexLine[LexColNo])
+        Do
         Begin
           V := V * 16 + HexVal(LexLine[LexColNo]);
           Inc(LexColNo);
@@ -1953,6 +1908,34 @@ Begin
       End;
       If Length(S) < MAX_STR Then
         S := S + Chr(V And $FF);
+    End;
+    { chaine 'xxx' apres les #nn }
+    If (LexColNo <= Length(LexLine)) And (LexLine[LexColNo] = '''') Then
+    Begin
+      More := True;
+      Inc(LexColNo); { sauter quote ouvrante }
+      While LexColNo <= Length(LexLine) Do
+      Begin
+        Ch := LexLine[LexColNo];
+        If Ch = '''' Then
+        Begin
+          Inc(LexColNo);
+          If (LexColNo <= Length(LexLine)) And
+             (LexLine[LexColNo] = '''') Then
+          Begin
+            If Length(S) < MAX_STR Then S := S + '''';
+            Inc(LexColNo);
+          End
+          Else
+            Break;
+        End
+        Else
+        Begin
+          If Length(S) < MAX_STR Then
+            S := S + Ch;
+          Inc(LexColNo);
+        End;
+      End;
     End;
   End;
 
@@ -61752,7 +61735,7 @@ Var
 { Nombre de lignes et texte d une ligne d un source integre }
 { BEGIN L32API : genere par MKAPI.PAS depuis L32API.PAS (ne pas editer) }
 Const
-  L32API_N = 3818;
+  L32API_N = 3957;
   L32API : Array[1..L32API_N] Of String[120] = (
     '{ @author: Sylvain Maltais (support@gladir.com)',
     '  @created: 2026',
@@ -62368,70 +62351,206 @@ Const
     '  LnxDaysFromCivil := Era * 146097 + Doe - 719468;',
     'End;',
     '',
-    '{ fuseau horaire : variable TZ (NOM[+-]hh[:mm], sans heure d''ete) ou fichier',
-    '  /etc/TZ ; decalage en secondes a l''est de UTC }',
+    '{ fuseau horaire : variable TZ ou /etc/TZ ou /etc/localtime.',
+    '  Formes admises : NOM[+-]hh[:mm] (decalage fixe, sans heure d''ete) ; un nom',
+    '  de zone ("Europe/Paris", ":Europe/Paris", "UTC", ou un chemin absolu) lu',
+    '  dans /usr/share/zoneinfo (TZif version 1 : transitions jusqu''en 2037,',
+    '  heure d''ete comprise) ; /etc/localtime (fichier TZif) si TZ est absente.',
+    '  LnxTzAt(T) : decalage en secondes a l''est de UTC pour l''instant UTC T ;',
+    '  LnxTzUtcOf(L) : instant UTC d''une heure locale L ; LnxTzAbbr : sigle. }',
     'Var',
-    '  LnxTzDone, LnxTzOff : LongInt;',
+    '  LnxTzDone, LnxTzOff, LnxTzMode, LnxTzN, LnxTzNTypes : LongInt;',
+    '  LnxTzTime : Array[0..511] Of LongInt;',
+    '  LnxTzIdx : Array[0..511] Of Byte;',
+    '  LnxTzUt : Array[0..63] Of LongInt;',
+    '  LnxTzDst : Array[0..63] Of Byte;',
+    '  LnxTzAbI : Array[0..63] Of Byte;',
+    '  LnxTzAbc : Array[0..255] Of Byte;',
+    '  LnxTzName : String;',
     '',
-    'Function LnxTz : LongInt;',
-    'Var S : String; I, Sg, H, M, F : LongInt; C : Char;',
+    'Function LnxBe32(Addr : LongInt) : LongInt;',
     'Begin',
-    '  If LnxTzDone = 0 Then',
+    '  LnxBe32 := (Mem[0:Addr] Shl 24) Or (Mem[0:Addr + 1] Shl 16) Or',
+    '    (Mem[0:Addr + 2] Shl 8) Or Mem[0:Addr + 3];',
+    'End;',
+    '',
+    '{ charge un fichier TZif ; rend False s''il est absent ou invalide }',
+    'Function LnxTzLoadFile(Const Path : String) : Boolean;',
+    'Var F, N, Tc, Ty, Cc, I, P, Lc, Sc, Gc : LongInt; Buf : Array[0..8191] Of Byte;',
+    'Begin',
+    '  LnxTzLoadFile := False;',
+    '  F := LnxSys3(5, LnxZ(Path), 0, 0);',
+    '  If F < 0 Then Exit;',
+    '  N := LnxSys3(3, F, LongInt(@Buf), 8192);',
+    '  LnxSys3(6, F, 0, 0);',
+    '  If (N < 44) Or (Buf[0] <> 84) Or (Buf[1] <> 90) Or (Buf[2] <> 105) Or',
+    '     (Buf[3] <> 102) Then Exit;',
+    '  Gc := LnxBe32(LongInt(@Buf) + 20);',
+    '  Sc := LnxBe32(LongInt(@Buf) + 24);',
+    '  Lc := LnxBe32(LongInt(@Buf) + 28);',
+    '  Tc := LnxBe32(LongInt(@Buf) + 32);',
+    '  Ty := LnxBe32(LongInt(@Buf) + 36);',
+    '  Cc := LnxBe32(LongInt(@Buf) + 40);',
+    '  If (Tc > 512) Or (Ty > 64) Or (Ty < 1) Or (Cc > 256) Then Exit;',
+    '  If 44 + Tc * 5 + Ty * 6 + Cc > N Then Exit;',
+    '  P := LongInt(@Buf) + 44;',
+    '  For I := 0 To Tc - 1 Do LnxTzTime[I] := LnxBe32(P + I * 4);',
+    '  P := P + Tc * 4;',
+    '  For I := 0 To Tc - 1 Do LnxTzIdx[I] := Mem[0:P + I];',
+    '  P := P + Tc;',
+    '  For I := 0 To Ty - 1 Do',
     '  Begin',
-    '    LnxTzDone := 1;',
-    '    LnxTzOff := 0;',
-    '    S := SysGetEnv(''TZ'');',
-    '    If S = '''' Then',
+    '    LnxTzUt[I] := LnxBe32(P + I * 6);',
+    '    LnxTzDst[I] := Mem[0:P + I * 6 + 4];',
+    '    LnxTzAbI[I] := Mem[0:P + I * 6 + 5];',
+    '  End;',
+    '  P := P + Ty * 6;',
+    '  For I := 0 To Cc - 1 Do LnxTzAbc[I] := Mem[0:P + I];',
+    '  LnxTzN := Tc;',
+    '  LnxTzNTypes := Ty;',
+    '  LnxTzLoadFile := True;',
+    'End;',
+    '',
+    'Procedure LnxTzFixed(Const S : String);',
+    'Var I, Sg, H, M : LongInt;',
+    'Begin',
+    '  LnxTzOff := 0;',
+    '  I := 1;',
+    '  If (S <> '''') And (S[1] = '':'') Then I := 2;',
+    '  While (I <= Length(S)) And (((S[I] >= ''A'') And (S[I] <= ''Z'')) Or',
+    '        ((S[I] >= ''a'') And (S[I] <= ''z''))) Do Inc(I);',
+    '  If (I <= Length(S)) And ((S[I] = ''+'') Or (S[I] = ''-'') Or',
+    '     ((S[I] >= ''0'') And (S[I] <= ''9''))) Then',
+    '  Begin',
+    '    Sg := 1;',
+    '    If S[I] = ''-'' Then',
     '    Begin',
-    '      F := SysOpen(''/etc/TZ'', 0, 0);',
-    '      If F >= 0 Then',
-    '      Begin',
-    '        If Not SysReadLine(F, S) Then S := '''';',
-    '        SysClose(F);',
-    '      End;',
+    '      Sg := -1;',
+    '      Inc(I);',
+    '    End',
+    '    Else If S[I] = ''+'' Then Inc(I);',
+    '    H := 0;',
+    '    M := 0;',
+    '    While (I <= Length(S)) And (S[I] >= ''0'') And (S[I] <= ''9'') Do',
+    '    Begin',
+    '      H := H * 10 + Ord(S[I]) - 48;',
+    '      Inc(I);',
     '    End;',
-    '    I := 1;',
-    '    If (S <> '''') And (S[1] = '':'') Then I := 2;',
-    '    While (I <= Length(S)) And (((S[I] >= ''A'') And (S[I] <= ''Z'')) Or',
-    '          ((S[I] >= ''a'') And (S[I] <= ''z''))) Do Inc(I);',
-    '    If (I <= Length(S)) And ((S[I] = ''+'') Or (S[I] = ''-'') Or',
-    '       ((S[I] >= ''0'') And (S[I] <= ''9''))) Then',
+    '    If (I <= Length(S)) And (S[I] = '':'') Then',
     '    Begin',
-    '      Sg := 1;',
-    '      If S[I] = ''-'' Then',
-    '      Begin',
-    '        Sg := -1;',
-    '        Inc(I);',
-    '      End',
-    '      Else If S[I] = ''+'' Then Inc(I);',
-    '      H := 0;',
-    '      M := 0;',
+    '      Inc(I);',
     '      While (I <= Length(S)) And (S[I] >= ''0'') And (S[I] <= ''9'') Do',
     '      Begin',
-    '        H := H * 10 + Ord(S[I]) - 48;',
+    '        M := M * 10 + Ord(S[I]) - 48;',
     '        Inc(I);',
     '      End;',
-    '      If (I <= Length(S)) And (S[I] = '':'') Then',
-    '      Begin',
-    '        Inc(I);',
-    '        While (I <= Length(S)) And (S[I] >= ''0'') And (S[I] <= ''9'') Do',
-    '        Begin',
-    '          M := M * 10 + Ord(S[I]) - 48;',
-    '          Inc(I);',
-    '        End;',
-    '      End;',
-    '      { POSIX : le decalage est compte vers l''ouest }',
-    '      LnxTzOff := -Sg * (H * 3600 + M * 60);',
+    '    End;',
+    '    { POSIX : le decalage est compte vers l''ouest }',
+    '    LnxTzOff := -Sg * (H * 3600 + M * 60);',
+    '  End;',
+    'End;',
+    '',
+    '{ choisit la zone : '''' = TZ, /etc/TZ puis /etc/localtime }',
+    'Procedure LnxTzSelect(Const Name : String);',
+    'Var S : String; F : LongInt;',
+    'Begin',
+    '  LnxTzDone := 1;',
+    '  LnxTzMode := 0;',
+    '  LnxTzOff := 0;',
+    '  LnxTzN := 0;',
+    '  S := Name;',
+    '  If S = '''' Then S := SysGetEnv(''TZ'');',
+    '  If S = '''' Then',
+    '  Begin',
+    '    F := SysOpen(''/etc/TZ'', 0, 0);',
+    '    If F >= 0 Then',
+    '    Begin',
+    '      If Not SysReadLine(F, S) Then S := '''';',
+    '      SysClose(F);',
     '    End;',
     '  End;',
-    '  LnxTz := LnxTzOff;',
+    '  If S = '''' Then',
+    '  Begin',
+    '    If LnxTzLoadFile(''/etc/localtime'') Then LnxTzMode := 1;',
+    '    Exit;',
+    '  End;',
+    '  If S[1] = '':'' Then S := Copy(S, 2, 200);',
+    '  If S[1] = ''/'' Then',
+    '  Begin',
+    '    If LnxTzLoadFile(S) Then LnxTzMode := 1;',
+    '  End',
+    '  Else If LnxTzLoadFile(''/usr/share/zoneinfo/'' + S) Then LnxTzMode := 1;',
+    '  If LnxTzMode = 1 Then',
+    '  Begin',
+    '    LnxTzName := S;',
+    '    Exit;',
+    '  End;',
+    '  LnxTzFixed(S);',
+    'End;',
+    '',
+    '{ type de zone en vigueur a l''instant UTC T }',
+    'Function LnxTzType(T : LongInt) : LongInt;',
+    'Var I, Lo, Hi, Mid : LongInt;',
+    'Begin',
+    '  If LnxTzN = 0 Then',
+    '  Begin',
+    '    LnxTzType := 0;',
+    '    Exit;',
+    '  End;',
+    '  If T < LnxTzTime[0] Then',
+    '  Begin',
+    '    LnxTzType := 0;',
+    '    For I := 0 To LnxTzNTypes - 1 Do',
+    '      If LnxTzDst[I] = 0 Then',
+    '      Begin',
+    '        LnxTzType := I;',
+    '        Exit;',
+    '      End;',
+    '    Exit;',
+    '  End;',
+    '  Lo := 0;',
+    '  Hi := LnxTzN - 1;',
+    '  While Lo < Hi Do',
+    '  Begin',
+    '    Mid := (Lo + Hi + 1) Div 2;',
+    '    If LnxTzTime[Mid] <= T Then Lo := Mid Else Hi := Mid - 1;',
+    '  End;',
+    '  LnxTzType := LnxTzIdx[Lo];',
+    'End;',
+    '',
+    'Function LnxTzAt(T : LongInt) : LongInt;',
+    'Begin',
+    '  If LnxTzDone = 0 Then LnxTzSelect('''');',
+    '  If LnxTzMode = 1 Then LnxTzAt := LnxTzUt[LnxTzType(T)]',
+    '  Else LnxTzAt := LnxTzOff;',
+    'End;',
+    '',
+    'Function LnxTzIsDst(T : LongInt) : Boolean;',
+    'Begin',
+    '  If LnxTzDone = 0 Then LnxTzSelect('''');',
+    '  LnxTzIsDst := (LnxTzMode = 1) And (LnxTzDst[LnxTzType(T)] <> 0);',
+    'End;',
+    '',
+    '{ instant UTC correspondant a une heure locale L }',
+    'Function LnxTzUtcOf(L : LongInt) : LongInt;',
+    'Var U : LongInt;',
+    'Begin',
+    '  U := L - LnxTzAt(L);',
+    '  LnxTzUtcOf := L - LnxTzAt(U);',
+    'End;',
+    '',
+    '{ decalage en vigueur maintenant }',
+    'Function LnxTz : LongInt;',
+    'Begin',
+    '  LnxSys3(78, LongInt(@LnxTmp), 0, 0);',
+    '  LnxTz := LnxTzAt(LnxTmp[0]);',
     'End;',
     '',
     '{ secondes Unix -> date et heure DOS (heure locale) }',
     'Function LnxToDos(T : LongInt) : LongInt;',
     'Var Days, Secs, Y, M, D : LongInt;',
     'Begin',
-    '  T := T + LnxTz;',
+    '  T := T + LnxTzAt(T);',
     '  If T < 0 Then T := 0;',
     '  Days := T Div 86400;',
     '  Secs := T Mod 86400;',
@@ -62448,7 +62567,7 @@ Const
     'Function LnxFromDos(V : LongInt) : LongInt;',
     'Var Dd, Tt : LongInt;',
     'Begin',
-    '  LnxFromDos := LnxFromDosUtc(V) - LnxTz;',
+    '  LnxFromDos := LnxTzUtcOf(LnxFromDosUtc(V));',
     'End;',
     '',
     'Function LnxFromDosUtc(V : LongInt) : LongInt;',
@@ -62465,7 +62584,7 @@ Const
     'Var Sec, Usec, Days, Y, M, D, Secs : LongInt;',
     'Begin',
     '  LnxSys3(78, LongInt(@LnxTmp), 0, 0);',
-    '  Sec := LnxTmp[0] + LnxTz;',
+    '  Sec := LnxTmp[0] + LnxTzAt(LnxTmp[0]);',
     '  Usec := LnxTmp[1];',
     '  Days := Sec Div 86400;',
     '  Secs := Sec Mod 86400;',
@@ -62484,7 +62603,8 @@ Const
     'Var T : LongInt;',
     'Begin',
     '  T := LnxDaysFromCivil(MemW[0:P], MemW[0:P + 2], MemW[0:P + 6]) * 86400 +',
-    '       MemW[0:P + 8] * 3600 + MemW[0:P + 10] * 60 + MemW[0:P + 12] - LnxTz;',
+    '       MemW[0:P + 8] * 3600 + MemW[0:P + 10] * 60 + MemW[0:P + 12];',
+    '  T := LnxTzUtcOf(T);',
     '  LnxTmp[0] := T;',
     '  LnxTmp[1] := 0;',
     '  If LnxCheck(LnxSys3(79, LongInt(@LnxTmp), 0, 0)) < 0 Then SetLocalTime := 0',
@@ -64687,7 +64807,7 @@ Const
     '{ ---------- langue et messages d''erreur ---------- }',
     '',
     '{ langue d''une valeur de LANGUAGE : 1 francais (defaut), 2 EN, 3 GR, 4 SP,',
-    '  5 IT }',
+    '  5 IT ; PT et NL (sans traduction des commandes) : anglais }',
     'Function SysLangOf(Const V : String) : LongInt;',
     'Var A, B : Char;',
     'Begin',
@@ -64700,7 +64820,9 @@ Const
     '  Else If (A = ''D'') And (B = ''E'') Then SysLangOf := 3',
     '  Else If (A = ''S'') And (B = ''P'') Then SysLangOf := 4',
     '  Else If (A = ''E'') And (B = ''S'') Then SysLangOf := 4',
-    '  Else If (A = ''I'') And (B = ''T'') Then SysLangOf := 5;',
+    '  Else If (A = ''I'') And (B = ''T'') Then SysLangOf := 5',
+    '  Else If (A = ''P'') And (B = ''T'') Then SysLangOf := 2',
+    '  Else If (A = ''N'') And (B = ''L'') Then SysLangOf := 2;',
     'End;',
     '',
     'Function SysLang : LongInt;',
