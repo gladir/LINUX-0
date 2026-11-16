@@ -116,7 +116,7 @@ for f in "$HERE"/USR/*.PAS; do
     INIT) build_one "$f" sbin/init ;;
     GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKPASSWD|NOLOGIN|IFCONFIG|\
     ROUTE|MKSWAP|SWAPON|SYSCTL|HWCLOCK|LSMOD|USERMGR|TELINIT|SYSLOGD|MODTOOL|\
-    E2FSCK|UDHCPC|LOGROTATE|NTPDATE|E2TOOLS)
+    E2FSCK|UDHCPC|LOGROTATE|NTPDATE|E2TOOLS|IPTABLES|TCPDUMP)
       build_one "$f" sbin/$l ;;
     *) build_one "$f" bin/$l ;;
   esac
@@ -186,7 +186,8 @@ for l in "chgrp chown bin" "realpath readlink bin" "pkill pgrep bin" \
          "dhclient udhcpc sbin" "ip iptool bin" "dumpkeys loadkeys bin" \
          "rdate ntpdate sbin" "dumpe2fs e2tools sbin" \
          "tune2fs e2tools sbin" "e2label e2tools sbin" \
-         "resize2fs e2tools sbin"; do
+         "resize2fs e2tools sbin" "iptables-save iptables sbin" \
+         "iptables-restore iptables sbin"; do
   set -- $l
   [ -f "$W/root/$3/$2" ] && ln -sf "$2" "$W/root/$3/$1" 2>/dev/null || true
 done

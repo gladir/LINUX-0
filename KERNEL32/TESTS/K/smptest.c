@@ -159,7 +159,21 @@ int main(){
       waitpid(p1,&st,0);waitpid(p2,&st,0);t2=us()-t0;
       puts("  getpid : un CPU ");putd(t1/1000);puts(" ms, deux CPU ");putd(t2/1000);puts(" ms\n");
       /* sous un verrou unique le temps doublerait (rapport 2) ; en parallele il reste proche de 1 */
-      ktest("smp.fastsys_parallel",t2*10<t1*16);
+      /* temoin : getppid passe par le verrou noyau ; sur deux CPU son temps
+         double presque, celui de getpid doit en rester nettement plus
+         proche de celui d'un seul (QEMU ne donne pas un parallelisme
+         parfait : on compare les deux rapports) */
+      {long s1,s2;
+       t0=us();p1=fork();
+       if(p1==0){setaff(0,1);for(j=0;j<NLOOP/10;j++)sc0(SYS_getppid);_exit(0);}
+       waitpid(p1,&st,0);s1=us()-t0;
+       t0=us();p1=fork();
+       if(p1==0){setaff(0,1);for(j=0;j<NLOOP/10;j++)sc0(SYS_getppid);_exit(0);}
+       p2=fork();
+       if(p2==0){setaff(0,2);for(j=0;j<NLOOP/10;j++)sc0(SYS_getppid);_exit(0);}
+       waitpid(p1,&st,0);waitpid(p2,&st,0);s2=us()-t0;
+       puts("  getppid (verrou) : un CPU ");putd(s1/1000);puts(" ms, deux CPU ");putd(s2/1000);puts(" ms\n");
+       ktest("smp.fastsys_parallel",t2*10<t1*14||(long long)t2*s1*10<(long long)s2*t1*8);}
     }
     /* /proc/interrupts : une colonne par CPU, minuterie locale qui avance */
     r=slurp("/proc/interrupts",b,sizeof b);

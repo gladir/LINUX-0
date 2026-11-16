@@ -15,7 +15,8 @@ bad = 0
 
 def check(name, ok, detail=''):
     global bad
-    print(('ok    ' if ok else 'ECHEC ') + name + ('' if ok else ' : ' + detail))
+    print(('ok    ' if ok else 'ECHEC ') + name +
+          ('' if ok else ' : ' + detail))
     if not ok:
         bad += 1
 

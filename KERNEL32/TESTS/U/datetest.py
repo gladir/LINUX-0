@@ -17,12 +17,16 @@ DATES = ['@1700000000', '@0', '@1718000000', '2024-02-29 13:45:10',
          'June 15, 2024 11:05 am', '2024-01-31 +1 month',
          '2024-02-29 +1 year', '2024-03-10 -3 days', '2024-05-05 2 weeks ago',
          '2024-06-01 12:00 UTC', '2024-06-01 12:00 +0530',
-         '2024-06-01 12:00 -0300', '2024-06-01 tomorrow', '2024-06-01 yesterday',
+         '2024-06-01 12:00 -0300', '2024-06-01 tomorrow',
+         '2024-06-01 yesterday',
          '2024-06-01 next month', '2024-06-01 last year',
-         'TZ="Asia/Tokyo" 2024-06-01 12:00', 'TZ="America/Los_Angeles" @1718000000',
+         'TZ="Asia/Tokyo" 2024-06-01 12:00',
+         'TZ="America/Los_Angeles" @1718000000',
 '20240601']
-FORMATS = ['%Y-%m-%d %H:%M:%S %Z %z', '%a %A %b %B %d %e %j', '%U %W %V %G %g %u %w',
-           '%D %F %T %R %r %p %P %I %l %k %y %C %s', '%-d/%-m %_d %^a %10Y %:z %%',
+FORMATS = ['%Y-%m-%d %H:%M:%S %Z %z', '%a %A %b %B %d %e %j',
+           '%U %W %V %G %g %u %w',
+           '%D %F %T %R %r %p %P %I %l %k %y %C %s',
+           '%-d/%-m %_d %^a %10Y %:z %%',
            '%c|%x|%X']
 bad = 0
 n = 0
@@ -55,8 +59,10 @@ for tz in ZONES:
                 if bad < 25:
                     print('DIFF', tz, d, f, '|', a, '|', b)
     for opt in (['-R'], ['-I'], ['-Iseconds'], ['-Iminutes'], ['-u', '+%H %Z'],
-                ['+%Z'], ['-d', 'next friday', '+%F'], ['-d', 'tomorrow', '+%F'],
-                ['-d', '3 days ago', '+%F'], ['-d', 'yesterday 12:00', '+%F %T'],
+                ['+%Z'], ['-d', 'next friday', '+%F'],
+                ['-d', 'tomorrow', '+%F'],
+                ['-d', '3 days ago', '+%F'],
+                ['-d', 'yesterday 12:00', '+%F %T'],
                 ['-d', 'last month', '+%Y-%m'], ['-d', 'monday', '+%F']):
         a, _ = run([PROG] + opt, tz)
         b, _ = run(['date'] + opt, tz)

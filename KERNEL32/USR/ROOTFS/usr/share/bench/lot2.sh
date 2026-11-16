@@ -24,6 +24,10 @@ chk 'date -d texte anglais' '2024-06-15 15:00' \
 chk 'date -R' 'Sat, 01 Jun 2024 12:00:00 +0000' \
   "$(date -u -d '2024-06-01 12:00 UTC' -R)"
 chk 'date %j %U %V' '153 21 22' "$(date -u -d 2024-06-01 '+%j %U %V')"
+# chmod Unix (USR/CHMOD.PAS)
+printf 'echo x\n' > $W/c1; chmod +x $W/c1
+[ -x $W/c1 ] && ok 'chmod +x puis test -x' || ko 'chmod +x' 'non executable'
+chmod 600 $W/c1; [ -x $W/c1 ] && ko 'chmod 600' 'encore x' || ok 'chmod 600'
 # zoneinfo / terminfo dans la racine
 [ -f /usr/share/zoneinfo/Europe/Paris ] && ok 'zoneinfo Europe/Paris' ||
   ko 'zoneinfo' 'absent'
@@ -69,4 +73,14 @@ resize2fs /dev/hda1 | grep -q 'Nothing to do' &&
 # loadkeys -n
 chk 'loadkeys -n fr (touche 16)' 'keycode 16 = a A nul' \
   "$(loadkeys -n fr | grep 'keycode 16 ')"
+# iptables : frontal seul (regles gardees, non appliquees)
+export IPTABLES_RULES=$W/ipt.rules
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null
+iptables -I INPUT 1 -s 10.0.0.0/8 -j DROP 2>/dev/null
+chk 'iptables -S INPUT' \
+  '-P INPUT ACCEPT -A INPUT -s 10.0.0.0/8 -j DROP -A INPUT -p tcp'\
+' --dport 22 -j ACCEPT' \
+  "$(iptables -S INPUT | paste -s -d' ' -)"
+iptables-save | grep -q '^-A INPUT -p tcp --dport 22 -j ACCEPT' &&
+  ok 'iptables-save' || ko 'iptables-save' 'sortie'
 echo "LOT2-FIN ok=$P ko=$F"

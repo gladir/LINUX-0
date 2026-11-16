@@ -86,6 +86,30 @@ int main(void){
      }
      ioctl(tf,0x4B45,1);ioctl(tf,0x5402,(long)sv);
      ktest("kbd.mediumraw_press_release",got1==0x30&&got2==0xb0);}
+    /* KDSKBENT/KDGKBENT et touches mortes : la touche 30 (A) devient un
+       accent circonflexe mort ; QEMU envoie a e / a espace / a a */
+    {unsigned tio[9],sv[9];unsigned v,r;int tf=open("/dev/tty1",O_RDWR|0x100,0);
+     unsigned char got[16];int ng=0,old;
+     v=0|(30u<<8);r=ioctl(tf,0x4B46,(long)&v);old=v>>16;
+     ktest("kbd.kdgkbent",r==0&&(v>>16)=='a');
+     v=3|(30u<<8);ktest("kbd.kdgkbent_einval_table",ioctl(tf,0x4B46,(long)&v)==-22);
+     v=0|(200u<<8);ktest("kbd.kdgkbent_einval_index",ioctl(tf,0x4B46,(long)&v)==-22);
+     v=0|(30u<<8)|(0x502u<<16);ktest("kbd.kdskbent",ioctl(tf,0x4B47,(long)&v)==0);
+     v=0|(30u<<8);ioctl(tf,0x4B46,(long)&v);ktest("kbd.kdskbent_readback",(v>>16)==0x502);
+     ioctl(tf,0x5401,(long)tio);memcpy(sv,tio,36);
+     tio[3]&=~0x4b;tio[0]&=~0x500;((unsigned char*)tio)[17+6]=1;((unsigned char*)tio)[17+5]=0;
+     ioctl(tf,0x5402,(long)tio);
+     puts("DEAD-READY\n");
+     for(t=0;t<150&&ng<4;t++){
+       struct pfd p={tf,1,0};
+       if(sc3(SYS_poll,(long)&p,1,100)>0){n=read(tf,got+ng,4-ng);if(n>0)ng+=n;}
+     }
+     ioctl(tf,0x5402,(long)sv);
+     v=0|(30u<<8)|((unsigned)old<<16);ioctl(tf,0x4B47,(long)&v);
+     ktest("kbd.dead_circumflex_e",ng>=2&&got[0]==0xC3&&got[1]==0xAA);
+     ktest("kbd.dead_space_sign",ng>=3&&got[2]=='^');
+     ktest("kbd.dead_twice_sign",ng==4&&got[3]=='^');
+     v=0|(30u<<8);ioctl(tf,0x4B46,(long)&v);ktest("kbd.kdskbent_restored",(v>>16)==old);}
   }
   puts("MOUSE-DONE\n");
   return ku_fail?1:0;

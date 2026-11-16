@@ -13,7 +13,8 @@ bad = 0
 
 def check(name, ok, detail=''):
     global bad
-    print(('ok    ' if ok else 'ECHEC ') + name + ('' if ok else ' : ' + detail))
+    print(('ok    ' if ok else 'ECHEC ') + name +
+          ('' if ok else ' : ' + detail))
     if not ok:
         bad += 1
 
@@ -67,12 +68,14 @@ check('-d : rien n\'est modifie', rd('a.log') == 'AAAA\n' and
 r = run('-f')
 check('rotation forcee : a.log -> a.log.1, a.log recree (create 600)',
       rd('a.log.1') == 'AAAA\n' and rd('a.log') == '' and
-      oct(os.stat(d + '/a.log').st_mode & 0o777) == '0o600', r.stdout + r.stderr)
+      oct(os.stat(d + '/a.log').st_mode & 0o777) == '0o600',
+      r.stdout + r.stderr)
 check('postrotate execute', rd('post.flag') == 'done\n')
 check('copytruncate : b.log.1 recoit les donnees, b.log est vide',
       rd('b.log.1') == 'x' * 100 and rd('b.log') == '')
 check('notifempty / missingok : c.log et absent.log ignores',
-      rd('c.log.1') is None and rd('absent.log.1') is None and r.returncode == 0)
+      rd('c.log.1') is None and rd('absent.log.1') is None and
+      r.returncode == 0)
 check('include : e.log tourne', rd('e.log.1') == 'tiny')
 w('a.log', 'SECOND\n')
 run('-f')
@@ -93,5 +96,6 @@ check('size 50 : fichier de 60 octets tourne', rd('b.log') == '' and
 w('d.log', 'D2\n')
 r = run()
 check('daily : pas de rotation le meme jour (etat)', rd('d.log') == 'D2\n')
-check('fichier d\'etat ecrit', rd('state') is not None and 'a.log' in rd('state'))
+check('fichier d\'etat ecrit',
+      rd('state') is not None and 'a.log' in rd('state'))
 sys.exit(1 if bad else 0)

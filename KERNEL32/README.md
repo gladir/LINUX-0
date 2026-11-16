@@ -931,6 +931,37 @@ les 8259 si l'etalonnage echoue (non teste sous NEM/Hyper-V). Tests : `RUNAHCI.S
 QEMU ajoute par defaut une carte e1000 : sans option, le noyau voit maintenant
 une carte reseau (`socktest` en tient compte).
 
+**Verrous et pare-feu (lot D7-2)** : les appels systeme sans etat partage
+(`getpid`, `gettid`, `getuid` et famille, 16 et 32 bits) sont traites a
+l'entree du noyau sans le verrou noyau (`FastSyscall`, dans `KTrapSmp` ;
+`nofastsys` sur la ligne de commande les remet sous verrou ; ligne `fastsys N`
+de `/proc/stat`) ; le CPU courant se lit dans le registre TR (chaque processeur
+a son descripteur de TSS dans sa propre GDT, 8 processeurs au plus) et non plus
+dans le LAPIC (un acces MMIO serialise les CPU sous QEMU). Mesure sous QEMU
+(`smptest`) : 300000 `getpid` en 300 ms sur un CPU, 460 ms sur deux ; sous le
+verrou, 60 ms pour 30000 `getppid` sur un CPU et 600 a 880 ms sur deux. Les
+verrous fins par sous-systeme (VFS, memoire, ordonnanceur, reseau) ne sont **pas
+faits** : tout le reste passe encore par le verrou noyau unique. **Filtre
+IP minimal** (`NfEval`) : table `filter` de l'ABI iptables (`IPT_SO_SET_REPLACE`,
+`GET_INFO`, `GET_ENTRIES` par `setsockopt/getsockopt` sur un socket brut
+protocole 255), chaines INPUT (a la reception, avant ARP) et OUTPUT (avant
+l'emission), regles sur adresses source/destination avec masque et
+inversion, interfaces, protocole, ports TCP/UDP, cibles ACCEPT et DROP,
+compteurs d'octets et de paquets, politique par defaut ; `root` seulement.
+La table `nat`, la chaine FORWARD (pas de routage), les modules d'etat
+(`conntrack`) et `REJECT`/`LOG` ne sont pas faits (`ENOPROTOOPT`/`EINVAL`).
+Tests : `smp.fastsys_*` (smptest), `nf.*` (12 verifications de `nettest`,
+RUNNET.SH avec rtl8139, virtio-net et e1000).
+**Claviers chargeables** : `KDGKBENT`/`KDSKBENT` (0x4B46/0x4B47) sur
+`/dev/ttyN` (struct kbentry `{table, index, valeur 16 bits}`, tables normale /
+Maj / AltGr, `EINVAL` hors limites, `EPERM` sans CAP_SYS_TTY_CONFIG) et touches
+mortes (valeur 0x500 + n : grave, aigu, circonflexe, tilde, trema ; combinaison
+avec a e i o u y n selon le cas, espace ou deux fois la meme touche donne le
+signe seul, autre caractere : le signe puis le caractere). Les tables sont des
+mots de 16 bits. `loadkeys` d'USR/ peut donc remplir les tables au demarrage ;
+`keymap=XX` de la ligne de commande reste limite a us et fr. Test :
+`mousetest` (RUNMOUSE.SH, 9 verifications dont `sendkey` a e / a espace / a a).
+
 **Noyau de production** : `TOOLS/MKPROD.SH [-o NOYAU.ELF]` compile
 `KERNEL32.PAS` sans les programmes de test embarques (2,6 Mo contre 3,4 Mo ; le
 reste est de la memoire initialisee a zero que le compilateur ecrit dans le
@@ -1438,3 +1469,31 @@ avec 4 Ko (`INSTALL.PAS` : `MAXBLK`) ; une seule partition `/home` ; pas de GPT,
 LVM ni de chiffrement ; pas de reseau pendant l'installation ; dispositions de clavier
 autres que us et fr : voir `BUGS_NOYAU.md` [E5] (le noyau ne les connait pas) ; pas de
 touches mortes ; `F2` : shell sans controle de jobs.
+
+### Lot E6 (suite) : userland ajoute dans `USR/`
+
+Audit des commandes de la racine du depot : `date` (version DOS : pas de texte
+relatif ni de fuseau), `chmod` (attributs DOS : `chmod +x` / `chmod 755` ne
+changeaient pas les droits Unix), pas de `logrotate`, `rdate`, `ntpdate`,
+`tune2fs`, `dumpe2fs`, `run-parts`. Ajouts (tous testes, voir `RUNU.SH lot2host
+lot2`) :
+
+| programme | contenu | essai |
+|---|---|---|
+| `DATE.PAS` (`/bin/date`) | syntaxe de GNU date : `-d` (`@epoch`, ISO, americain, mois en lettres, `now today tomorrow yesterday noon`, `next friday`, `3 days ago`, `+1 month`, `TZ="Zone"`, sigles et `+hh:mm`), `-u -s -r -R -I`, strftime complet (`%a..%Z`, `%V %G %U %W %j %:z`, indicateurs `- _ 0 ^`, largeurs), fuseau TZ ou `/etc/localtime` avec heure d'ete et sigle (`LnxTzAbbr`) | `datetest.py` : 420 comparaisons a GNU date sur 5 fuseaux, 0 ecart |
+| `CHMOD.PAS` | modes Unix octaux et symboliques (`u+x go-w a=rx u=g +t X`, umask), `-R -v -f`, regles GNU des dossiers (setuid/setgid) | `chmodtest.py` : 352 comparaisons, 0 ecart |
+| `NTPDATE.PAS` (`ntpdate`, `rdate`) | SNTP v4 (UDP 123) avec `-q`, `-p port` ; protocole TIME (TCP 37) avec `-p -s -P port` ; serveur par adresse, `/etc/hosts` ou DNS | `nettime.py` : serveurs factices sur l'hote, decalage de 7200 s |
+| `LOGROTATE.PAS` (`/sbin/logrotate`) | `rotate size daily weekly monthly missingok notifempty copytruncate create nocreate olddir prerotate postrotate include`, fichier d'etat, `-f -d -s` (la compression est signalee, non faite) | `logrotatetest.py` : 12 essais |
+| `IPTABLES.PAS` (`/sbin/iptables`, `iptables-save`, `iptables-restore`) | syntaxe `-t -A -I -D -F -L -S -P -N -X -Z -p -s -d -i -o --sport --dport -m --state -j`, tables filter/nat/mangle/raw ; regles gardees dans `/var/lib/iptables.rules` (`IPTABLES_RULES=`) et NON appliquees : pas encore branche sur le filtre du noyau (setsockopt) | `lot2.sh` sous QEMU (2 essais) |
+| `E2TOOLS.PAS` (`dumpe2fs tune2fs e2label resize2fs`) | superbloc ext2/3/4 : `dumpe2fs -h`, `tune2fs -l -L -m -c -C -i -e` (somme de controle `metadata_csum` recalculee), `e2label` ; `resize2fs` affiche la taille et refuse tout changement (non fait) | `e2toolstest.py` : 18 essais contre e2fsprogs (ext2, ext3, ext4 metadata_csum, 64bit) |
+| `ROOTFS/etc/crontab`, `cron.hourly daily weekly monthly`, `usr/bin/run-parts`, `etc/logrotate.conf` et `logrotate.d` | `crond` lance `run-parts` aux heures de `/etc/crontab` ; `cron.daily/logrotate` | `lot2.sh` sous QEMU |
+
+`BUILD.SH` installe aussi `/usr/share/zoneinfo` (TZif de l'hote, `ZONES=`) et des
+fichiers terminfo (`/usr/share/terminfo`, `TERMINFO=`) dans la racine. Sous QEMU :
+`/usr/share/bench/lot2.sh` (`RUNU.SH lot2`). `RUNU.SH` sans argument rejoue
+maintenant tout, `lot2host` et `lot2` compris.
+
+**Pas encore fait** (lot 2 de E6) : strace, tcpdump, iptables (front-end),
+job control verifie sur pty, lsof/fuser/netstat/ss/lspci/losetup verifies sous
+KERNEL32 avec tests dedies, nano/ed/bc/dc audites contre GNU, COMMANDES.TXT
+regenere.

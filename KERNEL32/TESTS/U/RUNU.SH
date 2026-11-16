@@ -208,11 +208,12 @@ for st in $STEPS; do
     # factices), logrotate, dumpe2fs/tune2fs/e2label/resize2fs (e2fsprogs)
     mkdir -p "$W/l2"; cp "$K32"/USR/*.PAS "$K32"/USR/*.INC "$W/l2/"
     cp "$K32"/USR/INSTALLER/LAYOUTS.INC "$W/l2/"
-    for n in DATE NTPDATE LOGROTATE E2TOOLS LOADKEYS; do
+    for n in DATE NTPDATE LOGROTATE E2TOOLS LOADKEYS CHMOD; do
       ( cd "$W/l2" && $LPC -3X -q $n.PAS >/dev/null 2>"$W/l2/$n.err" ) ||
         { echo "ECHEC compilation $n"; FAIL=1; }
     done
     python3 "$HERE/datetest.py" "$W/l2/DATE" | tail -1 || FAIL=1
+    python3 "$HERE/chmodtest.py" "$W/l2/CHMOD" | tail -1 || FAIL=1
     python3 "$HERE/nettime.py" "$W/l2/NTPDATE" | grep -c '^ok' |
       grep -q '^4$' && echo "ok    ntpdate/rdate : 4 essais" ||
       { echo "ECHEC ntpdate/rdate"; FAIL=1; }

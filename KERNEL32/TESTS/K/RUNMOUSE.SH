@@ -50,6 +50,9 @@ wait('KEY-READY')
 send('sendkey a'); send('sendkey up')
 wait('RAW-READY')
 send('sendkey b')
+wait('DEAD-READY')
+for k in ['a', 'e', 'a', 'spc', 'a', 'a']:
+    send('sendkey ' + k)
 PY
 wait $QP
 tr -d '\r' < "$W/out.txt" | grep "KTEST: mouse\|KTEST: evdev\|KTEST: kbd\|MOUSE\|KPROG: /bin/mousetest"

@@ -5,7 +5,7 @@
 # @description: dumpe2fs, tune2fs, e2label, resize2fs de USR/E2TOOLS.PAS contre
 #   e2fsprogs (hote) sur des images mke2fs : lignes principales de dumpe2fs -h,
 #   puis tune2fs -L -m -c -C -i -e et e2label, relus par dumpe2fs et e2fsck -fn.
-#   usage : e2toolstest.py ./E2TOOLS   (lie en dumpe2fs tune2fs e2label resize2fs)
+#   usage : e2toolstest.py ./E2TOOLS (lie en dumpe2fs tune2fs e2label ...)
 import os, re, subprocess, sys, tempfile
 
 PROG = os.path.abspath(sys.argv[1])
@@ -23,7 +23,8 @@ KEYS = ['Filesystem volume name', 'Filesystem UUID', 'Filesystem magic number',
 
 def check(name, ok, detail=''):
     global bad
-    print(('ok    ' if ok else 'ECHEC ') + name + ('' if ok else ' : ' + detail))
+    print(('ok    ' if ok else 'ECHEC ') + name +
+          ('' if ok else ' : ' + detail))
     if not ok:
         bad += 1
 
@@ -59,8 +60,8 @@ for name, o, lb in cases:
     b = fields(subprocess.run(['dumpe2fs', '-h', img], capture_output=True,
                               text=True).stdout)
     diff = [(k, a.get(k), b.get(k)) for k in KEYS if a.get(k) != b.get(k)]
-    check('dumpe2fs -h %s : %d lignes identiques a e2fsprogs' % (name, len(KEYS)),
-          not diff, str(diff))
+    check('dumpe2fs -h %s : %d lignes identiques a e2fsprogs' %
+          (name, len(KEYS)), not diff, str(diff))
     t = os.path.join(d, 'tune2fs')
     r = subprocess.run([t, '-L', 'nouveau', '-m', '3', '-c', '20', '-C', '5',
                         '-i', '2w', '-e', 'remount-ro', img],
