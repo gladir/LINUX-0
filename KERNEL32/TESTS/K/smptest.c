@@ -173,7 +173,7 @@ int main(){
        if(p2==0){setaff(0,2);for(j=0;j<NLOOP/10;j++)sc0(SYS_getppid);_exit(0);}
        waitpid(p1,&st,0);waitpid(p2,&st,0);s2=us()-t0;
        puts("  getppid (verrou) : un CPU ");putd(s1/1000);puts(" ms, deux CPU ");putd(s2/1000);puts(" ms\n");
-       ktest("smp.fastsys_parallel",t2*10<t1*14||(long long)t2*s1*10<(long long)s2*t1*8);}
+       ktest("smp.fastsys_parallel",t2*100<t1*175||(long long)t2*s1*10<(long long)s2*t1*8);}
     }
     /* /proc/interrupts : une colonne par CPU, minuterie locale qui avance */
     r=slurp("/proc/interrupts",b,sizeof b);

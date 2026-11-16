@@ -961,6 +961,39 @@ signe seul, autre caractere : le signe puis le caractere). Les tables sont des
 mots de 16 bits. `loadkeys` d'USR/ peut donc remplir les tables au demarrage ;
 `keymap=XX` de la ligne de commande reste limite a us et fr. Test :
 `mousetest` (RUNMOUSE.SH, 9 verifications dont `sendkey` a e / a espace / a a).
+Le mode du clavier (`KDSKBMODE`) est maintenant propre a chaque console
+(remis en XLATE a la fermeture du dernier descripteur, comme Linux) et
+`/dev/console` suit la **derniere** option `console=` de la ligne de commande
+(`console=tty0 console=ttyS0` : port serie). Tests : `devtest` (4
+verifications), `k32conmark`.
+
+**PCnet** (AMD 79C970A/973, PCI 1022:2000 : carte de VirtualBox, `-nic
+user,model=pcnet` sous QEMU) : mode 32 bits (DWIO, SWSTYLE 2), anneaux de 32
+descripteurs de reception et 8 d'emission, interruptions ; RUNNET.SH vert avec
+`NICMODEL=pcnet` (toute la suite `net.*`, `nf.*`, `tun.*`, `nat.*`).
+
+**tun/tap, routage, retransmission, NAT (lot D7-3)** : `/dev/net/tun`
+(`TUNSETIFF`, IFF_TUN et IFF_TAP, IFF_NO_PI, nom donne ou `tunN`/`tapN`, 2
+interfaces au plus ; l'interface disparait a la fermeture), configuration
+par les ioctl d'interface (`SIOCSIFADDR`, `SIOCSIFNETMASK`, `SIOCSIFFLAGS`,
+`SIOCGIFHWADDR`, `SIOCGIFINDEX`...). tap : trames Ethernet, ARP repondu par
+le noyau, requetes ARP emises sur le tap ; tun : paquets IP seuls. La
+couche IP route par sous-reseau d'interface (sur le lien) puis par la
+passerelle d'eth0 ; `net.ipv4.ip_forward` autorise la retransmission d'une
+interface a l'autre (TTL decremente, erreurs ICMP temps ecoule et reseau
+inaccessible). **Netfilter** : tables `filter` (INPUT, FORWARD, OUTPUT, cibles
+ACCEPT, DROP, REJECT avec code ICMP, LOG dans le journal du noyau) et `nat`
+(PREROUTING, INPUT, OUTPUT, POSTROUTING : SNAT, DNAT, MASQUERADE, REDIRECT),
+suivi de connexions de 64 entrees (TCP, UDP et echo ICMP, duree 5 min) avec
+traduction des reponses et recalcul des sommes de controle ; l'interface
+reste celle d'iptables (`setsockopt`/`getsockopt` SOL_IP sur un socket brut
+protocole 255). Tests (`nettest`, RUNNET.SH) : `tun.*` (14), `tap.*` (9),
+`nat.*` (12) : MASQUERADE d'un hote derriere tun0 vers l'hote QEMU et retour,
+DNAT en sortie avec adresse de reponse retablie, REJECT, LOG. **Non fait** :
+pont (bridge), suivi d'etat TCP (une connexion TCP traduite n'est pas
+verifiee par un test), fragmentation, `conntrack` dans /proc, selection de
+regles par etat (`-m state`), mangle, interfaces au-dela de deux tun/tap,
+`/proc/net/dev` et netlink pour tun/tap, IPv6.
 
 **Noyau de production** : `TOOLS/MKPROD.SH [-o NOYAU.ELF]` compile
 `KERNEL32.PAS` sans les programmes de test embarques (2,6 Mo contre 3,4 Mo ; le

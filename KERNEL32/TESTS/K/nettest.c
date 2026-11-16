@@ -265,11 +265,10 @@ int main(void){
     off=natbuild(tb,&pre,&out,&post);
     ktest("nat.dnat_rule",setsockopt(rs,0,64,tb,off)==0);
     {int us=socket(2,2,0);struct sin a2,f2;char b2[64];int n2=0,i2,l2;
-     mksin(&a2,0x6300020a,9092);
+     mksin(&a2,0x6302000a,9092);
      ktest("nat.dnat_send",sendto(us,"dnat-out",8,0,&a2,16)==8);
      for(i2=0;i2<300&&n2<=0;i2++){l2=sizeof f2;n2=recvfrom(us,b2,64,0x40,&f2,&l2);if(n2<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
-     if(n2!=8||f2.addr!=0x6300020a){puts("  dnat n=");putd(n2);puts(" addr=");putd(f2.addr);puts(" port=");putd(hs(f2.port));puts("\n");}
-     ktest("nat.dnat_reply_source",n2==8&&memcmp_(b2,"dnat-out",8)==0&&f2.addr==0x6300020a&&hs(f2.port)==9092);
+     ktest("nat.dnat_reply_source",n2==8&&memcmp_(b2,"dnat-out",8)==0&&f2.addr==0x6302000a&&hs(f2.port)==9092);
      close(us);}
     /* retour a une table nat vide */
     memset(&out,0,sizeof out);off=natbuild(tb,&pre,&out,&post);
@@ -327,6 +326,45 @@ int main(void){
      off=o;setsockopt(rs,0,64,tb,off);}
     fd=open("/proc/sys/net/ipv4/ip_forward",O_RDWR,0);write(fd,"0\n",2);close(fd);
     close(rs);close(tf);close(sk);(void)mk;
+  }
+  /* tap : trames Ethernet, ARP et ICMP sur tap0 (192.168.88.1/24) */
+  {
+    int tf=open("/dev/net/tun",O_RDWR|0x800,0),sk=socket(2,2,0),t,got,r;
+    static unsigned char ifr[40],fr[300],rb[2048],pl[64];
+    unsigned char me[4]={192,168,88,1},lan[4]={192,168,88,2},mk[4]={255,255,255,0};
+    unsigned char hm[6]={2,0,0,0,0,2};
+    memset(ifr,0,40);memcpy(ifr,"mytap",6);*(unsigned short*)(ifr+16)=0x1002;
+    r=ioctl(tf,0x400454CA,(long)ifr);
+    ktest("tap.setiff_named",tf>=0&&r==0&&memcmp_(ifr,"mytap",6)==0);
+    mkifr(ifr,"mytap",me);ioctl(sk,0x8916,(long)ifr);
+    mkifr(ifr,"mytap",mk);ioctl(sk,0x891C,(long)ifr);
+    mkifr(ifr,"mytap",0);*(unsigned short*)(ifr+16)=1;ioctl(sk,0x8914,(long)ifr);
+    mkifr(ifr,"mytap",0);ioctl(sk,0x8927,(long)ifr);
+    ktest("tap.hwaddr",*(unsigned short*)(ifr+16)==1&&ifr[18]==0xfe);
+    memset(fr,0,60);memset(fr,255,6);memcpy(fr+6,hm,6);fr[12]=8;fr[13]=6;
+    fr[15]=1;fr[16]=8;fr[18]=6;fr[19]=4;fr[21]=1;memcpy(fr+22,hm,6);memcpy(fr+28,lan,4);memcpy(fr+38,me,4);
+    ktest("tap.write_arp",write(tf,fr,60)==60);
+    got=-1;for(t=0;t<100&&got<0;t++){int n=read(tf,rb,sizeof rb);
+      if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
+    ktest("tap.arp_reply",got==60&&memcmp_(rb,hm,6)==0&&rb[12]==8&&rb[13]==6&&rb[21]==2&&memcmp_(rb+28,me,4)==0&&memcmp_(rb+22,rb+6,6)==0&&memcmp_(rb+32,hm,6)==0);
+    memset(pl,0,16);pl[0]=8;pl[4]=0x77;pl[5]=0x88;pl[7]=1;memcpy(pl+8,"tapping!",8);
+    {int c=ipcs(pl,16);pl[2]=c>>8;pl[3]=c&255;}
+    memset(fr,0,sizeof fr);memcpy(fr,rb+6,6);memcpy(fr+6,hm,6);fr[12]=8;fr[13]=0;
+    r=mkip(fr+14,1,lan,me,pl,16);
+    ktest("tap.write_ip",write(tf,fr,14+r)==14+r);
+    got=-1;for(t=0;t<100&&got<0;t++){int n=read(tf,rb,sizeof rb);
+      if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
+    ktest("tap.icmp_reply",got==14+36&&memcmp_(rb,hm,6)==0&&rb[12]==8&&rb[13]==0&&rb[14+9]==1&&rb[14+20]==0&&rb[14+20+4]==0x77&&memcmp_(rb+14+12,me,4)==0&&ipcs(rb+14,20)==0);
+    /* un socket UDP local vers l'hote du tap : requete ARP sur le tap puis donnees */
+    {int us=socket(2,2,0);struct sin a2;
+     mksin(&a2,0x0258a8c0,7);                       /* 192.168.88.2 */
+     ktest("tap.udp_send",sendto(us,"tap-udp",7,0,&a2,16)==7);
+     got=-1;for(t=0;t<100&&got<0;t++){int n=read(tf,rb,sizeof rb);
+       if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
+     ktest("tap.udp_frame",got==14+20+8+7&&rb[12]==8&&rb[13]==0&&rb[14+9]==17&&memcmp_(rb+14+12,me,4)==0&&memcmp_(rb+14+16,lan,4)==0&&memcmp_(rb+14+28,"tap-udp",7)==0&&udpchk(rb+14)==0);
+     close(us);}
+    close(tf);close(sk);
+    {int sk2=socket(2,2,0);mkifr(ifr,"mytap",0);ktest("tap.gone_after_close",ioctl(sk2,0x8915,(long)ifr)==-19);close(sk2);}
   }
   /* TCP client */
   s=socket(2,1,0);mksin(&a,HOST,9091);
