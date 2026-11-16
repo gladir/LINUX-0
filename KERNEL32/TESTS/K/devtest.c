@@ -58,5 +58,16 @@ int main(void){
    while((t=getdents64(d,db,sizeof db))>0){int o=0;while(o<t){struct{unsigned long long i,o;unsigned short l;unsigned char ty;char nm[1];}*e=(void*)(db+o);if(e->nm[0]>='0'&&e->nm[0]<='9')cnt++;o+=e->l;}}
    ktest("dev.proc_fd_list",d>=0&&cnt>=4);close(d);}
   close(fd);
+  if(ku_cmdline_has("k32conmark")){int c=open("/dev/console",O_WRONLY|0x100,0);
+    if(c>=0){write(c,"CONSOLE-MARK\n",13);close(c);}}
+  /* KDSKBMODE par console : tty1 en MEDIUMRAW ne touche pas tty2 ; la
+     fermeture du dernier descripteur remet XLATE */
+  {int t1=open("/dev/tty1",O_RDWR|0x100,0),t2=open("/dev/tty2",O_RDWR|0x100,0);int m=-1;
+   ktest("dev.kbmode_set",t1>=0&&ioctl(t1,0x4B45,2)==0);
+   m=-1;ioctl(t2,0x4B44,(long)&m);ktest("dev.kbmode_per_tty",m==1);
+   m=-1;ioctl(t1,0x4B44,(long)&m);ktest("dev.kbmode_own",m==2);
+   close(t1);t1=open("/dev/tty1",O_RDWR|0x100,0);
+   m=-1;ioctl(t1,0x4B44,(long)&m);ktest("dev.kbmode_reset_on_close",m==1);
+   close(t1);close(t2);}
   return ku_fail?1:0;
 }

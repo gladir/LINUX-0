@@ -7,6 +7,14 @@
 static unsigned short hs(unsigned short v){return (v>>8)|(v<<8);}
 static void mksin(struct sin*a,unsigned ip,int port){memset(a,0,sizeof *a);a->fam=2;a->port=hs(port);a->addr=ip;}
 #define HOST 0x0202000a
+static unsigned short ipcs(const unsigned char*p,int n){unsigned s=0;while(n>1){s+=(p[0]<<8)|p[1];p+=2;n-=2;}if(n)s+=p[0]<<8;while(s>>16)s=(s&0xffff)+(s>>16);return (unsigned short)~s;}
+/* paquet IPv4 : proto, source, destination (octets), charge utile */
+static int mkip(unsigned char*pk,int proto,const unsigned char*src,const unsigned char*dst,const unsigned char*pl,int plen){
+  int c;memset(pk,0,20);pk[0]=0x45;pk[2]=(20+plen)>>8;pk[3]=(20+plen)&255;pk[6]=0x40;pk[8]=64;pk[9]=proto;
+  memcpy(pk+12,src,4);memcpy(pk+16,dst,4);c=ipcs(pk,20);pk[10]=c>>8;pk[11]=c&255;memcpy(pk+20,pl,plen);return 20+plen;}
+/* ifreq pour ioctl d'interface : nom, adresse IPv4 en octets */
+static void mkifr(unsigned char*r,const char*nm,const unsigned char*ad){
+  memset(r,0,40);memcpy(r,nm,5);if(ad){r[16]=2;memcpy(r+20,ad,4);}}
 int main(void){
   char cl[256];int fdc=open("/proc/cmdline",O_RDONLY,0),m=0,k,found=0;
   int s,n,i,l;char b[4096];struct sin a,f;
@@ -124,6 +132,62 @@ int main(void){
     ktest("nf.nonroot_eperm",({int pp=fork(),st=0;if(pp==0){int r2;sc1(23,1000);r2=socket(2,3,255);_exit(r2==-1?0:1);}waitpid(pp,&st,0);st==0;}));
     (void)rl;
     close(rs);
+  }
+  /* tun/tap : interface tun0 en 192.168.77.1/24 ; un "hote" 192.168.77.2
+     ecrit et lit par /dev/net/tun */
+  {
+    int tf=open("/dev/net/tun",O_RDWR|0x800,0),sk=socket(2,2,0),r,t,got;
+    static unsigned char ifr[40],pk[256],rb[2048],pl[64],tb[4096];
+    unsigned char me[4]={192,168,77,1},lan[4]={192,168,77,2},mk[4]={255,255,255,0},hostip[4]={10,0,2,2};
+    int rs=socket(2,3,255),off;
+    memset(ifr,0,40);*(unsigned short*)(ifr+16)=0x1001;     /* IFF_TUN | IFF_NO_PI */
+    r=ioctl(tf,0x400454CA,(long)ifr);
+    ktest("tun.setiff",tf>=0&&r==0&&memcmp_(ifr,"tun0",5)==0);
+    mkifr(ifr,"tun0",me);r=ioctl(sk,0x8916,(long)ifr);
+    mkifr(ifr,"tun0",mk);r|=ioctl(sk,0x891C,(long)ifr);
+    mkifr(ifr,"tun0",0);*(unsigned short*)(ifr+16)=1;r|=ioctl(sk,0x8914,(long)ifr);
+    ktest("tun.configure",r==0);
+    mkifr(ifr,"tun0",0);ioctl(sk,0x8915,(long)ifr);
+    ktest("tun.getaddr",memcmp_(ifr+20,me,4)==0);
+    mkifr(ifr,"tun0",0);ioctl(sk,0x8933,(long)ifr);
+    ktest("tun.ifindex",*(int*)(ifr+16)==3);
+    mkifr(ifr,"tun0",0);ioctl(sk,0x8913,(long)ifr);
+    ktest("tun.flags_up",(*(unsigned short*)(ifr+16)&1)!=0);
+    /* ping de l'hote LAN vers 192.168.77.1 : reponse lue sur tun0 */
+    memset(pl,0,16);pl[0]=8;pl[4]=0x12;pl[5]=0x34;pl[7]=1;memcpy(pl+8,"tunping!",8);
+    {int c=ipcs(pl,16);pl[2]=c>>8;pl[3]=c&255;}
+    r=mkip(pk,1,lan,me,pl,16);
+    ktest("tun.write",write(tf,pk,r)==r);
+    got=-1;for(t=0;t<100&&got<0;t++){int n=read(tf,rb,sizeof rb);
+      if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
+    ktest("tun.icmp_reply",got==36&&rb[9]==1&&rb[20]==0&&rb[24]==0x12&&memcmp_(rb+12,me,4)==0&&memcmp_(rb+16,lan,4)==0&&ipcs(rb,20)==0);
+    /* paquet UDP vers l'hote 10.0.2.2:9092 a travers eth0, sans retransmission */
+    {unsigned char u[8+7];memset(u,0,sizeof u);u[0]=0x0f;u[1]=0xa0;u[2]=9092>>8;u[3]=9092&255;u[5]=15;memcpy(u+8,"tun-fwd",7);
+     r=mkip(pk,17,lan,hostip,u,15);
+     {int fd=open("/proc/sys/net/ipv4/ip_forward",O_RDWR,0),n;char v[4];
+      n=read(fd,v,1);ktest("tun.ip_forward_default_off",n==1&&v[0]=='0');close(fd);}
+     write(tf,pk,r);
+     got=-1;for(t=0;t<40&&got<0;t++){int n=read(tf,rb,sizeof rb);
+       if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
+     ktest("tun.no_forward_when_off",got<0);
+     {int fd=open("/proc/sys/net/ipv4/ip_forward",O_RDWR,0);write(fd,"1\n",2);close(fd);}
+     /* FORWARD en DROP : rien ne repart */
+     BUILD(0,0,0,0,0,0);PUT32(92+152+144,(unsigned)-1);
+     ktest("tun.forward_drop_rule",setsockopt(rs,0,64,tb,off)==0);
+     write(tf,pk,r);
+     got=-1;for(t=0;t<60&&got<0;t++){int n=read(tf,rb,sizeof rb);
+       if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
+     ktest("tun.forward_dropped",got<0);
+     BUILD(0,0,0,0,0,0);
+     ktest("tun.forward_accept_rule",setsockopt(rs,0,64,tb,off)==0);
+     write(tf,pk,r);
+     /* l'echo de l'hote revient vers 192.168.77.2 : retransmis sur tun0 */
+     got=-1;for(t=0;t<300&&got<0;t++){int n=read(tf,rb,sizeof rb);
+       if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
+     ktest("tun.forward_roundtrip",got==35&&rb[9]==17&&memcmp_(rb+12,hostip,4)==0&&memcmp_(rb+16,lan,4)==0&&memcmp_(rb+28,"tun-fwd",7)==0&&ipcs(rb,20)==0);
+    }
+    {int fd=open("/proc/sys/net/ipv4/ip_forward",O_RDWR,0);write(fd,"0\n",2);close(fd);}
+    close(rs);close(tf);close(sk);
   }
   /* TCP client */
   s=socket(2,1,0);mksin(&a,HOST,9091);

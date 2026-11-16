@@ -50,6 +50,8 @@ Var
   ScrollN : LongInt;
   CmdStr : String;
   CPos : LongInt;
+  Feed : String;
+  UseFeed : Boolean;
 
 Procedure Flush;
 Begin
@@ -421,11 +423,10 @@ Begin
   Begin
     P := LAt(I);
     L := LLen(P);
-    If L > 0 Then SysWrite(Fd, Mem[0:P + 8], L);
-    SysWrite(Fd, Mem[0:LongInt(@Tot)], 0);
+    If L > 0 Then LnxSys3(4, Fd, P + 8, L);
     Tot := Tot + L + 1;
     L := 10;
-    SysWrite(Fd, L, 1);
+    LnxSys3(4, Fd, LongInt(@L), 1);
   End;
   SysClose(Fd);
   WriteRange := Tot;
@@ -447,6 +448,8 @@ Begin
     CompileRe := True;
     Exit;
   End;
+  ReN := 0;
+  ReSetN := 0;
   Pr := ReCompile(Pat, False, False);
   If Pr < 0 Then
   Begin
@@ -711,11 +714,31 @@ End;
 
 { ---- saisie de texte (a, i, c) ---- }
 
+{ ligne de texte : de la liste de commandes d'un g, sinon de l'entree }
+Function ReadText(Var P, L : LongInt) : Boolean;
+Var K, N : LongInt;
+Begin
+  If Not UseFeed Then
+  Begin
+    ReadText := ReadInput(P, L);
+    Exit;
+  End;
+  ReadText := False;
+  If Feed = '' Then Exit;
+  K := Pos(#10, Feed);
+  If K = 0 Then N := Length(Feed) Else N := K - 1;
+  P := BAlloc(N + 8);
+  For L := 1 To N Do Mem[0:P + L - 1] := Ord(Feed[L]);
+  L := N;
+  If K = 0 Then Feed := '' Else Feed := Copy(Feed, K + 1, 250);
+  ReadText := True;
+End;
+
 Procedure InputText(At : LongInt; Var Cnt : LongInt);
 Var P, L : LongInt;
 Begin
   Cnt := 0;
-  While ReadInput(P, L) Do
+  While ReadText(P, L) Do
   Begin
     If (L = 1) And (Mem[0:P] = 46) Then
     Begin
@@ -846,7 +869,7 @@ End;
 { ---- global ---- }
 
 Procedure DoGlobal(A1, A2 : LongInt; Inverse, Interact : Boolean);
-Var Pat, Cmds, Line : String; Mk : LongInt; Ptrs, N, K, I, Hint, Found : LongInt;
+Var Pat, Cmds, Line : String; Mk, K2 : LongInt; Ptrs, N, K, I, Hint, Found : LongInt;
     M : Boolean; D : Char; S2 : String; P : LongInt; More : Boolean;
 Begin
   D := Cc;
@@ -916,7 +939,27 @@ Begin
       LastCmd := Line;
       ExecLine(Line);
     End
-    Else ExecLine(Cmds);
+    Else
+    Begin
+      Feed := Cmds;
+      UseFeed := True;
+      While (Feed <> '') And (Not Done_) Do
+      Begin
+        K2 := Pos(#10, Feed);
+        If K2 = 0 Then
+        Begin
+          Line := Feed;
+          Feed := '';
+        End
+        Else
+        Begin
+          Line := Copy(Feed, 1, K2 - 1);
+          Feed := Copy(Feed, K2 + 1, 250);
+        End;
+        ExecLine(Line);
+      End;
+      UseFeed := False;
+    End;
     If Done_ Then Break;
   End;
   For K := 0 To N - 1 Do LDrop(MemL[0:Ptrs + K * 4]);
@@ -926,25 +969,843 @@ End;
 
 { ---- execution d'une commande ---- }
 
-Procedure ExecLine(Const Cmd : String);
-Var
-  Sv : String; SvPos : LongInt;
-  A1, A2, Cnt, I, K, T, Dst, N, P, L, Nth, Q, X : LongInt;
-  Has, Has2, Sep : Boolean;
-  C : Char;
-  NAddr : LongInt;
-  Arg, Pat, Rep : String;
-  D : Char;
-  Glob, SP, SN, SL, Any : Boolean;
-  Out, OutL : LongInt;
-  Tot : LongInt;
-  Ok : Boolean;
-  Lo, Hi : LongInt;
-Procedure Need(N : LongInt);
+{ deplace/copie : copie les pointeurs A..B en tableau neuf }
+Function CopyPtrs(A, B : LongInt) : LongInt;
+Var P, K : LongInt;
 Begin
-  If (A1 < N) And (Not LastErrSet) Then
+  P := BAlloc((B - A + 2) * 4);
+  For K := A To B Do MemL[0:P + (K - A) * 4] := LAt(K);
+  CopyPtrs := P;
+End;
+
+Procedure CheckAddr(A : LongInt; Var Ok : Boolean);
+Begin
+  If (A < 0) Or (A > NL) Then
   Begin
+    Fail('Invalid address');
+    Ok := False;
   End;
 End;
+
+Procedure CmdSubst(A1, A2 : LongInt);
+Var D : Char; Pat, Rep, Flags, Ln : String; Glob, SP, SN, SL, Repeat_ : Boolean;
+    Nth, I, K, Out, OutL, Cnt, J, Last, S0, Pcs, Q : LongInt; Old, Nw : LongInt;
+    NoMatch : Boolean; Line : String;
 Begin
+  D := Cc;
+  Repeat_ := (D = #0) Or (D = 'g') Or (D = 'p') Or (D = 'l') Or
+             (D = 'n') Or ((D >= '0') And (D <= '9')) Or (D = ' ');
+  If Repeat_ Then
+  Begin
+    If Not ReValid Then
+    Begin
+      Fail('No previous substitution');
+      Exit;
+    End;
+    Pat := '';
+    Rep := LastRepl;
+    If LastRe = '' Then
+    Begin
+      Fail('No previous substitution');
+      Exit;
+    End;
+  End
+  Else
+  Begin
+    Inc(CPos);
+    Pat := ReadPat(D);
+    If Cc = D Then Inc(CPos);
+    { remplacement : jusqu'au delimiteur ; "\" + saut de ligne = ligne suite }
+    Rep := '';
+    While True Do
+    Begin
+      If CPos > Length(CmdStr) Then Break;
+      If CmdStr[CPos] = D Then
+      Begin
+        Inc(CPos);
+        Break;
+      End;
+      If CmdStr[CPos] = '\' Then
+      Begin
+        If CPos = Length(CmdStr) Then
+        Begin
+          { backslash final : continuer sur la ligne suivante }
+          If UseFeed Then
+          Begin
+            K := Pos(#10, Feed);
+            If K = 0 Then
+            Begin
+              Ln := Feed;
+              Feed := '';
+            End
+            Else
+            Begin
+              Ln := Copy(Feed, 1, K - 1);
+              Feed := Copy(Feed, K + 1, 250);
+            End;
+          End
+          Else If Not ReadCmdLine(Ln) Then Ln := '';
+          Rep := Rep + '\' + #10;
+          CmdStr := CmdStr + Ln;
+          Inc(CPos);
+          Continue;
+        End;
+        If CmdStr[CPos + 1] = D Then
+        Begin
+          Rep := Rep + D;
+          Inc(CPos, 2);
+          Continue;
+        End;
+        Rep := Rep + '\' + CmdStr[CPos + 1];
+        Inc(CPos, 2);
+        Continue;
+      End;
+      Rep := Rep + CmdStr[CPos];
+      Inc(CPos);
+    End;
+    If Rep = '%' Then Rep := LastRepl;
+    LastRepl := Rep;
+  End;
+  Glob := False;
+  SP := False;
+  SN := False;
+  SL := False;
+  Nth := 1;
+  While True Do
+  Begin
+    If Cc = 'g' Then Glob := True
+    Else If Cc = 'p' Then SP := True
+    Else If Cc = 'n' Then SN := True
+    Else If Cc = 'l' Then SL := True
+    Else If (Cc >= '0') And (Cc <= '9') Then
+    Begin
+      Nth := ParseNum;
+      Dec(CPos);
+    End
+    Else Break;
+    Inc(CPos);
+  End;
+  If Cc <> #0 Then
+  Begin
+    Fail('Invalid command suffix');
+    Exit;
+  End;
+  If Not Repeat_ Then
+  Begin
+    If Not CompileRe(Pat) Then Exit;
+  End
+  Else
+  Begin
+    ReN := 0;
+    ReSetN := 0;
+    LastReProg := ReCompile(LastRe, False, False);
+  End;
+  { Rep : conversion des sequences "\" + saut de ligne en saut de ligne }
+  Cnt := 0;
+  Last := 0;
+  Snap;
+  I := A1;
+  While I <= A2 Do
+  Begin
+    Old := LAt(I);
+    If SubstLine(Old, Rep, Nth, Glob, Out, OutL) Then
+    Begin
+      { remplace la ligne ; coupe aux sauts de ligne inseres }
+      S0 := 0;
+      Pcs := 0;
+      For K := 0 To OutL Do
+        If (K = OutL) Or (Mem[0:Out + K] = 10) Then
+        Begin
+          Nw := LNew(Out + S0, K - S0);
+          If Pcs = 0 Then
+          Begin
+            ClearMarksFor(Old);
+            LDrop(Old);
+            SetL(I, Nw);
+          End
+          Else
+          Begin
+            OpenGap(I + Pcs - 1, 1);
+            SetL(I + Pcs, Nw);
+            Inc(A2);
+          End;
+          Inc(Pcs);
+          S0 := K + 1;
+        End;
+      I := I + Pcs - 1;
+      Last := I;
+      Inc(Cnt);
+    End;
+    BFree(Out);
+    Inc(I);
+  End;
+  If Cnt = 0 Then
+  Begin
+    Fail('No match');
+    Exit;
+  End;
+  Changed := True;
+  Cur := Last;
+  If SL Then PrintLine(Cur, False, True)
+  Else If SN Then PrintLine(Cur, True, False)
+  Else If SP Then PrintLine(Cur, False, False);
 End;
+
+Procedure LoadBuffer(Const Name : String);
+Var N, K : LongInt;
+Begin
+  If NL > 0 Then DelRange(1, NL);
+  Cur := 0;
+  N := ReadFileInto(Name, 0);
+  If N < 0 Then Exit;
+  If Not Quiet Then OutS(NumS(N) + #10);
+  Changed := False;
+End;
+
+Procedure ExecLine(Const Cmd : String);
+Var
+  A1, A2, NA, I, K, T, Dst, N, P, L, X, Cnt, Tot : LongInt;
+  Has, Ok, Sep, DefDone : Boolean;
+  C : Char;
+  Arg, Tmp : String;
+  Pt : LongInt;
+  Q, Pt2 : LongInt;
+  St : LongInt;
+  Dirn : Boolean;
+Begin
+  CmdStr := Cmd;
+  CPos := 1;
+  A1 := Cur;
+  A2 := Cur;
+  NA := 0;
+  Ok := True;
+  { adresses }
+  While True Do
+  Begin
+    SkipSp;
+    If (Cc = '%') And (NA = 0) Then
+    Begin
+      Inc(CPos);
+      A1 := 1;
+      A2 := NL;
+      NA := 2;
+      Break;
+    End;
+    X := ParseAddr(Has);
+    If ErrAny Then Exit;
+    SkipSp;
+    C := Cc;
+    Sep := (C = ',') Or (C = ';');
+    If Has Then
+    Begin
+      A1 := A2;
+      A2 := X;
+      Inc(NA);
+    End
+    Else If Sep Then
+    Begin
+      A1 := A2;
+      If C = ',' Then A2 := 1 Else A2 := Cur;
+      Inc(NA);
+    End;
+    If Not Sep Then Break;
+    If C = ';' Then
+    Begin
+      If (A2 < 0) Or (A2 > NL) Then
+      Begin
+        Fail('Invalid address');
+        Exit;
+      End;
+      Cur := A2;
+    End;
+    Inc(CPos);
+    SkipSp;
+    C := Cc;
+    If Not (((C >= '0') And (C <= '9')) Or (C = '.') Or (C = '$') Or
+            (C = '+') Or (C = '-') Or (C = '/') Or (C = '?') Or
+            (C = '''')) Then
+    Begin
+      A1 := A2;
+      A2 := NL;
+      Inc(NA);
+      Break;
+    End;
+  End;
+  If NA > 2 Then NA := 2;
+  If NA = 1 Then A1 := A2;
+  SkipSp;
+  C := Cc;
+  If C <> #0 Then Inc(CPos);
+  If (A1 < 0) Or (A2 < 0) Or (A1 > NL) Or (A2 > NL) Or (A1 > A2) Then
+  Begin
+    If Not ((NA > 0) And (A2 = 0) And ((C = 'a') Or (C = 'r') Or (C = 'i')
+       Or (C = 'k') Or (C = #0) Or (C = 'x') Or (C = 't') Or (C = 'm'))) Then
+    Begin
+      If (NA > 0) Or (C = #0) Then
+      Begin
+        Fail('Invalid address');
+        Exit;
+      End;
+    End;
+  End;
+  { commandes }
+  Case C Of
+    #0 :
+      Begin
+        If NA = 0 Then
+        Begin
+          If Cur + 1 > NL Then
+          Begin
+            Fail('Invalid address');
+            Exit;
+          End;
+          A2 := Cur + 1;
+        End;
+        If (A2 < 1) Or (A2 > NL) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        PrintLine(A2, False, False);
+      End;
+    'a', 'i' :
+      Begin
+        If NA = 0 Then A2 := Cur;
+        If Not ReadSuffix Then Exit;
+        Snap;
+        If C = 'a' Then T := A2
+        Else
+        Begin
+          T := A2 - 1;
+          If T < 0 Then T := 0;
+        End;
+        InputText(T, Cnt);
+        If Cnt > 0 Then Changed := True;
+        ApplySuffix;
+      End;
+    'c' :
+      Begin
+        If NA = 0 Then
+        Begin
+          A1 := Cur;
+          A2 := Cur;
+        End;
+        If (A1 < 1) Or (A2 > NL) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        If Not ReadSuffix Then Exit;
+        Snap;
+        DelRange(A1, A2);
+        Cur := A1 - 1;
+        InputText(A1 - 1, Cnt);
+        Changed := True;
+        If Cnt = 0 Then
+        Begin
+          If A1 <= NL Then Cur := A1 Else Cur := NL;
+        End;
+        ApplySuffix;
+      End;
+    'd' :
+      Begin
+        If NA = 0 Then
+        Begin
+          A1 := Cur;
+          A2 := Cur;
+        End;
+        If (A1 < 1) Or (A2 > NL) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        If Not ReadSuffix Then Exit;
+        Snap;
+        DelRange(A1, A2);
+        Changed := True;
+        If A1 <= NL Then Cur := A1 Else Cur := NL;
+        ApplySuffix;
+      End;
+    'e', 'E' :
+      Begin
+        SkipSp;
+        If (C = 'e') And Changed And (Not QuitWarn) Then
+        Begin
+          QuitWarn := True;
+          Fail('Warning: buffer modified');
+          Exit;
+        End;
+        Arg := Copy(CmdStr, CPos, 250);
+        If Arg <> '' Then FileName := Arg;
+        If FileName = '' Then
+        Begin
+          Fail('No current filename');
+          Exit;
+        End;
+        Snap;
+        LoadBuffer(FileName);
+        QuitWarn := False;
+      End;
+    'f' :
+      Begin
+        SkipSp;
+        Arg := Copy(CmdStr, CPos, 250);
+        If Arg <> '' Then FileName := Arg;
+        OutS(FileName + #10);
+      End;
+    'g', 'v' :
+      Begin
+        If NA = 0 Then
+        Begin
+          A1 := 1;
+          A2 := NL;
+        End;
+        If (NL = 0) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        If InGlobal Then
+        Begin
+          Fail('Cannot nest global commands');
+          Exit;
+        End;
+        DoGlobal(A1, A2, C = 'v', False);
+      End;
+    'G', 'V' :
+      Begin
+        If NA = 0 Then
+        Begin
+          A1 := 1;
+          A2 := NL;
+        End;
+        If (NL = 0) Or InGlobal Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        DoGlobal(A1, A2, C = 'V', True);
+      End;
+    'h' :
+      If LastErr <> '' Then OutS(LastErr + #10);
+    'H' :
+      Begin
+        Verbose := Not Verbose;
+        If Verbose And (LastErr <> '') Then OutS(LastErr + #10);
+      End;
+    'j' :
+      Begin
+        If NA = 0 Then
+        Begin
+          A1 := Cur;
+          A2 := Cur + 1;
+        End;
+        If (A1 < 1) Or (A2 > NL) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        If Not ReadSuffix Then Exit;
+        If A1 < A2 Then
+        Begin
+          Snap;
+          T := 0;
+          For K := A1 To A2 Do T := T + LLen(LAt(K));
+          P := BAlloc(T + 8);
+          T := 0;
+          For K := A1 To A2 Do
+          Begin
+            For I := 0 To LLen(LAt(K)) - 1 Do Mem[0:P + T + I] := Mem[0:LAt(K) + 8 + I];
+            T := T + LLen(LAt(K));
+          End;
+          Q := LNew(P, T);
+          BFree(P);
+          DelRange(A1, A2);
+          OpenGap(A1 - 1, 1);
+          SetL(A1, Q);
+          Cur := A1;
+          Changed := True;
+        End;
+        ApplySuffix;
+      End;
+    'k' :
+      Begin
+        If NA = 0 Then A2 := Cur;
+        If (A2 < 1) Or (A2 > NL) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        X := Ord(Cc);
+        Inc(CPos);
+        If (X < 97) Or (X > 122) Then
+        Begin
+          Fail('Invalid mark character');
+          Exit;
+        End;
+        Marks[X - 97] := LAt(A2);
+        If Not ReadSuffix Then Exit;
+        ApplySuffix;
+      End;
+    'l', 'n', 'p' :
+      Begin
+        If NA = 0 Then
+        Begin
+          A1 := Cur;
+          A2 := Cur;
+        End;
+        If (A1 < 1) Or (A2 > NL) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        Dec(CPos);
+        If Not ReadSuffix Then Exit;
+        For K := A1 To A2 Do PrintLine(K, SuffixN, SuffixL);
+        Cur := A2;
+      End;
+    'm', 't' :
+      Begin
+        If NA = 0 Then
+        Begin
+          A1 := Cur;
+          A2 := Cur;
+        End;
+        If (A1 < 1) Or (A2 > NL) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        SkipSp;
+        X := ParseAddr(Has);
+        If (Not Has) Then X := Cur;
+        If (X < 0) Or (X > NL) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        If Not ReadSuffix Then Exit;
+        Cnt := A2 - A1 + 1;
+        If C = 'm' Then
+        Begin
+          If (X >= A1) And (X < A2) Then
+          Begin
+            Fail('Invalid destination');
+            Exit;
+          End;
+          Snap;
+          If X <> A2 Then
+          Begin
+            Pt := CopyPtrs(A1, A2);
+            { retire sans liberer }
+            For K := A2 + 1 To NL Do SetL(K - Cnt, LAt(K));
+            NL := NL - Cnt;
+            If X > A2 Then X := X - Cnt;
+            OpenGap(X, Cnt);
+            For K := 0 To Cnt - 1 Do SetL(X + 1 + K, MemL[0:Pt + K * 4]);
+            BFree(Pt);
+            Cur := X + Cnt;
+          End
+          Else Cur := A2;
+        End
+        Else
+        Begin
+          Snap;
+          Pt := CopyPtrs(A1, A2);
+          OpenGap(X, Cnt);
+          For K := 0 To Cnt - 1 Do
+          Begin
+            LRef(MemL[0:Pt + K * 4]);
+            SetL(X + 1 + K, MemL[0:Pt + K * 4]);
+          End;
+          BFree(Pt);
+          Cur := X + Cnt;
+        End;
+        Changed := True;
+        ApplySuffix;
+      End;
+    'P' :
+      Begin
+        ShowPrompt := Not ShowPrompt;
+      End;
+    'q', 'Q' :
+      Begin
+        If (C = 'q') And Changed And (Not QuitWarn) Then
+        Begin
+          QuitWarn := True;
+          Fail('Warning: buffer modified');
+          Exit;
+        End;
+        Done_ := True;
+      End;
+    'r' :
+      Begin
+        If NA = 0 Then A2 := NL;
+        SkipSp;
+        Arg := Copy(CmdStr, CPos, 250);
+        If Arg = '' Then Arg := FileName;
+        If FileName = '' Then FileName := Arg;
+        If Arg = '' Then
+        Begin
+          Fail('No current filename');
+          Exit;
+        End;
+        Snap;
+        If Arg[1] = '!' Then
+        Begin
+          Tmp := '/tmp/ed.' + NumS(SysGetPid);
+          RunShell(Copy(Arg, 2, 250) + ' > ' + Tmp);
+          Tot := ReadFileInto(Tmp, A2);
+          SysUnlink(Tmp);
+        End
+        Else Tot := ReadFileInto(Arg, A2);
+        If Tot >= 0 Then
+        Begin
+          If Not Quiet Then OutS(NumS(Tot) + #10);
+          Changed := True;
+        End;
+      End;
+    's' :
+      Begin
+        If NA = 0 Then
+        Begin
+          A1 := Cur;
+          A2 := Cur;
+        End;
+        If (A1 < 1) Or (A2 > NL) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        CmdSubst(A1, A2);
+      End;
+    'u' :
+      Begin
+        If Not UValid Then
+        Begin
+          Fail('Nothing to undo');
+          Exit;
+        End;
+        DoUndo;
+      End;
+    'w', 'W' :
+      Begin
+        If NA = 0 Then
+        Begin
+          A1 := 1;
+          A2 := NL;
+        End;
+        Dirn := False;
+        If Cc = 'q' Then
+        Begin
+          Dirn := True;
+          Inc(CPos);
+        End;
+        SkipSp;
+        Arg := Copy(CmdStr, CPos, 250);
+        If Arg = '' Then Arg := FileName;
+        If FileName = '' Then FileName := Arg;
+        If Arg = '' Then
+        Begin
+          Fail('No current filename');
+          Exit;
+        End;
+        If NL = 0 Then
+        Begin
+          A1 := 1;
+          A2 := 0;
+        End;
+        Tot := WriteRange(Arg, A1, A2, C = 'W');
+        If Tot < 0 Then Exit;
+        If Not Quiet Then OutS(NumS(Tot) + #10);
+        If (A1 <= 1) And (A2 >= NL) Then Changed := False;
+        If Dirn Then Done_ := True;
+      End;
+    'x' :
+      Begin
+        If NA = 0 Then A2 := Cur;
+        If YN = 0 Then
+        Begin
+          Fail('Nothing to put');
+          Exit;
+        End;
+        Snap;
+        OpenGap(A2, YN);
+        For K := 0 To YN - 1 Do
+        Begin
+          LRef(MemL[0:YP + K * 4]);
+          SetL(A2 + 1 + K, MemL[0:YP + K * 4]);
+        End;
+        Cur := A2 + YN;
+        Changed := True;
+        If Not ReadSuffix Then Exit;
+        ApplySuffix;
+      End;
+    'y' :
+      Begin
+        If NA = 0 Then
+        Begin
+          A1 := Cur;
+          A2 := Cur;
+        End;
+        If (A1 < 1) Or (A2 > NL) Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        If YP <> 0 Then
+        Begin
+          For K := 0 To YN - 1 Do LDrop(MemL[0:YP + K * 4]);
+          BFree(YP);
+        End;
+        YP := CopyPtrs(A1, A2);
+        YN := A2 - A1 + 1;
+        For K := 0 To YN - 1 Do LRef(MemL[0:YP + K * 4]);
+      End;
+    'z' :
+      Begin
+        If NA = 0 Then A2 := Cur;
+        If (Cc >= '0') And (Cc <= '9') Then ScrollN := ParseNum;
+        If ScrollN < 1 Then ScrollN := 22;
+        If A2 + 1 > NL Then
+        Begin
+          Fail('Invalid address');
+          Exit;
+        End;
+        T := A2 + ScrollN;
+        If T > NL Then T := NL;
+        For K := A2 + 1 To T Do PrintLine(K, False, False);
+        Cur := T;
+      End;
+    '=' :
+      Begin
+        If NA = 0 Then A2 := NL;
+        OutS(NumS(A2) + #10);
+      End;
+    '!' :
+      Begin
+        Arg := Copy(CmdStr, CPos, 250);
+        RunShell(Arg);
+        If Not Quiet Then OutS('!' + #10);
+      End;
+    '#' : ;
+  Else
+    Fail('Unknown command');
+  End;
+End;
+
+Procedure Usage;
+Begin
+  SysPut(1, 'Usage: ed [-s] [-p string] [file]' + #10);
+  SysExit(0);
+End;
+
+Var
+  I, K, N_ : LongInt;
+  A, Line : String;
+  Tm : TSysTermios;
+  ExitErr, QuitFlagReset : Boolean;
+Begin
+  ExitErr := False;
+  LP := 0;
+  NL := 0;
+  Cap := 0;
+  Cur := 0;
+  UP := 0;
+  UN := 0;
+  UCap := 0;
+  UValid := False;
+  Changed := False;
+  Quiet := False;
+  ErrAny := False;
+  Verbose := False;
+  ShowPrompt := False;
+  InGlobal := False;
+  UseFeed := False;
+  Done_ := False;
+  QuitWarn := False;
+  FileName := '';
+  PromptS := '*';
+  LastErr := '';
+  LastRe := '';
+  LastRepl := '';
+  ReValid := False;
+  YP := 0;
+  YN := 0;
+  InPos := 0;
+  InCnt := 0;
+  InEof := False;
+  OLen := 0;
+  ScrollN := 22;
+  For K := 0 To MaxMarks - 1 Do Marks[K] := 0;
+  Grow(1024);
+  Interactive := SysTcGetAttr(0, Tm) = 0;
+  I := 1;
+  While I < SysArgCount Do
+  Begin
+    A := SysArgStr(I);
+    If (A = '-') Or (A = '-s') Or (A = '--quiet') Or (A = '--silent') Then
+      Quiet := True
+    Else If (A = '-p') And (I + 1 < SysArgCount) Then
+    Begin
+      Inc(I);
+      PromptS := SysArgStr(I);
+      ShowPrompt := True;
+    End
+    Else If Copy(A, 1, 2) = '-p' Then
+    Begin
+      PromptS := Copy(A, 3, 100);
+      ShowPrompt := True;
+    End
+    Else If (A = '-h') Or (A = '--help') Then Usage
+    Else If (A = '-V') Or (A = '--version') Then
+    Begin
+      SysPut(1, 'GNU Ed 1.17' + #10);
+      SysExit(0);
+    End
+    Else If (A = '-G') Or (A = '--traditional') Then
+    Begin
+    End
+    Else If (A <> '') And (A[1] = '-') Then
+    Begin
+      SysPut(2, 'ed: invalid option ''' + A + '''' + #10);
+      SysExit(1);
+    End
+    Else
+    Begin
+      FileName := A;
+      N_ := ReadFileInto(A, 0);
+      If N_ >= 0 Then
+      Begin
+        If Not Quiet Then OutS(NumS(N_) + #10);
+      End
+      Else
+      Begin
+        OutS(A + ': No such file or directory' + #10);
+        Flush;
+        LastErr := 'Cannot open input file';
+      End;
+    End;
+    Inc(I);
+  End;
+  While Not Done_ Do
+  Begin
+    If ShowPrompt Then OutS(PromptS);
+    Flush;
+    ErrAny := False;
+    If Not ReadCmdLine(Line) Then Break;
+    QuitFlagReset := False;
+    ExecLine(Line);
+    If ErrAny Then
+    Begin
+      OutS('?' + #10);
+      If Verbose Then OutS(LastErr + #10);
+      ExitErr := True;
+    End
+    Else If (Line <> 'q') And (Line <> 'e') Then QuitWarn := False;
+    Flush;
+  End;
+  Flush;
+  If ExitErr And (Not Interactive) Then SysExit(1);
+  SysExit(0);
+End.
