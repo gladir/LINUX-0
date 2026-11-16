@@ -42604,8 +42604,10 @@ Begin
     LoopIoctl := -ENXIO;
     Exit;
   End;
-  If (Cmd <> $4C03) And (Cmd <> $4C05) And ((F^.Flags And O_ACCMODE)
-     = O_RDONLY) Then
+  { LOOP_CLR_FD (losetup -d) s'accepte sur une ouverture en lecture seule
+    comme sous Linux }
+  If (Cmd <> $4C03) And (Cmd <> $4C05) And (Cmd <> $4C01)
+     And ((F^.Flags And O_ACCMODE) = O_RDONLY) Then
   Begin
     LoopIoctl := -EPERM;
     Exit;
