@@ -19,7 +19,8 @@ depot : le regenerer par  KERNEL32/BUILD.SH cd  ou
 KERNEL32/TOOLS/MKINSTALLCD.SH -o KERNEL32-INSTALL.ISO).
   Contenu : /boot/linux0 (noyau de production), /boot/initrd.img (systeme live
   + assistant /sbin/k32-setup), /system.tar (systeme a installer), README.TXT.
-  Amorcage : qemu-system-i386 -m 256 -vga std -cdrom IMAGE/KERNEL32-INSTALL.ISO \
+  Amorcage : qemu-system-i386 -m 256 -vga std \
+             -cdrom IMAGE/KERNEL32-INSTALL.ISO \
              -boot d -drive file=disque.img,format=raw,if=ide,index=0
   (disque.img : un fichier creux, par exemple  truncate -s 1G disque.img ;
   le CD est /dev/hdc, le disque /dev/hda). Les 7 langues (francais, English,
@@ -53,3 +54,13 @@ Machine virtuelle : type Linux / Other Linux (32-bit), 256 Mo de RAM
 - Apres l'installation : retirer le CD (Peripheriques > Lecteurs optiques) et
   redemarrer ; le disque installe s'amorce par MBR + STAGE2 + /boot/linux0.
 - Shell de secours : F2 dans l'assistant, ou Alt+F2 / Alt+F3 (root / root).
+
+Lot E6 : accueil et aide (F1) en tete de l'assistant, touches mortes
+  (circonflexe, trema, grave, aigu, tilde) pour fr/de/es/pt/be/ch, partitions
+  etendue et logiques dans l'editeur et dans preseed (parts=...:l),
+  installation sur disque virtio (/dev/vda), detection d'un systeme deja
+  installe (avertissement en rouge avant l'effacement), loadkeys/dumpkeys
+  (necessitent KDSKBENT dans le noyau).
+  Guide pas a pas QEMU / VirtualBox : KERNEL32/README.md, "Guide
+  d'installation". VirtualBox (VBoxVGA, pas de /dev/fb0) : l'assistant passe
+  seul en mode texte ; controleur de disque IDE (pas encore AHCI).

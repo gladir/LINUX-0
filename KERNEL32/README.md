@@ -903,6 +903,34 @@ etre reproduit sans le correctif avec ce parametre, la garde `ShrinkBusy`
 reste la correction par construction). Non fait : rouvrir un tube par
 `/proc/self/fd/N`.
 
+**Materiel reel / VirtualBox (lot D7-1)** : **AHCI/SATA** (`AhciProbe`, classe
+01:06:01 : ICH9 de QEMU, defaut de VirtualBox) : ABAR mappe en FAC00000h,
+interruptions coupees, une commande a la fois par DMA (READ/WRITE DMA EXT 48
+bits, IDENTIFY, paquets ATAPI) ; disques `/dev/sdX` (majeur 8, 16 mineurs,
+partitions MBR/GPT comme les autres disques), lecteurs `/dev/srN` (majeur 11)
+et lien `/dev/cdrom` ; `/proc/partitions`, `/sys/block`, `BLKRRPART`,
+`BLKPG` comme pour hdX ; emplacements de disque 5 a 8, option `noahci`. Pas
+d'interruption, pas de NCQ, pas de port multiplicateur, une seule commande en
+vol. **e1000** (Intel 82540EM/82545EM/82543GC : la carte par defaut de
+VirtualBox et de `qemu -device e1000`) : anneaux de 32 descripteurs de
+reception et 8 d'emission, IRQ, MAC lue dans les registres ; pas de
+somme de controle ni de segmentation deleguees ; PCnet (AMD 79C970A) non fait.
+**VBoxVGA** (PCI 80EE:BEEF, registres Bochs VBE 1CEh/1CFh) reconnue comme la
+carte Bochs : taille du BAR mesuree decodage coupe, et un mode que la carte ne
+prend pas (relecture de `xres`, `yres`, bit d'activation) est annule avec retour au
+texte VGA (`FbSetMode` rend `ENODEV`) ; **non teste** (QEMU n'a pas cette
+carte). **ACPI** : FADT (PM1a_CNT_BLK, SMI_CMD, registre de reinitialisation)
+et objet `\_S5_` de la DSDT pour l'arret (activation ACPI si necessaire),
+reinitialisation par le registre ACPI, sinon 0CF9h, 8042, triple faute ;
+`noportoff` : aucun autre moyen d'arret (essais) ; `RUNPOWER.SH` vert sous
+QEMU (arret par PM1a 0604, redemarrage). LAPIC/IOAPIC/minuterie : repli sur
+les 8259 si l'etalonnage echoue (non teste sous NEM/Hyper-V). Tests : `RUNAHCI.SH`
+(disque ext2 sur AHCI seul puis avec un disque IDE, e2fsck, contenu relu,
+`root=/dev/sda1`), `RUNCD.SH` (3e essai : CD sur AHCI, `/dev/sr0`),
+`RUNNET.SH` avec `NICMODEL=e1000`, `RUNPOWER.SH`.
+QEMU ajoute par defaut une carte e1000 : sans option, le noyau voit maintenant
+une carte reseau (`socktest` en tient compte).
+
 **Noyau de production** : `TOOLS/MKPROD.SH [-o NOYAU.ELF]` compile
 `KERNEL32.PAS` sans les programmes de test embarques (2,6 Mo contre 3,4 Mo ; le
 reste est de la memoire initialisee a zero que le compilateur ecrit dans le
@@ -1244,6 +1272,10 @@ d'image 3 Mo).
   `/dev/fb0` est absent ou `text` figure sur la ligne de commande). Sur la console
   VGA du noyau les accents sont convertis en CP437 ; sur un terminal serie, en ASCII
   (ou UTF-8 avec `k32setup.utf8`).
+* **Touches mortes** (lot E6) : circonflexe, trema, grave, aigu et tilde des
+  dispositions fr be de chde chfr es pt (codes 2 a 6 de `LAYOUTS.INC`, jetons
+  `dcirc ddiaer dgrave dacute dtilde` de `LAYOUTS.TXT`) : la lettre suivante est
+  accentuee (`InCompose`), Espace ou la meme touche donne le signe seul.
 * **Clavier** : sur une console virtuelle l'assistant met `KDSKBMODE` en MEDIUMRAW
   et un termios brut ; les codes de touche Linux sont traduits ICI par la
   disposition choisie (`LAYOUTS.TXT` : us uk fr be de chde chfr it es pt nl, trois
@@ -1260,17 +1292,23 @@ d'image 3 Mo).
 
 ### Etapes de l'assistant
 
+0. Langue puis **accueil** (ecran/memoire/disques detectes, touches ; `F1` ouvre
+l'aide a tout moment) ;
 1. Langue ; 2. clavier (champ de test) ; 3. fuseau horaire : region puis ville
 (`/usr/share/zoneinfo`, heure locale affichee avec le decalage) ; 4. date et heure
 (reglage du systeme avec `settimeofday`, horloge materielle UTC ou locale) ;
 5. nom de la machine ; 6. mot de passe root, utilisateur (nom, identifiant, mot
 de passe : hachage V7 comme `PASSWD`) ; 7. disque (`/proc/partitions` : le CD, les
-disques montes ou en swap ne sont pas proposes) ; 8. partitionnement : *assiste*
+disques montes ou en swap ne sont pas proposes ; le **contenu existant** est
+detecte (`FSPROBE.INC` : type, nom, et `/boot/linux0` d'un systeme LINUX-0 deja
+installe) et repete en rouge dans le recapitulatif avant l'effacement) ; 8. partitionnement : *assiste*
 (racine + swap optionnel, systeme de fichiers ext4/ext3/ext2) ou *manuel* ;
-9. (manuel) **editeur MBR** type cfdisk : liste des 4 partitions primaires et des
-espaces libres, creation (tailles `500M`, `2G`, vide = tout), suppression, type
+9. (manuel) **editeur MBR** type cfdisk : liste des 4 partitions primaires, de la
+**partition etendue** et des **logiques** (5 a 12, EBR chaines, alignement 1 Mio) et
+des espaces libres, creation (tailles `500M`, `2G`, vide = tout), suppression, type
 (Linux 83 / swap 82), indicateur d'amorce, tout effacer ; 10. (manuel) roles :
-`/` (racine, obligatoire), swap, `/home`, ou inutilisee ; systeme de fichiers
+`/` (racine, obligatoire, **primaire** : le chargeur lit `/boot` sur la partition
+active), swap, `/home`, ou inutilisee ; systeme de fichiers
 (ext4/ext3/ext2) par defaut ou partition par partition (bouton) ;
 11. recapitulatif et **confirmation explicite** (case a cocher + boite Oui/Non) ;
 12. installation avec barre de progression reelle (octets du tar lus) et journal ;
@@ -1287,7 +1325,8 @@ et `mkswap` (programmes d'`INSTALL.PAS`) ; montage sur `/target` ; extraction de
 `default/locale`, `default/keyboard`, `timezone`, `localtime` (copie TZif),
 `adjtime`, ajouts a `/etc/rc` (`hwclock -s`, `swapon -a`, `mount -a`) ;
 `/boot/linux0` copie du CD et `/boot/linux0.cfg` (`root=/dev/hdaN rw console=tty0
-console=ttyS0 keymap=XX`) ; `hwclock -w` ; copie de `/var/log/install.log`.
+console=ttyS0`, plus `keymap=fr|us` si c'est la disposition choisie ; les autres
+sont chargees par `/bin/loadkeys $KEYMAP` depuis `/etc/rc`) ; `hwclock -w` ; copie de `/var/log/install.log`.
 
 ### Installation automatique (preseed)
 
@@ -1297,7 +1336,8 @@ nl), `timezone`, `clock` (utc|local), `date`/`time` (AAAA-MM-JJ, HH:MM:SS),
 `hostname`, `rootpw`, `user`, `fullname`, `userpw`, `disk` (defaut : premier disque
 libre), `partitioning` (guided|manual), `swap` (Mo, 0 = aucun), `fs` (ext4|ext3|ext2),
 `parts` (manuel : `ext3:/:250M,swap:swap:32M,ext4:/home:*`, systeme de fichiers par
-partition, tailles `M`/`G`/`*`),
+partition, tailles `M`/`G`/`*` ; suffixe `:l` = partition logique, creee dans
+une etendue sur l'espace libre restant : `ext4:/:250M,swap:swap:32M:l,ext3:/home:*:l`),
 `ui` (gui|text|none), `endwait` (secondes d'affichage de la page finale), `reboot`
 (reboot|halt). Autres
 parametres du noyau : `lang=fr` (langue initiale de l'assistant interactif ; defaut
@@ -1324,7 +1364,7 @@ dossier).
 
 ### Tests (`TESTS/U/RUNINST.SH`)
 
-`RUNINST.SH [-r racine] [-k noyau] [-c captures] [tz auto-fr auto-de ui-fr ui-de text refuse]` :
+`RUNINST.SH [-r racine] [-k noyau] [-c captures] [tz auto-fr auto-de auto-log ui-fr ui-de text refuse virtio exist]` :
 CD amorce sous QEMU (`-cdrom`, disque IDE vierge), installation, puis **amorcage du
 disque installe sans le CD** (connexion, nom de machine, langue, fuseau,
 utilisateur, clavier, fstab, noyau, `e2fsck -fn` de l'hote). `auto-de` installe
@@ -1334,9 +1374,65 @@ en mode texte (`ui=text`) avec une horloge materielle declaree locale (QEMU
 `text` pilotent l'interface par le moniteur QEMU (`sendkey`, `mouse_move`,
 `mouse_button`) et gardent des captures PNG dans `IMAGE/CAPTURES/`.
 
+### loadkeys / dumpkeys (lot E6)
+
+`USR/LOADKEYS.PAS` (`/bin/loadkeys`, lien `dumpkeys`) : `loadkeys NOM` (les 11
+dispositions de l'assistant), `loadkeys -f fichier` (`keycode N = normale
+majuscule altgr`), `-n` (affiche sans ecrire), `-d` (us) ; `dumpkeys` relit les
+tables. Il utilise KDSKBENT/KDGKBENT (0x4B47/0x4B46) : **le noyau ne les offre pas
+encore** (DEMANDES_A.md [E6], pour D7) ; le programme le dit et rend 1.
+
+### Disques virtio, VirtualBox
+
+L'assistant installe aussi sur `/dev/vdX` (scenario `virtio` de `RUNINST.SH` :
+installation puis amorce du disque virtio-blk). Sous VirtualBox (carte VBoxVGA :
+pas de `/dev/fb0`), l'assistant passe seul en **mode texte** plein ecran (80x25,
+accents convertis en CP437, `F3` inoperant faute de framebuffer).
+
+
+### Guide d'installation pas a pas (lot E6)
+
+**Fabriquer le CD** : `KERNEL32/BUILD.SH cd` (ou `TOOLS/MKINSTALLCD.SH -o X.ISO`) ;
+sortie `IMAGE/KERNEL32-INSTALL.ISO` (16 Mo, a regenerer, non conserve dans le depot).
+
+**QEMU** (affichage graphique 1024x768) :
+
+1. `truncate -s 2G disque.img`
+2. `qemu-system-i386 -m 256 -vga std -cdrom IMAGE/KERNEL32-INSTALL.ISO -boot d
+   -drive file=disque.img,format=raw,if=ide,index=0` (le CD est `/dev/hdc`, le disque
+   `/dev/hda` ; `if=virtio` donne `/dev/vda`). Le noyau du CD fixe `fb=1024x768` : la
+   carte `-vga std` passe en mode graphique, l'assistant s'affiche (captures
+   `IMAGE/CAPTURES/fr-01-langue.png` a `fr-11-fin.png` pour le francais,
+   `de-*.png` pour l'allemand).
+3. Suivre les pages (Tab, Entree, fleches, souris ; `F1` aide, `F2` shell, `F3` texte) :
+   langue, accueil, clavier, fuseau, date, machine, comptes, disque,
+   partitionnement, recapitulatif (cocher la confirmation), installation, fin.
+4. Quitter QEMU ; relancer **sans** `-cdrom` : `qemu-system-i386 -m 128 -drive
+   file=disque.img,format=raw,if=ide,index=0` : le chargeur
+   amorce directement le systeme installe, `login:` (root, mot de passe choisi).
+5. Installation sans intervention : `-append`/`MKINSTALLCD.SH -c "... preseed=/cdrom/
+   preseed.cfg"` (exemple `USR/INSTALLER/preseed.example`).
+
+**VirtualBox 7.0** (carte VBoxVGA : pas de `/dev/fb0` : l'assistant se met seul en
+mode texte 80x25, capture `text-01-langue.png`) :
+
+1. Nouvelle machine : type Linux, version "Other Linux (32-bit)", **BIOS** (pas EFI),
+   memoire 256 Mo (128 Mo au minimum), 1 processeur.
+2. Disque : nouveau disque VDI de 2 Go ou plus ; controleur **IDE** (PIIX4), pas SATA
+   (le noyau n'a pas encore de pilote AHCI : DEMANDES_A.md, D7). Le CD
+   `KERNEL32-INSTALL.ISO` sur le controleur IDE secondaire.
+3. Affichage : `VBoxVGA`, memoire video 16 Mo ; clavier/souris PS/2 par defaut.
+4. Demarrer : l'assistant s'affiche en mode texte (touches seulement). Memes pages
+   que sous QEMU. En fin d'installation : `Redemarrer`, puis retirer le CD (menu
+   Peripheriques > Lecteurs optiques > Retirer) ou le decocher dans l'ordre d'amorce.
+
+**Machine reelle** : graver l'ISO, amorcer en BIOS ; le noyau ne sait programmer le
+mode graphique que sur la carte Bochs/QEMU VGA : ailleurs (pas de `/dev/fb0`)
+l'assistant se met seul en mode texte (non verifie sur du materiel reel).
+
 ### Limites
 
-Partitions primaires seulement (4) ; une racine ne depasse pas 30 Go en mode assiste
+Pas de logiques sans etendue ni de racine logique ; une racine ne depasse pas 30 Go en mode assiste
 (blocs de 4 Ko des 2 Go) ; `mkfs` formate au plus 2 Go avec des blocs de 1 Ko, 32 Go
 avec 4 Ko (`INSTALL.PAS` : `MAXBLK`) ; une seule partition `/home` ; pas de GPT, de
 LVM ni de chiffrement ; pas de reseau pendant l'installation ; dispositions de clavier

@@ -10,6 +10,9 @@ import os, re, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LANGS = ['fr', 'en', 'de', 'it', 'es', 'pt', 'nl']
+# touches mortes : codes internes 2 a 6 (circonflexe, trema, grave, aigu, tilde)
+DEAD = {'dcirc': 2, 'ddiaer': 3, 'dgrave': 4, 'dacute': 5, 'dtilde': 6}
+DEADCH = {2: 94, 3: 168, 4: 96, 5: 180, 6: 126}
 KEYORDER = [41] + list(range(2, 14)) + list(range(16, 28)) + \
     list(range(30, 41)) + [43] + list(range(44, 54)) + [86]
 
@@ -17,6 +20,8 @@ KEYORDER = [41] + list(range(2, 14)) + list(range(16, 28)) + \
 def cp(ch):
     if ch == 'nul':
         return 1
+    if ch in DEAD:
+        return DEAD[ch]
     if len(ch) != 1:
         raise SystemExit('jeton invalide : %r' % ch)
     return ch.encode('cp1252')[0]
@@ -135,7 +140,7 @@ def layouts():
             for st, n in runs:
                 seq = [vals[st + j] for j in range(n)]
                 # l'euro n'est pas Latin-1 : omis
-                seq = [0 if v == 0x80 else v for v in seq]
+                seq = [0 if v == 0x80 else DEADCH.get(v, v) for v in seq]
                 if all(v in (0, 1) for v in seq):
                     continue
                 parts = plit(''.join(chr(v) if v > 1 else '\x00' for v in seq))

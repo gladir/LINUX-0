@@ -1169,3 +1169,155 @@ it: Nessuno schermo grafico: l'assistente usa la modalità testo.
 es: Sin pantalla gráfica: el asistente usa el modo texto.
 pt: Sem ecrã gráfico: o assistente usa o modo de texto.
 nl: Geen grafisch scherm: de installatie gebruikt de tekstmodus.
+@WEL_T
+fr: Bienvenue
+en: Welcome
+de: Willkommen
+it: Benvenuti
+es: Bienvenido
+pt: Bem-vindo
+nl: Welkom
+@WEL_I
+fr: Cet assistant installe LINUX-0 KERNEL32 sur un disque dur de cet ordinateur : partitionnement, formatage, copie du système, noyau et chargeur d'amorçage, puis redémarrage. Rien n'est écrit sur le disque avant la confirmation du récapitulatif.
+en: This installer puts LINUX-0 KERNEL32 on a hard disk of this computer: partitioning, formatting, copying the system, kernel and boot loader, then reboot. Nothing is written to the disk before you confirm the summary.
+de: Dieser Assistent installiert LINUX-0 KERNEL32 auf einer Festplatte dieses Rechners: Partitionieren, Formatieren, Systemdateien, Kernel und Bootlader, danach Neustart. Vor der Bestätigung der Zusammenfassung wird nichts auf die Festplatte geschrieben.
+it: Questo assistente installa LINUX-0 KERNEL32 su un disco fisso del computer: partizionamento, formattazione, copia del sistema, kernel e boot loader, poi riavvio. Nulla viene scritto sul disco prima della conferma del riepilogo.
+es: Este asistente instala LINUX-0 KERNEL32 en un disco duro del equipo: particionado, formateo, copia del sistema, núcleo y cargador de arranque, y reinicio. No se escribe nada en el disco antes de confirmar el resumen.
+pt: Este assistente instala o LINUX-0 KERNEL32 num disco rígido deste computador: particionamento, formatação, cópia do sistema, núcleo e carregador de arranque, e reinício. Nada é escrito no disco antes de confirmar o resumo.
+nl: Deze installatie zet LINUX-0 KERNEL32 op een harde schijf van deze computer: partitioneren, formatteren, systeem kopiëren, kernel en bootloader, daarna herstarten. Er wordt niets op de schijf geschreven vóór u het overzicht bevestigt.
+@WEL_KEYS
+fr: Tab / Maj-Tab : champ suivant ou précédent. Entrée : valider. Espace : cocher. Flèches : choisir. Échap : annuler. F1 : aide. F2 : shell de secours. F3 : mode texte. La souris fonctionne en mode graphique.
+en: Tab / Shift-Tab: next or previous field. Enter: confirm. Space: tick. Arrows: choose. Esc: cancel. F1: help. F2: rescue shell. F3: text mode. The mouse works in graphics mode.
+de: Tab / Umschalt-Tab: nächstes oder voriges Feld. Eingabe: bestätigen. Leertaste: ankreuzen. Pfeile: wählen. Esc: abbrechen. F1: Hilfe. F2: Rettungs-Shell. F3: Textmodus. Die Maus funktioniert im Grafikmodus.
+it: Tab / Maiusc-Tab: campo successivo o precedente. Invio: conferma. Spazio: seleziona. Frecce: scegli. Esc: annulla. F1: aiuto. F2: shell di emergenza. F3: modo testo. Il mouse funziona in modo grafico.
+es: Tab / May-Tab: campo siguiente o anterior. Intro: aceptar. Espacio: marcar. Flechas: elegir. Esc: cancelar. F1: ayuda. F2: shell de rescate. F3: modo texto. El ratón funciona en modo gráfico.
+pt: Tab / Shift-Tab: campo seguinte ou anterior. Enter: confirmar. Espaço: marcar. Setas: escolher. Esc: cancelar. F1: ajuda. F2: shell de recuperação. F3: modo de texto. O rato funciona no modo gráfico.
+nl: Tab / Shift-Tab: volgend of vorig veld. Enter: bevestigen. Spatie: aanvinken. Pijlen: kiezen. Esc: annuleren. F1: hulp. F2: noodshell. F3: tekstmodus. De muis werkt in grafische modus.
+@WEL_MODE_G
+fr: Écran : graphique %1 x %2
+en: Screen: graphics %1 x %2
+de: Bildschirm: grafisch %1 x %2
+it: Schermo: grafico %1 x %2
+es: Pantalla: gráfica %1 x %2
+pt: Ecrã: gráfico %1 x %2
+nl: Scherm: grafisch %1 x %2
+@WEL_MODE_T
+fr: Écran : mode texte (pas de /dev/fb0, ou mode choisi)
+en: Screen: text mode (no /dev/fb0, or chosen mode)
+de: Bildschirm: Textmodus (kein /dev/fb0 oder gewählt)
+it: Schermo: modo testo (nessun /dev/fb0, o scelto)
+es: Pantalla: modo texto (sin /dev/fb0, o elegido)
+pt: Ecrã: modo de texto (sem /dev/fb0, ou escolhido)
+nl: Scherm: tekstmodus (geen /dev/fb0, of gekozen)
+@WEL_MEM
+fr: Mémoire : %1 Mo
+en: Memory: %1 MB
+de: Speicher: %1 MB
+it: Memoria: %1 MB
+es: Memoria: %1 MB
+pt: Memória: %1 MB
+nl: Geheugen: %1 MB
+@WEL_DISKS
+fr: Disques utilisables : %1
+en: Usable disks: %1
+de: Nutzbare Festplatten: %1
+it: Dischi utilizzabili: %1
+es: Discos utilizables: %1
+pt: Discos utilizáveis: %1
+nl: Bruikbare schijven: %1
+@HELP_T
+fr: Aide
+en: Help
+de: Hilfe
+it: Aiuto
+es: Ayuda
+pt: Ajuda
+nl: Hulp
+@HELP_1
+fr: Tab : champ suivant (Maj-Tab : précédent). Flèches : choisir dans une liste ou un groupe. Espace : cocher une case. Entrée : activer le bouton par défaut. Échap : annuler.
+en: Tab: next field (Shift-Tab: previous). Arrows: choose in a list or group. Space: tick a box. Enter: press the default button. Esc: cancel.
+de: Tab: nächstes Feld (Umschalt-Tab: voriges). Pfeile: in Liste oder Gruppe wählen. Leertaste: Kästchen ankreuzen. Eingabe: Standardschaltfläche. Esc: abbrechen.
+it: Tab: campo successivo (Maiusc-Tab: precedente). Frecce: scegli in un elenco o gruppo. Spazio: seleziona. Invio: pulsante predefinito. Esc: annulla.
+es: Tab: campo siguiente (May-Tab: anterior). Flechas: elegir en una lista o grupo. Espacio: marcar. Intro: botón predeterminado. Esc: cancelar.
+pt: Tab: campo seguinte (Shift-Tab: anterior). Setas: escolher numa lista ou grupo. Espaço: marcar. Enter: botão predefinido. Esc: cancelar.
+nl: Tab: volgend veld (Shift-Tab: vorig). Pijlen: kiezen in een lijst of groep. Spatie: aanvinken. Enter: standaardknop. Esc: annuleren.
+@HELP_2
+fr: Souris : cliquer sur un bouton, une ligne ou un champ ; double clic dans une liste = Entrée.
+en: Mouse: click a button, a row or a field; double-click in a list = Enter.
+de: Maus: Schaltfläche, Zeile oder Feld anklicken; Doppelklick in einer Liste = Eingabe.
+it: Mouse: clic su pulsante, riga o campo; doppio clic in un elenco = Invio.
+es: Ratón: clic en un botón, una fila o un campo; doble clic en una lista = Intro.
+pt: Rato: clicar num botão, linha ou campo; duplo clique numa lista = Enter.
+nl: Muis: klik op een knop, regel of veld; dubbelklik in een lijst = Enter.
+@HELP_3
+fr: F2 : shell de secours (exit pour revenir). F3 : bascule graphique / texte.
+en: F2: rescue shell (exit to come back). F3: switch graphics / text.
+de: F2: Rettungs-Shell (exit zum Zurückkehren). F3: Grafik / Text umschalten.
+it: F2: shell di emergenza (exit per tornare). F3: alterna grafico / testo.
+es: F2: shell de rescate (exit para volver). F3: alterna gráfico / texto.
+pt: F2: shell de recuperação (exit para voltar). F3: alterna gráfico / texto.
+nl: F2: noodshell (exit om terug te keren). F3: schakelt grafisch / tekst.
+@HELP_4
+fr: Rien n'est écrit sur le disque avant la confirmation du récapitulatif.
+en: Nothing is written to the disk before you confirm the summary.
+de: Vor der Bestätigung der Zusammenfassung wird nichts auf die Festplatte geschrieben.
+it: Nulla viene scritto sul disco prima della conferma del riepilogo.
+es: No se escribe nada en el disco antes de confirmar el resumen.
+pt: Nada é escrito no disco antes de confirmar o resumo.
+nl: Er wordt niets op de schijf geschreven vóór u het overzicht bevestigt.
+@EXIST_L
+fr: Contenu actuel du disque :
+en: Current contents of the disk:
+de: Aktueller Inhalt der Festplatte:
+it: Contenuto attuale del disco:
+es: Contenido actual del disco:
+pt: Conteúdo atual do disco:
+nl: Huidige inhoud van de schijf:
+@EXIST_NONE
+fr: aucune partition reconnue
+en: no recognised partition
+de: keine erkannte Partition
+it: nessuna partizione riconosciuta
+es: ninguna partición reconocida
+pt: nenhuma partição reconhecida
+nl: geen herkende partitie
+@EXIST_SYS
+fr: système LINUX-0 déjà installé
+en: LINUX-0 system already installed
+de: LINUX-0 bereits installiert
+it: sistema LINUX-0 già installato
+es: sistema LINUX-0 ya instalado
+pt: sistema LINUX-0 já instalado
+nl: LINUX-0 al geïnstalleerd
+@SUM_EXIST
+fr: ATTENTION, ces données existantes seront DÉTRUITES :
+en: WARNING, this existing data will be DESTROYED:
+de: ACHTUNG, diese vorhandenen Daten werden ZERSTÖRT:
+it: ATTENZIONE, questi dati esistenti verranno DISTRUTTI:
+es: ATENCIÓN, estos datos existentes serán DESTRUIDOS:
+pt: ATENÇÃO, estes dados existentes serão DESTRUÍDOS:
+nl: LET OP, deze bestaande gegevens worden VERNIETIGD:
+@PED_LOGIC
+fr: logique
+en: logical
+de: logisch
+it: logica
+es: lógica
+pt: lógica
+nl: logisch
+@PED_TEXT
+fr: Partition étendue (05)
+en: Extended partition (05)
+de: Erweiterte Partition (05)
+it: Partizione estesa (05)
+es: Partición extendida (05)
+pt: Partição estendida (05)
+nl: Uitgebreide partitie (05)
+@ROLE_E_PRIM
+fr: La racine (/) doit être une partition primaire : le chargeur lit /boot sur la partition active.
+en: The root (/) must be a primary partition: the boot loader reads /boot from the active partition.
+de: Die Wurzel (/) muss eine primäre Partition sein: der Bootlader liest /boot von der aktiven Partition.
+it: La radice (/) deve essere una partizione primaria: il boot loader legge /boot dalla partizione attiva.
+es: La raíz (/) debe ser una partición primaria: el cargador lee /boot de la partición activa.
+pt: A raiz (/) tem de ser uma partição primária: o carregador lê /boot da partição ativa.
+nl: De root (/) moet een primaire partitie zijn: de bootloader leest /boot van de actieve partitie.

@@ -38,6 +38,7 @@ Var
   InMoved : Boolean;
   InIsVt : Boolean;
   InTtyName : String;
+  InDead : LongInt;            { touche morte en attente (2 a 6) ou 0 }
 
 Procedure InPush(K, A, B : LongInt);
 Begin
@@ -76,6 +77,55 @@ Function InIsLetter(C : LongInt) : Boolean;
 Begin
   InIsLetter := ((C >= 97) And (C <= 122)) Or ((C >= 224) And (C <= 254) And
     (C <> 247));
+End;
+
+{ caractere autonome d'une touche morte : ^ trema ` aigu ~ }
+Function InDeadCh(D : LongInt) : LongInt;
+Begin
+  Case D Of
+    2 : InDeadCh := 94;
+    3 : InDeadCh := 168;
+    4 : InDeadCh := 96;
+    5 : InDeadCh := 180;
+  Else
+    InDeadCh := 126;
+  End;
+End;
+
+{ lettre C accentuee par la touche morte D (2 circonflexe, 3 trema, 4 grave,
+  5 aigu, 6 tilde) ; 0 si la combinaison n'existe pas }
+Function InCompose(D, C : LongInt) : LongInt;
+Const
+  B2 : String[10] = 'aeiouAEIOU';
+  R2 : String[10] = #226#234#238#244#251#194#202#206#212#219;
+  B3 : String[12] = 'aeiouyAEIOUY';
+  R3 : String[12] = #228#235#239#246#252#255#196#203#207#214#220#159;
+  B4 : String[10] = 'aeiouAEIOU';
+  R4 : String[10] = #224#232#236#242#249#192#200#204#210#217;
+  B5 : String[12] = 'aeiouyAEIOUY';
+  R5 : String[12] = #225#233#237#243#250#253#193#201#205#211#218#221;
+  B6 : String[6] = 'anoANO';
+  R6 : String[6] = #227#241#245#195#209#213;
+Var I : LongInt;
+Begin
+  InCompose := 0;
+  Case D Of
+    2 : I := Pos(Chr(C), B2);
+    3 : I := Pos(Chr(C), B3);
+    4 : I := Pos(Chr(C), B4);
+    5 : I := Pos(Chr(C), B5);
+  Else
+    I := Pos(Chr(C), B6);
+  End;
+  If I = 0 Then Exit;
+  Case D Of
+    2 : InCompose := Ord(R2[I]);
+    3 : InCompose := Ord(R3[I]);
+    4 : InCompose := Ord(R4[I]);
+    5 : InCompose := Ord(R5[I]);
+  Else
+    InCompose := Ord(R6[I]);
+  End;
 End;
 
 { un code de touche (MEDIUMRAW) -> evenement }
@@ -121,6 +171,29 @@ Begin
         If InCaps And InIsLetter(InNorm[Code]) Then Sh := 1 - Sh;
         If Sh = 1 Then C := InShf[Code] Else C := InNorm[Code];
         If (C = 0) And (Sh = 1) Then C := InNorm[Code];
+      End;
+      { touches mortes : la suivante est accentuee ; Espace ou la meme touche
+        donnent le signe seul ; une lettre sans accent possible : signe, puis
+        la lettre }
+      If (C >= 2) And (C <= 6) Then
+      Begin
+        If InDead = 0 Then InDead := C
+        Else
+        Begin
+          InPush(EV_KEY, InDeadCh(InDead), 0);
+          If InDead = C Then InDead := 0 Else InDead := C;
+        End;
+        C := 0;
+      End
+      Else If (InDead <> 0) And (C >= 32) Then
+      Begin
+        If C = 32 Then C := InDeadCh(InDead)
+        Else If InCompose(InDead, C) <> 0 Then C := InCompose(InDead, C)
+        Else
+        Begin
+          InPush(EV_KEY, InDeadCh(InDead), 0);
+        End;
+        InDead := 0;
       End;
       If C <> 0 Then
       Begin
@@ -350,6 +423,7 @@ Begin
   InQh := 0; InQt := 0; InRawN := 0; InRawP := 0; InMsN := 0;
   InShift := False; InCtrl := False; InAlt := False; InAltGr := False;
   InCaps := False;
+  InDead := 0;
   InTtyName := Tty;
   If Tty <> '' Then
   Begin

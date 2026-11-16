@@ -68,10 +68,16 @@ def cap(q, name, tag):
     return p
 
 
-def qemu_cd(name, iso, disk, mem=256):
+def drive(disk, iface='ide'):
+    if iface == 'ide':
+        return 'file=%s,format=raw,if=ide,index=0' % disk
+    return 'file=%s,format=raw,if=%s' % (disk, iface)
+
+
+def qemu_cd(name, iso, disk, mem=256, iface='ide'):
     return Q(os.path.join(WORK, name), ['-cdrom', iso, '-boot', 'd', '-m',
-             str(mem), '-vga', 'std', '-drive',
-             'file=%s,format=raw,if=ide,index=0' % disk], serial_io=True)
+             str(mem), '-vga', 'std', '-drive', drive(disk, iface)],
+             serial_io=True)
 
 
 def page(q, n, timeout=120, settle=0.8):
@@ -95,6 +101,33 @@ def fs_check(disk, parts):
         good = good and r.returncode == 0
         os.unlink(img)
     return good
+
+
+def read_logical(disk):
+    """chaine des EBR : [(type, debut, taille)] des partitions logiques"""
+    tab = read_table(disk)
+    ext = [t for t in tab if t[0] in (5, 0x0F, 0x85)]
+    out = []
+    if not ext:
+        return out
+    base = lba = ext[0][1]
+    with open(disk, 'rb') as f:
+        for _ in range(16):
+            f.seek(lba * 512)
+            d = f.read(512)
+            if len(d) < 512 or d[510:512] != b'\x55\xaa':
+                break
+            e0 = d[446:462]
+            e1 = d[462:478]
+            if e0[4]:
+                out.append((e0[4],
+                            lba + int.from_bytes(e0[8:12], 'little'),
+                            int.from_bytes(e0[12:16], 'little')))
+            nx = int.from_bytes(e1[8:12], 'little')
+            if not e1[4] or not nx:
+                break
+            lba = base + nx
+    return out
 
 
 def zone_copy_ok(disk, start, zone):
@@ -126,7 +159,8 @@ def read_table(disk):
     return out
 
 
-def boot_verify(tag, disk, rootpw, checks, mem=128, rtc_tz=None):
+def boot_verify(tag, disk, rootpw, checks, mem=128, rtc_tz=None,
+                iface='ide'):
     """amorce le disque installe SANS le CD, ouvre une session root et execute
     les commandes ; checks = [(libelle, commande, regex attendue)] ;
     rtc_tz : fuseau de l'horloge materielle de QEMU (-rtc base=localtime)"""
@@ -136,8 +170,7 @@ def boot_verify(tag, disk, rootpw, checks, mem=128, rtc_tz=None):
         extra = ['-rtc', 'base=localtime']
         env = {'TZ': rtc_tz}
     q = Q(os.path.join(WORK, tag + '-boot'), extra + ['-m', str(mem), '-drive',
-          'file=%s,format=raw,if=ide,index=0' % disk], serial_io=True,
-          env=env)
+          drive(disk, iface)], serial_io=True, env=env)
     ok = q.wait(r'login:', 90)
     check(tag + ' : amorce du disque installe (login:)', ok)
     if not ok:
@@ -265,7 +298,7 @@ reboot=halt
                     {'preseed.cfg': pre})
     disk = new_disk('auto-fr', 400)
     q = qemu_cd('auto-fr', iso, disk)
-    ok = page(q, 11, 90)
+    ok = page(q, 12, 90)
     check('auto-fr : page de progression affichee', ok)
     time.sleep(6)
     cap(q, 'fr-prog', 'auto-fr-installation')
@@ -341,7 +374,7 @@ reboot=halt
                     {'preseed.cfg': pre})
     disk = new_disk('auto-de', 700)
     q = qemu_cd('auto-de', iso, disk)
-    ok = page(q, 11, 90)
+    ok = page(q, 12, 90)
     check('auto-de : page de progression affichee', ok)
     time.sleep(5)
     cap(q, 'de-prog', 'auto-de-texte-installation')
@@ -408,23 +441,30 @@ def t_ui_fr():
     time.sleep(0.8)
     cap(q, 'a', 'fr-01-langue')
     q.key('ret')
-    check('ui-fr : langue francaise -> page clavier', page(q, 1))
+    check('ui-fr : langue francaise -> page d\'accueil', page(q, 1))
+    cap(q, 'a2', 'fr-01b-accueil')
+    q.key('ret')
+    check('ui-fr : page clavier', page(q, 2))
     q.key('tab')
     # touches physiques q w e r t y m , 1 : donnent azerty,;& en AZERTY
     for k in ['q', 'w', 'e', 'r', 't', 'y', 'm', 'comma', '1']:
         q.key(k)
+    # touches mortes AZERTY : ^ + e = ecirc, trema + u = uuml, ^ + x = ^x
+    for k in ['bracket_left', 'e', 'shift-bracket_left', 'u',
+              'bracket_left', 'x']:
+        q.key(k)
     time.sleep(0.6)
     cap(q, 'b', 'fr-02-clavier')
     q.key('ret')
-    check('ui-fr : page fuseau horaire', page(q, 2))
+    check('ui-fr : page fuseau horaire', page(q, 3))
     cap(q, 'c', 'fr-03-fuseau')
     q.key('ret')
-    check('ui-fr : date et heure', page(q, 3))
+    check('ui-fr : date et heure', page(q, 4))
     cap(q, 'c2', 'fr-04-heure')
     q.key('ret')
-    check('ui-fr : nom de machine', page(q, 4))
+    check('ui-fr : nom de machine', page(q, 5))
     q.key('ret')
-    check('ui-fr : comptes', page(q, 5))
+    check('ui-fr : comptes', page(q, 6))
     q.type('secret')
     q.key('tab')
     q.type('secret')
@@ -440,13 +480,13 @@ def t_ui_fr():
     time.sleep(0.5)
     cap(q, 'd', 'fr-05-comptes')
     q.key('ret')
-    check('ui-fr : disque', page(q, 6))
+    check('ui-fr : disque', page(q, 7))
     cap(q, 'e', 'fr-06-disque')
     q.key('ret')
-    check('ui-fr : methode de partitionnement', page(q, 7))
+    check('ui-fr : methode de partitionnement', page(q, 8))
     cap(q, 'f', 'fr-07-partitionnement')
     q.key('ret')
-    check('ui-fr : recapitulatif', page(q, 10))
+    check('ui-fr : recapitulatif', page(q, 11))
     q.key('spc')
     time.sleep(0.4)
     cap(q, 'g', 'fr-08-recapitulatif')
@@ -454,10 +494,10 @@ def t_ui_fr():
     time.sleep(1.0)
     cap(q, 'g2', 'fr-09-confirmation')
     q.key('ret')
-    check('ui-fr : installation lancee', page(q, 11, 60))
+    check('ui-fr : installation lancee', page(q, 12, 60))
     time.sleep(12)
     cap(q, 'h', 'fr-10-progression')
-    ok = q.wait(r'K32SETUP: page 12\b', 300)
+    ok = q.wait(r'K32SETUP: page 13\b', 300)
     check('ui-fr : fin de l\'installation (page finale)', ok)
     time.sleep(1.5)
     cap(q, 'i', 'fr-11-fin')
@@ -467,6 +507,9 @@ def t_ui_fr():
     t = q.text()
     check('ui-fr : disposition AZERTY : les touches q w e r t y donnent azerty',
           'keytest=azerty' in t.replace('\r', ''))
+    check('ui-fr : touches mortes : ^e = ecirc (234), trema u = uuml (252), '
+          '^x = ^ x', 'codes= 97 122 101 114 116 121 44 59 38 234 252 94 120'
+          in t.replace('\r', ''))
     checks = [
         ('nom de machine par defaut', 'hostname', r'linux0'),
         ('langue FR', '. /etc/profile; echo L=$LANGUAGE', r'L=FR'),
@@ -496,58 +539,67 @@ def t_ui_de():
     q.move(630, 385)
     time.sleep(0.3)
     q.click()
-    check('ui-de : clic souris Deutsch puis Weiter -> page Tastatur',
+    check('ui-de : clic souris Deutsch puis Weiter -> Willkommen',
           page(q, 1))
+    cap(q, 'a2', 'de-01b-willkommen')
+    q.key('f1')
+    time.sleep(1.0)
+    cap(q, 'a3', 'de-01c-hilfe')                  # F1 : aide
+    q.key('ret')
+    time.sleep(0.5)
+    q.key('ret')
+    check('ui-de : page Tastatur', page(q, 2))
     q.key('tab')
-    for k in ['y', 'z', 'x', 'slash', 'minus', 'shift-2']:
-        q.key(k)
+    for k in ['y', 'z', 'x', 'slash', 'minus', 'shift-2', 'equal', 'e']:
+        q.key(k)                                # equal, e : accent aigu + e
     time.sleep(0.6)
     cap(q, 'b', 'de-02-tastatur')
     q.key('ret')
-    page(q, 2)
-    q.key('ret'); page(q, 3)
+    page(q, 3)
     q.key('ret'); page(q, 4)
     q.key('ret'); page(q, 5)
+    q.key('ret'); page(q, 6)
     q.type('geheim'); q.key('tab'); q.type('geheim'); q.key('tab')
     q.type('Hans Mueller'); q.key('tab'); q.type('hans'); q.key('tab')
     q.type('passwort'); q.key('tab'); q.type('passwort')
-    q.key('ret'); page(q, 6)
     q.key('ret'); page(q, 7)
+    q.key('ret'); page(q, 8)
     q.key('down')                               # manuell
     time.sleep(0.5)
     cap(q, 'c', 'de-03-partitionierung')
     q.key('ret')
-    check('ui-de : partitionnement manuel -> editeur', page(q, 8))
+    check('ui-de : partitionnement manuel -> editeur', page(q, 9))
     cap(q, 'd', 'de-04-editor-leer')
     q.key('tab'); q.key('ret'); time.sleep(1.0)
     q.type('300M')
     cap(q, 'e', 'de-05-neue-partition')
-    q.key('ret'); page(q, 8)
+    q.key('ret'); page(q, 9)
     q.key('down'); q.key('tab'); q.key('ret'); time.sleep(1.0)
     q.type('64M'); q.key('tab'); q.key('down'); time.sleep(0.4)
-    q.key('ret'); page(q, 8)
+    q.key('ret'); page(q, 9)
     time.sleep(0.5)
     cap(q, 'f', 'de-06-editor')
     q.key('ret')
-    check('ui-de : roles des partitions', page(q, 9))
+    check('ui-de : roles des partitions', page(q, 10))
     q.key('tab'); q.key('tab'); q.key('ret')        # bouton Dateisystem
     time.sleep(1.0)                                 # racine : ext4 -> ext3
     cap(q, 'g', 'de-07-rollen')
     q.key('ret')
-    check('ui-de : zusammenfassung', page(q, 10))
+    check('ui-de : zusammenfassung', page(q, 11))
     q.key('spc'); time.sleep(0.3)
     cap(q, 'h', 'de-08-zusammenfassung')
     q.key('tab'); q.key('tab'); q.key('ret'); time.sleep(0.8); q.key('ret')
-    check('ui-de : installation lancee', page(q, 11, 60))
+    check('ui-de : installation lancee', page(q, 12, 60))
     time.sleep(14)
     cap(q, 'i', 'de-09-fortschritt')
-    ok = q.wait(r'K32SETUP: page 12\b', 300)
+    ok = q.wait(r'K32SETUP: page 13\b', 300)
     check('ui-de : fin de l\'installation', ok)
     time.sleep(1.5)
     cap(q, 'j', 'de-10-fertig')
     t = q.text().replace('\r', '')
-    check('ui-de : clavier QWERTZ (touches y z x / - 2 -> zyx-ss")',
-          'keytest=zyx-s" layout=de' in t)
+    check('ui-de : clavier QWERTZ (touches y z x / - 2 -> zyx-ss"), accent '
+          'aigu mort + e = e acute (233)',
+          'keytest=zyx-s"e layout=de' in t and ' 233' in t.split('codes=')[1])
     q.quit()
     tab = read_table(disk)
     check('ui-de : table 83 (active) + 82',
@@ -570,6 +622,131 @@ def t_ui_de():
         ('invite de connexion en allemand', 'echo x', r'x'),
     ]
     boot_verify('ui-de', disk, 'geheim', checks)
+
+
+# ------------------------------------------------------------- auto-log
+def t_auto_log():
+    pre = """lang=it
+keyboard=it
+timezone=Europe/Rome
+hostname=logiche
+rootpw=radice
+user=gigi
+userpw=gigi
+partitioning=manual
+parts=ext4:/:250M,swap:swap:32M:l,ext3:/home:*:l
+ui=text
+endwait=2
+reboot=halt
+"""
+    iso = build_iso('auto-log', 'console=tty0 console=ttyS0 rw '
+                    'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
+                    {'preseed.cfg': pre})
+    disk = new_disk('auto-log', 700)
+    q = qemu_cd('auto-log', iso, disk)
+    ok = q.wait(r'K32SETUP: DONE', 300)
+    check('auto-log : installation avec partitions logiques', ok)
+    for _ in range(40):
+        if not q.alive():
+            break
+        time.sleep(1)
+    q.quit()
+    tab = read_table(disk)
+    lg = read_logical(disk)
+    check('auto-log : primaire 83 active + etendue 05 + 2 logiques 82 et 83',
+          len(tab) == 4 and tab[0][0] == 0x83 and tab[0][3] and
+          tab[1][0] == 5 and [t[0] for t in lg] == [0x82, 0x83], str(tab) +
+          str(lg))
+    check('auto-log : e2fsck -fn propre (racine et /home logique)',
+          fs_check(disk, [(tab[0][1], tab[0][2]), (lg[1][1], lg[1][2])]))
+    checks = [
+        ('hostname', 'hostname', r'logiche'),
+        ('fstab : /home sur hda6, swap sur hda5', 'cat /etc/fstab',
+         r'hda5 none swap(.|\n)*hda6 /home ext3'),
+        ('partitions logiques vues par le noyau', 'cat /proc/partitions',
+         r'hda5(.|\n)*hda6'),
+        ('/home monte (hda6)', 'df | grep hda6', r'/home'),
+        ('swap actif (hda5)', 'cat /proc/swaps', r'hda5'),
+        ('langue IT', '. /etc/profile; echo L=$LANGUAGE', r'L=IT'),
+    ]
+    boot_verify('auto-log', disk, 'radice', checks)
+
+
+# --------------------------------------------------------------- exist
+def t_exist():
+    """disque deja installe (disque de auto-fr) : l'assistant l'annonce a
+    l'etape du disque et dans le recapitulatif"""
+    old = os.path.join(WORK, 'auto-fr.img')
+    if not os.path.exists(old):
+        t_auto_fr()
+    disk = os.path.join(WORK, 'exist.img')
+    subprocess.run(['cp', '--sparse=always', old, disk], check=True)
+    iso = build_iso('exist', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'k32setup.verbose=/dev/ttyS0')
+    q = qemu_cd('exist', iso, disk)
+    page(q, 0, 90)
+    for _ in range(6):                  # langue ... nom de machine
+        q.key('ret')
+        time.sleep(1.2)
+    page(q, 6)
+    q.type('x'); q.key('tab'); q.type('x')
+    q.key('ret')
+    check('exist : page du disque', page(q, 7))
+    cap(q, 'a', 'exist-disque')
+    t = q.text().replace('\r', '')
+    check('exist : partitions et systeme LINUX-0 deja installe detectes',
+          re.search(r'existing /dev/hda1 \d+ MB ext4 "root" - '
+                    r'(LINUX-0|syst)', t) is not None)
+    q.key('ret')
+    page(q, 8)
+    q.key('ret')
+    check('exist : recapitulatif', page(q, 11))
+    cap(q, 'b', 'exist-recapitulatif')
+    q.quit()
+
+
+# -------------------------------------------------------------- virtio
+def t_virtio():
+    pre = """lang=es
+keyboard=es
+timezone=Europe/Madrid
+hostname=virtio-es
+rootpw=clave
+user=ana
+userpw=clave2
+partitioning=guided
+swap=32
+fs=ext4
+ui=text
+endwait=2
+reboot=halt
+"""
+    iso = build_iso('virtio', 'console=tty0 console=ttyS0 rw '
+                    'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
+                    {'preseed.cfg': pre})
+    disk = new_disk('virtio', 300)
+    q = qemu_cd('virtio', iso, disk, iface='virtio')
+    ok = q.wait(r'K32SETUP: DONE', 300)
+    check('virtio : installation sur /dev/vda (disque virtio-blk)', ok)
+    t = q.text()
+    check('virtio : l\'assistant a choisi /dev/vda',
+          'a /dev/vda' in t or '/dev/vda' in t)
+    for _ in range(40):
+        if not q.alive():
+            break
+        time.sleep(1)
+    q.quit()
+    tab = read_table(disk)
+    check('virtio : e2fsck -fn propre',
+          fs_check(disk, [(tab[0][1], tab[0][2])]))
+    checks = [
+        ('hostname', 'hostname', r'virtio-es'),
+        ('racine sur /dev/vda1', 'cat /proc/mounts', r'/dev/vda1 / '),
+        ('fstab vda', 'cat /etc/fstab', r'/dev/vda1 / ext4'),
+        ('cfg du chargeur', 'cat /boot/linux0.cfg', r'root=/dev/vda1'),
+        ('langue ES', '. /etc/profile; echo L=$LANGUAGE', r'L=ES'),
+    ]
+    boot_verify('virtio', disk, 'clave', checks, iface='virtio')
 
 
 # -------------------------------------------------------------- refuse
@@ -612,21 +789,25 @@ def t_text():
     cap(q, 'a', 'text-01-langue')
     q.key('up')
     q.key('ret')
-    check('text : navigation au clavier (page clavier)', page(q, 1))
+    check('text : page d\'accueil', page(q, 1))
+    cap(q, 'a2', 'text-01b-accueil')
+    q.key('ret')
+    check('text : navigation au clavier (page clavier)', page(q, 2))
     q.key('tab')
     for k in ['q', 'w', 'e', 'r', 't', 'y']:
         q.key(k)
     time.sleep(0.5)
     cap(q, 'b', 'text-02-clavier')
     q.key('ret')
-    page(q, 2)
+    page(q, 3)
     cap(q, 'c', 'text-03-fuseau')
     q.quit()
 
 
 ALL = {'tz': t_tz, 'auto-fr': t_auto_fr, 'auto-de': t_auto_de,
        'ui-fr': t_ui_fr, 'ui-de': t_ui_de, 'text': t_text,
-       'refuse': t_refuse}
+       'refuse': t_refuse, 'virtio': t_virtio, 'exist': t_exist,
+       'auto-log': t_auto_log}
 os.makedirs(WORK, exist_ok=True)
 for s in (SCEN or list(ALL)):
     print('=== ' + s, flush=True)

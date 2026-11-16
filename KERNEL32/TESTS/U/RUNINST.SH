@@ -5,7 +5,8 @@
 # @description: Banc d'essai de l'assistant d'installation (CD-ROM
 #   KERNEL32-INSTALL.ISO) sous QEMU : voir instest.py.
 #     RUNINST.SH [-r racine] [-k noyau.elf] [-c dossier_captures] [scenario...]
-#   scenarios : tz auto-fr auto-de ui-fr ui-de text (defaut : tous)
+#   scenarios : tz auto-fr auto-de ui-fr ui-de text refuse virtio (defaut:tous)
+#     virtio   installation sur un disque virtio-blk (/dev/vda)
 #     tz       fuseaux horaires (TZif, heure d'ete) contre l'hote
 #     auto-fr  installation automatique (preseed) en francais, guide, ext4+swap
 #     auto-de  idem en allemand, manuel : ext3 + swap + /home, horloge locale

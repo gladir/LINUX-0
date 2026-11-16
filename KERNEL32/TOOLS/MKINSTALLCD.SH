@@ -47,7 +47,7 @@ fi
 cp -a "$ROOT" "$W/sys"
 
 echo "== Fuseaux horaires ($ZONES)"
-if [ -d "$ZONES" ]; then
+if [ -d "$ZONES" ] && [ ! -d "$W/sys/usr/share/zoneinfo/Europe" ]; then
   mkdir -p "$W/sys/usr/share/zoneinfo"
   for d in Africa America Antarctica Arctic Asia Atlantic Australia Europe \
            Indian Pacific; do
@@ -73,7 +73,8 @@ echo "   $(stat -c %s "$W/cd/system.tar") octets"
 
 echo "== Assistant (USR/INSTALLER)"
 mkdir -p "$W/inst"
-cp "$K32"/USR/INSTALLER/*.INC "$K32"/USR/INSTALLER/INSTALLER.PAS "$W/inst/"
+cp "$K32"/USR/INSTALLER/*.INC "$K32"/USR/INSTALLER/INSTALLER.PAS \
+  "$K32"/USR/FSPROBE.INC "$W/inst/"
 ( cd "$W/inst" && "$LPC" -3X -q INSTALLER.PAS ) ||
   { echo "echec de compilation de l'assistant"; exit 1; }
 cp -a "$W/sys" "$W/live"

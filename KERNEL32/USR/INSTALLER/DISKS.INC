@@ -15,6 +15,8 @@ Const
   ROLE_NONE = 0;  ROLE_ROOT = 1;  ROLE_SWAP = 2;  ROLE_HOME = 3;
   ALIGN_SEC = 2048;                 { debut de partition : 1 Mio }
   MAXDISK = 8;
+  MAXPT = 12;                       { 4 primaires + 8 logiques (5..12) }
+  PT_EXT = $05;
 
 Type
   TPart = Record
@@ -28,7 +30,7 @@ Var
   DkCount : LongInt;
   Dsk : String;                                   { /dev/hda }
   DskSec : LongInt;
-  Pt : Array[1..4] Of TPart;
+  Pt : Array[1..MAXPT] Of TPart;      { 5..12 : logiques, ordre du disque }
   Mbr : Array[0..511] Of Byte;
   St2 : Array[0..65535] Of Byte;
   St2Len : LongInt;
@@ -158,10 +160,32 @@ Begin
   DkSectors := S;
 End;
 
-{ lit le MBR du disque Dsk ; les partitions inconnues (etendues, GPT...)
-  sont conservees telles quelles comme partitions primaires }
+{ la partition I est-elle la partition etendue ? }
+Function DkIsExt(I : LongInt) : Boolean;
+Begin
+  DkIsExt := (I <= 4) And Pt[I].Used And ((Pt[I].Typ = $05) Or
+             (Pt[I].Typ = $0F) Or (Pt[I].Typ = $85));
+End;
+
+{ numero (1..4) de la partition etendue, 0 s'il n'y en a pas }
+Function DkExt : LongInt;
+Var I : LongInt;
+Begin
+  DkExt := 0;
+  For I := 1 To 4 Do
+    If DkIsExt(I) Then DkExt := I;
+End;
+
+{ place le pointeur du peripherique au secteur Sec (disques > 2 Go) }
+Procedure DkSeekSec(Fd, Sec : LongInt);
+Var Res : Array[0..1] Of LongInt;
+Begin
+  SysLLSeek(Fd, Sec Shr 23, (Sec And $7FFFFF) Shl 9, LongInt(@Res), SEEK_SET);
+End;
+
+{ lit le MBR du disque Dsk et la chaine des partitions logiques (5..) }
 Procedure DkReadTable;
-Var Fd, I, O, N : LongInt;
+Var Fd, I, O, N, Ex, Base, Lba, Cnt, Nx : LongInt; Eb : Array[0..511] Of Byte;
 Begin
   FillChar(Pt, SizeOf(Pt), 0);
   FillChar(Mbr, 512, 0);
@@ -185,6 +209,37 @@ Begin
     Pt[I].Used := (Pt[I].Typ <> 0) And (Pt[I].Size > 0);
     Pt[I].Role := ROLE_NONE;
   End;
+  { partitions logiques : EBR chaines, premier EBR au debut de l'etendue }
+  Ex := DkExt;
+  If Ex = 0 Then Exit;
+  Base := Pt[Ex].Start;
+  Lba := Base;
+  N := 5;
+  Cnt := 0;
+  Fd := SysOpen(Dsk, O_RDONLY, 0);
+  If Fd < 0 Then Exit;
+  While (Cnt < 16) And (N <= MAXPT) Do
+  Begin
+    DkSeekSec(Fd, Lba);
+    If SysRead(Fd, Eb, 512) <> 512 Then Break;
+    If (Eb[510] <> $55) Or (Eb[511] <> $AA) Then Break;
+    If (Eb[446 + 4] <> 0) And (Eb[446 + 12] + Eb[446 + 13] <> 0) Then
+    Begin
+      Pt[N].Used := True;
+      Pt[N].Typ := Eb[446 + 4];
+      Pt[N].Start := Lba + (Eb[446 + 8] Or (Eb[446 + 9] Shl 8) Or
+                     (Eb[446 + 10] Shl 16) Or (Eb[446 + 11] Shl 24));
+      Pt[N].Size := Eb[446 + 12] Or (Eb[446 + 13] Shl 8) Or
+                    (Eb[446 + 14] Shl 16) Or (Eb[446 + 15] Shl 24);
+      Inc(N);
+    End;
+    Nx := Eb[446 + 16 + 8] Or (Eb[446 + 16 + 9] Shl 8) Or
+          (Eb[446 + 16 + 10] Shl 16) Or (Eb[446 + 16 + 11] Shl 24);
+    If (Eb[446 + 16 + 4] = 0) Or (Nx = 0) Then Break;
+    Lba := Base + Nx;
+    Inc(Cnt);
+  End;
+  SysClose(Fd);
 End;
 
 Procedure DkClearTable;
@@ -273,6 +328,126 @@ Begin
   DkCreate := Slot;
 End;
 
+{ nombre de partitions logiques (5..) }
+Function DkLogCount : LongInt;
+Var I, N : LongInt;
+Begin
+  N := 0;
+  For I := 5 To MAXPT Do
+    If Pt[I].Used Then Inc(N);
+  DkLogCount := N;
+End;
+
+{ plage libre numero K (0..) a l'interieur de la partition etendue : GStart =
+  place du futur EBR, GSize = taille de la plage (EBR de 1 Mio compris) }
+Function DkLgGap(K : LongInt; Var GStart, GSize : LongInt) : Boolean;
+Var Ex, I, Pos, Gs, Idx, ExEnd, Rg : LongInt;
+Begin
+  DkLgGap := False;
+  Ex := DkExt;
+  If Ex = 0 Then Exit;
+  Pos := Pt[Ex].Start;
+  ExEnd := Pt[Ex].Start + Pt[Ex].Size;
+  Idx := 0;
+  For I := 5 To MAXPT + 1 Do
+  Begin
+    If (I <= MAXPT) And Pt[I].Used Then Rg := Pt[I].Start - ALIGN_SEC
+    Else If I > MAXPT Then Rg := ExEnd
+    Else Continue;
+    Gs := Rg - Pos;
+    If Gs >= 2 * ALIGN_SEC Then
+    Begin
+      If Idx = K Then
+      Begin
+        GStart := Pos;
+        GSize := Gs;
+        DkLgGap := True;
+        Exit;
+      End;
+      Inc(Idx);
+    End;
+    If I <= MAXPT Then
+    Begin
+      Pos := Pt[I].Start + Pt[I].Size;
+      Pos := ((Pos + ALIGN_SEC - 1) Div ALIGN_SEC) * ALIGN_SEC;
+    End;
+  End;
+End;
+
+{ cree une partition logique de Size secteurs dans la plage K de l'etendue ;
+  rend son numero (5..) ou 0 }
+Function DkCreateLog(K, Size, Typ : LongInt) : LongInt;
+Var Gs, Gz, St, I, J : LongInt;
+Begin
+  DkCreateLog := 0;
+  If DkLogCount >= MAXPT - 4 Then Exit;
+  If Not DkLgGap(K, Gs, Gz) Then Exit;
+  If Size > Gz - ALIGN_SEC Then Size := Gz - ALIGN_SEC;
+  If Size < 2048 Then Exit;
+  St := Gs + ALIGN_SEC;
+  I := 5;
+  While (I <= MAXPT) And Pt[I].Used And (Pt[I].Start < St) Do Inc(I);
+  { decale les suivantes d'un cran }
+  For J := MAXPT DownTo I + 1 Do Pt[J] := Pt[J - 1];
+  FillChar(Pt[I], SizeOf(TPart), 0);
+  Pt[I].Used := True;
+  Pt[I].Start := St;
+  Pt[I].Size := Size;
+  Pt[I].Typ := Typ;
+  DkCreateLog := I;
+End;
+
+{ supprime la partition I ; l'etendue emporte ses partitions logiques }
+Procedure DkDelete(I : LongInt);
+Var J : LongInt;
+Begin
+  If DkIsExt(I) Then
+    For J := 5 To MAXPT Do FillChar(Pt[J], SizeOf(TPart), 0);
+  If I >= 5 Then
+  Begin
+    For J := I To MAXPT - 1 Do Pt[J] := Pt[J + 1];
+    FillChar(Pt[MAXPT], SizeOf(TPart), 0);
+  End
+  Else FillChar(Pt[I], SizeOf(TPart), 0);
+End;
+
+{ ecrit les EBR des partitions logiques (le premier au debut de l'etendue) }
+Function DkWriteLogical(Fd : LongInt) : Boolean;
+Var Ex, J, Nx, E : LongInt; Z : Array[0..511] Of Byte;
+Begin
+  DkWriteLogical := True;
+  Ex := DkExt;
+  If Ex = 0 Then Exit;
+  FillChar(Z, 512, 0);
+  { etendue sans logique ou ancien EBR : secteur vierge au debut }
+  DkSeekSec(Fd, Pt[Ex].Start);
+  SysWrite(Fd, Z, 512);
+  For J := 5 To MAXPT Do
+    If Pt[J].Used Then
+    Begin
+      E := Pt[J].Start - ALIGN_SEC;
+      FillChar(Mbr, 512, 0);
+      Mbr[446 + 4] := Pt[J].Typ;
+      DkChs(Pt[J].Start, 446 + 1);
+      DkChs(Pt[J].Start + Pt[J].Size - 1, 446 + 5);
+      DkPutD(446 + 8, Pt[J].Start - E);
+      DkPutD(446 + 12, Pt[J].Size);
+      If (J < MAXPT) And Pt[J + 1].Used Then
+      Begin
+        Nx := Pt[J + 1].Start - ALIGN_SEC;
+        Mbr[446 + 16 + 4] := PT_EXT;
+        DkChs(Nx, 446 + 16 + 1);
+        DkChs(Pt[J + 1].Start + Pt[J + 1].Size - 1, 446 + 16 + 5);
+        DkPutD(446 + 16 + 8, Nx - Pt[Ex].Start);
+        DkPutD(446 + 16 + 12, Pt[J + 1].Start + Pt[J + 1].Size - Nx);
+      End;
+      Mbr[510] := $55;
+      Mbr[511] := $AA;
+      DkSeekSec(Fd, E);
+      If SysWrite(Fd, Mbr, 512) <> 512 Then DkWriteLogical := False;
+    End;
+End;
+
 { ecrit le MBR (code de MBR.BIN, parametres du chargeur, table, signature) }
 Function DkWriteTable : Boolean;
 Var Fd, F2, N, I, O : LongInt; Code : Array[0..511] Of Byte;
@@ -334,6 +509,11 @@ Begin
     SysClose(Fd);
     Exit;
   End;
+  If Not DkWriteLogical(Fd) Then
+  Begin
+    SysClose(Fd);
+    Exit;
+  End;
   LnxSys3(118, Fd, 0, 0);
   SysClose(Fd);
   SysSync;
@@ -352,8 +532,9 @@ Begin
   For K := 1 To 40 Do
   Begin
     Ok := True;
-    For I := 1 To 4 Do
-      If Pt[I].Used And (SysStat(DkPartDev(I), S) < 0) Then Ok := False;
+    For I := 1 To MAXPT Do
+      If Pt[I].Used And Not DkIsExt(I) And
+         (SysStat(DkPartDev(I), S) < 0) Then Ok := False;
     If Ok Then
     Begin
       DkReread := True;

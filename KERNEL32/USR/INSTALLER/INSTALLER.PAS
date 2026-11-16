@@ -27,13 +27,14 @@ Program K32Setup;
 {$I WIDGETS.INC}
 {$I DISKS.INC}
 {$I INSTOPS.INC}
+{$I FSPROBE.INC}
 
 Const
   NAV_BACK = 1;  NAV_NEXT = 2;  NAV_CANCEL = 3;
   RES_REBUILD = -2;
-  S_LANG = 0;  S_KEY = 1;  S_TZ = 2;  S_CLK = 3;  S_HOST = 4;  S_ACC = 5;
-  S_DISK = 6;  S_METH = 7;  S_PED = 8;  S_ROLE = 9;  S_SUM = 10;
-  S_INST = 11;  S_END = 12;
+  S_LANG = 0;  S_WELC = 1;  S_KEY = 2;  S_TZ = 3;  S_CLK = 4;  S_HOST = 5;
+  S_ACC = 6;  S_DISK = 7;  S_METH = 8;  S_PED = 9;  S_ROLE = 10;  S_SUM = 11;
+  S_INST = 12;  S_END = 13;
   LangCode : Array[0..6] Of String[2] = ('FR', 'EN', 'DE', 'IT', 'ES', 'PT',
     'NL');
   LangName : Array[0..6] Of String[12] = ('Fran'#231'ais', 'English',
@@ -60,7 +61,7 @@ Var
     SwapMb, TtyPath, PresPath, RebootMode, DiskPath : String;
   Cities : Array[0..699] Of String[40];
   CityN : LongInt;
-  PedKind, PedIdx : Array[0..15] Of LongInt;
+  PedKind, PedIdx : Array[0..31] Of LongInt;
   PedN : LongInt;
   StageBase, StageSpan : LongInt;
   InstLogW, InstProgW, InstLblW : LongInt;
@@ -70,6 +71,8 @@ Var
   PsN : LongInt;
   FsName : Array[2..4] Of String[4];
   InstFailed : Boolean;
+  ExistNote : String;          { contenu detecte sur le disque choisi }
+  ExistSys : Boolean;
 
 { ---- textes ---- }
 
@@ -399,7 +402,7 @@ End;
 
 Function StepTotal : LongInt;
 Begin
-  If PartMode = 2 Then StepTotal := 13 Else StepTotal := 11;
+  If PartMode = 2 Then StepTotal := 14 Else StepTotal := 12;
 End;
 
 { debut de page : titre, aide, boutons de navigation }
@@ -435,6 +438,26 @@ Begin
                           Msg(M_NO)) = 1;
 End;
 
+{ aide (F1) : page de texte sur les touches et la souris }
+Procedure PageHelp;
+Var R : LongInt;
+Begin
+  UiClear;
+  UiHead := Msg(M_TITLE);
+  UiTitle := Msg(M_HELP_T);
+  UiFoot := Msg(M_FOOT);
+  UiLabel(0, 0, UiCw, 4, Msg(M_HELP_1), 0);
+  UiLabel(0, 5, UiCw, 3, Msg(M_HELP_2), 0);
+  UiLabel(0, 9, UiCw, 3, Msg(M_HELP_3), 0);
+  UiLabel(0, 13, UiCw, 3, Msg(M_HELP_4), WF_DIM);
+  UiButton(NAV_NEXT, UiCw - Length(Msg(M_OK)) - 4, UiWh - 4,
+           Length(Msg(M_OK)) + 4, Msg(M_OK), WF_DEF Or WF_CANCEL);
+  UiSetFocusId(NAV_NEXT);
+  Repeat
+    R := UiRun(-1);
+  Until (R = NAV_NEXT) Or (R = RES_REBUILD);
+End;
+
 { boucle d'une page : gere F2, F3 et l'annulation ; rend un identifiant de
   bouton, une notification (>= 1000) ou RES_REBUILD }
 Function PageRun : LongInt;
@@ -452,6 +475,11 @@ Begin
       ToggleMode;
       R := RES_REBUILD;
     End
+    Else If R = 2001 Then
+    Begin
+      PageHelp;
+      R := RES_REBUILD;
+    End
     Else If R >= 2001 Then R := 0
     Else If R = NAV_CANCEL Then
     Begin
@@ -464,6 +492,60 @@ End;
 Procedure ErrBox(Const S : String);
 Begin
   UiMsgBox(Msg(M_ERR_T), S, Msg(M_OK), '');
+End;
+
+{ ---- contenu existant d'un disque ---- }
+
+{ detecte le contenu des partitions de DiskDev (type de systeme de fichiers,
+  nom, et presence d'un systeme LINUX-0 : /boot/linux0) ; remplit ExistNote }
+Procedure ScanExisting(Const DiskDev : String);
+Var I : LongInt; Typ, Lbl, Uu, Line : String;
+Begin
+  ExistNote := '';
+  ExistSys := False;
+  Dsk := DiskDev;
+  DkReadTable;
+  For I := 1 To MAXPT Do
+    If Pt[I].Used And Not DkIsExt(I) Then
+    Begin
+      Typ := ''; Lbl := ''; Uu := '';
+      Probe(DkPartDev(I), Typ, Lbl, Uu);
+      Line := DkPartDev(I) + ' ' + NumS(DkMb(Pt[I].Size)) + ' MB ';
+      If Typ <> '' Then Line := Line + Typ Else Line := Line + '(' +
+        HexByte(Pt[I].Typ) + ')';
+      If Lbl <> '' Then Line := Line + ' "' + Lbl + '"';
+      If (Typ = 'ext2') Or (Typ = 'ext3') Or (Typ = 'ext4') Then
+      Begin
+        SysMkdir('/probe', 493);
+        If SysMount(DkPartDev(I), '/probe', Typ, MS_RDONLY) = 0 Then
+        Begin
+          If OpFileExists('/probe/boot/linux0') Then
+          Begin
+            Line := Line + ' - ' + Msg(M_EXIST_SYS);
+            ExistSys := True;
+          End;
+          SysUmount('/probe');
+        End;
+      End;
+      ExistNote := ExistNote + Line + #10;
+    End;
+End;
+
+{ memoire totale en Mo (/proc/meminfo) }
+Function MemMb : LongInt;
+Var F, V, E : LongInt; L : String;
+Begin
+  MemMb := 0;
+  F := SysOpen('/proc/meminfo', O_RDONLY, 0);
+  If F < 0 Then Exit;
+  While SysReadLine(F, L) Do
+    If Copy(L, 1, 9) = 'MemTotal:' Then
+    Begin
+      Val(DkField(L, 2), V, E);
+      If E = 0 Then MemMb := V Div 1024;
+      Break;
+    End;
+  SysClose(F);
 End;
 
 { ---- page : langue ---- }
@@ -498,6 +580,31 @@ Begin
   PageLang := R;
 End;
 
+{ ---- page : accueil ---- }
+
+Function PageWelc : LongInt;
+Var R, M : LongInt; T : String;
+Begin
+  Repeat
+    BeginPage(S_WELC, Msg(M_WEL_T));
+    UiLabel(0, 0, UiCw, 5, Msg(M_WEL_I), 0);
+    If UiGfx Then T := Fmt(M_WEL_MODE_G, NumS(GW), NumS(GH), '')
+    Else T := Msg(M_WEL_MODE_T);
+    M := MemMb;
+    DkScan;
+    UiLabel(0, 6, UiCw, 1, T, WF_DIM);
+    UiLabel(0, 7, UiCw, 1, Fmt(M_WEL_MEM, NumS(M), '', ''), WF_DIM);
+    UiLabel(0, 8, UiCw, 1, Fmt(M_WEL_DISKS, NumS(DkCount), '', ''), WF_DIM);
+    UiLabel(0, 10, UiCw, 5, Msg(M_WEL_KEYS), 0);
+    If M < 100 Then UiLabel(0, 15, UiCw, 1, 'RAM < 100 MB', WF_ERR);
+    NavButtons(True, Msg(M_NEXT));
+    UiSetFocusId(NAV_NEXT);
+    R := PageRun;
+    If R >= RES_NOTIFY Then R := RES_REBUILD;
+  Until R <> RES_REBUILD;
+  PageWelc := R;
+End;
+
 { ---- page : clavier ---- }
 
 Var KeyTest : String;
@@ -520,7 +627,7 @@ Begin
 End;
 
 Function PageKey : LongInt;
-Var R : LongInt;
+Var R, I : LongInt; CodeS : String;
 Begin
   Repeat
     BuildKey;
@@ -537,7 +644,9 @@ Begin
     Until R <> 0;
     KeyTest := UiGetText(11);
   Until R <> RES_REBUILD;
-  OpMark('keytest=' + KeyTest + ' layout=' + LayId[LayI]);
+  CodeS := '';
+  For I := 1 To Length(KeyTest) Do CodeS := CodeS + ' ' + NumS(Ord(KeyTest[I]));
+  OpMark('keytest=' + KeyTest + ' layout=' + LayId[LayI] + ' codes=' + CodeS);
   PageKey := R;
 End;
 
@@ -834,20 +943,27 @@ Begin
     End
     Else
     Begin
-      L := UiList(10, 0, 4, 50, 6, 0);
+      L := UiList(10, 0, 4, 50, 4, WF_NOTIFY);
       For I := 0 To DkCount - 1 Do
         UiListAdd(L, PadR('/dev/' + DkName[I], 14) +
                   PadL(NumS(DkMb(DkSize[I])), 8) + ' ' +
                   ' MB');
-      If DiskIx < DkCount Then UiWd[L].Val := DiskIx;
+      If DiskIx >= DkCount Then DiskIx := 0;
+      UiWd[L].Val := DiskIx;
+      ScanExisting('/dev/' + DkName[DiskIx]);
+      OpMark('existing ' + ExistNote);
+      If ExistNote = '' Then
+        UiLabel(0, 9, UiCw, 1, Msg(M_EXIST_L) + ' ' + Msg(M_EXIST_NONE),
+                WF_DIM)
+      Else
+        UiLabel(0, 9, UiCw, UiCh - 14, Msg(M_EXIST_L) + #10 + ExistNote,
+                WF_ERR);
       NavButtons(True, Msg(M_NEXT));
       UiSetFocusId(10);
     End;
-    Repeat
-      R := PageRun;
-      If R >= RES_NOTIFY Then R := 0;
-    Until R <> 0;
+    R := PageRun;
     If DkCount > 0 Then DiskIx := UiSel(10);
+    If R >= RES_NOTIFY Then R := RES_REBUILD;
   Until R <> RES_REBUILD;
   If (R = NAV_NEXT) And (DkCount > 0) Then
   Begin
@@ -963,7 +1079,7 @@ Begin
     $82 : TypeName := Msg(M_PED_TSWAP);
     $07 : TypeName := 'NTFS/HPFS (07)';
     $0B, $0C : TypeName := 'FAT32 (' + OpNum2(T) + ')';
-    $05, $0F : TypeName := 'Extended (' + OpNum2(T) + ')';
+    $05, $0F : TypeName := Msg(M_PED_TEXT);
     $EF : TypeName := 'EFI (EF)';
   Else
     TypeName := '(' + HexByte(T) + ')';
@@ -971,23 +1087,35 @@ Begin
 End;
 
 Procedure BuildPedRows(Var L : LongInt);
-Var I, K, J, T, Gs, Gz : LongInt; Pos_ : Array[0..15] Of LongInt; Line : String;
+Var I, K, J, T, Gs, Gz : LongInt; Pos_ : Array[0..31] Of LongInt; Line : String;
 Begin
   PedN := 0;
-  For I := 1 To 4 Do
-    If Pt[I].Used Then
+  { cle de tri : 2 x debut ; les logiques et leurs plages libres : + 1, pour
+    que l'etendue precede son contenu }
+  For I := 1 To MAXPT Do
+    If Pt[I].Used And (PedN < 30) Then
     Begin
       PedKind[PedN] := 1;
       PedIdx[PedN] := I;
-      Pos_[PedN] := Pt[I].Start;
+      Pos_[PedN] := Pt[I].Start * 2;
+      If I > 4 Then Pos_[PedN] := Pos_[PedN] + 1;
       Inc(PedN);
     End;
   K := 0;
-  While DkGap(K, Gs, Gz) And (PedN < 15) Do
+  While DkGap(K, Gs, Gz) And (PedN < 30) Do
   Begin
     PedKind[PedN] := 2;
     PedIdx[PedN] := K;
-    Pos_[PedN] := Gs;
+    Pos_[PedN] := Gs * 2;
+    Inc(PedN);
+    Inc(K);
+  End;
+  K := 0;
+  While DkLgGap(K, Gs, Gz) And (PedN < 30) Do
+  Begin
+    PedKind[PedN] := 3;
+    PedIdx[PedN] := K;
+    Pos_[PedN] := Gs * 2 + 1;
     Inc(PedN);
     Inc(K);
   End;
@@ -1011,9 +1139,11 @@ Begin
     End
     Else
     Begin
-      DkGap(PedIdx[I], Gs, Gz);
+      If PedKind[I] = 2 Then DkGap(PedIdx[I], Gs, Gz)
+      Else DkLgGap(PedIdx[I], Gs, Gz);
       Line := PadR('-', 10) + PadL(NumS(DkMb(Gs)), 10) + '  ' +
               PadL(NumS(DkMb(Gz)), 10) + '  ' + Msg(M_PED_FREE);
+      If PedKind[I] = 3 Then Line := Line + ' (' + Msg(M_PED_LOGIC) + ')';
     End;
     UiListAdd(L, Line);
   End;
@@ -1047,14 +1177,19 @@ Begin
   ParseSize := V * 2048;
 End;
 
-Var NewGap, NewTyp : LongInt;
+Var NewGap, NewTyp, NewKind : LongInt;   { NewKind : 2 primaire, 3 logique }
 
 { sous-page : nouvelle partition dans l'espace libre NewGap }
 Function PageNewPart : Boolean;
 Var R, Gs, Gz, Sz, Slot : LongInt; SzS : String;
 Begin
   PageNewPart := False;
-  If Not DkGap(NewGap, Gs, Gz) Then Exit;
+  If NewKind = 3 Then
+  Begin
+    If Not DkLgGap(NewGap, Gs, Gz) Then Exit;
+    Gz := Gz - ALIGN_SEC;
+  End
+  Else If Not DkGap(NewGap, Gs, Gz) Then Exit;
   SzS := '';
   NewTyp := PT_LINUX;
   Repeat
@@ -1068,12 +1203,16 @@ Begin
     UiLabel(16, 4, 30, 1, '(max ' + NumS(DkMb(Gz)) + ' MB)', WF_DIM);
     UiRadio(11, 1, 0, 6, 40, Msg(M_PED_TLINUX), NewTyp = PT_LINUX, 0);
     UiRadio(12, 1, 0, 7, 40, Msg(M_PED_TSWAP), NewTyp = PT_SWAP, 0);
+    If (NewKind = 2) And (DkExt = 0) Then
+      UiRadio(13, 1, 0, 8, 50, Msg(M_PED_TEXT), NewTyp = PT_EXT, 0);
     NavButtons(True, Msg(M_OK));
     UiSetFocusId(10);
     Repeat
       R := PageRun;
       SzS := UiGetText(10);
       If UiChecked(12) Then NewTyp := PT_SWAP Else NewTyp := PT_LINUX;
+      If (NewKind = 2) And (DkExt = 0) Then
+        If UiChecked(13) Then NewTyp := PT_EXT;
       If R = NAV_NEXT Then
       Begin
         Sz := ParseSize(SzS, Gz Div 2048 * 2048);
@@ -1084,7 +1223,8 @@ Begin
         End
         Else
         Begin
-          Slot := DkCreate(NewGap, Sz, NewTyp);
+          If NewKind = 3 Then Slot := DkCreateLog(NewGap, Sz, NewTyp)
+          Else Slot := DkCreate(NewGap, Sz, NewTyp);
           If Slot = 0 Then
           Begin
             ErrBox(Msg(M_PED_NOSLOT));
@@ -1133,12 +1273,16 @@ Begin
       Sel := UiSel(10);
       If R = 20 Then
       Begin
-        If (Sel >= 0) And (Sel < PedN) And (PedKind[Sel] = 2) Then
+        If (Sel >= 0) And (Sel < PedN) And (PedKind[Sel] >= 2) Then
         Begin
-          If DkFreeSlot = 0 Then ErrBox(Msg(M_PED_NOSLOT))
+          If (PedKind[Sel] = 2) And (DkFreeSlot = 0) Then
+            ErrBox(Msg(M_PED_NOSLOT))
+          Else If (PedKind[Sel] = 3) And (DkLogCount >= MAXPT - 4) Then
+            ErrBox(Msg(M_PED_NOSLOT))
           Else
           Begin
             NewGap := PedIdx[Sel];
+            NewKind := PedKind[Sel];
             PageNewPart;
           End;
         End
@@ -1150,7 +1294,7 @@ Begin
         If (Sel >= 0) And (Sel < PedN) And (PedKind[Sel] = 1) Then
           If UiMsgBox(Msg(M_WARN_T), Fmt(M_PED_CONFDEL, NumS(PedIdx[Sel]), '',
              ''), Msg(M_YES), Msg(M_NO)) = 1 Then
-            FillChar(Pt[PedIdx[Sel]], SizeOf(TPart), 0);
+            DkDelete(PedIdx[Sel]);
         R := RES_REBUILD;
       End
       Else If R = 22 Then
@@ -1158,14 +1302,16 @@ Begin
         If (Sel >= 0) And (Sel < PedN) And (PedKind[Sel] = 1) Then
         Begin
           K := PedIdx[Sel];
-          If Pt[K].Typ = PT_LINUX Then Pt[K].Typ := PT_SWAP
-          Else Pt[K].Typ := PT_LINUX;
+          If Not DkIsExt(K) Then
+            If Pt[K].Typ = PT_LINUX Then Pt[K].Typ := PT_SWAP
+            Else Pt[K].Typ := PT_LINUX;
         End;
         R := RES_REBUILD;
       End
       Else If R = 23 Then
       Begin
-        If (Sel >= 0) And (Sel < PedN) And (PedKind[Sel] = 1) Then
+        If (Sel >= 0) And (Sel < PedN) And (PedKind[Sel] = 1) And
+           (PedIdx[Sel] <= 4) And Not DkIsExt(PedIdx[Sel]) Then
         Begin
           K := PedIdx[Sel];
           Pt[K].Active := Not Pt[K].Active;
@@ -1222,15 +1368,15 @@ Procedure AutoRoles;
 Var I, Nr : LongInt;
 Begin
   Nr := 0;
-  For I := 1 To 4 Do
+  For I := 1 To MAXPT Do
     If Pt[I].Used And (Pt[I].Role = ROLE_ROOT) Then Inc(Nr);
-  For I := 1 To 4 Do
-    If Pt[I].Used Then
+  For I := 1 To MAXPT Do
+    If Pt[I].Used And Not DkIsExt(I) Then
     Begin
       If (Pt[I].Role = ROLE_NONE) Then
       Begin
         If Pt[I].Typ = PT_SWAP Then Pt[I].Role := ROLE_SWAP
-        Else If (Pt[I].Typ = PT_LINUX) And (Nr = 0) Then
+        Else If (Pt[I].Typ = PT_LINUX) And (Nr = 0) And (I <= 4) Then
         Begin
           Pt[I].Role := ROLE_ROOT;
           Inc(Nr);
@@ -1244,13 +1390,13 @@ Procedure SetRole(K, R : LongInt);
 Var I : LongInt;
 Begin
   If R <> ROLE_NONE Then
-    For I := 1 To 4 Do
+    For I := 1 To MAXPT Do
       If (I <> K) And (Pt[I].Role = R) Then Pt[I].Role := ROLE_NONE;
   Pt[K].Role := R;
 End;
 
 Function PageRole : LongInt;
-Var R, L, I, N, Sel, K : LongInt; Map : Array[0..3] Of LongInt; Nr : LongInt;
+Var R, L, I, N, Sel, K : LongInt; Map : Array[0..11] Of LongInt; Nr : LongInt;
 Begin
   AutoRoles;
   Sel := 0;
@@ -1259,8 +1405,8 @@ Begin
     UiLabel(0, 0, UiCw, 3, Msg(M_ROLE_I), 0);
     L := UiList(10, 0, 4, UiCw, 6, 0);
     N := 0;
-    For I := 1 To 4 Do
-      If Pt[I].Used Then
+    For I := 1 To MAXPT Do
+      If Pt[I].Used And Not DkIsExt(I) Then
       Begin
         Map[N] := I;
         UiListAdd(L, PadR(DkPartDev(I), 12) + PadL(NumS(DkMb(Pt[I].Size)), 8) +
@@ -1286,7 +1432,7 @@ Begin
         If UiChecked(14) Then FsKind := 4
         Else If UiChecked(15) Then FsKind := 3
         Else FsKind := 2;
-        For K := 1 To 4 Do Pt[K].Fs := 0;
+        For K := 1 To MAXPT Do Pt[K].Fs := 0;
         R := RES_REBUILD;
       End;
       If R = 20 Then
@@ -1312,7 +1458,7 @@ Begin
       Begin
         Nr := 0;
         K := 0;
-        For I := 1 To 4 Do
+        For I := 1 To MAXPT Do
           If Pt[I].Used And (Pt[I].Role = ROLE_ROOT) Then
           Begin
             Inc(Nr);
@@ -1321,6 +1467,11 @@ Begin
         If Nr <> 1 Then
         Begin
           ErrBox(Msg(M_ROLE_E_ROOT));
+          R := 0;
+        End
+        Else If K > 4 Then
+        Begin
+          ErrBox(Msg(M_ROLE_E_PRIM));
           R := 0;
         End
         Else If Pt[K].Size < 64 * 2048 Then
@@ -1341,7 +1492,7 @@ Function RootPart : LongInt;
 Var I : LongInt;
 Begin
   RootPart := 0;
-  For I := 1 To 4 Do
+  For I := 1 To MAXPT Do
     If Pt[I].Used And (Pt[I].Role = ROLE_ROOT) Then RootPart := I;
 End;
 
@@ -1358,19 +1509,22 @@ Begin
          Fmt(M_SUM_HOST, Host, '', '') + #10 +
          Fmt(M_SUM_USER, U, '', '') + #10 +
          Fmt(M_SUM_DISK, DiskPath, NumS(DkMb(DkSectors(DiskPath))), '');
-    UiLabel(0, 0, UiCw, 7, T, 0);
+    UiLabel(0, 0, UiCw, 6, T, 0);
     N := 0;
     T := '';
-    For I := 1 To 4 Do
-      If Pt[I].Used Then
+    For I := 1 To MAXPT Do
+      If Pt[I].Used And Not DkIsExt(I) Then
       Begin
         If N > 0 Then T := T + #10;
         T := T + Fmt(M_SUM_PART, DkPartDev(I), NumS(DkMb(Pt[I].Size)),
                      RoleLine(I));
         Inc(N);
       End;
-    UiLabel(0, 7, UiCw, 5, T, WF_DIM);
-    UiCheck(30, 0, 13, UiCw, Fmt(M_SUM_CONF, DiskPath, '', ''), False,
+    UiLabel(0, 6, UiCw, 5, T, WF_DIM);
+    If ExistNote <> '' Then
+      UiLabel(0, 11, UiCw, UiCh - 14, Msg(M_SUM_EXIST) + #10 + ExistNote,
+              WF_ERR);
+    UiCheck(30, 0, UiCh - 2, UiCw, Fmt(M_SUM_CONF, DiskPath, '', ''), False,
             WF_NOTIFY Or WF_ERR);
     NavButtons(True, Msg(M_INSTALL));
     UiSetEnabled(NAV_NEXT, False);
@@ -1489,7 +1643,7 @@ Begin
   { fstab }
   Pw := '# /etc/fstab : genere par l''installateur' + #10 +
         RootDev + ' / ' + FsName[PartFs(RootPart)] + ' defaults 1 1' + #10;
-  For I := 1 To 4 Do
+  For I := 1 To MAXPT Do
     If Pt[I].Used Then
     Begin
       If Pt[I].Role = ROLE_HOME Then
@@ -1565,7 +1719,9 @@ Begin
   If Not OpWriteFile(TGT + '/etc/adjtime', '0.000000 0 0.000000' + #10 + '0' +
      #10 + Sh + #10, 420, False) Then Exit;
   Gr := '# ajouts de l''installateur' + #10 +
-        '[ -x /sbin/hwclock ] && /sbin/hwclock -s 2>/dev/null' + #10;
+        '[ -x /sbin/hwclock ] && /sbin/hwclock -s 2>/dev/null' + #10 +
+        '[ -x /bin/loadkeys ] && . /etc/default/keyboard && ' +
+        '/bin/loadkeys $KEYMAP 2>/dev/null' + #10;
   If Swap Then Gr := Gr + 'swapon -a 2>/dev/null' + #10;
   If Home Then Gr := Gr + 'mount -a 2>/dev/null' + #10;
   If Not OpWriteFile(TGT + '/etc/rc', Gr, 493, True) Then Exit;
@@ -1577,7 +1733,10 @@ Var Km, Cmd : String;
 Begin
   BootAll := False;
   Km := LayId[LayI];
-  Cmd := 'root=' + RootDev + ' rw console=tty0 console=ttyS0 keymap=' + Km;
+  Cmd := 'root=' + RootDev + ' rw console=tty0 console=ttyS0';
+  { le noyau ne connait que us et fr : les autres dispositions sont
+    chargees par loadkeys (KDSKBENT) depuis /etc/rc }
+  If (Km = 'fr') Or (Km = 'us') Then Cmd := Cmd + ' keymap=' + Km;
   If Not OpCopyFile(CDMNT + '/boot/linux0', TGT + '/boot/linux0', 493) Then
     Exit;
   If Not OpWriteFile(TGT + '/boot/linux0.cfg', 'kernel=/boot/linux0' + #10 +
@@ -1630,7 +1789,7 @@ Begin
   End;
   If PartMode = 1 Then GuidedPlan;
   { le role fixe le type : swap 82, le reste Linux 83 }
-  For I := 1 To 4 Do
+  For I := 1 To MAXPT Do
     If Pt[I].Used Then
     Begin
       If Pt[I].Role = ROLE_SWAP Then Pt[I].Typ := PT_SWAP
@@ -1638,9 +1797,10 @@ Begin
         Pt[I].Typ := PT_LINUX;
       Pt[I].Active := Pt[I].Role = ROLE_ROOT;
     End;
-  If RootPart = 0 Then
+  If (RootPart = 0) Or (RootPart > 4) Then
   Begin
     OpErr := Msg(M_ROLE_E_ROOT);
+    If RootPart > 4 Then OpErr := Msg(M_ROLE_E_PRIM);
     Exit;
   End;
   Dsk := DiskPath;
@@ -1664,7 +1824,7 @@ Begin
   End;
   { 2 : formatage }
   InstStage(2, 30, 100);
-  For I := 1 To 4 Do
+  For I := 1 To MAXPT Do
     If Pt[I].Used And (Pt[I].Role <> ROLE_NONE) Then
     Begin
       Dev := DkPartDev(I);
@@ -1698,7 +1858,7 @@ Begin
     OpErr := Fmt(M_E_MNT, Dev, '', '') + ' : ' + SysErrorText(SysErrno);
     Exit;
   End;
-  For I := 1 To 4 Do
+  For I := 1 To MAXPT Do
     If Pt[I].Used And (Pt[I].Role = ROLE_HOME) Then
     Begin
       SysMkdir(TGT + '/home', 493);
@@ -1818,9 +1978,25 @@ Begin
   If LowerS(C) = 'sp' Then LangFromCode := 4;
 End;
 
-{ parts=ext4:/:300M,swap:swap:64M,ext3:/home:* }
+{ role et systeme de fichiers d'une partition creee par le fichier de reponses }
+Procedure PsRole(Slot : LongInt; Const Mnt, Fs : String);
+Begin
+  Pt[Slot].Role := ROLE_NONE;
+  If Mnt = '/' Then Pt[Slot].Role := ROLE_ROOT
+  Else If Mnt = '/home' Then Pt[Slot].Role := ROLE_HOME
+  Else If Mnt = 'swap' Then Pt[Slot].Role := ROLE_SWAP;
+  If Fs = 'ext3' Then Pt[Slot].Fs := 3
+  Else If Fs = 'ext2' Then Pt[Slot].Fs := 2
+  Else If Fs = 'ext4' Then Pt[Slot].Fs := 4;
+End;
+
+{ parts=ext4:/:300M,swap:swap:64M,ext3:/home:*,ext4:/var:200M:logical
+  (systeme de fichiers : mount : taille [: logical]) ; les partitions
+  "logical" vont dans une etendue creee sur tout l'espace libre restant }
 Function PsParts(Const Spec : String) : Boolean;
-Var I, S, N, F, Sz, Slot : LongInt; E, Fs, Mnt, Siz : String; Role : LongInt;
+Var I, S, N, F, Sz, Slot, K, Best, Gs, Gz, BestSz, NLog : LongInt; E : String;
+  EFs, EMnt, ESz : Array[0..7] Of String[20]; ELog : Array[0..7] Of Boolean;
+  Role : LongInt;
 Begin
   PsParts := False;
   Dsk := DiskPath;
@@ -1828,7 +2004,8 @@ Begin
   DkClearTable;
   I := 1;
   N := 0;
-  While I <= Length(Spec) Do
+  NLog := 0;
+  While (I <= Length(Spec)) And (N < 8) Do
   Begin
     S := I;
     While (I <= Length(Spec)) And (Spec[I] <> ',') Do Inc(I);
@@ -1836,27 +2013,61 @@ Begin
     Inc(I);
     F := Pos(':', E);
     If F = 0 Then Exit;
-    Fs := Copy(E, 1, F - 1);
+    EFs[N] := Copy(E, 1, F - 1);
     E := Copy(E, F + 1, 80);
     F := Pos(':', E);
     If F = 0 Then Exit;
-    Mnt := Copy(E, 1, F - 1);
-    Siz := Copy(E, F + 1, 20);
-    Role := ROLE_NONE;
-    If Mnt = '/' Then Role := ROLE_ROOT
-    Else If Mnt = '/home' Then Role := ROLE_HOME
-    Else If Mnt = 'swap' Then Role := ROLE_SWAP;
-    If Siz = '*' Then Sz := ParseSize('', DskSec - ALIGN_SEC)
-    Else Sz := ParseSize(Siz, DskSec);
-    If Sz < 2048 Then Exit;
-    If Role = ROLE_SWAP Then Slot := DkCreate(0, Sz, PT_SWAP)
-    Else Slot := DkCreate(0, Sz, PT_LINUX);
-    If Slot = 0 Then Exit;
-    Pt[Slot].Role := Role;
-    If Fs = 'ext3' Then Pt[Slot].Fs := 3
-    Else If Fs = 'ext2' Then Pt[Slot].Fs := 2
-    Else If Fs = 'ext4' Then Pt[Slot].Fs := 4;
+    EMnt[N] := Copy(E, 1, F - 1);
+    E := Copy(E, F + 1, 40);
+    ELog[N] := False;
+    F := Pos(':', E);
+    If F > 0 Then
+    Begin
+      ELog[N] := Copy(E, F + 1, 1) = 'l';
+      E := Copy(E, 1, F - 1);
+    End;
+    ESz[N] := E;
+    If ELog[N] Then Inc(NLog);
     Inc(N);
+  End;
+  { 1 : les primaires }
+  For K := 0 To N - 1 Do
+    If Not ELog[K] Then
+    Begin
+      If ESz[K] = '*' Then Sz := DskSec Else Sz := ParseSize(ESz[K], DskSec);
+      If Sz < 2048 Then Exit;
+      If EMnt[K] = 'swap' Then Slot := DkCreate(0, Sz, PT_SWAP)
+      Else Slot := DkCreate(0, Sz, PT_LINUX);
+      If Slot = 0 Then Exit;
+      PsRole(Slot, EMnt[K], EFs[K]);
+    End;
+  { 2 : l'etendue sur la plus grande plage libre, puis les logiques }
+  If NLog > 0 Then
+  Begin
+    Best := -1;
+    BestSz := 0;
+    K := 0;
+    While DkGap(K, Gs, Gz) Do
+    Begin
+      If Gz > BestSz Then
+      Begin
+        Best := K;
+        BestSz := Gz;
+      End;
+      Inc(K);
+    End;
+    If Best < 0 Then Exit;
+    If DkCreate(Best, BestSz, PT_EXT) = 0 Then Exit;
+    For K := 0 To N - 1 Do
+      If ELog[K] Then
+      Begin
+        If Not DkLgGap(0, Gs, Gz) Then Exit;
+        If ESz[K] = '*' Then Sz := Gz Else Sz := ParseSize(ESz[K], Gz);
+        If EMnt[K] = 'swap' Then Slot := DkCreateLog(0, Sz, PT_SWAP)
+        Else Slot := DkCreateLog(0, Sz, PT_LINUX);
+        If Slot = 0 Then Exit;
+        PsRole(Slot, EMnt[K], EFs[K]);
+      End;
   End;
   PsParts := N > 0;
 End;
@@ -1952,6 +2163,7 @@ Begin
     R := NAV_NEXT;
     Case Step Of
       S_LANG : R := PageLang;
+      S_WELC : R := PageWelc;
       S_KEY : R := PageKey;
       S_TZ : R := PageTz;
       S_CLK :

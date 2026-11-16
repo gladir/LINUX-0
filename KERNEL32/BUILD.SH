@@ -99,7 +99,8 @@ build_one() {
   local f=$1 dst=$2 n
   n=$(basename "$f" .PAS)
   cp "$f" "$W/usr/"
-  cp "$HERE"/USR/*.INC "$W/usr/" 2>/dev/null || true
+  cp "$HERE"/USR/*.INC "$HERE"/USR/INSTALLER/LAYOUTS.INC "$W/usr/" \
+    2>/dev/null || true
   if ( cd "$W/usr" && "$LPC" -3X -q "$n.PAS" ) > "$W/log/$n.log" 2>&1; then
     install -m 755 "$W/usr/$n" "$W/root/$dst"
     N=$((N + 1))
@@ -115,7 +116,7 @@ for f in "$HERE"/USR/*.PAS; do
     INIT) build_one "$f" sbin/init ;;
     GETTY|INSTALL|MOUNT|UMOUNT|HALT|REBOOT|POWEROFF|MKPASSWD|NOLOGIN|IFCONFIG|\
     ROUTE|MKSWAP|SWAPON|SYSCTL|HWCLOCK|LSMOD|USERMGR|TELINIT|SYSLOGD|MODTOOL|\
-    E2FSCK|UDHCPC)
+    E2FSCK|UDHCPC|LOGROTATE|NTPDATE|E2TOOLS)
       build_one "$f" sbin/$l ;;
     *) build_one "$f" bin/$l ;;
   esac
@@ -182,7 +183,10 @@ for l in "chgrp chown bin" "realpath readlink bin" "pkill pgrep bin" \
          "ss procinfo bin" "lspci procinfo bin" "lsusb procinfo bin" \
          "losetup procinfo bin" "telnet netutil bin" "ftp netutil bin" \
          "httpd netutil bin" "traceroute netutil bin" \
-         "dhclient udhcpc sbin" "ip iptool bin"; do
+         "dhclient udhcpc sbin" "ip iptool bin" "dumpkeys loadkeys bin" \
+         "rdate ntpdate sbin" "dumpe2fs e2tools sbin" \
+         "tune2fs e2tools sbin" "e2label e2tools sbin" \
+         "resize2fs e2tools sbin"; do
   set -- $l
   [ -f "$W/root/$3/$2" ] && ln -sf "$2" "$W/root/$3/$1" 2>/dev/null || true
 done
@@ -198,6 +202,35 @@ done
 mkdir -p "$W/root/usr/share/boot"
 cp "$B/MBR.BIN" "$B/STAGE2.BIN" "$W/root/usr/share/boot/"
 echo "   $N programme(s)"
+# fuseaux horaires (TZif de l'hote : ZONES=dossier) et terminfo des terminaux
+# courants (TERMINFO=dossier) : lus par L32API (TZ, /etc/localtime) et ncurses
+ZONES=${ZONES:-/usr/share/zoneinfo}
+if [ -d "$ZONES" ]; then
+  mkdir -p "$W/root/usr/share/zoneinfo"
+  for d in Africa America Antarctica Arctic Asia Atlantic Australia Europe \
+           Indian Pacific; do
+    [ -d "$ZONES/$d" ] && cp -a "$ZONES/$d" "$W/root/usr/share/zoneinfo/"
+  done
+  for f in UTC GMT CET EET MET WET EST MST HST zone.tab iso3166.tab; do
+    [ -e "$ZONES/$f" ] && cp -a "$ZONES/$f" "$W/root/usr/share/zoneinfo/" || true
+  done
+  mkdir -p "$W/root/usr/share/zoneinfo/Etc"
+  for f in UTC GMT; do
+    [ -e "$ZONES/Etc/$f" ] &&
+      cp -a "$ZONES/Etc/$f" "$W/root/usr/share/zoneinfo/Etc/" || true
+  done
+fi
+TERMINFO=${TERMINFO:-/usr/share/terminfo}
+if [ -d "$TERMINFO" ]; then
+  for t in linux vt100 vt102 vt220 xterm xterm-256color xterm-color ansi screen \
+           screen-256color dumb; do
+    f=$(find "$TERMINFO" -name "$t" 2>/dev/null | head -1)
+    if [ -n "$f" ]; then
+      mkdir -p "$W/root/usr/share/terminfo/$(echo $t | cut -c1)"
+      cp -L "$f" "$W/root/usr/share/terminfo/$(echo $t | cut -c1)/$t"
+    fi
+  done
+fi
 # fichiers de configuration
 cp -a "$HERE/USR/ROOTFS"/. "$W/root"/
 chmod 600 "$W/root/etc/shadow"; chmod 700 "$W/root/root"
