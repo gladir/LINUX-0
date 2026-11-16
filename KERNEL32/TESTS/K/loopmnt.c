@@ -54,7 +54,27 @@ int main(){
     ktest("loopmnt.off_read",n>0&&memcmp_(buf,"hello from inner",16)==0);
     ktest("loopmnt.off_umount",umount("/tmp/lm")==0);
   }
-  ioctl(lo,LOOP_CLR_FD,0);close(lo);close(bf);
+  { /* losetup -d : LOOP_CLR_FD sur une ouverture en lecture seule, apres umount */
+    int lr=open("/dev/loop1",O_RDONLY,0);
+    ktest("loopmnt.clr_fd_rdonly_after_umount",ioctl(lr,LOOP_CLR_FD,0)==0);close(lr);}
+  close(lo);close(bf);
+  { /* LO_FLAGS_AUTOCLEAR : umount libere la boucle */
+    int b3=open("/mnt/inner2.img",O_RDWR,0),l3=open("/dev/loop3",O_RDWR,0);
+    memset(&li,0,sizeof li);li.off=8192;li.flags=4;
+    ioctl(l3,LOOP_SET_FD,b3);ktest("loopmnt.autoclear_set",ioctl(l3,LOOP_SET_STATUS64,(long)&li)==0);
+    r=mount("/dev/loop3","/tmp/lm","ext2",1,0);
+    ktest("loopmnt.autoclear_mount",r==0);
+    if(r==0){
+      /* mount --bind apparait dans /proc/mounts */
+      mkdir("/tmp/lm2",0755);
+      ktest("loopmnt.bind",mount("/tmp/lm","/tmp/lm2",0,4096,0)==0);
+      {int n=slurp("/proc/mounts",buf,sizeof buf),i,f=0;for(i=0;i+10<n;i++)if(memcmp_(buf+i," /tmp/lm2 ",10)==0&&buf[i+10]!=0)f=1;
+       ktest("loopmnt.bind_in_proc_mounts",f);}
+      umount("/tmp/lm2");
+      ktest("loopmnt.autoclear_umount",umount("/tmp/lm")==0);
+    }
+    ktest("loopmnt.autoclear_freed",ioctl(l3,0x4C05,(long)&li)==-6);
+    close(l3);close(b3);}
   /* le montage d'un loop sans fichier echoue */
   ktest("loopmnt.unbound_mount",mount("/dev/loop2","/tmp/lm","ext2",0,0)<0);
   sync();
