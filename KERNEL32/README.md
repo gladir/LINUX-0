@@ -82,6 +82,7 @@ Parties ajoutees en phase 2 (placees physiquement avant la partie 14) :
 | 36 | `/proc/sys` (sysctl en lecture et ecriture), `/proc/swaps`, swap sur fichier ordinaire, chargeur de modules (`init_module/delete_module/finit_module`, `.ko` de `lpc -3M`), `/proc/modules`, `/proc/kallsyms`, `request_irq` pour les modules : voir la section "Partie 36" |
 | 37 | ext3/ext4 (physiquement dans la partie 18, plus la couche bloc de la partie 11) : fonctionnalites compat/incompat/ro_compat reconnues et refusees proprement si inconnues, arbre d'extents en lecture/ecriture, journal jbd/jbd2 (rejeu au montage, ecriture journalisee `data=ordered`/`data=writeback`), `flex_bg`, `meta_bg`, `64bit`, `uninit_bg`/`GDT_CSUM` (crc16), `metadata_csum` (crc32c), `extra_isize`/`i_crtime`, `huge_file`, `dir_index` (lecture), blocs de 1 a 64 Ko, `sparse_super2`, orphelins, chargeur BOOT/ capable de lire ext3/ext4 : voir la section "Partie 37" |
 | 38 | `/proc` et `/sys` complets, loop, PCI, SMP (detection), initramfs, minix/cramfs/romfs, effets de sysctl : `/proc/net/{tcp,udp,raw,unix,arp,snmp,sockstat,protocols}`, `/proc/{partitions,diskstats,devices,interrupts,ioports,iomem,vmstat,buddyinfo,misc,cgroups,tty/drivers,sysrq-trigger}`, `/proc/PID/{environ,limits,statm,comm,io,mountinfo,mounts,cgroup,oom_score,task,fdinfo/N,...}` + liens magiques (`fd/N`, `cwd`, `exe`, `root`), `/dev/loop0..15` + `/dev/loop-control` (`LOOP_*`), enumeration PCI (`/sys/bus/pci/devices`), detection ACPI MADT / tables MP et demarrage des processeurs secondaires a l'arret, inflate (deflate/zlib/gzip), initramfs cpio newc (module Multiboot, `initrd=` du chargeur), minix v1/v2/v3, cramfs, romfs (lecture seule), racine `vfat/iso9660/minix/cramfs/romfs` (`rootfstype=`), ASLR, overcommit, `kernel.panic`, SysRq |
+| 39 | SMP reel sous un verrou noyau unique, `AF_NETLINK` (NETLINK_ROUTE), `AF_PACKET` : minuterie du LAPIC (100 Hz, etalonnee sur le PIT) et IOAPIC a la place des 8259 (surcharges de la MADT, repli sur les 8259 / `noapic`), processeurs secondaires qui executent des taches (GDT/TSS/pile/inactivite par CPU, `ScheduleSmp`, IPI de reordonnancement / de vidage de TLB / d'arret, atomiques `LOCK`), `sched_setaffinity` / `sched_getaffinity` / `getcpu` reels, `/proc/cpuinfo`, `/proc/stat` (`cpuN`), `/proc/interrupts` par CPU, `/sys/devices/system/cpu/online` ; virtio-net, virtio-blk, tueur OOM ; physiquement repartie : declarations precoces (partie 4), ordonnanceur (partie 8), traps (partie 16) et amorce des AP (partie 38) |
 | ... | `/sys` (`PopulateSys`), pseudo-terminaux (maitre `PtmxXxx`, esclaves `Ttys[PtyBase+N]`, devpts = tmpfs a la partie 14), FPU/SSE (`FpuDetect`, FXSAVE), bind mounts / `pivot_root` / `MS_MOVE` (partie 12), racine reelle `TryRealRoot` (partie 17) |
 
 ## Carte memoire
@@ -337,7 +338,7 @@ Principe (un seul verrou, pas de verrous fins) :
   et son passage a l'etat non ordonnable dans `fork` (commutation vers une
   pile invalide) ; (3) `CR2` lu apres `STI`. Chaque correction a ete validee
   par des centaines d'executions de la suite (`RUNPREEMPT.SH`).
-* Ce que ce n'est pas : pas de SMP, pas de verrous fins (le code noyau de deux
+* Ce que ce n'est pas : (avec un seul CPU) pas de verrous fins (le code noyau de deux
   taches ne s'execute jamais en parallele), pas de preemption pendant une
   section qui detient `PreemptCount`. La latence d'une tache en mode noyau est
   bornee par la tranche (environ 70 ms), pas par un point de preemption fin.
@@ -710,6 +711,146 @@ chargeur sur disque), `RUNRO.SH` (cramfs via `mkfs.cramfs` de l'hote, minix
 `RUNROOT.SH` (racine ext2, vfat, iso9660, minix, cramfs, romfs), `RUNPANIC.SH`,
 `effects` (ASLR, overcommit, sysrq) dans RUNK.
 
+### Partie 39 : SMP reel sous le verrou noyau unique (lot 1 de D6)
+
+**Ce qui est fait et prouve (QEMU `-smp 1/2/4`)** :
+
+* **LAPIC + IOAPIC** (`ApicInit`, apres la MADT) : quand la MADT annonce un
+  IOAPIC, les 8259 sont coupes ; la minuterie 100 Hz est celle du LAPIC
+  (vecteur 32, etalonnee sur 10 ms de la voie 2 du PIT) ; les IRQ ISA/PCI sont
+  routees par l'IOAPIC vers les memes vecteurs `32 + IRQ` (les pilotes ne
+  changent pas), en tenant compte des surcharges de la MADT (IRQ0 -> GSI 2,
+  IRQ 5/9/10/11 sensibles au niveau) ; l'accuse de reception est l'EOI du
+  LAPIC ; `IrqEnable/IrqDisable` agissent sur le masque de l'entree IOAPIC (sous
+  `IoapLock`). Repli sur les 8259 sans IOAPIC, si l'etalonnage echoue ou avec
+  `noapic`. Les IRQ de peripheriques vont toutes au BSP.
+* **Processeurs secondaires** : INIT + SIPI (partie 38), puis chaque AP monte
+  sa GDT et son TSS (`CpuGdt/CpuTss`, car les descripteurs TLS sont par CPU),
+  active son LAPIC, sa minuterie et ses registres FPU/SSE, et entre dans la
+  boucle d'inactivite (`IdleLoopSmp`, HLT). Une tache d'inactivite par CPU
+  (`ApIdleTask`, pile du noyau propre).
+* **Verrou noyau unique** (`BklOwner`, tache qui le detient) : le code du noyau
+  (appels systeme, exceptions, traitements differes des IRQ) ne s'execute que
+  sous ce verrou ; le mode utilisateur s'execute en parallele sur tous les CPU.
+  Une tache prend le verrou a chaque entree depuis le mode utilisateur
+  (`BklAcquireSmp` : attente active `LOCK CMPXCHG`, qui sert les demandes de
+  vidage de TLB pendant l'attente) et le rend au retour (`ReturnToUserSmp`).
+  `ScheduleSmp` (verrou detenu) choisit parmi les taches ordonnables qui ne
+  tournent sur aucun autre CPU (`OnCpu`) et dont l'affinite (`Affinity`)
+  autorise ce CPU, et **transmet le verrou** a la tache choisie. Les IRQ ne font
+  que la partie haute sans verrou (accuse, comptage, comptabilite de la tranche
+  de la tache du CPU : `DoIrqSmp`) ; le traitement differe (`RunBH`) est fait
+  par celui qui rend le verrou. Les fils crees en SMP demarrent par
+  `SmpChildEntry` (le verrou leur est transmis). **Le noyau n'est pas
+  preemptible en mode SMP** (`kpreempt` P = 0 dans `/proc/stat`) : la preemption
+  du noyau (partie 27) reste utilisee avec un seul CPU ; une tache en mode noyau
+  garde le verrou jusqu'a ce qu'elle dorme ou revienne au mode utilisateur.
+* **IPI** (vecteurs F0h reordonnancement, F1h vidage de TLB, F2h arret, FFh
+  parasite) : `KickIdleCpu` reveille un CPU inactif quand une tache devient
+  ordonnable ; `TlbShoot(Mm)` (munmap, mprotect, copie sur ecriture, fork,
+  ecriture forcee de ptrace) vide la TLB des autres CPU qui executent l'espace
+  `Mm` et attend leur accuse ; `SwapReclaim` ignore les espaces d'adressage
+  charges sur un autre CPU ; une panique arrete les autres CPU.
+* **Affinite et observation** : `sched_setaffinity` / `sched_getaffinity` /
+  `getcpu` reels (`EINVAL` pour un masque vide ou hors CPU en ligne, `EPERM`
+  pour un tiers non privilegie), `/proc/cpuinfo` (un bloc par CPU),
+  `/proc/stat` (`cpu0..cpuN` : user/system/idle par CPU), `/proc/interrupts`
+  (une colonne par CPU, `LOC`, `RES`, `TLB`), `/sys/devices/system/cpu/{online,
+  offline,cpuN/online}`, ITIMER_VIRTUAL/PROF pour la tache de chaque CPU.
+* Options : `nosmp` (detection sans demarrage, un seul CPU), `noapic` (8259 ;
+  un seul CPU executant des taches).
+
+**Pieges rencontres (utiles aux suites)** : (1) un IOAPIC **perd les fronts**
+qui arrivent sur une ligne sensible au front et masquee (contrairement a un
+8259 qui les memorise) : la partie haute d'une IRQ ne masque donc que les
+lignes sensibles au niveau (`IrqDefer`, `ApicLevel`) ; avant ce correctif la
+souris PS/2 (3 octets, une IRQ chacun) perdait ses 2e et 3e octets en SMP ;
+(2) le compteur de tranche ne doit jamais devenir negatif (`Counter Shr 1`
+d'un negatif donne 2^31-1 : tache jamais elue) ; (3) sous QEMU/TCG,
+l'instruction `PAUSE` d'une boucle d'attente retarde le processeur qui fait
+des E/S : les attentes actives utilisent `NOP` ; (4) `SwapReclaim` reprend aussi
+les pages d'un espace charge sur un autre CPU (page retiree des tables, TLB
+videe par IPI, puis ecriture sur le swap).
+
+**Ordre des verrous** : `BklOwner` > `IoapLock` (registres de l'IOAPIC, IF
+masque). Les structures `PendIrq` / `TickPend` sont modifiees par des
+instructions `LOCK` / `XCHG`. Aucun autre verrou : le verrou fin par
+sous-systeme est la suite (non fait).
+
+**Limites** : verrou unique donc pas d'acceleration du code noyau (seul le mode
+utilisateur est parallele) ; pas de migration equilibree (choix glouton au
+premier CPU qui ordonnance) ; IRQ de peripheriques sur le BSP uniquement ; pas
+de preemption du noyau en SMP ; bits accedes/modifie des PTE modifies sans
+verrou par le materiel pendant que le noyau les reecrit (perte possible de ces
+bits pour un espace partage entre CPU) ; `mprotect(PROT_NONE)` laisse la page
+lisible (limite anterieure, identique en monoprocesseur) ; pas de x2APIC, pas
+de hotplug.
+
+**AF_NETLINK (NETLINK_ROUTE)** (`NlSend`, `SOCK_RAW` ou `SOCK_DGRAM`,
+protocole 0 ; les autres protocoles repondent `EPROTONOSUPPORT`) : `bind` /
+`getsockname` (`sockaddr_nl`), `RTM_GETLINK` (liste complete ou un lien par
+numero ou par `IFLA_IFNAME` : nom, type, drapeaux, MTU, adresse MAC, file,
+etat), `RTM_GETADDR` et `RTM_GETROUTE` (listes, fin `NLMSG_DONE`),
+`RTM_NEWADDR` / `RTM_DELADDR` (adresse et masque de eth0), `RTM_NEWROUTE` /
+`RTM_DELROUTE` (route par defaut), `RTM_NEWLINK` (`IFF_UP` de eth0 ; un MTU
+different de 1500 : `EINVAL`), acquittements `NLM_F_ACK`, erreurs
+`NLMSG_ERROR` (`ENODEV`, `EOPNOTSUPP`, `EEXIST`, `EPERM` hors root, ...). Les
+reponses sont des datagrammes de 3,5 Ko au plus dans la file de la socket
+(poll/select/recvmsg habituels). Limites : pas de groupes multicast
+(`RTMGRP_*` : aucune notification), un seul lien Ethernet, pas de routes autres
+que la route du reseau de eth0 et la route par defaut, pas de NETLINK_*
+autres que ROUTE. **AF_PACKET** (`SOCK_RAW` : trame complete, `SOCK_DGRAM` :
+sans l'en-tete Ethernet, protocole `ETH_P_ALL` ou un type precis, root
+seulement) : `bind` (`sockaddr_ll`, interface 0/1/2), `getsockname`,
+emission d'une trame brute ou d'une charge avec en-tete ajoute (adresse MAC de
+destination dans `sockaddr_ll`), reception de toutes les trames de eth0 avec
+`sockaddr_ll` (type de paquet : hote, diffusion, multicast, autre, emis) et
+copie des trames emises (`PACKET_OUTGOING`, pas pour l'emetteur lui-meme),
+comme `tcpdump` ou un client DHCP brut. Limites : seulement eth0 (RTL8139) ;
+pas de `PACKET_MMAP`, de filtres BPF (`SO_ATTACH_FILTER`), de mode
+promiscuite ni de `/proc/net/packet`.
+
+**virtio-net** (`VnInit`, carte PCI 1AF4:1000 de QEMU, interface "legacy" a
+ports d'E/S ; `-nic user,model=virtio-net-pci`) : files 0 (reception, 64
+tampons de 2 Ko recycles par la partie differee de l'IRQ) et 1 (emission, 8
+tampons), adresse MAC lue dans la configuration, entete virtio de 10 octets nul
+(pas de somme de controle ni de segmentation deleguees, pas de
+`VIRTIO_NET_F_MRG_RXBUF`, pas de file de controle). Cherchee apres le RTL8139 ;
+toute la pile reseau, `AF_PACKET` et `AF_NETLINK` s'appliquent sans changement.
+Limites : un seul peripherique reseau a la fois ; pas de virtio moderne
+(1AF4:1041), pas de MSI-X, pas de multifile. `RUNNET.SH` avec
+`NICMODEL=virtio-net-pci` rejoue les essais reseau reels.
+
+**virtio-blk** (`VblkProbe`, `VblkRW` ; 1AF4:1001, `-drive if=virtio`) :
+disque d'index 4 de la couche IDE (arrays `DiskPresent..PartSize` etendus),
+majeur 253, `/dev/vda` et `/dev/vda1..15` (table de partitions MBR lue comme
+celle des disques IDE, logiques comprises), `/proc/partitions`, `/proc/diskstats`,
+`/sys/block/vda`, `root=/dev/vda1`. Une requete a la fois (entete, tampon de
+128 secteurs au plus, octet d'etat), attente par scrutation de l'anneau
+"utilise" sous le verrou noyau (interruptions du peripherique supprimees par le
+drapeau `NO_INTERRUPT` de l'anneau). Option `novirtio` : ne pas le chercher.
+Limites : legacy seulement (pas de virtio 1.0), un seul disque virtio, pas
+de `BLK_F_FLUSH` / multifile / `DISCARD`, capacite limitee a 2^31-1 secteurs,
+le chargeur `BOOT/` n'amorce pas depuis virtio (BIOS) ; `RUNVBLK.SH`.
+
+**Tueur OOM** (`OomKill`, `AllocUserPage`) : quand une page utilisateur ne
+peut plus etre allouee (apres reprise de pages / swap), la tache de plus grand
+nombre de pages residentes (processus entier ; ni init ni thread du noyau ni
+tache deja condamnee) recoit `SIGKILL` (tout son groupe de threads), le journal
+indique "Out of memory: Killed process N (nom) rss K kB", `/proc/vmstat` compte
+`oom_kill`, et la tache fautive attend (5 fois 3 ticks au plus) que les pages
+soient rendues avant d'echouer. `vm.panic_on_oom` non nul : panique du noyau.
+Limites : le score est le nombre de pages residentes seulement (pas de
+`oom_score_adj`, d'enfants, de swap, de cgroup) ; seules les fautes de page
+(zero, copie sur ecriture, relecture du swap) passent par le tueur, pas les
+allocations du noyau.
+
+Tests : `nltest` (17 verifications, 25 avec une carte reseau ; RUNK), `oomtest` (8 ; RUNK), `idetest` (5 verifications + 3 pour vda1 ; RUNVBLK.SH : virtio seul, avec un disque IDE, racine `/dev/vda1`, `e2fsck`, contenu relu par `debugfs`), le bloc `pkt.*` de `nettest` (15, avec RUNNET.SH), `smptest` (14 verifications, 20 avec plusieurs CPU : sysfs/proc, affinite, getcpu, chaque CPU
+execute une tache epinglee, parallelisme mesure par les ticks `cpuN`, vidage de
+TLB prouve par SIGSEGV d'un thread d'un autre CPU apres `mprotect` ;
+temoin negatif : sans l'IPI le test echoue), toute la suite RUNK sous
+`-smp 2` et `-smp 4`, les autres suites sous `-smp 2` (voir STATUS.md).
+
 ### Lots A2c et A2d (ptrace, seccomp, xattr/ACL, clone3/espaces de noms)
 
 Limites connues : `PTRACE_SINGLEBLOCK` et `SET_THREAD_AREA` refusent (`EIO`) ;
@@ -902,3 +1043,86 @@ Demandes au noyau (D4) : `/proc/net/tcp`, `/proc/net/udp`, `/proc/net/unix`
 et `/dev/loop-control` avec LOOP_* (losetup), `/sys/bus/pci/devices`,
 `/sys/bus/usb/devices` (lspci, lsusb), AF_NETLINK (ip natif), AF_PACKET
 (DHCP), `/proc/partitions`. Voir BUGS_NOYAU.md.
+
+### Lot E4 : mkfs ext3/ext4, montages, bash, xz, terminal, espaces de noms
+
+`USR/` compte 82 programmes. Noyau d'essai : `D/backup-38.PAS`.
+
+**Compilateur (`TOOLS/LPC32.PAS`)** : les temporaires `String` de l'operateur
+`+`, de `Copy` et de `Concat` sont rendus dans l'anneau `STRRING` (256
+tampons) au lieu d'un tampon unique `STRBUF1` : `F(A+B, x, C+D)`,
+`G(A+B, B+C, C+A)`, `G(Copy(..), Copy(..), ..)`, `(A+B) < (B+C)` et les
+appels imbriques sont corrects (cause du `lsof` a une lettre et du piege
+signale par D5 ; le noyau n'est plus concerne). `Delete(S, Pos, Len)` borne
+`Pos` et `Len` par la longueur (avant : lecture au-dela de la chaine, d'ou
+des chaines corrompues dans `read` du shell). `{$I fichier}` absent : erreur
+nette au lieu d'une boucle ou d'un plantage. Tests : `TESTS/C/UX7`, `UX8`.
+
+**mkfs.ext3 / mkfs.ext4 / mke2fs (`USR/INSTALL.PAS`)** : `-t ext2|ext3|ext4`
+(ou le nom du programme), `-O fonctions` (`extents flex_bg 64bit
+metadata_csum uninit_bg dir_index has_journal huge_file dir_nlink
+extra_isize large_file ext_attr none`, `^nom` pour retirer), `-J size=Mo`
+(minimum 1024 blocs), `-j`, `-L nom`, `-m pct`, `-b -I -N` (arguments
+colles acceptes : `-b4096`). Journal jbd2 interne (inode 8, sauvegarde dans
+le superbloc), extents (arbre de profondeur 0 ou 1), groupes flex (taille
+adaptee a la table d'inodes), 64bit (descripteurs de 64 octets),
+metadata_csum (crc32c : superbloc, descripteurs, bitmaps, inodes, repertoires
+avec enregistrement final, blocs d'extents), uninit_bg (crc16, indicateurs
+INODE_UNINIT/BLOCK_UNINIT/ITABLE_ZEROED), inodes de 256 octets
+(`extra_isize`, `crtime`). L'installateur accepte les memes options
+(`install -t ext4 ...`). Verifie par `e2fsck -fn`, `dumpe2fs`, `debugfs
+rdump` de l'hote sur 13 combinaisons (RUNU `utils`), et sous QEMU : disque
+installe en ext4 (extents, flex_bg, journal) puis en ext4 4 Ko
+`metadata_csum,64bit`, amorce par le chargeur, ecriture, `e2fsck -fn`
+propre ensuite. Non fait : resize_inode, repertoires htree, bigalloc,
+quotas, `tune2fs`, `dumpe2fs`, `resize2fs`.
+
+**Montages** : `MOUNT.PAS` (`-t -o -a -L -U -r -w -v -f`, `--bind --rbind
+--move`, options ro rw remount noatime relatime nosuid nodev noexec sync
+dirsync loop loop=/dev/loopN offset= sizelimit= defaults noauto nofail x-*,
+le reste va au noyau comme `data=`, fstab complet : `mount DIR`, `mount -a`,
+UUID=/LABEL=, type lu dans le superbloc ou essai des types, fichier ordinaire
+monte par un peripherique de boucle autoclear), `UMOUNT.PAS` (`-a -l -f -r
+-d`, libere la boucle), `SWAPON.PAS` (`-a` lit fstab, `-p`, UUID/LABEL),
+`FSINFO.PAS` (`df -hHkmPTia -t -x`, `blkid -s -o -t -L -U`, `lsblk -flnab
+-o`, `findmnt -nlfsT -t -o -S -M`) et `FSPROBE.INC` (ext2/3/4, FAT,
+iso9660, minix, cramfs, romfs, swap). Sous QEMU : mkfs.ext4 sur un fichier,
+`mount -o loop`, ecriture, `df`, `findmnt`, `blkid`, `lsblk`, `--bind`,
+`remount,ro`, `umount`, libere la boucle, `mount -a` depuis fstab.
+
+**bash (`/bin/bash` = `USR/SH.PAS` appele `bash`)** : le meme interpreteur,
+en mode bash quand `argv[0]` est `bash` (`sh` reste POSIX : 5/5 contre dash).
+Tableaux indexes et associatifs (`a=(..)`, `a[i]=`, `+=`, `${a[@]}`,
+`${#a[@]}`, `${!a[@]}`, tranches, indices negatifs, `unset a[i]`, `declare
+-a -A -p`, `read -a`, `mapfile`), `[[ ]]` (motifs, `=~` avec
+`BASH_REMATCH`, `-v`, `&& || ! ( )`), `(( ))`, `for ((;;))`, arithmetique
+complete (affectations, `++ --`, `?:`, `,`, `**`, bases, court-circuit),
+`let`, accolades `{a,b}` `{1..10..2}` `{a..e}` `{01..10}`, `${v^^ ,, ^ ,
+@Q @U @L / // /# /%  :off:len  !ref  !prefixe*}`, `$'..'`, `<<<`, `&>`,
+`<(cmd)` `>(cmd)`, `select`, `case ;& ;;&`, extglob `@() ?() *() +() !()`,
+`shopt` (extglob nullglob dotglob failglob nocasematch), `set -o pipefail`,
+`PIPESTATUS`, `trap ERR/DEBUG/RETURN/EXIT`, `declare/typeset/local/readonly`
+avec `-i -l -u -r -x -n -a -A`, namerefs, `printf` interne (`-v`, `%q %b`),
+`pushd popd dirs`, `FUNCNAME`, `BASH_VERSION`, `BASH_VERSINFO`, `LINENO`,
+`SECONDS`, `HOSTNAME`... Essais : `TESTS/U/bashtest.sh` (6 scripts compares
+a GNU bash 5.2). Limites : mots de 255 caracteres, 1500 variables, `export
+-f` et `declare -f` (corps) absents, completion programmable (`complete`,
+`compgen`) en coquilles vides, pas de `coproc`, `wait -n`, `${v@a}`.
+
+**Autres programmes** : `XZ.PAS` (xz unxz xzcat lzma unlzma lzcat : lecture
+.xz LZMA2 avec CRC32/CRC64 et flux concatenes, .lzma ancien ; ecriture .xz
+(LZMA gourmand, CRC64) relue par `xz -d` de l'hote ; `-k -c -t -l -f`),
+`NSTOOLS.PAS` (chroot unshare nsenter pivot_root switch_root setpriv),
+`TPUT.PAS` (tput clear reset infocmp tset : terminaux linux vt100 vt220 xterm
+xterm-256color ansi screen, sequences identiques a ncurses pour les
+capacites courantes ; base integree, pas de fichiers `/usr/share/terminfo`),
+`SUDO.PAS` (sudo visudo : `/etc/sudoers` utilisateur/%groupe/ALL, runas,
+NOPASSWD, `!authenticate`, `-u -n -l -U -i -s`, mot de passe verifie dans
+`/etc/shadow`, `sudo` installe setuid root ; `visudo -c -f` controle la
+syntaxe ; aliases non geres).
+
+**Non fait** : loadkeys/dumpkeys, fichiers terminfo et zoneinfo, `date -d`
+avec fuseaux, ed complet/nano, logrotate, rdate, strace,
+tcpdump, iptables, cron.daily, job control verifie sur pty, `bc`/`dc`
+complets, nouveaux appels de `L32API.PAS`.
+

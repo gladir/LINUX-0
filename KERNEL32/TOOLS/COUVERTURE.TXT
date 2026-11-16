@@ -9,7 +9,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
 
   nr  nom                    etat     test
    0  restart_syscall        stub     
-   1  exit                   reel     ku.h
+   1  exit                   reel     ku.h,smptest.c
    2  fork                   reel     ku.h
    3  read                   reel     ku.h
    4  write                  reel     ku.h,seccomptest.c
@@ -31,7 +31,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
   20  getpid                 reel     ku.h,ptracetest.c,seccomptest.c
   21  mount                  reel     ku.h
   22  umount                 reel     ku.h
-  23  setuid                 reel     dirtest.c,effects.c,ku.h,misctest.c,modtest.c,nstest.c,seccomptest.c,syscalltest.c,xattrtest.c
+  23  setuid                 reel     dirtest.c,effects.c,ku.h,misctest.c,modtest.c,nettest.c,nltest.c,nstest.c,seccomptest.c,syscalltest.c,xattrtest.c
   24  getuid                 reel     ku.h,seccomptest.c
   25  stime                  reel     
   26  ptrace                 reel     ptracetest.c,seccomptest.c
@@ -86,7 +86,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
   75  setrlimit              reel     bigtest.c,limtest.c,syscalltest.c
   76  getrlimit              reel     misctest.c
   77  getrusage              reel     
-  78  gettimeofday           reel     devtest.c,ipctest.c,ku.h,mqfutextest.c,preempttest.c,pstress.c,schedtest.c,sigrttest.c
+  78  gettimeofday           reel     devtest.c,ipctest.c,ku.h,mqfutextest.c,preempttest.c,pstress.c,schedtest.c,sigrttest.c,smptest.c
   79  settimeofday           reel     
   80  getgroups              reel     
   81  setgroups              reel     
@@ -322,7 +322,7 @@ A. APPELS SYSTEME (/usr/include/asm/unistd_32.h)
  315  tee                    enosys   
  316  vmsplice               reel     
  317  move_pages             enosys   
- 318  getcpu                 reel     syscalltest.c
+ 318  getcpu                 reel     smptest.c,syscalltest.c
  319  epoll_pwait            reel     
  320  utimensat              reel     
  321  signalfd               reel     sigrttest.c
@@ -524,15 +524,16 @@ B3. PILOTES ET PERIPHERIQUES
    console VGA texte + VT             present  
    framebuffer Bochs                  present  
    RTL8139                            present  
-   virtio-net/blk/rng/console         absent   
+   virtio-net (QEMU, legacy) + virtio-blk (/dev/vda) present  partie 39 ; virtio-scsi/rng/console : non faits
    AHCI/SATA                          absent   
    NVMe                               absent   
    USB UHCI/EHCI                      absent   
    E1000 / NE2000 / PCnet             absent   
    son SB16/AC97                      absent   
    evdev /dev/input/event*            absent   
-   SMP reel (ordonnancement multi-CPU, IPI) absent   AP demarres mais a l arret
-   SMP : detection ACPI MADT / MP + demarrage AP a l arret present  partie 38
+   SMP reel sous verrou noyau unique (AP executent des taches, IPI, TLB) present  partie 39 ; verrous fins : non fait
+   LAPIC (minuterie) + IOAPIC         present  partie 39 ; repli 8259
+   SMP : detection ACPI MADT / MP + demarrage des AP present  parties 38-39
    ACPI (MADT seulement ; pas AML/arret) present  
    HPET                               absent   
    PCI (config + /sys/bus/pci ; pas de /proc/bus/pci) present  
@@ -542,7 +543,8 @@ B3. PILOTES ET PERIPHERIQUES
    /dev/tty* /dev/ptmx pts            present  
    modules du noyau (.ko ET_REL, insmod/rmmod) present  partie 36
    swap sur fichier ordinaire         present  partie 36
-   -> 19 / 30
+   tueur OOM (victime = plus gros RSS, SIGKILL) present  partie 39 ; pas d oom_score_adj
+   -> 23 / 32
 
 B4. /PROC ET /SYS
    /proc/meminfo uptime version cmdline present  
@@ -572,13 +574,13 @@ B5. FAMILLES DE SOCKETS
    AF_INET TCP/UDP                    present  
    AF_INET raw / ICMP                 present  
    AF_INET6                           absent   
-   AF_PACKET                          absent   
-   AF_NETLINK                         absent   
+   AF_PACKET RAW/DGRAM (tcpdump, DHCP brut) present  partie 39 ; pas de BPF ni PACKET_MMAP
+   AF_NETLINK (NETLINK_ROUTE : GET/NEW/DEL LINK/ADDR/ROUTE) present  partie 39 ; pas de groupes multicast
    SCM_RIGHTS / SCM_CREDENTIALS       present  
    multicast UDP                      absent   
    netfilter                          absent   
    TCP SACK / window scale            absent   
-   -> 4 / 10
+   -> 6 / 10
 
 B6. DRAPEAUX mmap / clone / open
    MAP_SHARED/PRIVATE/FIXED/ANONYMOUS present  
@@ -597,4 +599,4 @@ B6. DRAPEAUX mmap / clone / open
 
 C. SYNTHESE
    appels reels : 357 / 451 (79.2 %) ; stubs 2 ; ENOSYS explicites 81 ; absents 11
-   familles B1-B6 presentes : 81 / 115 (70.4 %)
+   familles B1-B6 presentes : 87 / 117 (74.4 %)

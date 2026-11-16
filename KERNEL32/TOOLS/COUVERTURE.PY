@@ -126,15 +126,16 @@ S.append(section('B3. PILOTES ET PERIPHERIQUES', [
     ('port serie 16550 (COM1)', r'Procedure SerialIrq', ''), ('4 ports serie', r'\$2F8|\$3E8', ''),
     ('port parallele', r'\$378', ''), ('console VGA texte + VT', r'NVc', ''),
     ('framebuffer Bochs', r'Procedure FbInit', ''), ('RTL8139', r'Procedure NicInit', ''),
-    ('virtio-net/blk/rng/console', r'virtio', ''), ('AHCI/SATA', r'AHCI', ''), ('NVMe', r'NVMe', ''),
+    ('virtio-net (QEMU, legacy) + virtio-blk (/dev/vda)', r'Function VnInit', 'partie 39 ; virtio-scsi/rng/console : non faits'), ('AHCI/SATA', r'AHCI', ''), ('NVMe', r'NVMe', ''),
     ('USB UHCI/EHCI', r'UHCI|EHCI', ''), ('E1000 / NE2000 / PCnet', r'E1000|NE2000|PCnet', ''),
     ('son SB16/AC97', r'SB16|AC97', ''), ('evdev /dev/input/event*', r'event0', ''),
-    ('SMP reel (ordonnancement multi-CPU, IPI)', r'IpiReschedule', 'AP demarres mais a l arret'), ('SMP : detection ACPI MADT / MP + demarrage AP a l arret', r'Procedure SmpStartAp', 'partie 38'), ('ACPI (MADT seulement ; pas AML/arret)', r'Function FindRsdp', ''),
+    ('SMP reel sous verrou noyau unique (AP executent des taches, IPI, TLB)', r'Procedure ScheduleSmp', 'partie 39 ; verrous fins : non fait'), ('LAPIC (minuterie) + IOAPIC', r'Function ApicInit', 'partie 39 ; repli 8259'), ('SMP : detection ACPI MADT / MP + demarrage des AP', r'Procedure SmpStartAp', 'parties 38-39'), ('ACPI (MADT seulement ; pas AML/arret)', r'Function FindRsdp', ''),
     ('HPET', r'HPET', ''), ('PCI (config + /sys/bus/pci ; pas de /proc/bus/pci)', r'Procedure PciPopulate', ''),
     ('/dev/null zero full random urandom', r"MkDev\(1, 9\)", ''), ('/dev/mem kmem port kmsg', r"/dev/kmsg", ''),
     ('/dev/rtc', r'/dev/rtc', ''), ('/dev/tty* /dev/ptmx pts', r'/dev/ptmx', ''),
     ('modules du noyau (.ko ET_REL, insmod/rmmod)', r'Function ModLoadImage', 'partie 36'),
     ('swap sur fichier ordinaire', r'Function SwapBmap', 'partie 36'),
+    ('tueur OOM (victime = plus gros RSS, SIGKILL)', r'Function OomKill', 'partie 39 ; pas d oom_score_adj'),
 ]))
 S.append(section('B4. /PROC ET /SYS', [
     ('/proc/meminfo uptime version cmdline', r"'meminfo'", ''), ('/proc/cpuinfo stat loadavg', r"'cpuinfo'", ''),
@@ -150,7 +151,7 @@ S.append(section('B4. /PROC ET /SYS', [
 S.append(section('B5. FAMILLES DE SOCKETS', [
     ('AF_UNIX stream/dgram/socketpair', r'AF_UNIX', ''), ('AF_INET TCP/UDP', r'AF_INET', ''),
     ('AF_INET raw / ICMP', r'IPPROTO_ICMP', ''), ('AF_INET6', r'AF_INET6', ''),
-    ('AF_PACKET', r'AF_PACKET', ''), ('AF_NETLINK', r'AF_NETLINK', ''),
+    ('AF_PACKET RAW/DGRAM (tcpdump, DHCP brut)', r'Function PktSend', 'partie 39 ; pas de BPF ni PACKET_MMAP'), ('AF_NETLINK (NETLINK_ROUTE : GET/NEW/DEL LINK/ADDR/ROUTE)', r'Function NlSend', 'partie 39 ; pas de groupes multicast'),
     ('SCM_RIGHTS / SCM_CREDENTIALS', r'SCM_RIGHTS', ''), ('multicast UDP', r'IP_ADD_MEMBERSHIP', ''),
     ('netfilter', r'iptables|NF_', ''), ('TCP SACK / window scale', r'SACK', ''),
 ]))

@@ -17,6 +17,7 @@ int main(void){
     while((n=read(fd,b,3))==3){got++;if(!(b[0]&8))got=-100;if(b[0]&1)btn=1;
       sdx+=(int)b[1]-((b[0]&0x10)?256:0);sdy+=(int)b[2]-((b[0]&0x20)?256:0);}
   }
+  if(got<1){char ib[1024];int ifd=open("/proc/interrupts",O_RDONLY,0),r2;if(ifd>=0){r2=read(ifd,ib,sizeof ib-1);if(r2>0)write(1,ib,r2);close(ifd);}}
   ktest("mouse.packets",got>=1);
   ktest("mouse.button",btn==1);
   ktest("mouse.motion",sdx!=0||sdy!=0);

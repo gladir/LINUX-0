@@ -8,9 +8,9 @@ static unsigned char pat(unsigned i){return (unsigned char)(i*13+(i>>7)+1);}
 static unsigned char wb[4096];
 int main(void){
   if(ku_cmdline_has("bigtest"))return 0;
-  static const char*devs[4]={"/dev/hda1","/dev/hdb1","/dev/hdc1","/dev/hdd1"};
+  static const char*devs[5]={"/dev/hda1","/dev/hdb1","/dev/hdc1","/dev/hdd1","/dev/vda1"};
   int d,n=0;
-  for(d=0;d<4;d++){
+  for(d=0;d<5;d++){
     int fd=open(devs[d],O_RDONLY,0),r,i,ok;
     char b[64],nm[32];
     if(fd<0)continue;
@@ -38,9 +38,16 @@ int main(void){
       if(fd>=0)close(fd);}
      strcpy_(t+k,".write");ktest(t,ok);
      sync();
+     if(d==4){char pb[2048];int pf=open("/proc/partitions",O_RDONLY,0),pn=0,q,f1=0,f2=0;
+       if(pf>=0){pn=read(pf,pb,sizeof pb-1);close(pf);}
+       for(q=0;q+4<pn;q++){if(memcmp_(pb+q," vda",4)==0&&pb[q+4]=='\n')f1=1;if(memcmp_(pb+q," vda1",5)==0)f2=1;}
+       ktest("ide.vda_proc_partitions",f1&&f2);
+       pf=open("/sys/block/vda/size",O_RDONLY,0);pn=pf>=0?read(pf,pb,20):0;if(pf>=0)close(pf);
+       ktest("ide.vda_sysfs_size",pn>1&&pb[0]>='0'&&pb[0]<='9');
+       pf=open("/dev/vda",O_RDONLY,0);ktest("ide.vda_whole_node",pf>=0);if(pf>=0)close(pf);}
      strcpy_(t+k,".umount");ktest(t,umount("/mnt")==0);}
   }
-  if(n==0){puts("  (aucun ext2 sur hda1..hdd1 : tests IDE ignores)\n");return 0;}
+  if(n==0){puts("  (aucun ext2 sur hda1..hdd1, vda1 : tests IDE ignores)\n");return 0;}
   puts("ide DONE ");putd(n);puts("\n");
   return 0;
 }

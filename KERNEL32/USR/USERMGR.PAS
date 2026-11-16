@@ -5,7 +5,7 @@
   @description: gestion des comptes (un seul programme, nom lu dans argv[0]) :
       useradd userdel usermod groupadd groupdel groupmod adduser addgroup
       deluser delgroup chpasswd : editent /etc/passwd, /etc/shadow et
-      /etc/group (reservé a root).
+      /etc/group (reserve a root).
 }
 
 Program USERMGR;

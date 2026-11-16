@@ -12,6 +12,9 @@
 #     mod      modules du noyau : insmod/lsmod/rmmod de /lib/modules/hello.ko
 #              (SKIP si le noyau n'a pas encore le chargeur init_module)
 #     sh       shell USR/SH.PAS contre dash (TESTS/U/shtest.sh)
+#     bash     mode bash du meme programme (argv[0] = bash) contre GNU bash :
+#              tableaux, [[ ]], (( )), accolades, ${..}, printf, traps...
+#              (TESTS/U/bashtest.sh)
 #     host     compile les commandes du depot (LPC -3X) et lance cmdbench.py
 #              sur l'hote (ELF32 statique) : tableau marche/reserves/echoue
 #     qemu     amorce IMAGE/LINUX32-HD.IMG sous QEMU, ouvre une session root et
@@ -34,7 +37,7 @@ W=${W:-/tmp/linux0-u-tests}
 QT=${QEMU_T:-600}
 export LPC W
 mkdir -p "$W/bin" "$W/src"
-STEPS=${*:-sh host utils qemu tools power net install mod}
+STEPS=${*:-sh bash host utils qemu tools power net install mod}
 FAIL=0
 build() {
   [ -n "$IMAGE" ] && return 0
@@ -46,6 +49,7 @@ for st in $STEPS; do
   echo "=== $st"
   case $st in
   sh) "$HERE/shtest.sh" || FAIL=1 ;;
+  bash) "$HERE/bashtest.sh" || FAIL=1 ;;
   host)
     cp "$K32"/../*.PAS "$W/src/"
     ls "$K32"/../*.PAS | xargs -n1 basename | sed 's/\.PAS$//' |
@@ -58,6 +62,10 @@ for st in $STEPS; do
       ( cd "$W/src" && $LPC -3X -q $n.PAS > /dev/null 2> "$W/bin/$n.err" &&
         mv $n "$W/bin/$n" ) || echo "ECHEC compilation USR/$n"
     done
+    # df : version de USR/FSINFO.PAS (statfs, GNU)
+    cp "$K32"/USR/FSINFO.PAS "$K32"/USR/FSPROBE.INC "$W/src/"
+    ( cd "$W/src" && $LPC -3X -q FSINFO.PAS >/dev/null 2>&1 &&
+      mv FSINFO "$W/bin/df" ) || echo "ECHEC compilation USR/FSINFO"
     CMDBIN=$W/bin python3 "$HERE/cmdbench.py" -o "$W/host.txt" | tail -1 ;;
   qemu)
     build
@@ -83,7 +91,7 @@ for st in $STEPS; do
     done ;;
   utils)
     mkdir -p "$W/ut"; cp "$K32"/USR/*.PAS "$K32"/USR/*.INC "$W/ut/"
-    for n in VI TEXTUTIL PATCH E2FSCK ZIPTOOL LESS MAN CRON INSTALL; do
+    for n in VI TEXTUTIL PATCH E2FSCK ZIPTOOL LESS MAN CRON INSTALL FSINFO; do
       ( cd "$W/ut" && $LPC -3X -q $n.PAS >/dev/null 2>"$W/ut/$n.err" ) ||
         { echo "ECHEC compilation $n"; FAIL=1; }
     done
@@ -106,6 +114,76 @@ for st in $STEPS; do
         e2fsck -fn m.img >/dev/null 2>&1 || bad=1
       done; [ $bad = 0 ] ) && echo "ok    install/mkfs.ext2 -b 1024..4096 -I 128/256 : e2fsck propre" ||
       { echo "ECHEC install -b/-I"; FAIL=1; }
+    # mkfs.ext3 / mkfs.ext4 : journal, extents, flex_bg, 64bit, metadata_csum,
+    # uninit_bg, blocs 1/2/4 Ko, inodes 128/256 : e2fsck -fn et debugfs de l'hote
+    ( mkdir -p "$W/mk4" && cd "$W/mk4" && cp "$W/ut/INSTALL" install &&
+      for n in mkfs.ext3 mkfs.ext4 mke2fs; do ln -sf install $n; done && bad=0 &&
+      for cfg in "ext3 -b1024" "ext3 -b4096 -J size=8" "ext4 -b1024" \
+        "ext4 -b2048 -O metadata_csum" "ext4 -b4096 -O metadata_csum,64bit" \
+        "ext4 -b1024 -O ^flex_bg,^uninit_bg" "ext4 -b4096 -I256 -O ^has_journal" \
+        "ext4 -b1024 -I128 -N 3000" "ext4 -b1024 -O 64bit -J size=8"
+      do set -- $cfg; t=$1; shift; truncate -s 64M m.img
+        ./mkfs.$t -q "$@" m.img >/dev/null 2>&1 || bad=1
+        e2fsck -fn m.img >/dev/null 2>&1 || { echo "  e2fsck : $cfg"; bad=1; }
+        dumpe2fs -h m.img 2>/dev/null | grep -q "Filesystem magic" || bad=1
+        debugfs -R 'stat <2>' m.img >/dev/null 2>&1 || bad=1
+      done; [ $bad = 0 ] ) && echo "ok    mkfs.ext3/ext4 (9 combinaisons) : e2fsck -fn propre" ||
+      { echo "ECHEC mkfs.ext3/ext4"; FAIL=1; }
+    # installateur sur ext3/ext4 : e2fsck propre et contenu identique (rdump)
+    ( mkdir -p "$W/in4/rt/usr/share/boot" "$W/in4/rt/bin" && cd "$W/in4" &&
+      cp "$K32"/BOOT/MBR.BIN "$K32"/BOOT/STAGE2.BIN rt/usr/share/boot/ &&
+      seq 1 30000 > rt/n.txt && head -c 2000000 /dev/urandom > rt/r.bin &&
+      cp /bin/sh rt/bin/ && mkdir -p rt/d1/d2 && echo x > rt/d1/d2/f &&
+      ln -sf ../n.txt rt/d1/lnk && cp "$W/ut/INSTALL" install && bad=0 &&
+      for t in "-t ext3" "-t ext4" "-t ext4 -O metadata_csum,64bit -b 4096" \
+               "-t ext4 -O ^flex_bg -b 2048"; do
+        truncate -s 100M p.img
+        ./install -y -q -d p.img -s 100 -r rt -l EN $t >/dev/null 2>&1 || bad=1
+        e2fsck -fn 'p.img?offset=1048576' >/dev/null 2>&1 || { echo "  e2fsck : $t"; bad=1; }
+        rm -rf out; mkdir out
+        debugfs -R 'rdump / out' 'p.img?offset=1048576' >/dev/null 2>&1
+        for f in n.txt r.bin bin/sh d1/d2/f; do cmp -s rt/$f out/$f || bad=1; done
+      done; [ $bad = 0 ] ) && echo "ok    install ext3/ext4 : e2fsck propre, contenu identique" ||
+      { echo "ECHEC install ext3/ext4"; FAIL=1; }
+    # blkid / lsblk / findmnt / df (USR/FSINFO.PAS) contre l'hote
+    ( cd "$W/ut" && ln -sf FSINFO blkid && ln -sf FSINFO df && ln -sf FSINFO findmnt &&
+      cp "$W/mk4/m.img" b.img && bad=0 &&
+      [ "$(./blkid -o value -s UUID b.img)" = "$(blkid -o value -s UUID b.img)" ] || bad=1
+      [ "$(./blkid -o value -s TYPE b.img)" = "$(blkid -o value -s TYPE b.img)" ] || bad=1
+      ./blkid b.img | grep -q 'TYPE="ext4"' || bad=1
+      [ "$(LANGUAGE=EN ./df -P / | tail -1 | awk '{print $2}')" = \
+        "$(df -P / | tail -1 | awk '{print $2}')" ] || bad=1
+      [ "$(./findmnt -n -o TARGET -T / )" = "$(findmnt -n -o TARGET -T /)" ] || bad=1
+      [ $bad = 0 ] ) && echo "ok    blkid/df/findmnt = util-linux/coreutils" ||
+      { echo "ECHEC blkid/df/findmnt"; FAIL=1; }
+    # xz / lzma : decompression des fichiers de l'hote, compression relue par xz
+    for n in XZ TPUT SUDO NSTOOLS; do
+      ( cd "$W/ut" && $LPC -3X -q $n.PAS >/dev/null 2>"$W/ut/$n.err" ) ||
+        { echo "ECHEC compilation $n"; FAIL=1; }
+    done
+    ( mkdir -p "$W/xzt" && cd "$W/xzt" && cp "$W/ut/XZ" xz && ln -sf xz xzcat &&
+      ln -sf xz unlzma && seq 1 40000 > a.txt && head -c 200000 /dev/urandom > b.bin &&
+      cat "$K32"/USR/*.PAS > c.txt && : > d.empty && echo hi > e.txt && bad=0 &&
+      for f in a.txt b.bin c.txt d.empty e.txt; do
+        /usr/bin/xz -c $f > $f.h.xz; ./xzcat $f.h.xz | cmp -s - $f || bad=1
+        ./xz -c $f > $f.m.xz; /usr/bin/xz -dc $f.m.xz | cmp -s - $f || bad=1
+        /usr/bin/xz -tq $f.m.xz || bad=1
+      done
+      /usr/bin/xz --format=lzma -c c.txt > c.lzma; ./unlzma -c c.lzma | cmp -s - c.txt ||
+        bad=1
+      [ $bad = 0 ] ) && echo "ok    xz/lzma = xz de l'hote (5 fichiers, 2 sens)" ||
+      { echo "ECHEC xz"; FAIL=1; }
+    ( cd "$W/ut" && ln -sf TPUT tput && ln -sf SUDO visudo && ln -sf NSTOOLS unshare &&
+      bad=0 &&
+      for t in linux xterm vt100; do for c in "cup 5 10" bold sgr0 el home rev smul; do
+        [ "$(TERM=$t ./tput $c | od -c)" = "$(TERM=$t tput $c | od -c)" ] || bad=1
+      done; done
+      printf 'root ALL=(ALL) ALL\nbob ALL=(ALL) NOPASSWD: /bin/ls\n' > sd.t
+      ./visudo -c -f sd.t >/dev/null || bad=1
+      echo 'junk' > sd.b; ./visudo -c -f sd.b >/dev/null 2>&1 && bad=1
+      ./unshare -r id -u | grep -q '^0$' || bad=1
+      [ $bad = 0 ] ) && echo "ok    tput = ncurses, visudo, unshare" ||
+      { echo "ECHEC tput/visudo/unshare"; FAIL=1; }
     ( mkdir -p "$W/zt/src" && cd "$W/zt" && cp "$W/ut/ZIPTOOL" zip &&
       ln -sf zip unzip && seq 1 5000 > src/n.txt && head -c 100000 /dev/urandom > src/r.bin &&
       ./zip -qr a.zip src && /usr/bin/unzip -tq a.zip >/dev/null &&

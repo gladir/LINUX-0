@@ -28,7 +28,7 @@ Program Sh;
 {$I-}
 
 Const
-  MAXVARS = 400;
+  MAXVARS = 1500;
   MAXFUNCS = 100;
   MAXALIAS = 64;
   MAXJOBS = 32;
@@ -36,17 +36,19 @@ Const
   MAXPOS = 200;
   MAXARGS = 2000;
   MAXSUBS = 4000;
-  MAXTRAP = 32;
+  MAXTRAP = 40;
   MAXREDIR = 16;
   { jetons }
   tEOF = 0; tNL = 1; tWord = 2; tAndIf = 3; tOrIf = 4; tSemi = 5;
   tDSemi = 6; tAmp = 7; tPipe = 8; tLParen = 9; tRParen = 10; tLess = 11;
   tGreat = 12; tDGreat = 13; tDLess = 14; tDLessDash = 15; tLessAnd = 16;
   tGreatAnd = 17; tLessGreat = 18; tClobber = 19; tIONum = 20;
+  tHereStr = 21; tAndGreat = 22; tAndDGreat = 23; tSemiAmp = 24;
+  tDSemiAmp = 25;
   { noeuds }
   nSimple = 1; nPipe = 2; nAndOr = 3; nList = 4; nIf = 5; nWhile = 6;
   nUntil = 7; nFor = 8; nCase = 9; nBrace = 10; nSubshell = 11; nFunc = 12;
-  nCaseItem = 13;
+  nCaseItem = 13; nDBr = 14; nArith = 15; nArithFor = 16; nSelect = 17;
   { etats des travaux }
   jFree = 0; jRunning = 1; jStopped = 2; jDone = 3;
 
@@ -89,6 +91,14 @@ Type
     Name : String[63];
     Val : String;
     Exp, RO, Used : Boolean;
+    Kind : Byte;           { 0 scalaire, 1 tableau indexe, 2 associatif }
+    IntAttr : Boolean;     { declare -i }
+    CaseAttr : Byte;       { 1 -l minuscules, 2 -u majuscules }
+    Ref : Boolean;         { declare -n : Val = nom de la variable visee }
+  End;
+  TPollFd = Record
+    Fd : LongInt;
+    Events, REvents : Word;
   End;
   TJob = Record
     State : LongInt;
@@ -99,6 +109,7 @@ Type
     Status : LongInt;
     Cmd : String[100];
     Notified : Boolean;
+    PStat : Array[0..15] Of LongInt;
   End;
   TIn = Record
     Fd : LongInt;          { -1 : source en memoire }
@@ -151,6 +162,15 @@ Var
   { options }
   OptE, OptX, OptU, OptN, OptV, OptI, OptL, OptC, OptS : Boolean;
   Interactive : Boolean;
+  BashMode : Boolean;                 { extensions de bash }
+  OptPipe, OptNoGlob, OptNoClob, OptAllExp : Boolean;
+  ExtGlob, NullGlob, DotGlob, NoCaseMatch, FailGlob, StarStar : Boolean;
+  AoShort, NoErrChk, InDebug, InErrTrap, DbParse : Boolean;
+  FnDepth : LongInt;
+  StartTime : LongInt;
+  CurLine : LongInt;
+  ProcFds : Array[0..15] Of LongInt;  { <(..) >(..) : descripteurs a fermer }
+  NProcFds : LongInt;
   JobCtl : Boolean;
   { etat de l'execution }
   LastStatus : LongInt;
@@ -173,8 +193,9 @@ Var
   SubDepth : LongInt;
   TmpCnt : LongInt;
   LocalSP : LongInt;
-  LocalName : Array[0..63] Of String[63];
-  LocalOld : Array[0..63] Of PStr;
+  LocalName : Array[0..255] Of String[63];
+  LocalOld : Array[0..255] Of PStr;
+  LocalKd : Array[0..255] Of Byte;
   LocalFrame : Array[0..31] Of LongInt;
   LocalFP : LongInt;
 
@@ -280,6 +301,24 @@ Begin
   StrInt := True;
 End;
 
+Function UpStr(Const S : String) : String;
+Var R : String; K : LongInt;
+Begin
+  R := S;
+  For K := 1 To Length(R) Do
+    If (R[K] >= 'a') And (R[K] <= 'z') Then R[K] := Chr(Ord(R[K]) - 32);
+  UpStr := R;
+End;
+
+Function LowStr(Const S : String) : String;
+Var R : String; K : LongInt;
+Begin
+  R := S;
+  For K := 1 To Length(R) Do
+    If (R[K] >= 'A') And (R[K] <= 'Z') Then R[K] := Chr(Ord(R[K]) + 32);
+  LowStr := R;
+End;
+
 { ---------- messages (FR, EN, GR, SP, IT) ---------- }
 
 Const
@@ -358,7 +397,7 @@ End;
 
 Procedure ShErr(Const S : String);
 Begin
-  Err('sh: ' + S);
+  If BashMode Then Err('bash: ' + S) Else Err('sh: ' + S);
 End;
 
 Procedure CleanExit(Code : LongInt); Forward;
@@ -371,6 +410,8 @@ End;
 
 { ---------- variables ---------- }
 
+Var AnyRef : Boolean;
+
 Function FindVar(Const N : String) : LongInt;
 Var I : LongInt;
 Begin
@@ -381,6 +422,37 @@ Begin
       Exit;
     End;
   FindVar := -1;
+End;
+
+{ suit les variables nameref : nom effectif }
+Function ResolveRef(Const N : String) : String;
+Var I, Dp : LongInt; R : String;
+Begin
+  ResolveRef := N;
+  If Not AnyRef Then Exit;
+  R := N;
+  For Dp := 1 To 8 Do
+  Begin
+    I := FindVar(R);
+    If (I < 0) Or Not Vars[I].Ref Then Break;
+    R := Vars[I].Val;
+  End;
+  ResolveRef := R;
+End;
+
+{ vrai si N est un tableau (indexe ou associatif) }
+Function ArrKind(Const N0 : String) : LongInt;
+Var I : LongInt; N : String;
+Begin
+  ArrKind := 0;
+  N := ResolveRef(N0);
+  I := FindVar(N);
+  If I >= 0 Then ArrKind := Vars[I].Kind;
+End;
+
+Function IsAssocName(Const N : String) : Boolean;
+Begin
+  IsAssocName := ArrKind(N) = 2;
 End;
 
 Function ValidName(Const S : String) : Boolean;
@@ -444,11 +516,13 @@ Begin
 End;
 
 { valeur d'une variable ou d'un parametre special ; Faux si non definie }
-Function GetVar(Const N : String; Var V : String) : Boolean;
-Var K, X : LongInt; S : String;
+Function GetVar(Const N0 : String; Var V : String) : Boolean;
+Var K, X : LongInt; S, N : String;
 Begin
   GetVar := True;
   V := '';
+  N := N0;
+  If AnyRef Then N := ResolveRef(N0);
   If N = '' Then Exit;
   Case N[1] Of
     '0'..'9' :
@@ -497,7 +571,7 @@ Begin
   End;
   If N = 'LINENO' Then
   Begin
-    V := IntStr(CurIn.LineNo);
+    If CurLine > 0 Then V := IntStr(CurLine) Else V := IntStr(CurIn.LineNo);
     Exit;
   End;
   If N = 'RANDOM' Then
@@ -505,6 +579,29 @@ Begin
     TmpCnt := (TmpCnt * 1103515245 + 12345 + SysTime) And $7FFFFFFF;
     V := IntStr((TmpCnt Shr 8) And $7FFF);
     Exit;
+  End;
+  If BashMode Then
+  Begin
+    If N = 'BASHPID' Then
+    Begin
+      V := IntStr(SysGetPid);
+      Exit;
+    End;
+    If N = 'SECONDS' Then
+    Begin
+      V := IntStr(SysTime - StartTime);
+      Exit;
+    End;
+    If N = 'EPOCHSECONDS' Then
+    Begin
+      V := IntStr(SysTime);
+      Exit;
+    End;
+    If N = 'EUID' Then
+    Begin
+      V := IntStr(SysGetEUid);
+      Exit;
+    End;
   End;
   If N = 'PPID' Then
   Begin
@@ -517,6 +614,8 @@ Begin
     Exit;
   End;
   K := FindVar(N);
+  If K >= 0 Then
+    If Vars[K].Kind > 0 Then K := FindVar(N + '[0]');
   If K < 0 Then
   Begin
     GetVar := False;
@@ -532,10 +631,14 @@ Begin
   VarValue := V;
 End;
 
-Function SetVar(Const N, V : String) : Boolean;
-Var I : LongInt;
+Function ArithEval(Const S : String) : LongInt; Forward;
+
+Function SetVar(Const N0, V : String) : Boolean;
+Var I : LongInt; W, N : String;
 Begin
   SetVar := True;
+  N := N0;
+  If AnyRef Then N := ResolveRef(N0);
   I := FindVar(N);
   If I >= 0 Then
   Begin
@@ -545,7 +648,16 @@ Begin
       SetVar := False;
       Exit;
     End;
-    Vars[I].Val := V;
+    If Vars[I].Kind > 0 Then
+    Begin
+      SetVar := SetVar(N + '[0]', V);
+      Exit;
+    End;
+    W := V;
+    If Vars[I].IntAttr Then W := IntStr(ArithEval(V));
+    If Vars[I].CaseAttr = 1 Then W := LowStr(W)
+    Else If Vars[I].CaseAttr = 2 Then W := UpStr(W);
+    Vars[I].Val := W;
     Exit;
   End;
   For I := 0 To MAXVARS - 1 Do
@@ -556,6 +668,10 @@ Begin
       Vars[I].Val := V;
       Vars[I].Exp := False;
       Vars[I].RO := False;
+      Vars[I].Kind := 0;
+      Vars[I].IntAttr := False;
+      Vars[I].CaseAttr := 0;
+      Vars[I].Ref := False;
       Exit;
     End;
   ShErr(Msg(mTooMany));
@@ -575,6 +691,8 @@ Begin
   Vars[I].Exp := On;
 End;
 
+Procedure ArrClear(Const N : String); Forward;
+
 Procedure UnsetVar(Const N : String);
 Var I : LongInt;
 Begin
@@ -585,6 +703,7 @@ Begin
     ShErr(N + ': ' + Msg(mReadonly));
     Exit;
   End;
+  If Vars[I].Kind > 0 Then ArrClear(N);
   Vars[I].Used := False;
 End;
 
@@ -646,6 +765,91 @@ Begin
     A.It[J + 1] := T;
   End;
 End;
+
+{ ----- tableaux : cles, en-tete (Kind), liste ordonnee ----- }
+
+Procedure ArrDeclare(Const N0 : String; Kind : LongInt);
+Var I : LongInt; N : String;
+Begin
+  N := ResolveRef(N0);
+  I := FindVar(N);
+  If I < 0 Then
+  Begin
+    If Not SetVar(N, '') Then Exit;
+    I := FindVar(N);
+    If I < 0 Then Exit;
+  End;
+  If Vars[I].Kind = 0 Then
+  Begin
+    { le scalaire existant devient l'element 0 }
+    If (Vars[I].Val <> '') And (Kind = 1) Then
+      SetVar(N + '[0]', Vars[I].Val);
+    Vars[I].Val := '';
+  End;
+  Vars[I].Kind := Kind;
+End;
+
+Procedure ArrClear(Const N0 : String);
+Var I, L : LongInt; N : String;
+Begin
+  N := ResolveRef(N0);
+  L := Length(N) + 1;
+  For I := 0 To MAXVARS - 1 Do
+    If Vars[I].Used And (Copy(Vars[I].Name, 1, L) = N + '[') Then
+      Vars[I].Used := False;
+End;
+
+{ cles de N : Keys.It = chaines ; tableau indexe : ordre numerique }
+Procedure ArrKeys(Const N0 : String; Var Keys : TArgs);
+Var I, L, J, X, Y : LongInt; K : String; Tmp : PStr; Num : Boolean; N : String;
+Begin
+  N := ResolveRef(N0);
+  ArgsInit(Keys);
+  L := Length(N) + 1;
+  Num := ArrKind(N) <> 2;
+  For I := 0 To MAXVARS - 1 Do
+    If Vars[I].Used And (Copy(Vars[I].Name, 1, L) = N + '[') Then
+    Begin
+      K := Copy(Vars[I].Name, L + 1, Length(Vars[I].Name) - L - 1);
+      ArgsAdd(Keys, K);
+    End;
+  If Num Then
+    For I := 1 To Keys.N - 1 Do
+    Begin
+      J := I;
+      While J > 0 Do
+      Begin
+        If Not StrInt(Keys.It[J - 1]^, X) Then X := 0;
+        If Not StrInt(Keys.It[J]^, Y) Then Y := 0;
+        If X <= Y Then Break;
+        Tmp := Keys.It[J - 1];
+        Keys.It[J - 1] := Keys.It[J];
+        Keys.It[J] := Tmp;
+        Dec(J);
+      End;
+    End;
+End;
+
+Function ArrCount(Const N : String) : LongInt;
+Var K : TArgs; C : LongInt;
+Begin
+  ArrKeys(N, K);
+  C := K.N;
+  ArgsFree(K);
+  ArrCount := C;
+End;
+
+Function ArrNextIdx(Const N : String) : LongInt;
+Var K : TArgs; X, M : LongInt;
+Begin
+  ArrKeys(N, K);
+  M := -1;
+  If K.N > 0 Then
+    If StrInt(K.It[K.N - 1]^, X) Then M := X;
+  ArgsFree(K);
+  ArrNextIdx := M + 1;
+End;
+
 
 { ---------- entree : fichiers, tampons, editeur de ligne ---------- }
 
@@ -761,6 +965,7 @@ Begin
     C := CurIn.Pk;
     CurIn.Pk := CurIn.Pk2;
     CurIn.Pk2 := -2;
+    If C = 10 Then Inc(CurIn.LineNo);
     InGetC := C;
     Exit;
   End;
@@ -970,6 +1175,29 @@ Procedure ScanDollar(Var W : String);
 Var C, C2, Depth : LongInt; Q : Boolean;
 Begin
   C := InGetC;
+  If BashMode And (C = 39) Then
+  Begin
+    { $'...' : chaine a echappements, copiee telle quelle jusqu'a la quote }
+    WAdd(W, 36);
+    WAdd(W, 39);
+    While True Do
+    Begin
+      C := InGetC;
+      If C < 0 Then
+      Begin
+        SynError(Msg(mUnexpEof));
+        Exit;
+      End;
+      WAdd(W, C);
+      If C = 92 Then
+      Begin
+        C := InGetC;
+        If C >= 0 Then WAdd(W, C);
+      End
+      Else If C = 39 Then Break;
+    End;
+    Exit;
+  End;
   If C = 40 Then
   Begin
     C2 := InGetC;
@@ -1121,7 +1349,7 @@ Begin
 End;
 
 Procedure GetTok;
-Var C, C2 : LongInt; W : String; AllDig, Q : Boolean;
+Var C, C2, Depth : LongInt; W : String; AllDig, Q, PSub : Boolean;
 Begin
   TokS := '';
   TokQuoted := False;
@@ -1156,10 +1384,23 @@ Begin
     If HereN > 0 Then ReadHeredocs;
     Exit;
   End;
+  PSub := False;
+  If BashMode And ((C = 60) Or (C = 62)) Then
+  Begin
+    C2 := InGetC;
+    If C2 = 40 Then PSub := True Else InUnget(C2);
+  End;
+  If Not PSub Then
   Case C Of
     38 : Begin
            C2 := InGetC;
            If C2 = 38 Then Tok := tAndIf
+           Else If BashMode And (C2 = 62) Then
+           Begin
+             C2 := InGetC;
+             If C2 = 62 Then Tok := tAndDGreat
+             Else Begin InUnget(C2); Tok := tAndGreat; End;
+           End
            Else Begin InUnget(C2); Tok := tAmp; End;
            Exit;
          End;
@@ -1171,7 +1412,16 @@ Begin
          End;
     59 : Begin
            C2 := InGetC;
-           If C2 = 59 Then Tok := tDSemi
+           If C2 = 59 Then
+           Begin
+             Tok := tDSemi;
+             If BashMode Then
+             Begin
+               C2 := InGetC;
+               If C2 = 38 Then Tok := tDSemiAmp Else InUnget(C2);
+             End;
+           End
+           Else If BashMode And (C2 = 38) Then Tok := tSemiAmp
            Else Begin InUnget(C2); Tok := tSemi; End;
            Exit;
          End;
@@ -1183,6 +1433,7 @@ Begin
            Begin
              C2 := InGetC;
              If C2 = 45 Then Tok := tDLessDash
+             Else If BashMode And (C2 = 60) Then Tok := tHereStr
              Else Begin InUnget(C2); Tok := tDLess; End;
            End
            Else If C2 = 38 Then Tok := tLessAnd
@@ -1201,7 +1452,14 @@ Begin
   End;
   { mot }
   W := '';
-  InUnget(C);
+  If PSub Then
+  Begin
+    { <(commande) et >(commande) : le corps est range comme $( ) }
+    WAdd(W, C);
+    W := W + SubPlaceholder(ScanCmdSub);
+    TokQuoted := True;
+  End
+  Else InUnget(C);
   While True Do
   Begin
     C := InGetC;
@@ -1271,6 +1529,36 @@ Begin
     End
     Else If C = 36 Then ScanDollar(W)
     Else If C = 96 Then W := W + SubPlaceholder(ScanBackquote)
+    Else If BashMode And (ExtGlob Or DbParse) And
+            ((C = 64) Or (C = 63) Or (C = 42) Or (C = 43) Or (C = 33)) Then
+    Begin
+      WAdd(W, C);
+      C2 := InGetC;
+      If C2 = 40 Then
+      Begin
+        { @( ?( *( +( !( : jusqu'a la parenthese fermante }
+        WAdd(W, 40);
+        Depth := 1;
+        While Depth > 0 Do
+        Begin
+          C2 := InGetC;
+          If C2 < 0 Then
+          Begin
+            SynError(Msg(mUnexpEof));
+            Break;
+          End;
+          If C2 = 40 Then Inc(Depth)
+          Else If C2 = 41 Then Dec(Depth);
+          If C2 = 92 Then
+          Begin
+            WAdd(W, C2);
+            C2 := InGetC;
+          End;
+          If C2 >= 0 Then WAdd(W, C2);
+        End;
+      End
+      Else InUnget(C2);
+    End
     Else WAdd(W, C);
   End;
   TokS := W;
@@ -1296,7 +1584,8 @@ End;
 Const
   rIf = 1; rThen = 2; rElse = 3; rElif = 4; rFi = 5; rDo = 6; rDone = 7;
   rCase = 8; rEsac = 9; rWhile = 10; rUntil = 11; rFor = 12; rIn = 13;
-  rLBrace = 14; rRBrace = 15; rBang = 16; rFunction = 17;
+  rLBrace = 14; rRBrace = 15; rBang = 16; rFunction = 17; rDBr = 18;
+  rSelect = 19;
 
 Function ReservedOf : LongInt;
 Var S : String;
@@ -1320,14 +1609,16 @@ Begin
   Else If S = '{' Then ReservedOf := rLBrace
   Else If S = '}' Then ReservedOf := rRBrace
   Else If S = '!' Then ReservedOf := rBang
-  Else If S = 'function' Then ReservedOf := rFunction;
+  Else If S = 'function' Then ReservedOf := rFunction
+  Else If BashMode And (S = '[[') Then ReservedOf := rDBr
+  Else If BashMode And (S = 'select') Then ReservedOf := rSelect;
 End;
 
 Function ParseList(Top : Boolean) : PNode; Forward;
 Function ParseCommand : PNode; Forward;
 
 Function IsAssignWord(Const S : String) : Boolean;
-Var K : LongInt;
+Var K, Dp : LongInt;
 Begin
   IsAssignWord := False;
   If S = '' Then Exit;
@@ -1335,6 +1626,22 @@ Begin
   K := 2;
   While (K <= Length(S)) And (UpCase(S[K]) In ['A'..'Z', '_', '0'..'9']) Do
     Inc(K);
+  If BashMode Then
+  Begin
+    If (K <= Length(S)) And (S[K] = '[') Then
+    Begin
+      Dp := 1;
+      Inc(K);
+      While (K <= Length(S)) And (Dp > 0) Do
+      Begin
+        If S[K] = '[' Then Inc(Dp)
+        Else If S[K] = ']' Then Dec(Dp);
+        Inc(K);
+      End;
+      If Dp > 0 Then Exit;
+    End;
+    If (K < Length(S)) And (S[K] = '+') And (S[K + 1] = '=') Then Inc(K);
+  End;
   If (K <= Length(S)) And (S[K] = '=') Then IsAssignWord := True;
 End;
 
@@ -1379,7 +1686,8 @@ End;
 
 Function IsRedirTok : Boolean;
 Begin
-  IsRedirTok := (Tok = tIONum) Or ((Tok >= tLess) And (Tok <= tClobber));
+  IsRedirTok := (Tok = tIONum) Or ((Tok >= tLess) And (Tok <= tClobber)) Or
+                ((Tok >= tHereStr) And (Tok <= tAndDGreat));
 End;
 
 { analyse d'une redirection ; Tok est l'operateur ou le numero }
@@ -1394,7 +1702,8 @@ Begin
     GetTok;
   End;
   Op := Tok;
-  If (Op < tLess) Or (Op > tClobber) Then
+  If ((Op < tLess) Or (Op > tClobber)) And ((Op < tHereStr) Or
+     (Op > tAndDGreat)) Then
   Begin
     SynError(Msg(mSyntax));
     Exit;
@@ -1603,11 +1912,43 @@ Begin
 End;
 
 Function ParseFor : PNode;
-Var N : PNode; W, Last : PWd;
+Var N : PNode; W, Last : PWd; Hdr : String; K, Sp : LongInt;
 Begin
   ParseFor := Nil;
   N := NewNode(nFor);
   GetTok;
+  If BashMode And (Tok = tLParen) Then
+  Begin
+    GetTok;
+    If Tok <> tLParen Then
+    Begin
+      SynError(Msg(mSyntax));
+      Exit;
+    End;
+    Hdr := ReadArithBody;
+    If SynErr Then Exit;
+    N^.Kind := nArithFor;
+    Last := Nil;
+    Hdr := Hdr + ';';
+    For K := 1 To 3 Do
+    Begin
+      Sp := Pos(';', Hdr);
+      If Sp = 0 Then Sp := Length(Hdr) + 1;
+      W := NewWord(Copy(Hdr, 1, Sp - 1));
+      Hdr := Copy(Hdr, Sp + 1, 255);
+      If Last = Nil Then N^.Words := W Else Last^.Next := W;
+      Last := W;
+    End;
+    GetTok;
+    If Tok = tSemi Then GetTok;
+    SkipNewlines;
+    If Not Expect(rDo) Then Exit;
+    N^.B := ParseList(False);
+    If SynErr Then Exit;
+    If Not Expect(rDone) Then Exit;
+    ParseFor := N;
+    Exit;
+  End;
   If (Tok <> tWord) Or Not ValidName(TokS) Then
   Begin
     SynError(Msg(mNotId));
@@ -1690,8 +2031,9 @@ Begin
     If SynErr Then Exit;
     If Last = Nil Then N^.B := It Else Last^.Next := It;
     Last := It;
-    If Tok = tDSemi Then
+    If (Tok = tDSemi) Or (Tok = tSemiAmp) Or (Tok = tDSemiAmp) Then
     Begin
+      It^.Op := Tok;
       GetTok;
       SkipNewlines;
     End
@@ -1732,6 +2074,13 @@ Begin
       LastW := W;
       Inc(Cnt);
       GetTok;
+      If BashMode And (Tok = tLParen) And (W^.S <> '') And
+         (W^.S[Length(W^.S)] = '=') Then
+      Begin
+        ParseCompound(W);
+        If SynErr Then Exit;
+        Continue;
+      End;
       If (Cnt = 1) And (Not W^.IsAssign) And (Tok = tLParen) Then
       Begin
         { definition de fonction : nom ( ) corps }
@@ -1762,16 +2111,266 @@ Begin
   ParseSimple := N;
 End;
 
+
+{ ---------- bash : [[ ]], (( )), for ((;;)), select, tableaux ---------- }
+
+{ regex apres =~ : lu tel quel jusqu'a un blanc hors parentheses }
+Function ReadRegexWord : String;
+Var C, C2, Depth : LongInt; W : String;
+Begin
+  W := '';
+  Depth := 0;
+  C := InGetC;
+  While (C = 32) Or (C = 9) Do C := InGetC;
+  While C >= 0 Do
+  Begin
+    If ((C = 32) Or (C = 9) Or (C = 10)) And (Depth = 0) Then
+    Begin
+      InUnget(C);
+      Break;
+    End;
+    If C = 40 Then Inc(Depth)
+    Else If C = 41 Then
+    Begin
+      If Depth = 0 Then
+      Begin
+        InUnget(C);
+        Break;
+      End;
+      Dec(Depth);
+    End;
+    If C = 92 Then
+    Begin
+      WAdd(W, 92);
+      C2 := InGetC;
+      If C2 >= 0 Then WAdd(W, C2);
+    End
+    Else If C = 39 Then
+    Begin
+      WAdd(W, 39);
+      Repeat
+        C2 := InGetC;
+        If C2 >= 0 Then WAdd(W, C2);
+      Until (C2 = 39) Or (C2 < 0);
+    End
+    Else If C = 34 Then
+    Begin
+      WAdd(W, 34);
+      Repeat
+        C2 := InGetC;
+        If C2 = 36 Then ScanDollar(W)
+        Else If C2 >= 0 Then WAdd(W, C2);
+        If C2 = 92 Then
+        Begin
+          C2 := InGetC;
+          If C2 >= 0 Then WAdd(W, C2);
+          C2 := 0;
+        End;
+      Until (C2 = 34) Or (C2 < 0);
+    End
+    Else If C = 36 Then ScanDollar(W)
+    Else WAdd(W, C);
+    C := InGetC;
+  End;
+  ReadRegexWord := W;
+End;
+
+{ corps de (( ... )) : lu jusqu'aux deux parentheses fermantes }
+Function ReadArithBody : String;
+Var C, C2, Depth : LongInt; W : String;
+Begin
+  W := '';
+  Depth := 0;
+  While True Do
+  Begin
+    C := InGetC;
+    If C < 0 Then
+    Begin
+      SynError(Msg(mUnexpEof));
+      Break;
+    End;
+    If C = 36 Then
+    Begin
+      ScanDollar(W);
+      Continue;
+    End;
+    If C = 40 Then Inc(Depth)
+    Else If C = 41 Then
+    Begin
+      If Depth = 0 Then
+      Begin
+        C2 := InGetC;
+        If C2 = 41 Then Break;
+        SynError(Msg(mSyntax));
+        Break;
+      End;
+      Dec(Depth);
+    End;
+    WAdd(W, C);
+  End;
+  ReadArithBody := W;
+End;
+
+Function ParseDBr : PNode;
+Var N : PNode; W, Last : PWd; S : String; IsOp : Boolean;
+Begin
+  ParseDBr := Nil;
+  N := NewNode(nDBr);
+  Last := Nil;
+  DbParse := True;
+  GetTok;
+  While True Do
+  Begin
+    If SynErr Then
+    Begin
+      DbParse := False;
+      Exit;
+    End;
+    If Tok = tEOF Then
+    Begin
+      SynError(Msg(mUnexpEof));
+      Exit;
+    End;
+    If Tok = tNL Then
+    Begin
+      GetTok;
+      Continue;
+    End;
+    If (Tok = tWord) And (TokS = ']]') And Not TokQuoted Then Break;
+    IsOp := False;
+    If Tok = tWord Then S := TokS
+    Else
+    Begin
+      IsOp := True;
+      Case Tok Of
+        tAndIf : S := '&&';
+        tOrIf : S := '||';
+        tLParen : S := '(';
+        tRParen : S := ')';
+        tLess : S := '<';
+        tGreat : S := '>';
+      Else
+        Begin
+          SynError(Msg(mUnexpTok));
+          Exit;
+        End;
+      End;
+    End;
+    W := NewWord(S);
+    W^.IsAssign := IsOp;
+    If Last = Nil Then N^.Words := W Else Last^.Next := W;
+    Last := W;
+    If (Not IsOp) And (S = '=~') And Not TokQuoted Then
+    Begin
+      W := NewWord(ReadRegexWord);
+      Last^.Next := W;
+      Last := W;
+    End;
+    GetTok;
+  End;
+  DbParse := False;
+  GetTok;
+  ParseDBr := N;
+End;
+
+{ corps d'une affectation composee a=( ... ) : les elements sont ranges dans
+  le mot, apres #5, separes par #2 }
+Procedure ParseCompound(W : PWd);
+Var Items : String;
+Begin
+  GetTok;                                 { apres ( }
+  Items := '';
+  While True Do
+  Begin
+    If SynErr Then Exit;
+    If Tok = tNL Then
+    Begin
+      GetTok;
+      Continue;
+    End;
+    If Tok = tRParen Then Break;
+    If Tok <> tWord Then
+    Begin
+      SynError(Msg(mSyntax));
+      Exit;
+    End;
+    If Items <> '' Then Items := Items + #2;
+    Items := Items + TokS;
+    GetTok;
+  End;
+  GetTok;
+  W^.S := W^.S + #5 + Items;
+End;
+
+Function ParseSelect : PNode;
+Var N : PNode; W, Last : PWd;
+Begin
+  ParseSelect := Nil;
+  N := NewNode(nSelect);
+  GetTok;
+  If (Tok <> tWord) Or Not ValidName(TokS) Then
+  Begin
+    SynError(Msg(mNotId));
+    Exit;
+  End;
+  N^.Name := TokS;
+  GetTok;
+  SkipNewlines;
+  N^.Neg := False;
+  If ReservedOf = rIn Then
+  Begin
+    N^.Neg := True;
+    GetTok;
+    Last := Nil;
+    While Tok = tWord Do
+    Begin
+      W := NewWord(TokS);
+      If Last = Nil Then N^.Words := W Else Last^.Next := W;
+      Last := W;
+      GetTok;
+    End;
+    If (Tok = tSemi) Or (Tok = tNL) Then GetTok;
+    SkipNewlines;
+  End
+  Else If Tok = tSemi Then
+  Begin
+    GetTok;
+    SkipNewlines;
+  End;
+  If Not Expect(rDo) Then Exit;
+  N^.B := ParseList(False);
+  If SynErr Then Exit;
+  If Not Expect(rDone) Then Exit;
+  ParseSelect := N;
+End;
+
 Function ParseCommand : PNode;
-Var N, L : PNode; R : LongInt; Rd : PRedir; FW : String;
+Var N, L : PNode; R : LongInt; Rd : PRedir; FW : String; Body : String;
 Begin
   ParseCommand := Nil;
   If SynErr Then Exit;
   N := Nil;
   If Tok = tLParen Then
   Begin
-    N := NewNode(nSubshell);
     GetTok;
+    If BashMode And (Tok = tLParen) Then
+    Begin
+      { (( expression )) }
+      Body := ReadArithBody;
+      If SynErr Then Exit;
+      N := NewNode(nArith);
+      N^.Words := NewWord(Body);
+      GetTok;
+      While IsRedirTok Do
+      Begin
+        Rd := ParseRedir;
+        If SynErr Then Exit;
+        AddRedir(N, Rd);
+      End;
+      ParseCommand := N;
+      Exit;
+    End;
+    N := NewNode(nSubshell);
     N^.A := ParseList(False);
     If SynErr Then Exit;
     If Tok <> tRParen Then
@@ -1790,6 +2389,8 @@ Begin
       rUntil : N := ParseWhile(nUntil);
       rFor : N := ParseFor;
       rCase : N := ParseCase;
+      rDBr : N := ParseDBr;
+      rSelect : N := ParseSelect;
       rLBrace :
         Begin
           N := NewNode(nBrace);
@@ -1854,10 +2455,98 @@ End;
 
 { P : motif, PF : drapeaux ('1' = caractere entre guillemets : litteral) }
 Function PatMatchAt(Const P, PF, T : String; PI, TI : LongInt) : Boolean;
-Var Neg, Ok : Boolean; C, Lo, Hi : Char; K : LongInt;
+Forward;
+
+{ sous-chaine Sub (entiere) filtree par l'une des alternatives de Al }
+Function ExtAny(Const P, PF : String; A0, A1 : LongInt; Const Sub : String)
+    : Boolean;
+Var Dp, K, St : LongInt;
+Begin
+  ExtAny := False;
+  Dp := 0;
+  St := A0;
+  K := A0;
+  While K <= A1 + 1 Do
+  Begin
+    If (K > A1) Or ((P[K] = '|') And (Dp = 0)) Then
+    Begin
+      If PatMatchAt(Copy(P, St, K - St), Copy(PF, St, K - St), Sub, 1, 1) Then
+      Begin
+        ExtAny := True;
+        Exit;
+      End;
+      St := K + 1;
+    End
+    Else If P[K] = '(' Then Inc(Dp)
+    Else If P[K] = ')' Then Dec(Dp);
+    Inc(K);
+  End;
+End;
+
+{ repetition : Sub est une suite (eventuellement vide si Zero) d'alternatives }
+Function ExtRep(Const P, PF : String; A0, A1 : LongInt; Const Sub : String;
+    Zero : Boolean) : Boolean;
+Var L : LongInt;
+Begin
+  ExtRep := False;
+  If Sub = '' Then
+  Begin
+    ExtRep := Zero;
+    Exit;
+  End;
+  For L := 1 To Length(Sub) Do
+    If ExtAny(P, PF, A0, A1, Copy(Sub, 1, L)) Then
+      If ExtRep(P, PF, A0, A1, Copy(Sub, L + 1, 255), True) Then
+      Begin
+        ExtRep := True;
+        Exit;
+      End;
+End;
+
+Function PatMatchAt(Const P, PF, T : String; PI, TI : LongInt) : Boolean;
+Var Neg, Ok : Boolean; C, Lo, Hi : Char; K, Dp, Cl, L : LongInt; Kd : Char;
 Begin
   While PI <= Length(P) Do
   Begin
+    If ExtGlob And (P[PI] In ['@', '?', '*', '+', '!']) And
+       (PI < Length(P)) And (P[PI + 1] = '(') And (PF[PI] <> '1') Then
+    Begin
+      Dp := 0;
+      Cl := PI + 1;
+      While Cl <= Length(P) Do
+      Begin
+        If P[Cl] = '(' Then Inc(Dp)
+        Else If P[Cl] = ')' Then
+        Begin
+          Dec(Dp);
+          If Dp = 0 Then Break;
+        End;
+        Inc(Cl);
+      End;
+      If Cl <= Length(P) Then
+      Begin
+        Kd := P[PI];
+        For L := 0 To Length(T) - TI + 1 Do
+        Begin
+          Ok := False;
+          If Kd = '@' Then Ok := ExtAny(P, PF, PI + 2, Cl - 1, Copy(T, TI, L))
+          Else If Kd = '?' Then
+            Ok := (L = 0) Or ExtAny(P, PF, PI + 2, Cl - 1, Copy(T, TI, L))
+          Else If Kd = '*' Then
+            Ok := ExtRep(P, PF, PI + 2, Cl - 1, Copy(T, TI, L), True)
+          Else If Kd = '+' Then
+            Ok := ExtRep(P, PF, PI + 2, Cl - 1, Copy(T, TI, L), False)
+          Else Ok := Not ExtAny(P, PF, PI + 2, Cl - 1, Copy(T, TI, L));
+          If Ok And PatMatchAt(P, PF, T, Cl + 1, TI + L) Then
+          Begin
+            PatMatchAt := True;
+            Exit;
+          End;
+        End;
+        PatMatchAt := False;
+        Exit;
+      End;
+    End;
     If (P[PI] = '*') And (PF[PI] <> '1') Then
     Begin
       While (PI <= Length(P)) And (P[PI] = '*') And (PF[PI] <> '1') Do Inc(PI);
@@ -2007,6 +2696,12 @@ Begin
     Begin
       HasGlob := True;
       Exit;
+    End
+    Else If ExtGlob And (F[K] <> '1') And (K < Length(S)) And
+            (S[K + 1] = '(') And (S[K] In ['@', '+', '!']) Then
+    Begin
+      HasGlob := True;
+      Exit;
     End;
 End;
 
@@ -2015,7 +2710,8 @@ Begin
   If E.Single Then Exit;
   If E.Have Or Force Then
   Begin
-    If E.Glob And HasGlob(E.S, E.F) Then GlobField(E.S, E.F, E.Dst)
+    If E.Glob And Not OptNoGlob And HasGlob(E.S, E.F) Then
+      GlobField(E.S, E.F, E.Dst)
     Else ArgsAdd(E.Dst^, E.S);
   End;
   E.S := '';
@@ -2091,11 +2787,15 @@ Begin
 End;
 
 { valeur et etat d'une variable pour ${...} ; Set = definie et non vide }
+Procedure ParamArray(Var E : TExp; Const Name, Sub, Op : String; DQ, Hash,
+    KeysMode : Boolean); Forward;
+
 Procedure ParamExpand(Var E : TExp; Const Inner : String; DQ : Boolean);
 Var
-  Name, Op, Word, V, R : String;
-  K, K2, Cnt, X, Len : LongInt;
-  IsSet, NullToo, Hash, Done : Boolean;
+  Name, Op, Word, V, R, Sub : String;
+  K, K2, Cnt, X, Len, Dp : LongInt;
+  IsSet, NullToo, Hash, Done, Indir, HasSub : Boolean;
+  Anch : Char;
   E2 : TExp;
   Pat, PF : String;
   L2 : LongInt;
@@ -2103,9 +2803,18 @@ Begin
   Name := '';
   K := 1;
   Hash := False;
+  Indir := False;
+  HasSub := False;
+  Sub := '';
   If (Length(Inner) > 1) And (Inner[1] = '#') And (Inner[2] <> '}') Then
   Begin
     Hash := True;
+    K := 2;
+  End
+  Else If BashMode And (Length(Inner) > 1) And (Inner[1] = '!') And
+          IsNameCh(Ord(Inner[2])) Then
+  Begin
+    Indir := True;
     K := 2;
   End;
   { nom : identificateur, chiffres, ou caractere special }
@@ -2120,9 +2829,90 @@ Begin
     Name := Inner[K];
     Inc(K);
   End;
+  If BashMode And (K <= Length(Inner)) And (Inner[K] = '[') And
+     ValidName(Name) Then
+  Begin
+    Dp := 1;
+    X := K + 1;
+    While (X <= Length(Inner)) And (Dp > 0) Do
+    Begin
+      If Inner[X] = '[' Then Inc(Dp)
+      Else If Inner[X] = ']' Then Dec(Dp);
+      Inc(X);
+    End;
+    Sub := Copy(Inner, K + 1, X - K - 2);
+    K := X;
+    HasSub := True;
+  End;
   Op := Copy(Inner, K, 255);
+  If HasSub And ((Sub = '@') Or (Sub = '*')) Then
+  Begin
+    ParamArray(E, ResolveRef(Name), Sub, Op, DQ, Hash, Indir);
+    Exit;
+  End;
+  If Indir And (Op <> '') And ((Op = '*') Or (Op = '@')) And Not HasSub Then
+  Begin
+    { ${!prefixe*} : noms de variables }
+    Word := '';
+    For X := 0 To MAXVARS - 1 Do
+      If Vars[X].Used And (Copy(Vars[X].Name, 1, Length(Name)) = Name) And
+         (Pos('[', Vars[X].Name) = 0) Then
+      Begin
+        If Word <> '' Then Word := Word + ' ';
+        Word := Word + Vars[X].Name;
+      End;
+    AppendValue(E, Word, DQ);
+    Exit;
+  End;
+  If HasSub Then
+  Begin
+    Pat := Name;
+    Name := ElemName(Name, Sub);
+    If (Not VarSet(Name)) And (ArrKind(Pat) = 0) And (Name = Pat + '[0]') Then
+      Name := Pat;
+  End;
+  If Indir Then
+  Begin
+    GetVar(Name, V);
+    Name := V;
+    If Pos('[', Name) > 0 Then
+      Name := ElemName(Copy(Name, 1, Pos('[', Name) - 1),
+                Copy(Name, Pos('[', Name) + 1,
+                     Length(Name) - Pos('[', Name) - 1));
+  End;
   If (Name = '@') Or (Name = '*') Then
   Begin
+    If BashMode And (Length(Op) > 1) And (Op[1] = ':') And
+       Not (Op[2] In ['-', '=', '?', '+']) Then
+    Begin
+      Pat := Copy(Op, 2, 255);
+      X := Pos(':', Pat);
+      If X = 0 Then
+      Begin
+        If Not StrInt(Pat, K2) Then K2 := 0;
+        Len := 1000000;
+      End
+      Else
+      Begin
+        If Not StrInt(Copy(Pat, 1, X - 1), K2) Then K2 := 0;
+        If Not StrInt(Copy(Pat, X + 1, 255), Len) Then Len := 0;
+      End;
+      If K2 < 0 Then K2 := NPos + 1 + K2;
+      If K2 < 0 Then K2 := 0;
+      Cnt := 0;
+      For X := K2 To NPos Do
+      Begin
+        If Cnt >= Len Then Break;
+        If X = 0 Then V := Arg0 Else V := PosGet(X);
+        If (Cnt > 0) Then
+          If DQ And (Name = '@') Then FinishField(E, True)
+          Else If DQ Then AddChar(E, ' ', True)
+          Else FinishField(E, False);
+        AppendValue(E, V, DQ);
+        Inc(Cnt);
+      End;
+      Exit;
+    End;
     If Hash Then
     Begin
       AppendValue(E, IntStr(NPos), True);
@@ -2183,6 +2973,33 @@ Begin
   End;
   Word := Copy(Op, 2, 255);
   Case Op[1] Of
+    '^', ',' :
+      Begin
+        If (Word <> '') And (Word[1] = Op[1]) Then
+        Begin
+          If Op[1] = '^' Then R := UpStr(V) Else R := LowStr(V);
+        End
+        Else If V = '' Then R := ''
+        Else If Op[1] = '^' Then R := UpStr(Copy(V, 1, 1)) + Copy(V, 2, 255)
+        Else R := LowStr(Copy(V, 1, 1)) + Copy(V, 2, 255);
+        AppendValue(E, R, DQ);
+      End;
+    '@' :
+      Begin
+        If Word = 'U' Then R := UpStr(V)
+        Else If Word = 'L' Then R := LowStr(V)
+        Else If Word = 'u' Then R := UpStr(Copy(V, 1, 1)) + Copy(V, 2, 255)
+        Else If Word = 'Q' Then
+        Begin
+          R := '''';
+          For K := 1 To Length(V) Do
+            If V[K] = '''' Then R := R + '''\'''''
+            Else R := R + V[K];
+          R := R + '''';
+        End
+        Else R := V;
+        AppendValue(E, R, DQ);
+      End;
     '-' :
       Begin
         If IsSet And ((Not NullToo) Or (V <> '')) Then AppendValue(E, V, DQ)
@@ -2274,9 +3091,15 @@ Begin
       Begin
         { ${v/motif/remplacement} et ${v//motif/remplacement} }
         Cnt := 1;
+        Anch := ' ';
         If (Word <> '') And (Word[1] = '/') Then
         Begin
           Cnt := 2;
+          Word := Copy(Word, 2, 255);
+        End
+        Else If (Word <> '') And ((Word[1] = '#') Or (Word[1] = '%')) Then
+        Begin
+          Anch := Word[1];
           Word := Copy(Word, 2, 255);
         End;
         K2 := Pos('/', Word);
@@ -2299,6 +3122,28 @@ Begin
         R := E2.S;
         Word := '';
         K := 1;
+        If Anch <> ' ' Then
+        Begin
+          Done := False;
+          If Anch = '#' Then
+          Begin
+            For L2 := Length(V) DownTo 0 Do
+              If (Not Done) And PatMatch(Pat, PF, Copy(V, 1, L2)) Then
+              Begin
+                Word := R + Copy(V, L2 + 1, 255);
+                Done := True;
+              End;
+          End
+          Else
+            For L2 := 0 To Length(V) Do
+              If (Not Done) And PatMatch(Pat, PF, Copy(V, L2 + 1, 255)) Then
+              Begin
+                Word := Copy(V, 1, L2) + R;
+                Done := True;
+              End;
+          If Not Done Then Word := V;
+          K := Length(V) + 1;
+        End;
         While K <= Length(V) Do
         Begin
           Done := False;
@@ -2326,6 +3171,115 @@ Begin
   Else
     ShErr(Msg(mBadSub));
   End;
+End;
+
+Function ProcSubst(Idx : LongInt; IsIn : Boolean) : String; Forward;
+
+
+{ ${nom[@]} ${nom[*]} ${#nom[@]} ${!nom[@]} ${nom[@]:d:n} ${nom[@]op...} }
+Procedure ParamArray(Var E : TExp; Const Name, Sub, Op : String; DQ, Hash,
+    KeysMode : Boolean);
+Var Keys, Vals : TArgs; K, X, Off, Cnt, I : LongInt; V, Ifs, Q : String;
+    Sep : Char; Sc : String; Tail : String;
+Begin
+  ArgsInit(Keys);
+  ArgsInit(Vals);
+  If ArrKind(Name) > 0 Then
+  Begin
+    ArrKeys(Name, Keys);
+    For K := 0 To Keys.N - 1 Do
+    Begin
+      GetVar(Name + '[' + Keys.It[K]^ + ']', V);
+      ArgsAdd(Vals, V);
+    End;
+  End
+  Else If VarSet(Name) Then
+  Begin
+    ArgsAdd(Keys, '0');
+    GetVar(Name, V);
+    ArgsAdd(Vals, V);
+  End;
+  If Hash Then
+  Begin
+    AppendValue(E, IntStr(Keys.N), True);
+    ArgsFree(Keys);
+    ArgsFree(Vals);
+    Exit;
+  End;
+  If Op <> '' Then
+  Begin
+    If (Op[1] = ':') And (Length(Op) > 1) And
+       Not (Op[2] In ['-', '=', '?', '+']) Then
+    Begin
+      { tranche ${a[@]:off:len} }
+      Tail := Copy(Op, 2, 255);
+      X := Pos(':', Tail);
+      If X = 0 Then
+      Begin
+        If Not StrInt(Tail, Off) Then Off := 0;
+        Cnt := 1000000;
+      End
+      Else
+      Begin
+        If Not StrInt(Copy(Tail, 1, X - 1), Off) Then Off := 0;
+        If Not StrInt(Copy(Tail, X + 1, 255), Cnt) Then Cnt := 0;
+      End;
+      If Off < 0 Then Off := Vals.N + Off;
+      If Off < 0 Then Off := 0;
+      For I := Vals.N - 1 DownTo 0 Do
+        If (I < Off) Or (I >= Off + Cnt) Then
+        Begin
+          FreeStr(Vals.It[I]);
+          For X := I To Vals.N - 2 Do Vals.It[X] := Vals.It[X + 1];
+          Dec(Vals.N);
+        End;
+    End
+    Else
+    Begin
+      { autre operation : appliquee a chaque element }
+      For K := 0 To Keys.N - 1 Do
+      Begin
+        If (K > 0) And (DQ Or True) Then FinishField(E, DQ);
+        ParamExpand(E, Name + '[' + Keys.It[K]^ + ']' + Op, DQ);
+      End;
+      ArgsFree(Keys);
+      ArgsFree(Vals);
+      Exit;
+    End;
+  End;
+  If KeysMode Then
+  Begin
+    ArgsFree(Vals);
+    Vals := Keys;
+    Keys.N := 0;
+  End;
+  If DQ And (Sub = '*') Then
+  Begin
+    Ifs := IfsOf;
+    If Ifs = '' Then Sep := #0 Else Sep := Ifs[1];
+    For K := 0 To Vals.N - 1 Do
+    Begin
+      If (K > 0) And (Sep <> #0) Then AddChar(E, Sep, True);
+      AppendValue(E, Vals.It[K]^, True);
+    End;
+  End
+  Else If DQ Then
+  Begin
+    E.AtUsed := True;
+    For K := 0 To Vals.N - 1 Do
+    Begin
+      If K > 0 Then FinishField(E, True);
+      AppendValue(E, Vals.It[K]^, True);
+    End;
+  End
+  Else
+    For K := 0 To Vals.N - 1 Do
+    Begin
+      If K > 0 Then FinishField(E, False);
+      AppendValue(E, Vals.It[K]^, False);
+    End;
+  ArgsFree(Keys);
+  ArgsFree(Vals);
 End;
 
 Procedure ExpandInto(Var E : TExp; Const Raw : String; InDQ : Boolean);
@@ -2367,6 +3321,17 @@ Begin
         Inc(K);
       End;
     End
+    Else If BashMode And ((C = '<') Or (C = '>')) And Not DQ And
+            (K + 8 <= Length(Raw)) And (Raw[K + 1] = '$') And
+            (Raw[K + 2] = '(') And (Raw[K + 3] = #1) Then
+    Begin
+      { <(cmd) >(cmd) : tube nomme /dev/fd/N }
+      X := (Ord(Raw[K + 4]) - 48) * 1000 + (Ord(Raw[K + 5]) - 48) * 100 +
+           (Ord(Raw[K + 6]) - 48) * 10 + Ord(Raw[K + 7]) - 48;
+      V := ProcSubst(X, C = '<');
+      For Len := 1 To Length(V) Do AddChar(E, V[Len], True);
+      K := K + 8;
+    End
     Else If C = '"' Then
     Begin
       If DQ And (Not InDQ) Then
@@ -2387,6 +3352,70 @@ Begin
     Begin
       Inc(K);
       If K > Length(Raw) Then AddChar(E, '$', DQ)
+      Else If BashMode And (Raw[K] = '''') And Not DQ Then
+      Begin
+        { $'...' : echappements du langage C }
+        Inc(K);
+        While (K <= Length(Raw)) And (Raw[K] <> '''') Do
+        Begin
+          If Raw[K] = '\' Then
+          Begin
+            Inc(K);
+            If K > Length(Raw) Then Break;
+            Case Raw[K] Of
+              'n' : AddChar(E, #10, True);
+              't' : AddChar(E, #9, True);
+              'r' : AddChar(E, #13, True);
+              'a' : AddChar(E, #7, True);
+              'b' : AddChar(E, #8, True);
+              'e', 'E' : AddChar(E, #27, True);
+              'f' : AddChar(E, #12, True);
+              'v' : AddChar(E, #11, True);
+              '0'..'7' :
+                Begin
+                  X := 0;
+                  Len := 0;
+                  While (K <= Length(Raw)) And (Len < 3) And
+                        (Raw[K] In ['0'..'7']) Do
+                  Begin
+                    X := X * 8 + Ord(Raw[K]) - 48;
+                    Inc(K);
+                    Inc(Len);
+                  End;
+                  Dec(K);
+                  AddChar(E, Chr(X And 255), True);
+                End;
+              'x' :
+                Begin
+                  X := 0;
+                  Len := 0;
+                  Inc(K);
+                  While (K <= Length(Raw)) And (Len < 2) And
+                        (UpCase(Raw[K]) In ['0'..'9', 'A'..'F']) Do
+                  Begin
+                    If Raw[K] <= '9' Then X := X * 16 + Ord(Raw[K]) - 48
+                    Else X := X * 16 + Ord(UpCase(Raw[K])) - 55;
+                    Inc(K);
+                    Inc(Len);
+                  End;
+                  Dec(K);
+                  AddChar(E, Chr(X And 255), True);
+                End;
+              'c' :
+                Begin
+                  Inc(K);
+                  If K <= Length(Raw) Then
+                    AddChar(E, Chr(Ord(UpCase(Raw[K])) And 31), True);
+                End;
+            Else
+              AddChar(E, Raw[K], True);
+            End;
+          End
+          Else AddChar(E, Raw[K], True);
+          Inc(K);
+        End;
+        E.Have := True;
+      End
       Else If Raw[K] = '(' Then
       Begin
         If (K + 1 <= Length(Raw)) And (Raw[K + 1] = '(') Then
@@ -2403,7 +3432,7 @@ Begin
           End;
           Inner := Copy(Raw, A, B - A - 2);
           ExpInit(E2, Nil, True);
-          ExpandInto(E2, Inner, False);
+          ExpandInto(E2, ' ' + Inner, False);
           AppendValue(E, IntStr(ArithEval(E2.S)), DQ);
           K := B - 1;
         End
@@ -2437,6 +3466,9 @@ Begin
         End;
         Inner := Copy(Raw, A, B - A - 1);
         If (Inner = '@') Or (Inner = '*') Then AtSec := True;
+        If BashMode And (Length(Inner) > 3) And
+           ((Copy(Inner, Length(Inner) - 2, 3) = '[@]') Or
+            (Copy(Inner, Length(Inner) - 2, 3) = '[*]')) Then AtSec := True;
         ParamExpand(E, Inner, DQ);
         K := B - 1;
       End
@@ -2513,9 +3545,265 @@ Begin
   End;
 End;
 
-Procedure ExpandWord(Const Raw : String; Dst : PArgs);
-Var E : TExp;
+{ ----- accolades : a{b,c}d, {1..5}, {a..e}, {01..10..2} ----- }
+
+{ saute le contenu entre guillemets / ${..} / $(..) a partir de I (sur le
+  caractere d'ouverture) ; rend l'indice du dernier caractere saute }
+Function BraceSkip(Const R : String; I : LongInt) : LongInt;
+Var C : Char; Dp : LongInt;
 Begin
+  C := R[I];
+  If C = '\' Then
+  Begin
+    BraceSkip := I + 1;
+    Exit;
+  End;
+  If C = '''' Then
+  Begin
+    Inc(I);
+    While (I <= Length(R)) And (R[I] <> '''') Do Inc(I);
+    BraceSkip := I;
+    Exit;
+  End;
+  If C = '"' Then
+  Begin
+    Inc(I);
+    While (I <= Length(R)) And (R[I] <> '"') Do
+    Begin
+      If R[I] = '\' Then Inc(I);
+      Inc(I);
+    End;
+    BraceSkip := I;
+    Exit;
+  End;
+  If (C = '$') And (I < Length(R)) Then
+  Begin
+    If R[I + 1] = '{' Then
+    Begin
+      Dp := 0;
+      Inc(I);
+      While I <= Length(R) Do
+      Begin
+        If R[I] = '{' Then Inc(Dp)
+        Else If R[I] = '}' Then
+        Begin
+          Dec(Dp);
+          If Dp = 0 Then Break;
+        End
+        Else If R[I] = '\' Then Inc(I);
+        Inc(I);
+      End;
+      BraceSkip := I;
+      Exit;
+    End;
+    If (R[I + 1] = '(') And (I + 7 <= Length(R)) And (R[I + 2] = #1) Then
+    Begin
+      BraceSkip := I + 7;
+      Exit;
+    End;
+  End;
+  BraceSkip := I;
+End;
+
+Procedure BraceSeq(Const Body : String; Var Items : TArgs; Var Ok : Boolean);
+Var P1, P2, K : LongInt; A, B, Stp : String; X, Y, St, W, V : LongInt;
+    Num : Boolean; Pad : Boolean; T : String; C : Char;
+Begin
+  Ok := False;
+  P1 := Pos('..', Body);
+  If P1 = 0 Then Exit;
+  A := Copy(Body, 1, P1 - 1);
+  T := Copy(Body, P1 + 2, 255);
+  P2 := Pos('..', T);
+  Stp := '';
+  If P2 > 0 Then
+  Begin
+    B := Copy(T, 1, P2 - 1);
+    Stp := Copy(T, P2 + 2, 255);
+  End
+  Else B := T;
+  St := 1;
+  If Stp <> '' Then
+  Begin
+    If Not StrInt(Stp, St) Then Exit;
+    If St < 0 Then St := -St;
+    If St = 0 Then St := 1;
+  End;
+  If StrInt(A, X) And StrInt(B, Y) And (A <> '') And (B <> '') Then
+  Begin
+    W := 0;
+    Pad := False;
+    If (Length(A) > 1) And
+       ((A[1] = '0') Or ((A[1] = '-') And (A[2] = '0'))) Then
+      Pad := True;
+    If (Length(B) > 1) And
+       ((B[1] = '0') Or ((B[1] = '-') And (B[2] = '0'))) Then
+      Pad := True;
+    If Pad Then
+    Begin
+      W := Length(A);
+      If Length(B) > W Then W := Length(B);
+    End;
+    V := X;
+    While True Do
+    Begin
+      T := IntStr(V);
+      If Pad Then
+        While Length(T) < W Do
+          If T[1] = '-' Then T := '-0' + Copy(T, 2, 255) Else T := '0' + T;
+      ArgsAdd(Items, T);
+      If Items.N > 1000 Then Break;
+      If X <= Y Then
+      Begin
+        V := V + St;
+        If V > Y Then Break;
+      End
+      Else
+      Begin
+        V := V - St;
+        If V < Y Then Break;
+      End;
+    End;
+    Ok := True;
+    Exit;
+  End;
+  If (Length(A) = 1) And (Length(B) = 1) And Not StrInt(A, X) Then
+  Begin
+    X := Ord(A[1]);
+    Y := Ord(B[1]);
+    V := X;
+    While True Do
+    Begin
+      C := Chr(V);
+      ArgsAdd(Items, C);
+      If X <= Y Then
+      Begin
+        V := V + St;
+        If V > Y Then Break;
+      End
+      Else
+      Begin
+        V := V - St;
+        If V < Y Then Break;
+      End;
+    End;
+    Ok := True;
+  End;
+End;
+
+Procedure BraceExpand(Const Raw : String; Var Out : TArgs; Depth : LongInt);
+Var I, J, Dp, NC, K, P0 : LongInt; C, C2 : Char;
+    Commas : Array[0..63] Of LongInt;
+    Pre, Post, Body : String; Items : TArgs; Ok : Boolean;
+Begin
+  If (Depth > 12) Or (Out.N >= MAXARGS - 8) Then
+  Begin
+    ArgsAdd(Out, Raw);
+    Exit;
+  End;
+  I := 1;
+  While I <= Length(Raw) Do
+  Begin
+    C := Raw[I];
+    If (C = '\') Or (C = '''') Or (C = '"') Or (C = '$') Then
+    Begin
+      I := BraceSkip(Raw, I) + 1;
+      Continue;
+    End;
+    If C = '{' Then
+    Begin
+      Dp := 1;
+      J := I + 1;
+      NC := 0;
+      While (J <= Length(Raw)) And (Dp > 0) Do
+      Begin
+        C2 := Raw[J];
+        If (C2 = '\') Or (C2 = '''') Or (C2 = '"') Or (C2 = '$') Then
+          J := BraceSkip(Raw, J)
+        Else If C2 = '{' Then Inc(Dp)
+        Else If C2 = '}' Then Dec(Dp)
+        Else If (C2 = ',') And (Dp = 1) And (NC < 63) Then
+        Begin
+          Commas[NC] := J;
+          Inc(NC);
+        End;
+        If Dp > 0 Then Inc(J);
+      End;
+      If Dp = 0 Then
+      Begin
+        Pre := Copy(Raw, 1, I - 1);
+        Post := Copy(Raw, J + 1, 255);
+        Body := Copy(Raw, I + 1, J - I - 1);
+        If NC > 0 Then
+        Begin
+          P0 := I + 1;
+          For K := 0 To NC Do
+          Begin
+            If K < NC Then
+              BraceExpand(Pre + Copy(Raw, P0, Commas[K] - P0) + Post, Out,
+                          Depth + 1)
+            Else
+              BraceExpand(Pre + Copy(Raw, P0, J - P0) + Post, Out, Depth + 1);
+            If K < NC Then P0 := Commas[K] + 1;
+          End;
+          Exit;
+        End;
+        ArgsInit(Items);
+        BraceSeq(Body, Items, Ok);
+        If Ok Then
+        Begin
+          For K := 0 To Items.N - 1 Do
+            BraceExpand(Pre + Items.It[K]^ + Post, Out, Depth + 1);
+          ArgsFree(Items);
+          Exit;
+        End;
+        ArgsFree(Items);
+      End;
+    End;
+    Inc(I);
+  End;
+  ArgsAdd(Out, Raw);
+End;
+
+Function HasBrace(Const R : String) : Boolean;
+Var I : LongInt;
+Begin
+  HasBrace := False;
+  I := 1;
+  While I <= Length(R) Do
+  Begin
+    If (R[I] = '\') Or (R[I] = '''') Or (R[I] = '"') Or (R[I] = '$') Then
+      I := BraceSkip(R, I)
+    Else If R[I] = '{' Then
+    Begin
+      HasBrace := True;
+      Exit;
+    End;
+    Inc(I);
+  End;
+End;
+
+Procedure ExpandWord(Const Raw : String; Dst : PArgs);
+Var E : TExp; B : TArgs; I : LongInt;
+Begin
+  If BashMode And (Pos('{', Raw) > 0) Then
+    If HasBrace(Raw) Then
+    Begin
+      ArgsInit(B);
+      BraceExpand(Raw, B, 0);
+      If B.N > 1 Then
+      Begin
+        For I := 0 To B.N - 1 Do
+        Begin
+          ExpInit(E, Dst, False);
+          ExpandInto(E, B.It[I]^, False);
+          FinishField(E, False);
+        End;
+        ArgsFree(B);
+        Exit;
+      End;
+      ArgsFree(B);
+    End;
   ExpInit(E, Dst, False);
   ExpandInto(E, Raw, False);
   FinishField(E, False);
@@ -2642,7 +3930,8 @@ Begin
   While SysReadDir(D, Name, Ino) Do
   Begin
     Hidden := (Name <> '') And (Name[1] = '.');
-    If Hidden And ((Comp[1] <> '.') Or (CF[1] = '1')) Then Continue;
+    If Hidden And Not DotGlob And ((Comp[1] <> '.') Or (CF[1] = '1')) Then
+      Continue;
     If (Name = '.') Or (Name = '..') Then Continue;
     If PatMatch(Comp, CF, Name) Then ArgsAdd(Tmp, Name);
   End;
@@ -2669,32 +3958,188 @@ Begin
   GlobRec('', S, F, 1, Dst, Found);
   If Found = 0 Then
   Begin
+    If NullGlob Then Exit;
+    If FailGlob Then
+    Begin
+      ShErr('no match: ' + S);
+      Exit;
+    End;
     { aucun fichier : le mot reste tel quel }
     U := S;
     ArgsAdd(Dst^, U);
   End;
 End;
 
-{ ---------- arithmetique : $(( )) ---------- }
+{$I REGEX.INC}
+
+{ ---------- arithmetique : $(( )), (( )), let ---------- }
 
 Var
   ArS : String;
   ArP : LongInt;
   ArErr : Boolean;
+  ArNoEval : LongInt;                  { > 0 : sans effet (branche non prise) }
+  ArDepth : LongInt;
+  ArFailed : Boolean;                  { derniere evaluation en erreur }
 
-Function ArExpr(MinPrec : LongInt) : LongInt; Forward;
+Function ArComma : LongInt; Forward;
+Function ArTernary : LongInt; Forward;
+Function ElemName(Const N, Sub : String) : String; Forward;
 
 Procedure ArSkip;
 Begin
-  While (ArP <= Length(ArS)) And ((ArS[ArP] = ' ') Or (ArS[ArP] = #9)) Do
+  While (ArP <= Length(ArS)) And ((ArS[ArP] = ' ') Or (ArS[ArP] = #9) Or
+        (ArS[ArP] = #10)) Do
     Inc(ArP);
 End;
 
-Function ArPrimary : LongInt;
-Var V, K : LongInt; N, Tmp : String; C : Char;
+Function ArDigit(C : Char) : LongInt;
+Begin
+  ArDigit := -1;
+  If (C >= '0') And (C <= '9') Then ArDigit := Ord(C) - 48
+  Else If (C >= 'a') And (C <= 'z') Then ArDigit := Ord(C) - 87
+  Else If (C >= 'A') And (C <= 'Z') Then ArDigit := Ord(C) - 29
+  Else If C = '@' Then ArDigit := 62
+  Else If C = '_' Then ArDigit := 63;
+End;
+
+{ valeur numerique du texte d'une variable (evaluee comme expression) }
+Function ArValueOf(Const Nm : String) : LongInt;
+Var T : String; V : LongInt;
+Begin
+  ArValueOf := 0;
+  If Not GetVar(Nm, T) Then
+  Begin
+    If OptU Then
+    Begin
+      ShErr(Nm + ': ' + Msg(mUnbound));
+      ArErr := True;
+    End;
+    Exit;
+  End;
+  If T = '' Then Exit;
+  If StrInt(T, V) And ((T[1] <> '0') Or (Length(T) = 1)) Then
+  Begin
+    ArValueOf := V;
+    Exit;
+  End;
+  If ArDepth > 12 Then
+  Begin
+    ArErr := True;
+    Exit;
+  End;
+  Inc(ArDepth);
+  ArValueOf := ArithEval(T);
+  Dec(ArDepth);
+End;
+
+{ lit un nombre : decimal, 0x.., 0.. (octal), base#chiffres }
+Function ArNumber : LongInt;
+Var V, Base, D, Start : LongInt; C : Char;
+Begin
+  V := 0;
+  Start := ArP;
+  If (ArS[ArP] = '0') And (ArP < Length(ArS)) And
+     ((ArS[ArP + 1] = 'x') Or (ArS[ArP + 1] = 'X')) Then
+  Begin
+    ArP := ArP + 2;
+    While (ArP <= Length(ArS)) And (ArDigit(ArS[ArP]) >= 0) And
+          (ArDigit(ArS[ArP]) < 16) Do
+    Begin
+      V := V * 16 + ArDigit(ArS[ArP]);
+      Inc(ArP);
+    End;
+    ArNumber := V;
+    Exit;
+  End;
+  While (ArP <= Length(ArS)) And (ArS[ArP] >= '0') And (ArS[ArP] <= '9') Do
+  Begin
+    V := V * 10 + Ord(ArS[ArP]) - 48;
+    Inc(ArP);
+  End;
+  If (ArP <= Length(ArS)) And (ArS[ArP] = '#') And (V >= 2) And (V <= 64) Then
+  Begin
+    Base := V;
+    V := 0;
+    Inc(ArP);
+    While (ArP <= Length(ArS)) And (ArDigit(ArS[ArP]) >= 0) And
+          (ArDigit(ArS[ArP]) < Base) Do
+    Begin
+      V := V * Base + ArDigit(ArS[ArP]);
+      Inc(ArP);
+    End;
+    ArNumber := V;
+    Exit;
+  End;
+  If (ArS[Start] = '0') And (Start < ArP - 1) Then
+  Begin
+    { octal }
+    V := 0;
+    D := Start;
+    While D < ArP Do
+    Begin
+      C := ArS[D];
+      If C > '7' Then ArErr := True;
+      V := V * 8 + Ord(C) - 48;
+      Inc(D);
+    End;
+  End;
+  ArNumber := V;
+End;
+
+{ operateur d'affectation en ArP ? rend sa longueur (0 : aucun) et l'op }
+Function ArAssignOp(Var Op : String) : LongInt;
+Var C2, C3 : Char; L : LongInt;
+Begin
+  ArAssignOp := 0;
+  Op := '';
+  If ArP > Length(ArS) Then Exit;
+  If ArP < Length(ArS) Then C2 := ArS[ArP + 1] Else C2 := #0;
+  If ArP + 1 < Length(ArS) Then C3 := ArS[ArP + 2] Else C3 := #0;
+  Case ArS[ArP] Of
+    '=' : If C2 <> '=' Then Begin Op := '='; ArAssignOp := 1; End;
+    '+', '-', '*', '/', '%', '&', '^', '|' :
+      If C2 = '=' Then Begin Op := ArS[ArP]; ArAssignOp := 2; End;
+    '<' : If (C2 = '<') And (C3 = '=') Then
+          Begin Op := '<<'; ArAssignOp := 3; End;
+    '>' : If (C2 = '>') And (C3 = '=') Then
+          Begin Op := '>>'; ArAssignOp := 3; End;
+  End;
+  If (Op = '*') And False Then L := 0;
+End;
+
+Function ArApply(Const Op : String; L, R : LongInt) : LongInt;
+Begin
+  ArApply := R;
+  If Op = '+' Then ArApply := L + R
+  Else If Op = '-' Then ArApply := L - R
+  Else If Op = '*' Then ArApply := L * R
+  Else If (Op = '/') Or (Op = '%') Then
+  Begin
+    If R = 0 Then
+    Begin
+      If ArNoEval = 0 Then
+      Begin
+        ShErr(Msg(mDivZero));
+        ArErr := True;
+      End;
+      ArApply := 0;
+      Exit;
+    End;
+    If Op = '/' Then ArApply := L Div R Else ArApply := L Mod R;
+  End
+  Else If Op = '&' Then ArApply := L And R
+  Else If Op = '|' Then ArApply := L Or R
+  Else If Op = '^' Then ArApply := L Xor R
+  Else If Op = '<<' Then ArApply := L Shl R
+  Else If Op = '>>' Then ArApply := L Shr R;
+End;
+
+Function ArUnary : LongInt;
+Var V, K, Old, L, Depth : LongInt; N, Sub, Nm, Op : String; C : Char;
 Begin
   ArSkip;
-  ArPrimary := 0;
+  ArUnary := 0;
   If ArP > Length(ArS) Then
   Begin
     ArErr := True;
@@ -2704,69 +4149,75 @@ Begin
   If C = '(' Then
   Begin
     Inc(ArP);
-    V := ArExpr(0);
+    V := ArComma;
     ArSkip;
     If (ArP <= Length(ArS)) And (ArS[ArP] = ')') Then Inc(ArP)
     Else ArErr := True;
-    ArPrimary := V;
+    ArUnary := V;
     Exit;
   End;
-  If C = '-' Then
+  If (C = '+') Or (C = '-') Then
   Begin
+    If (ArP < Length(ArS)) And (ArS[ArP + 1] = C) Then
+    Begin
+      { ++x / --x }
+      ArP := ArP + 2;
+      ArSkip;
+      N := '';
+      While (ArP <= Length(ArS)) And IsNameCh(Ord(ArS[ArP])) Do
+      Begin
+        N := N + ArS[ArP];
+        Inc(ArP);
+      End;
+      Sub := '';
+      If (ArP <= Length(ArS)) And (ArS[ArP] = '[') Then
+      Begin
+        Depth := 1;
+        K := ArP + 1;
+        While (K <= Length(ArS)) And (Depth > 0) Do
+        Begin
+          If ArS[K] = '[' Then Inc(Depth)
+          Else If ArS[K] = ']' Then Dec(Depth);
+          Inc(K);
+        End;
+        Sub := Copy(ArS, ArP + 1, K - ArP - 2);
+        ArP := K;
+        Nm := ElemName(N, Sub);
+      End
+      Else Nm := N;
+      If N = '' Then
+      Begin
+        ArErr := True;
+        Exit;
+      End;
+      V := ArValueOf(Nm);
+      If C = '+' Then Inc(V) Else Dec(V);
+      If ArNoEval = 0 Then SetVar(Nm, IntStr(V));
+      ArUnary := V;
+      Exit;
+    End;
     Inc(ArP);
-    ArPrimary := -ArPrimary;
-    Exit;
-  End;
-  If C = '+' Then
-  Begin
-    Inc(ArP);
+    V := ArUnary;
+    If C = '-' Then ArUnary := -V Else ArUnary := V;
     Exit;
   End;
   If C = '!' Then
   Begin
     Inc(ArP);
-    V := ArPrimary;
-    If V = 0 Then ArPrimary := 1 Else ArPrimary := 0;
+    V := ArUnary;
+    If V = 0 Then ArUnary := 1 Else ArUnary := 0;
     Exit;
   End;
   If C = '~' Then
   Begin
     Inc(ArP);
-    V := ArPrimary;
-    ArPrimary := Not V;
+    V := ArUnary;
+    ArUnary := V Xor -1;
     Exit;
   End;
   If (C >= '0') And (C <= '9') Then
   Begin
-    V := 0;
-    If (C = '0') And (ArP < Length(ArS)) And
-       ((ArS[ArP + 1] = 'x') Or (ArS[ArP + 1] = 'X')) Then
-    Begin
-      ArP := ArP + 2;
-      While (ArP <= Length(ArS)) And (UpCase(ArS[ArP]) In ['0'..'9', 'A'..'F'])
-      Do
-      Begin
-        C := UpCase(ArS[ArP]);
-        If C <= '9' Then V := V * 16 + Ord(C) - 48
-        Else V := V * 16 + Ord(C) - 55;
-        Inc(ArP);
-      End;
-    End
-    Else If (C = '0') Then
-    Begin
-      While (ArP <= Length(ArS)) And (ArS[ArP] >= '0') And (ArS[ArP] <= '7') Do
-      Begin
-        V := V * 8 + Ord(ArS[ArP]) - 48;
-        Inc(ArP);
-      End;
-    End
-    Else
-      While (ArP <= Length(ArS)) And (ArS[ArP] >= '0') And (ArS[ArP] <= '9') Do
-      Begin
-        V := V * 10 + Ord(ArS[ArP]) - 48;
-        Inc(ArP);
-      End;
-    ArPrimary := V;
+    ArUnary := ArNumber;
     Exit;
   End;
   If IsNameCh(Ord(C)) Then
@@ -2777,37 +4228,95 @@ Begin
       N := N + ArS[ArP];
       Inc(ArP);
     End;
-    ArSkip;
-    If (ArP <= Length(ArS)) And (ArS[ArP] = '=') And
-       ((ArP = Length(ArS)) Or (ArS[ArP + 1] <> '=')) Then
+    Nm := N;
+    If (ArP <= Length(ArS)) And (ArS[ArP] = '[') Then
     Begin
-      Inc(ArP);
-      V := ArExpr(0);
-      SetVar(N, IntStr(V));
-      ArPrimary := V;
+      Depth := 1;
+      K := ArP + 1;
+      While (K <= Length(ArS)) And (Depth > 0) Do
+      Begin
+        If ArS[K] = '[' Then Inc(Depth)
+        Else If ArS[K] = ']' Then Dec(Depth);
+        Inc(K);
+      End;
+      Sub := Copy(ArS, ArP + 1, K - ArP - 2);
+      ArP := K;
+      Nm := ElemName(N, Sub);
+    End;
+    ArSkip;
+    { affectation }
+    L := ArAssignOp(Op);
+    If L > 0 Then
+    Begin
+      ArP := ArP + L;
+      V := ArTernary;
+      If Op <> '=' Then V := ArApply(Op, ArValueOf(Nm), V);
+      If ArNoEval = 0 Then
+      Begin
+        If Not SetVar(Nm, IntStr(V)) Then ArErr := True;
+      End;
+      ArUnary := V;
       Exit;
     End;
-    GetVar(N, Tmp);
-    If Not StrInt(Tmp, V) Then V := 0;
-    ArPrimary := V;
+    { x++ x-- }
+    If (ArP < Length(ArS)) And ((ArS[ArP] = '+') Or (ArS[ArP] = '-')) And
+       (ArS[ArP + 1] = ArS[ArP]) Then
+    Begin
+      Old := ArValueOf(Nm);
+      If ArNoEval = 0 Then
+        If ArS[ArP] = '+' Then SetVar(Nm, IntStr(Old + 1))
+        Else SetVar(Nm, IntStr(Old - 1));
+      ArP := ArP + 2;
+      ArUnary := Old;
+      Exit;
+    End;
+    ArUnary := ArValueOf(Nm);
     Exit;
   End;
   ArErr := True;
   Inc(ArP);
 End;
 
+Function ArPow : LongInt;
+Var L, R, V, K : LongInt;
+Begin
+  L := ArUnary;
+  ArSkip;
+  If (ArP < Length(ArS)) And (ArS[ArP] = '*') And (ArS[ArP + 1] = '*') Then
+  Begin
+    ArP := ArP + 2;
+    R := ArPow;
+    V := 1;
+    If R < 0 Then
+    Begin
+      If ArNoEval = 0 Then
+      Begin
+        ShErr('exponent less than 0');
+        ArErr := True;
+      End;
+      ArPow := 0;
+      Exit;
+    End;
+    For K := 1 To R Do V := V * L;
+    ArPow := V;
+    Exit;
+  End;
+  ArPow := L;
+End;
+
 { niveaux : 1 || ; 2 && ; 3 | ; 4 ^ ; 5 & ; 6 == != ; 7 < <= > >= ;
   8 << >> ; 9 + - ; 10 * / % }
 Function ArExpr(MinPrec : LongInt) : LongInt;
-Var L, R, Prec : LongInt; C, C2 : Char; Op : String;
+Var L, R, Prec : LongInt; C, C2, C3 : Char; Op : String;
 Begin
-  L := ArPrimary;
+  L := ArPow;
   While True Do
   Begin
     ArSkip;
     If ArP > Length(ArS) Then Break;
     C := ArS[ArP];
     If ArP < Length(ArS) Then C2 := ArS[ArP + 1] Else C2 := #0;
+    If ArP + 1 < Length(ArS) Then C3 := ArS[ArP + 2] Else C3 := #0;
     Op := C;
     If (C2 = C) And (C In ['|', '&', '<', '>', '=']) Then Op := C + C2
     Else If (C2 = '=') And (C In ['!', '<', '>']) Then Op := C + C2;
@@ -2822,55 +4331,132 @@ Begin
       Prec := 7
     Else If (Op = '<<') Or (Op = '>>') Then Prec := 8
     Else If (Op = '+') Or (Op = '-') Then Prec := 9
-    Else If (Op = '*') Or (Op = '/') Or (Op = '%') Then Prec := 10;
+    Else If ((Op = '*') And (C2 <> '*')) Or (Op = '/') Or (Op = '%') Then
+      Prec := 10;
+    { operateur compose (+= <<= ...) : laisse a l'affectation }
+    If (Prec > 0) And (Length(Op) = 1) And (C2 = '=') And
+       (C In ['+', '-', '*', '/', '%', '&', '^', '|']) Then Prec := 0;
+    If (Prec > 0) And (Length(Op) = 2) And (C3 = '=') And
+       ((Op = '<<') Or (Op = '>>')) Then Prec := 0;
     If (Prec = 0) Or (Prec < MinPrec) Then Break;
     ArP := ArP + Length(Op);
+    If (Op = '||') And (L <> 0) Then
+    Begin
+      Inc(ArNoEval);
+      R := ArExpr(Prec + 1);
+      Dec(ArNoEval);
+      L := 1;
+      Continue;
+    End;
+    If (Op = '&&') And (L = 0) Then
+    Begin
+      Inc(ArNoEval);
+      R := ArExpr(Prec + 1);
+      Dec(ArNoEval);
+      Continue;
+    End;
     R := ArExpr(Prec + 1);
     If Op = '||' Then L := Ord((L <> 0) Or (R <> 0))
     Else If Op = '&&' Then L := Ord((L <> 0) And (R <> 0))
-    Else If Op = '|' Then L := L Or R
-    Else If Op = '^' Then L := L Xor R
-    Else If Op = '&' Then L := L And R
     Else If Op = '==' Then L := Ord(L = R)
     Else If Op = '!=' Then L := Ord(L <> R)
     Else If Op = '<' Then L := Ord(L < R)
     Else If Op = '<=' Then L := Ord(L <= R)
     Else If Op = '>' Then L := Ord(L > R)
     Else If Op = '>=' Then L := Ord(L >= R)
-    Else If Op = '<<' Then L := L Shl R
-    Else If Op = '>>' Then L := L Shr R
-    Else If Op = '+' Then L := L + R
-    Else If Op = '-' Then L := L - R
-    Else If Op = '*' Then L := L * R
-    Else If (Op = '/') Or (Op = '%') Then
-    Begin
-      If R = 0 Then
-      Begin
-        ShErr(Msg(mDivZero));
-        ArErr := True;
-        R := 1;
-      End;
-      If Op = '/' Then L := L Div R Else L := L Mod R;
-    End;
+    Else L := ArApply(Op, L, R);
   End;
   ArExpr := L;
 End;
 
+Function ArTernary : LongInt;
+Var C, A, B : LongInt;
+Begin
+  C := ArExpr(1);
+  ArSkip;
+  If (ArP <= Length(ArS)) And (ArS[ArP] = '?') Then
+  Begin
+    Inc(ArP);
+    If C = 0 Then Inc(ArNoEval);
+    A := ArTernary;
+    If C = 0 Then Dec(ArNoEval);
+    ArSkip;
+    If (ArP <= Length(ArS)) And (ArS[ArP] = ':') Then Inc(ArP)
+    Else ArErr := True;
+    If C <> 0 Then Inc(ArNoEval);
+    B := ArTernary;
+    If C <> 0 Then Dec(ArNoEval);
+    If C <> 0 Then ArTernary := A Else ArTernary := B;
+    Exit;
+  End;
+  ArTernary := C;
+End;
+
+Function ArComma : LongInt;
+Var V : LongInt;
+Begin
+  V := ArTernary;
+  ArSkip;
+  While (ArP <= Length(ArS)) And (ArS[ArP] = ',') Do
+  Begin
+    Inc(ArP);
+    V := ArTernary;
+    ArSkip;
+  End;
+  ArComma := V;
+End;
+
 Function ArithEval(Const S : String) : LongInt;
-Var SaveS : String; SaveP : LongInt; V : LongInt;
+Var SaveS : String; SaveP, SaveNo : LongInt; V : LongInt; SaveErr : Boolean;
 Begin
   SaveS := ArS;
   SaveP := ArP;
+  SaveNo := ArNoEval;
+  SaveErr := ArErr;
   ArS := S;
   ArP := 1;
   ArErr := False;
-  V := ArExpr(0);
+  ArNoEval := 0;
+  ArSkip;
+  If ArP > Length(ArS) Then V := 0
+  Else V := ArComma;
   ArSkip;
   If ArP <= Length(ArS) Then ArErr := True;
   If ArErr Then ShErr(Msg(mSyntax) + ': ' + S);
+  ArFailed := ArErr;
   ArS := SaveS;
   ArP := SaveP;
+  ArNoEval := SaveNo;
+  ArErr := SaveErr;
   ArithEval := V;
+End;
+
+{ nom interne d'un element de tableau : nom[cle] (cle numerique normalisee
+  pour un tableau indexe, texte pour un tableau associatif) }
+Function ElemName(Const N0, Sub : String) : String;
+Var K, I, Mx, X : LongInt; S, N : String;
+Begin
+  N := ResolveRef(N0);
+  If IsAssocName(N) Then
+  Begin
+    ElemName := N + '[' + ExpandStr(Sub) + ']';
+    Exit;
+  End;
+  S := ExpandStr(Sub);
+  K := ArithEval(S);
+  If K < 0 Then
+  Begin
+    { indice negatif : depuis le dernier element }
+    Mx := -1;
+    For I := 0 To MAXVARS - 1 Do
+      If Vars[I].Used And (Copy(Vars[I].Name, 1, Length(N) + 1) = N + '[') Then
+        If StrInt(Copy(Vars[I].Name, Length(N) + 2,
+                       Length(Vars[I].Name) - Length(N) - 2), X) Then
+          If X > Mx Then Mx := X;
+    K := Mx + 1 + K;
+    If K < 0 Then K := 0;
+  End;
+  ElemName := N + '[' + IntStr(K) + ']';
 End;
 
 { ---------- processus, travaux, terminal ---------- }
@@ -2949,6 +4535,7 @@ Begin
               Jobs[J].Dones[K] := True;
               Inc(Jobs[J].NDone);
             End;
+            Jobs[J].PStat[K] := StatusOf(St);
             If K = Jobs[J].NProc - 1 Then Jobs[J].Status := StatusOf(St);
             If Jobs[J].NDone >= Jobs[J].NProc Then Jobs[J].State := jDone
             Else If Jobs[J].State = jStopped Then Jobs[J].State := jRunning;
@@ -3142,6 +4729,36 @@ Begin
   HereDocFd := Fds[0];
 End;
 
+{ <<< mot : tube alimente par un fils avec le texte S }
+Function HereStrFd(Const S : String) : LongInt;
+Var Fds : Array[0..1] Of LongInt; Pid, P, K : LongInt;
+Begin
+  HereStrFd := -1;
+  If SysPipe(Fds[0]) < 0 Then Exit;
+  Pid := SysFork;
+  If Pid < 0 Then
+  Begin
+    SysClose(Fds[0]);
+    SysClose(Fds[1]);
+    Exit;
+  End;
+  If Pid = 0 Then
+  Begin
+    SysClose(Fds[0]);
+    SysSigAction(SIGPIPE, SIG_DFL, 0);
+    P := 0;
+    While P < Length(S) Do
+    Begin
+      K := LnxSys3(4, Fds[1], LongInt(@S[1]) + P, Length(S) - P);
+      If K <= 0 Then Break;
+      P := P + K;
+    End;
+    SysExit(0);
+  End;
+  SysClose(Fds[1]);
+  HereStrFd := Fds[0];
+End;
+
 Function ApplyRedirs(R : PRedir; Sv : PSaved) : Boolean;
 Var Fd, H, Op, X : LongInt; Path, Wd : String;
 Begin
@@ -3153,7 +4770,7 @@ Begin
     If Fd < 0 Then
     Begin
       If (Op = tLess) Or (Op = tLessAnd) Or (Op = tLessGreat) Or (Op = tDLess)
-      Then Fd := 0 Else Fd := 1;
+         Or (Op = tHereStr) Then Fd := 0 Else Fd := 1;
     End;
     If Sv <> Nil Then
       If Sv^.N <= MAXREDIR Then
@@ -3180,6 +4797,32 @@ Begin
             ApplyRedirs := False;
             Exit;
           End;
+        End;
+      tHereStr :
+        Begin
+          H := HereStrFd(ExpandStr(R^.Target) + #10);
+          If H < 0 Then
+          Begin
+            ApplyRedirs := False;
+            Exit;
+          End;
+        End;
+      tAndGreat, tAndDGreat :
+        Begin
+          Path := ExpandStr(R^.Target);
+          If Op = tAndDGreat Then
+            H := SysOpen(Path, O_WRONLY Or O_CREAT Or O_APPEND, 438)
+          Else H := SysOpen(Path, O_WRONLY Or O_CREAT Or O_TRUNC, 438);
+          If H < 0 Then
+          Begin
+            ShErr(Path + ': ' + SysErrorText(SysErrno));
+            ApplyRedirs := False;
+            Exit;
+          End;
+          SysDup2(H, 1);
+          SysDup2(H, 2);
+          SysClose(H);
+          H := -2;
         End;
       tDLess :
         Begin
@@ -3279,13 +4922,16 @@ Begin
 End;
 
 Const
-  NBUILTIN = 42;
+  NBUILTIN = 59;
   BuiltinNames : Array[1..NBUILTIN] Of String[10] = (
     ':', '.', 'source', 'alias', 'bg', 'break', 'builtin', 'cd', 'command',
     'continue', 'echo', 'eval', 'exec', 'exit', 'export', 'false', 'fg',
     'getopts', 'history', 'jobs', 'kill', 'local', 'pwd', 'read', 'readonly',
     'return', 'set', 'shift', 'test', '[', 'times', 'trap', 'true', 'type',
-    'ulimit', 'umask', 'unalias', 'unset', 'wait', 'hash', 'chdir', 'logout');
+    'ulimit', 'umask', 'unalias', 'unset', 'wait', 'hash', 'chdir', 'logout',
+    'declare', 'typeset', 'let', 'mapfile', 'readarray', 'printf', 'shopt',
+    'pushd', 'popd', 'dirs', 'complete', 'compgen', 'enable', 'disown',
+    'bind', 'caller', 'compopt');
 
 Function BuiltinId(Const N : String) : LongInt;
 Var I : LongInt;
@@ -3293,6 +4939,7 @@ Begin
   For I := 1 To NBUILTIN Do
     If BuiltinNames[I] = N Then
     Begin
+      If (I > 42) And Not BashMode Then Break;
       BuiltinId := I;
       Exit;
     End;
@@ -3394,15 +5041,171 @@ Type
     It : Array[0..31] Of TOldVal;
   End;
 
+{ affectation composee nom=(a b c) ; Items : elements separes par #2 }
+Procedure AssignCompound(Const Nm : String; Append : Boolean;
+    Const Items : String);
+Var Kind, Idx, K, J, E, Dp : LongInt; It, Tok2, Key : String; A : TArgs;
+    Rest : String; Fl : Boolean; Pend : String; HavePend : Boolean;
+Begin
+  Kind := ArrKind(Nm);
+  If Kind = 0 Then Kind := 1;
+  ArrDeclare(Nm, Kind);
+  If Not Append Then ArrClear(Nm);
+  Idx := 0;
+  If Append And (Kind = 1) Then Idx := ArrNextIdx(Nm);
+  HavePend := False;
+  Rest := Items;
+  While (Rest <> '') Or HavePend Do
+  Begin
+    If Rest = '' Then Break;
+    K := Pos(#2, Rest);
+    If K = 0 Then
+    Begin
+      It := Rest;
+      Rest := '';
+    End
+    Else
+    Begin
+      It := Copy(Rest, 1, K - 1);
+      Rest := Copy(Rest, K + 1, 2000);
+    End;
+    { [cle]=valeur }
+    If (It <> '') And (It[1] = '[') Then
+    Begin
+      Dp := 1;
+      J := 2;
+      While (J <= Length(It)) And (Dp > 0) Do
+      Begin
+        If It[J] = '[' Then Inc(Dp)
+        Else If It[J] = ']' Then Dec(Dp);
+        Inc(J);
+      End;
+      If (Dp = 0) And (J <= Length(It)) And ((It[J] = '=') Or
+         ((It[J] = '+') And (J < Length(It)) And (It[J + 1] = '='))) Then
+      Begin
+        Key := ElemName(Nm, Copy(It, 2, J - 3));
+        Tok2 := ExpandStr(Copy(It, J + 1 + Ord(It[J] = '+'), 255));
+        If It[J] = '+' Then
+        Begin
+          GetVar(Key, Pend);
+          Tok2 := Pend + Tok2;
+        End;
+        SetVar(Key, Tok2);
+        If Kind = 1 Then
+          If StrInt(Copy(Key, Length(Nm) + 2, Length(Key) - Length(Nm) - 2),
+                    E) Then Idx := E + 1;
+        Continue;
+      End;
+    End;
+    ArgsInit(A);
+    ExpandWord(It, @A);
+    For J := 0 To A.N - 1 Do
+    Begin
+      If Kind = 2 Then
+      Begin
+        If HavePend Then
+        Begin
+          SetVar(Nm + '[' + Pend + ']', A.It[J]^);
+          HavePend := False;
+        End
+        Else
+        Begin
+          Pend := A.It[J]^;
+          HavePend := True;
+        End;
+      End
+      Else
+      Begin
+        SetVar(Nm + '[' + IntStr(Idx) + ']', A.It[J]^);
+        Inc(Idx);
+      End;
+    End;
+    ArgsFree(A);
+  End;
+  If HavePend Then SetVar(Nm + '[' + Pend + ']', '');
+End;
+
+{ decoupe un mot d'affectation : base, indice (ou ''), += ?, valeur brute }
+Function SplitAssign(Const W : String; Var Base, Sub, Val_ : String;
+    Var Append : Boolean) : Boolean;
+Var K, Dp : LongInt;
+Begin
+  SplitAssign := False;
+  Base := '';
+  Sub := '';
+  Append := False;
+  K := 1;
+  While (K <= Length(W)) And IsNameCh(Ord(W[K])) Do
+  Begin
+    Base := Base + W[K];
+    Inc(K);
+  End;
+  If (K <= Length(W)) And (W[K] = '[') And BashMode Then
+  Begin
+    Dp := 1;
+    Inc(K);
+    While (K <= Length(W)) And (Dp > 0) Do
+    Begin
+      If W[K] = '[' Then Inc(Dp)
+      Else If W[K] = ']' Then Dec(Dp);
+      If Dp > 0 Then Sub := Sub + W[K];
+      Inc(K);
+    End;
+  End;
+  If (K < Length(W)) And (W[K] = '+') And (W[K + 1] = '=') Then
+  Begin
+    Append := True;
+    Inc(K);
+  End;
+  If (K > Length(W)) Or (W[K] <> '=') Then Exit;
+  Val_ := Copy(W, K + 1, 2000);
+  SplitAssign := True;
+End;
+
 Procedure DoAssign(N : PNode; Var O : TOlds; Save : Boolean);
-Var W : PWd; K, I : LongInt; Nm, V : String;
+Var W : PWd; K, I : LongInt; Nm, V, Sub, Raw, Cur, EN : String; App : Boolean;
 Begin
   W := N^.Words;
   While (W <> Nil) And W^.IsAssign Do
   Begin
-    K := Pos('=', W^.S);
-    Nm := Copy(W^.S, 1, K - 1);
-    V := ExpandStr(Copy(W^.S, K + 1, 255));
+    If Not SplitAssign(W^.S, Nm, Sub, Raw, App) Then
+    Begin
+      W := W^.Next;
+      Continue;
+    End;
+    If (Raw <> '') And (Raw[1] = #5) Then
+    Begin
+      AssignCompound(ResolveRef(Nm), App, Copy(Raw, 2, 2000));
+      W := W^.Next;
+      Continue;
+    End;
+    V := ExpandStr(Raw);
+    Nm := ResolveRef(Nm);
+    If Sub <> '' Then
+    Begin
+      If ArrKind(Nm) = 0 Then
+      Begin
+        I := FindVar(Nm);
+        ArrDeclare(Nm, 1);
+      End;
+      EN := ElemName(Nm, Sub);
+      If App Then
+      Begin
+        GetVar(EN, Cur);
+        V := Cur + V;
+      End;
+      SetVar(EN, V);
+      W := W^.Next;
+      Continue;
+    End;
+    If App Then
+    Begin
+      GetVar(Nm, Cur);
+      I := FindVar(Nm);
+      If (I >= 0) And Vars[I].IntAttr Then
+        V := IntStr(ArithEval(Cur) + ArithEval(V))
+      Else V := Cur + V;
+    End;
     If Save And (O.N < 32) Then
     Begin
       O.It[O.N].Name := Nm;
@@ -3443,12 +5246,21 @@ Begin
 End;
 
 Function ExecFuncCall(F : LongInt; Var A : TArgs) : LongInt;
-Var SaveArr, SaveN, St, I : LongInt; Body : PNode;
+Var SaveArr, SaveN, St, I, SaveN2 : LongInt; Body : PNode;
 Begin
   SaveArr := PosArr;
   SaveN := NPos;
   PosSet(A, 1);
   Inc(InFunc);
+  If BashMode Then
+  Begin
+    ArrDeclare('FUNCNAME', 1);
+    If ArrCount('FUNCNAME') = 0 Then SetVar('FUNCNAME[0]', 'main');
+    For I := ArrCount('FUNCNAME') - 1 DownTo 0 Do
+      SetVar('FUNCNAME[' + IntStr(I + 1) + ']',
+             VarValue('FUNCNAME[' + IntStr(I) + ']'));
+    SetVar('FUNCNAME[0]', Funcs[F].Name);
+  End;
   If LocalFP < 31 Then
   Begin
     Inc(LocalFP);
@@ -3467,14 +5279,53 @@ Begin
     While LocalSP > LocalFrame[LocalFP] Do
     Begin
       Dec(LocalSP);
-      If LocalOld[LocalSP] = Nil Then UnsetVar(LocalName[LocalSP])
+      If Copy(LocalName[LocalSP], 1, 7) = '#clear:' Then
+        ArrClear(Copy(LocalName[LocalSP], 8, 60))
+      Else If LocalOld[LocalSP] = Nil Then
+      Begin
+        I := FindVar(LocalName[LocalSP]);
+        If I >= 0 Then
+        Begin
+          If Vars[I].Kind > 0 Then ArrClear(LocalName[LocalSP]);
+          Vars[I].Used := False;
+        End;
+      End
       Else
       Begin
-        SetVar(LocalName[LocalSP], LocalOld[LocalSP]^);
+        I := FindVar(LocalName[LocalSP]);
+        If I < 0 Then
+        Begin
+          SetVar(LocalName[LocalSP], '');
+          I := FindVar(LocalName[LocalSP]);
+        End;
+        If I >= 0 Then
+        Begin
+          Vars[I].Val := LocalOld[LocalSP]^;
+          Vars[I].Kind := LocalKd[LocalSP];
+          Vars[I].IntAttr := False;
+          Vars[I].CaseAttr := 0;
+          Vars[I].RO := False;
+          Vars[I].Ref := False;
+        End;
         FreeStr(LocalOld[LocalSP]);
       End;
     End;
     Dec(LocalFP);
+  End;
+  If BashMode Then
+  Begin
+    SaveN2 := ArrCount('FUNCNAME');
+    For I := 0 To SaveN2 - 2 Do
+      SetVar('FUNCNAME[' + IntStr(I) + ']',
+             VarValue('FUNCNAME[' + IntStr(I + 1) + ']'));
+    UnsetVar('FUNCNAME[' + IntStr(SaveN2 - 1) + ']');
+    If SaveN2 = 2 Then UnsetVar('FUNCNAME');
+    If (TrapCmd[35] <> Nil) And (TrapCmd[35]^ <> '') And Not InDebug Then
+    Begin
+      InDebug := True;
+      RunText(TrapCmd[35]^);
+      InDebug := False;
+    End;
   End;
   Dec(InFunc);
   PosClear;
@@ -3508,7 +5359,10 @@ Begin
   W := N^.Words;
   While W <> Nil Do
   Begin
-    If Not W^.IsAssign Then ExpandWord(W^.S, @A);
+    If W^.IsAssign Then
+    Else If BashMode And (Pos(#5, W^.S) > 0) And (A.N > 0) Then
+      ArgsAdd(A, W^.S)
+    Else ExpandWord(W^.S, @A);
     W := W^.Next;
   End;
   { alias : premier mot }
@@ -3556,7 +5410,9 @@ Begin
   Begin
     Special := (Id = 1) Or (Id = 2) Or (Id = 3) Or (Id = 6) Or (Id = 10) Or
                (Id = 12) Or (Id = 13) Or (Id = 14) Or (Id = 15) Or
-               (Id = 25) Or (Id = 26) Or (Id = 27) Or (Id = 32) Or (Id = 38);
+               (Id = 25) Or (Id = 26) Or (Id = 27) Or (Id = 32) Or (Id = 38)
+               Or (Id = 43) Or (Id = 44) Or (Id = 22) Or (Id = 45) Or
+               (Id = 46) Or (Id = 47) Or (Id = 49) Or (Id = 50) Or (Id = 51);
     Special := Special Or (Id = 12);
     DoAssign(N, Old, Not Special);
     If N^.Redirs <> Nil Then
@@ -3718,17 +5574,28 @@ Begin
 End;
 
 Function ExecCase(N : PNode) : LongInt;
-Var It : PNode; Wd : String;
+Var It : PNode; Wd : String; Fall : Boolean; St : LongInt;
 Begin
   Wd := ExpandStr(N^.Words^.S);
   It := N^.B;
   ExecCase := 0;
+  Fall := False;
+  St := 0;
   While It <> Nil Do
   Begin
-    If CaseMatch(Wd, It^.Words) Then
+    If Fall Or CaseMatch(Wd, It^.Words) Then
     Begin
-      ExecCase := ExecBody(It^.A);
-      Exit;
+      St := ExecBody(It^.A);
+      ExecCase := St;
+      If It^.Op = tSemiAmp Then Fall := True
+      Else If It^.Op = tDSemiAmp Then Fall := False
+      Else Exit;
+      If RetFlag <> 0 Then Exit;
+      If It^.Op = tDSemiAmp Then
+      Begin
+        It := It^.Next;
+        Continue;
+      End;
     End;
     It := It^.Next;
   End;
@@ -3762,13 +5629,139 @@ Begin
   End;
 End;
 
-Function ExecCommand(N : PNode; InChild : Boolean) : LongInt;
+
+Function ExecDBr(N : PNode) : LongInt; Forward;
+
+{ evalue une expression arithmetique brute (avec developpement des $) }
+Function ArithStr(Const Raw : String) : LongInt;
+Var E : TExp;
+Begin
+  ExpInit(E, Nil, True);
+  ExpandInto(E, ' ' + Raw, False);
+  ArithStr := ArithEval(E.S);
+End;
+
+Function ExecArith(N : PNode) : LongInt;
+Var V : LongInt;
+Begin
+  V := ArithStr(N^.Words^.S);
+  If ArFailed Then ExecArith := 1
+  Else If V <> 0 Then ExecArith := 0
+  Else ExecArith := 1;
+End;
+
+Function ExecArithFor(N : PNode) : LongInt;
+Var St, V : LongInt; Ini, Cnd, Stp : PWd; Done : Boolean;
+Begin
+  Ini := N^.Words;
+  Cnd := Ini^.Next;
+  Stp := Cnd^.Next;
+  St := 0;
+  If Ini^.S <> '' Then ArithStr(Ini^.S);
+  Inc(LoopDepth);
+  Done := False;
+  While Not Done Do
+  Begin
+    If Cnd^.S <> '' Then
+    Begin
+      V := ArithStr(Cnd^.S);
+      If (V = 0) Or ArFailed Then Break;
+    End;
+    St := ExecBody(N^.B);
+    If RetFlag <> 0 Then Break;
+    If BreakN > 0 Then
+    Begin
+      Dec(BreakN);
+      Break;
+    End;
+    If ContN > 0 Then
+    Begin
+      Dec(ContN);
+      If ContN > 0 Then Break;
+    End;
+    If IntFlag <> 0 Then Break;
+    If Stp^.S <> '' Then ArithStr(Stp^.S);
+  End;
+  Dec(LoopDepth);
+  ExecArithFor := St;
+End;
+
+Function ExecSelect(N : PNode) : LongInt;
+Var A : TArgs; W : PWd; I, St, X : LongInt; L, Pr : String; Redo : Boolean;
+Begin
+  ArgsInit(A);
+  If N^.Neg Then
+  Begin
+    W := N^.Words;
+    While W <> Nil Do
+    Begin
+      ExpandWord(W^.S, @A);
+      W := W^.Next;
+    End;
+  End
+  Else
+    For I := 1 To NPos Do ArgsAdd(A, PosGet(I));
+  St := 0;
+  Inc(LoopDepth);
+  Redo := True;
+  While True Do
+  Begin
+    If Redo Then
+      For I := 0 To A.N - 1 Do
+        Out(2, IntStr(I + 1) + ') ' + A.It[I]^ + #10);
+    Pr := '#? ';
+    If GetVarRaw('PS3', L) Then Pr := L;
+    Out(2, Pr);
+    If Not SysReadLine(0, L) Then
+    Begin
+      St := 1;
+      Break;
+    End;
+    SetVar('REPLY', L);
+    If L = '' Then
+    Begin
+      Redo := True;
+      Continue;
+    End;
+    Redo := False;
+    If StrInt(L, X) And (X >= 1) And (X <= A.N) Then
+      SetVar(N^.Name, A.It[X - 1]^)
+    Else SetVar(N^.Name, '');
+    St := ExecBody(N^.B);
+    If RetFlag <> 0 Then Break;
+    If BreakN > 0 Then
+    Begin
+      Dec(BreakN);
+      Break;
+    End;
+    If ContN > 0 Then
+    Begin
+      Dec(ContN);
+      If ContN > 0 Then Break;
+    End;
+    If IntFlag <> 0 Then Break;
+  End;
+  Dec(LoopDepth);
+  ArgsFree(A);
+  ExecSelect := St;
+End;
+
+Function ExecCommand1(N : PNode; InChild : Boolean) : LongInt;
 Var Sv : TSaved; St, I : LongInt;
 Begin
   Sv.N := 0;
   St := 0;
   Case N^.Kind Of
-    nSimple : St := ExecSimple(N, InChild);
+    nSimple :
+      Begin
+        If BashMode And (TrapCmd[34] <> Nil) And Not InDebug Then
+        Begin
+          InDebug := True;
+          RunText(TrapCmd[34]^);
+          InDebug := False;
+        End;
+        St := ExecSimple(N, InChild);
+      End;
     nSubshell :
       Begin
         If InChild Then
@@ -3802,7 +5795,7 @@ Begin
         If Not ApplyRedirs(N^.Redirs, @Sv) Then
         Begin
           RestoreRedirs(@Sv);
-          ExecCommand := 1;
+          ExecCommand1 := 1;
           Exit;
         End;
       Case N^.Kind Of
@@ -3825,13 +5818,26 @@ Begin
         nWhile : St := ExecWhile(N, False);
         nUntil : St := ExecWhile(N, True);
         nFor : St := ExecFor(N);
+        nArithFor : St := ExecArithFor(N);
+        nArith : St := ExecArith(N);
+        nDBr : St := ExecDBr(N);
+        nSelect : St := ExecSelect(N);
         nCase : St := ExecCase(N);
         nBrace : St := ExecBody(N^.A);
       End;
       If N^.Redirs <> Nil Then RestoreRedirs(@Sv);
     End;
   End;
-  ExecCommand := St;
+  ExecCommand1 := St;
+End;
+
+Function ExecCommand(N : PNode; InChild : Boolean) : LongInt;
+Var Mk : LongInt;
+Begin
+  Mk := NProcFds;
+  If N^.Line > 0 Then CurLine := N^.Line;
+  ExecCommand := ExecCommand1(N, InChild);
+  If NProcFds > Mk Then CloseProcFds(Mk);
 End;
 
 { execute un fils d'un tube : ne revient pas }
@@ -3842,9 +5848,25 @@ Begin
   CleanExit(St);
 End;
 
+{ $PIPESTATUS : N etats ; J = numero du travail (ou -1 / 1 processus) }
+Procedure SetPipeStatus(N, Last, Fail, J : LongInt);
+Var I : LongInt;
+Begin
+  ArrDeclare('PIPESTATUS', 1);
+  ArrClear('PIPESTATUS');
+  If (N = 1) Or (J < 0) Then
+  Begin
+    SetVar('PIPESTATUS[0]', IntStr(Last));
+    Exit;
+  End;
+  For I := 0 To N - 1 Do
+    If I < 16 Then
+      SetVar('PIPESTATUS[' + IntStr(I) + ']', IntStr(Jobs[J].PStat[I]));
+End;
+
 Function ExecPipeline(P : PNode; Bg : Boolean) : LongInt;
 Var
-  C : PNode; N, I, J, Pid, Pgid, Prev, St, K : LongInt;
+  C : PNode; N, I, J, Pid, Pgid, Prev, St, K, Pf : LongInt;
   Fds : Array[0..1] Of LongInt;
 Begin
   N := 0;
@@ -3857,7 +5879,9 @@ Begin
   If N = 1 Then
   Begin
     St := ExecCommand(P^.A, False);
+    If BashMode Then SetPipeStatus(1, St, St, St);
     If P^.Neg Then St := Ord(St = 0);
+    NoErrChk := P^.Neg;
     ExecPipeline := St;
     Exit;
   End;
@@ -3907,7 +5931,16 @@ Begin
   End;
   GiveTerm(Pgid);
   St := JobWait(J);
+  If BashMode Then
+  Begin
+    Pf := 0;
+    For I := 0 To N - 1 Do
+      If (I < 16) And (Jobs[J].PStat[I] <> 0) Then Pf := Jobs[J].PStat[I];
+    SetPipeStatus(N, St, Pf, J);
+    If OptPipe And (Pf <> 0) Then St := Pf;
+  End;
   If P^.Neg Then St := Ord(St = 0);
+  NoErrChk := P^.Neg;
   ExecPipeline := St;
 End;
 
@@ -3923,19 +5956,29 @@ Begin
 End;
 
 Function ExecAndOr(N : PNode) : LongInt;
-Var P : PNode; St, Op : LongInt;
+Var P : PNode; St, Op : LongInt; Short, NE : Boolean;
 Begin
   P := N^.A;
+  Short := False;
+  NoErrChk := False;
   St := RunPipe(P);
+  NE := NoErrChk;
   While P^.Op <> 0 Do
   Begin
     Op := P^.Op;
     P := P^.Next;
     If ((Op = tAndIf) And (St = 0)) Or ((Op = tOrIf) And (St <> 0)) Then
+    Begin
+      NoErrChk := False;
       St := RunPipe(P);
+      NE := NoErrChk;
+    End
+    Else Short := True;
     If RetFlag <> 0 Then Break;
     If (BreakN > 0) Or (ContN > 0) Then Break;
   End;
+  AoShort := Short;
+  NoErrChk := NE;
   ExecAndOr := St;
 End;
 
@@ -3980,9 +6023,20 @@ Begin
     End
     Else St := ExecAndOr(It);
     LastStatus := St;
-    If OptE And (St <> 0) And (InCond = 0) And (RetFlag = 0) Then
+    If (St <> 0) And (InCond = 0) And (RetFlag = 0) And Not AoShort And
+       Not NoErrChk And Not It^.Bg Then
     Begin
-      If Not Interactive Then CleanExit(St);
+      If BashMode And (TrapCmd[33] <> Nil) And (TrapCmd[33]^ <> '') Then
+      Begin
+        If Not InErrTrap Then
+        Begin
+          InErrTrap := True;
+          RunText(TrapCmd[33]^);
+          InErrTrap := False;
+          LastStatus := St;
+        End;
+      End;
+      If OptE And Not Interactive Then CleanExit(St);
     End;
     If TrapAny <> 0 Then DoTraps;
     If (RetFlag <> 0) Or (BreakN > 0) Or (ContN > 0) Then Break;
@@ -4158,6 +6212,68 @@ Begin
   RunSubst := Buf;
 End;
 
+{ <(cmd) / >(cmd) : un fils execute cmd, relie a un tube ; le chemin rendu
+  designe l'autre extremite (/dev/fd/N ou /proc/self/fd/N) }
+Function ProcSubst(Idx : LongInt; IsIn : Boolean) : String;
+Var Fds : Array[0..1] Of LongInt; Pid, Body, Mine, St : LongInt; Pth : String;
+    T : TSysStat;
+Begin
+  ProcSubst := '';
+  Body := Subs[Idx];
+  If SysPipe(Fds[0]) < 0 Then Exit;
+  Pid := ForkProc(0, False);
+  If Pid < 0 Then
+  Begin
+    SysClose(Fds[0]);
+    SysClose(Fds[1]);
+    Exit;
+  End;
+  If Pid = 0 Then
+  Begin
+    If IsIn Then
+    Begin
+      SysClose(Fds[0]);
+      SysDup2(Fds[1], 1);
+      SysClose(Fds[1]);
+    End
+    Else
+    Begin
+      SysClose(Fds[1]);
+      SysDup2(Fds[0], 0);
+      SysClose(Fds[0]);
+    End;
+    RunString(Body + 4, MemL[0:Body]);
+    CleanExit(LastStatus);
+  End;
+  If IsIn Then
+  Begin
+    SysClose(Fds[1]);
+    Mine := Fds[0];
+  End
+  Else
+  Begin
+    SysClose(Fds[0]);
+    Mine := Fds[1];
+  End;
+  If NProcFds < 16 Then
+  Begin
+    ProcFds[NProcFds] := Mine;
+    Inc(NProcFds);
+  End;
+  If SysStat('/dev/fd', T) = 0 Then Pth := '/dev/fd/'
+  Else Pth := '/proc/self/fd/';
+  ProcSubst := Pth + IntStr(Mine);
+End;
+
+Procedure CloseProcFds(Mark : LongInt);
+Begin
+  While NProcFds > Mark Do
+  Begin
+    Dec(NProcFds);
+    SysClose(ProcFds[NProcFds]);
+  End;
+End;
+
 { ---------- commandes internes ---------- }
 
 Const
@@ -4179,6 +6295,13 @@ Begin
   End;
   U := S;
   For I := 1 To Length(U) Do U[I] := UpCase(U[I]);
+  If BashMode Then
+  Begin
+    If U = 'ERR' Then SigNum := 33
+    Else If U = 'DEBUG' Then SigNum := 34
+    Else If U = 'RETURN' Then SigNum := 35;
+    If (U = 'ERR') Or (U = 'DEBUG') Or (U = 'RETURN') Then Exit;
+  End;
   If Copy(U, 1, 3) = 'SIG' Then U := Copy(U, 4, 20);
   For I := 0 To NSIG - 1 Do
     If SigNames[I] = U Then
@@ -4476,6 +6599,13 @@ Begin
       K := FindFunc(A.It[I]^);
       If K >= 0 Then Funcs[K].Used := False;
     End
+    Else If BashMode And (Pos('[', A.It[I]^) > 0) And
+            (A.It[I]^[Length(A.It[I]^)] = ']') Then
+    Begin
+      K := Pos('[', A.It[I]^);
+      UnsetVar(ElemName(Copy(A.It[I]^, 1, K - 1),
+               Copy(A.It[I]^, K + 1, Length(A.It[I]^) - K - 1)));
+    End
     Else UnsetVar(A.It[I]^);
   End;
 End;
@@ -4501,6 +6631,11 @@ Begin
   For I := N + 1 To NPos Do
     MemL[0:PosArr + (I - N) * 4] := MemL[0:PosArr + I * 4];
   NPos := NPos - N;
+End;
+
+Function OnOff(B : Boolean) : String;
+Begin
+  If B Then OnOff := 'on' Else OnOff := 'off';
 End;
 
 Function BiSet(Var A : TArgs) : LongInt;
@@ -4536,10 +6671,35 @@ Begin
           'u' : OptU := On;
           'n' : OptN := On;
           'v' : OptV := On;
+          'f' : OptNoGlob := On;
+          'C' : OptNoClob := On;
+          'a' : OptAllExp := On;
           'o' :
             Begin
-              If (I + 1 < A.N) And (A.It[I + 1]^ = 'pipefail') Then Inc(I)
-              Else If I + 1 < A.N Then Inc(I);
+              If I + 1 < A.N Then
+              Begin
+                Inc(I);
+                If A.It[I]^ = 'pipefail' Then OptPipe := On
+                Else If A.It[I]^ = 'errexit' Then OptE := On
+                Else If A.It[I]^ = 'nounset' Then OptU := On
+                Else If A.It[I]^ = 'xtrace' Then OptX := On
+                Else If A.It[I]^ = 'verbose' Then OptV := On
+                Else If A.It[I]^ = 'noexec' Then OptN := On
+                Else If A.It[I]^ = 'noglob' Then OptNoGlob := On
+                Else If A.It[I]^ = 'noclobber' Then OptNoClob := On
+                Else If A.It[I]^ = 'allexport' Then OptAllExp := On;
+              End
+              Else
+              Begin
+                Say1('errexit       ' + Chr(9) + OnOff(OptE));
+                Say1('noclobber     ' + Chr(9) + OnOff(OptNoClob));
+                Say1('noexec        ' + Chr(9) + OnOff(OptN));
+                Say1('noglob        ' + Chr(9) + OnOff(OptNoGlob));
+                Say1('nounset       ' + Chr(9) + OnOff(OptU));
+                Say1('pipefail      ' + Chr(9) + OnOff(OptPipe));
+                Say1('verbose       ' + Chr(9) + OnOff(OptV));
+                Say1('xtrace        ' + Chr(9) + OnOff(OptX));
+              End;
             End;
         End;
     End
@@ -4560,14 +6720,20 @@ End;
 { ----- read ----- }
 Function BiRead(Var A : TArgs) : LongInt;
 Var
-  I, N, K, X, V : LongInt; Raw, Prompt : Boolean; Line, Ifs, Rest, Nm : String;
+  I, N, K, X, V, Fd, Idx : LongInt; Raw : Boolean; Line, Ifs, Rest, Nm : String;
   C : Char; Eof, Esc : Boolean; Pr : String; Names : TArgs; NChars : LongInt;
-  B : Array[0..3] Of Byte;
+  B : Array[0..3] Of Byte; ArrN : String; Delim : Char; Exact : Boolean;
+  Tmo : LongInt; Pf : TPollFd;
 Begin
   ArgsInit(Names);
   Raw := False;
   Pr := '';
   NChars := 0;
+  Fd := 0;
+  ArrN := '';
+  Delim := #10;
+  Exact := False;
+  Tmo := -1;
   I := 1;
   While I < A.N Do
   Begin
@@ -4582,18 +6748,57 @@ Begin
       Inc(I);
       StrInt(A.It[I]^, NChars);
     End
-    Else If A.It[I]^ = '-s' Then
+    Else If (A.It[I]^ = '-N') And (I + 1 < A.N) Then
+    Begin
+      Inc(I);
+      StrInt(A.It[I]^, NChars);
+      Exact := True;
+      Raw := True;
+    End
+    Else If (A.It[I]^ = '-a') And (I + 1 < A.N) Then
+    Begin
+      Inc(I);
+      ArrN := A.It[I]^;
+    End
+    Else If (A.It[I]^ = '-d') And (I + 1 < A.N) Then
+    Begin
+      Inc(I);
+      If A.It[I]^ = '' Then Delim := #0 Else Delim := A.It[I]^[1];
+    End
+    Else If (A.It[I]^ = '-u') And (I + 1 < A.N) Then
+    Begin
+      Inc(I);
+      StrInt(A.It[I]^, Fd);
+    End
+    Else If (A.It[I]^ = '-t') And (I + 1 < A.N) Then
+    Begin
+      Inc(I);
+      StrInt(A.It[I]^, Tmo);
+    End
+    Else If (A.It[I]^ = '-s') Or (A.It[I]^ = '-e') Then
     Else ArgsAdd(Names, A.It[I]^);
     Inc(I);
   End;
-  If Names.N = 0 Then ArgsAdd(Names, 'REPLY');
-  If (Pr <> '') And SysIsATty(0) Then Out(2, Pr);
+  If (Names.N = 0) And (ArrN = '') Then ArgsAdd(Names, 'REPLY');
+  If (Pr <> '') And SysIsATty(Fd) Then Out(2, Pr);
   Line := '';
   Eof := False;
   Esc := False;
   While True Do
   Begin
-    N := LnxSys3(3, 0, LongInt(@B), 1);
+    If Tmo >= 0 Then
+    Begin
+      Pf.Fd := Fd;
+      Pf.Events := 1;
+      Pf.REvents := 0;
+      If SysPoll(LongInt(@Pf), 1, Tmo * 1000) <= 0 Then
+      Begin
+        Eof := True;
+        Tmo := -2;
+        Break;
+      End;
+    End;
+    N := LnxSys3(3, Fd, LongInt(@B), 1);
     If N = -4 Then Continue;
     If N <= 0 Then
     Begin
@@ -4612,11 +6817,34 @@ Begin
       Esc := True;
       Continue;
     End;
-    If C = #10 Then Break;
+    If (C = Delim) And Not Exact Then Break;
     If Length(Line) < 254 Then Line := Line + C;
     If (NChars > 0) And (Length(Line) >= NChars) Then Break;
   End;
   If Not GetVarRaw('IFS', Ifs) Then Ifs := ' ' + #9 + #10;
+  If ArrN <> '' Then
+  Begin
+    { read -a : champs dans un tableau }
+    ArrDeclare(ArrN, 1);
+    ArrClear(ArrN);
+    Rest := Line;
+    Idx := 0;
+    While True Do
+    Begin
+      While (Rest <> '') And (Pos(Rest[1], Ifs) > 0) And
+            ((Rest[1] = ' ') Or (Rest[1] = #9) Or (Rest[1] = #10)) Do
+        Delete(Rest, 1, 1);
+      If Rest = '' Then Break;
+      X := 1;
+      While (X <= Length(Rest)) And (Pos(Rest[X], Ifs) = 0) Do Inc(X);
+      SetVar(ArrN + '[' + IntStr(Idx) + ']', Copy(Rest, 1, X - 1));
+      Inc(Idx);
+      Rest := Copy(Rest, X + 1, 255);
+    End;
+    ArgsFree(Names);
+    If Eof Then BiRead := 1 Else BiRead := 0;
+    Exit;
+  End;
   { decoupage en champs }
   Rest := Line;
   For K := 0 To Names.N - 1 Do
@@ -4644,7 +6872,8 @@ Begin
     End;
   End;
   ArgsFree(Names);
-  If Eof Then BiRead := 1 Else BiRead := 0;
+  If Tmo = -2 Then BiRead := 142
+  Else If Eof Then BiRead := 1 Else BiRead := 0;
 End;
 
 { ----- test ----- }
@@ -4872,15 +7101,213 @@ Begin
 End;
 
 { ----- trap ----- }
+
+{ ---------- [[ expression ]] ---------- }
+
+Var
+  DbCur : PWd;
+  DbErr : Boolean;
+
+Function DbOr : Boolean; Forward;
+
+Function DbIsOp(W : PWd; Const Op : String) : Boolean;
+Begin
+  DbIsOp := (W <> Nil) And W^.IsAssign And (W^.S = Op);
+End;
+
+Function DbBinWord(W : PWd) : Boolean;
+Begin
+  DbBinWord := False;
+  If W = Nil Then Exit;
+  If W^.IsAssign Then DbBinWord := (W^.S = '<') Or (W^.S = '>')
+  Else DbBinWord := (W^.S = '==') Or (W^.S = '=') Or (W^.S = '!=') Or
+    (W^.S = '=~') Or IsBinaryOp(W^.S);
+End;
+
+Function DbRegex(Const Txt : String; W : PWd) : Boolean;
+Var E : TExp; Pat : String; K, Prog, G : LongInt; T : String;
+Begin
+  DbRegex := False;
+  ExpInit(E, Nil, True);
+  ExpandInto(E, W^.S, False);
+  Pat := '';
+  For K := 1 To Length(E.S) Do
+  Begin
+    If (E.F[K] = '1') And (E.S[K] In ['.', '[', ']', '(', ')', '*', '+', '?',
+       '{', '}', '|', '^', '$', '\\']) Then Pat := Pat + '\\';
+    Pat := Pat + E.S[K];
+  End;
+  ReN := 0;
+  Prog := ReCompile(Pat, True, False);
+  If Prog < 0 Then
+  Begin
+    DbErr := True;
+    Exit;
+  End;
+  T := Txt;
+  If Not ReSearch(Prog, LongInt(@T[1]), Length(T), 0, True) Then
+  Begin
+    ArrClear('BASH_REMATCH');
+    Exit;
+  End;
+  ArrDeclare('BASH_REMATCH', 1);
+  ArrClear('BASH_REMATCH');
+  For G := 0 To ReProg[Prog].Y Do
+    If (G <= 9) And (ReCap[2 * G] >= 0) Then
+      SetVar('BASH_REMATCH[' + IntStr(G) + ']',
+             Copy(T, ReCap[2 * G] + 1, ReCap[2 * G + 1] - ReCap[2 * G]))
+    Else If G <= 9 Then SetVar('BASH_REMATCH[' + IntStr(G) + ']', '');
+  DbRegex := True;
+End;
+
+Function DbPrimary : Boolean;
+Var A, B, Op : String; W, R : PWd; Res : Boolean; X, Y : LongInt; E : TExp;
+Begin
+  DbPrimary := False;
+  If DbCur = Nil Then
+  Begin
+    DbErr := True;
+    Exit;
+  End;
+  If DbIsOp(DbCur, '(') Then
+  Begin
+    DbCur := DbCur^.Next;
+    Res := DbOr;
+    If DbIsOp(DbCur, ')') Then DbCur := DbCur^.Next Else DbErr := True;
+    DbPrimary := Res;
+    Exit;
+  End;
+  If (Not DbCur^.IsAssign) And (DbCur^.S = '!') Then
+  Begin
+    DbCur := DbCur^.Next;
+    DbPrimary := Not DbPrimary;
+    Exit;
+  End;
+  W := DbCur;
+  If (Not W^.IsAssign) And (Length(W^.S) = 2) And (W^.S[1] = '-') And
+     (W^.Next <> Nil) And Not DbBinWord(W^.Next) And Not W^.Next^.IsAssign Then
+  Begin
+    A := ExpandStr(W^.Next^.S);
+    DbCur := W^.Next^.Next;
+    If W^.S = '-v' Then
+    Begin
+      If Pos('[', A) > 0 Then
+        DbPrimary := VarSet(ElemName(Copy(A, 1, Pos('[', A) - 1),
+                       Copy(A, Pos('[', A) + 1, Length(A) - Pos('[', A) - 1)))
+      Else DbPrimary := VarSet(A);
+    End
+    Else If W^.S = '-R' Then DbPrimary := VarSet(A)
+    Else If W^.S = '-N' Then DbPrimary := TestUnary('-s', A)
+    Else If W^.S = '-a' Then DbPrimary := TestUnary('-e', A)
+    Else If W^.S = '-o' Then DbPrimary := False
+    Else If W^.S = '-S' Then DbPrimary := TestUnary('-p', A)
+    Else If IsUnaryOp(W^.S) Then DbPrimary := TestUnary(W^.S, A)
+    Else DbErr := True;
+    Exit;
+  End;
+  A := ExpandStr(W^.S);
+  If DbBinWord(W^.Next) Then
+  Begin
+    Op := W^.Next^.S;
+    R := W^.Next^.Next;
+    If R = Nil Then
+    Begin
+      DbErr := True;
+      Exit;
+    End;
+    DbCur := R^.Next;
+    If (Op = '==') Or (Op = '=') Or (Op = '!=') Then
+    Begin
+      ExpInit(E, Nil, True);
+      ExpandInto(E, R^.S, False);
+      Res := PatMatch(E.S, E.F, A);
+      If Op = '!=' Then Res := Not Res;
+      DbPrimary := Res;
+    End
+    Else If Op = '=~' Then DbPrimary := DbRegex(A, R)
+    Else If (Op = '<') Or (Op = '>') Or (Op = '-nt') Or (Op = '-ot') Or
+            (Op = '-ef') Then
+      DbPrimary := TestBinary(A, Op, ExpandStr(R^.S))
+    Else
+    Begin
+      B := ExpandStr(R^.S);
+      X := ArithEval(A);
+      Y := ArithEval(B);
+      If Op = '-eq' Then DbPrimary := X = Y
+      Else If Op = '-ne' Then DbPrimary := X <> Y
+      Else If Op = '-lt' Then DbPrimary := X < Y
+      Else If Op = '-le' Then DbPrimary := X <= Y
+      Else If Op = '-gt' Then DbPrimary := X > Y
+      Else DbPrimary := X >= Y;
+    End;
+    Exit;
+  End;
+  DbCur := W^.Next;
+  DbPrimary := A <> '';
+End;
+
+Function DbAnd : Boolean;
+Var R, R2 : Boolean;
+Begin
+  R := DbPrimary;
+  While DbIsOp(DbCur, '&&') Do
+  Begin
+    DbCur := DbCur^.Next;
+    R2 := DbPrimary;
+    R := R And R2;
+  End;
+  DbAnd := R;
+End;
+
+Function DbOr : Boolean;
+Var R, R2 : Boolean;
+Begin
+  R := DbAnd;
+  While DbIsOp(DbCur, '||') Do
+  Begin
+    DbCur := DbCur^.Next;
+    R2 := DbAnd;
+    R := R Or R2;
+  End;
+  DbOr := R;
+End;
+
+Function ExecDBr(N : PNode) : LongInt;
+Var R : Boolean; SaveCur : PWd; SaveErr, SaveEx : Boolean;
+Begin
+  SaveCur := DbCur;
+  SaveErr := DbErr;
+  SaveEx := ExtGlob;
+  ExtGlob := True;
+  DbCur := N^.Words;
+  DbErr := False;
+  R := DbOr;
+  ExtGlob := SaveEx;
+  If DbErr Or (DbCur <> Nil) Then
+  Begin
+    ShErr(Msg(mSyntax) + ' [[');
+    ExecDBr := 2;
+  End
+  Else If R Then ExecDBr := 0
+  Else ExecDBr := 1;
+  DbCur := SaveCur;
+  DbErr := SaveErr;
+End;
+
 Function BiTrap(Var A : TArgs) : LongInt;
 Var I, S : LongInt; Cmd : String;
 Begin
   BiTrap := 0;
   If A.N = 1 Then
   Begin
-    For I := 0 To NSIG - 1 Do
+    For I := 0 To 35 Do
       If TrapCmd[I] <> Nil Then
-        Say1('trap -- ''' + TrapCmd[I]^ + ''' ' + SigNames[I]);
+      Begin
+        If I = 33 Then Say1('trap -- ''' + TrapCmd[I]^ + ''' ERR')
+        Else If I = 34 Then Say1('trap -- ''' + TrapCmd[I]^ + ''' DEBUG')
+        Else If I = 35 Then Say1('trap -- ''' + TrapCmd[I]^ + ''' RETURN')
+        Else Say1('trap -- ''' + TrapCmd[I]^ + ''' SIG' + SigNames[I]);
+      End;
     Exit;
   End;
   I := 1;
@@ -4915,7 +7342,7 @@ Begin
       TrapPend[S] := 0;
       If Cmd = '-' Then
       Begin
-        If S > 0 Then
+        If (S > 0) And (S < 33) Then
         Begin
           If S = SIGINT Then SysSigAction(S, LongInt(@IntHandler), 0)
           Else If (S <> SIGKILL) And (S <> SIGSTOP) Then
@@ -4930,7 +7357,7 @@ Begin
       Else
       Begin
         TrapCmd[S] := MkStr(Cmd);
-        If S > 0 Then
+        If (S > 0) And (S < 33) Then
         Begin
           If Cmd = '' Then SysSigAction(S, SIG_IGN, 0)
           Else If (S <> SIGKILL) And (S <> SIGSTOP) Then
@@ -5339,32 +7766,897 @@ Begin
 End;
 
 { ----- local, getopts, command ----- }
-Function BiLocal(Var A : TArgs) : LongInt;
-Var I, K : LongInt; N : String;
+ memorise la variable N (et ses elements) pour la restauration en sortie de
+  fonction ; la variable locale part vide }
+Procedure LocalSave(Const N : String);
+Var K, J : LongInt; Keys : TArgs;
 Begin
-  BiLocal := 0;
-  If InFunc = 0 Then
+  If InFunc = 0 Then Exit;
+  { deja local dans ce cadre ? }
+  For K := LocalFrame[LocalFP] To LocalSP - 1 Do
+    If LocalName[K] = N Then Exit;
+  If LocalSP > 250 Then Exit;
+  K := FindVar(N);
+  If (K >= 0) And (Vars[K].Kind > 0) Then
+  Begin
+    { le tableau est sauvegarde element par element }
+    ArrKeys(N, Keys);
+    For J := 0 To Keys.N - 1 Do
+      If LocalSP < 250 Then
+      Begin
+        LocalName[LocalSP] := N + '[' + Keys.It[J]^ + ']';
+        LocalOld[LocalSP] := MkStr(VarValue(N + '[' + Keys.It[J]^ + ']'));
+        LocalKd[LocalSP] := 0;
+        Inc(LocalSP);
+      End;
+    ArgsFree(Keys);
+    LocalName[LocalSP] := '#clear:' + N;
+    LocalOld[LocalSP] := Nil;
+    Inc(LocalSP);
+    ArrClear(N);
+  End;
+  LocalName[LocalSP] := N;
+  K := FindVar(N);
+  If K >= 0 Then
+  Begin
+    LocalOld[LocalSP] := MkStr(Vars[K].Val);
+    LocalKd[LocalSP] := Vars[K].Kind;
+  End
+  Else
+  Begin
+    LocalOld[LocalSP] := Nil;
+    LocalKd[LocalSP] := 0;
+  End;
+  Inc(LocalSP);
+  If K >= 0 Then
+  Begin
+    Vars[K].Val := '';
+    Vars[K].Kind := 0;
+    Vars[K].RO := False;
+  End;
+End;
+
+Procedure ShowDecl(I : LongInt);
+Var F, S, Keys : String; K : LongInt; Ks : TArgs; Nm : String;
+Begin
+  Nm := Vars[I].Name;
+  F := '-';
+  If Vars[I].Kind = 1 Then F := F + 'a';
+  If Vars[I].Kind = 2 Then F := F + 'A';
+  If Vars[I].IntAttr Then F := F + 'i';
+  If Vars[I].CaseAttr = 1 Then F := F + 'l';
+  If Vars[I].CaseAttr = 2 Then F := F + 'u';
+  If Vars[I].RO Then F := F + 'r';
+  If Vars[I].Exp Then F := F + 'x';
+  If F = '-' Then F := '--';
+  If Vars[I].Kind > 0 Then
+  Begin
+    ArrKeys(Nm, Ks);
+    S := '(';
+    For K := 0 To Ks.N - 1 Do
+    Begin
+      If K > 0 Then S := S + ' ';
+      S := S + '[' + Ks.It[K]^ + ']="' + VarValue(Nm + '[' + Ks.It[K]^ + ']') +
+           '"';
+    End;
+    S := S + ')';
+    ArgsFree(Ks);
+    Say1('declare ' + F + ' ' + Nm + '=' + S);
+  End
+  Else Say1('declare ' + F + ' ' + Nm + '="' + Vars[I].Val + '"');
+End;
+
+{ declare / typeset / local / readonly (Mode 0 declare, 1 local) }
+Function BiDeclare(Var A : TArgs; IsLocal : Boolean) : LongInt;
+Var I, K, J, Kind, IntA, CaseA : LongInt; S, Nm, Sub, Raw, EN, Cur : String;
+    FlA, FlAA, FlI, FlR, FlX, FlL, FlU, FlP, FlF, FlG, FlN : Boolean;
+    OnI, OnR, OnX, App : Boolean; Opts : Boolean; Cnt : LongInt;
+Begin
+  BiDeclare := 0;
+  FlA := False; FlAA := False; FlI := False; FlR := False; FlX := False;
+  FlL := False; FlU := False; FlP := False; FlF := False; FlG := False;
+  FlN := False; OnI := True; OnR := True; OnX := True;
+  Opts := True;
+  Cnt := 0;
+  If IsLocal And (InFunc = 0) Then
   Begin
     ShErr('local: can only be used in a function');
-    BiLocal := 1;
+    BiDeclare := 1;
     Exit;
   End;
   For I := 1 To A.N - 1 Do
   Begin
-    K := Pos('=', A.It[I]^);
-    If K > 0 Then N := Copy(A.It[I]^, 1, K - 1) Else N := A.It[I]^;
-    If LocalSP < 64 Then
+    S := A.It[I]^;
+    If Opts And (Length(S) > 1) And ((S[1] = '-') Or (S[1] = '+')) And
+       (Pos('=', S) = 0) Then
     Begin
-      LocalName[LocalSP] := N;
-      K := FindVar(N);
-      If K >= 0 Then LocalOld[LocalSP] := MkStr(Vars[K].Val)
-      Else LocalOld[LocalSP] := Nil;
-      Inc(LocalSP);
+      If S = '--' Then
+      Begin
+        Opts := False;
+        Continue;
+      End;
+      For K := 2 To Length(S) Do
+        Case S[K] Of
+          'a' : FlA := True;
+          'A' : FlAA := True;
+          'i' : Begin FlI := True; OnI := S[1] = '-'; End;
+          'r' : Begin FlR := True; OnR := S[1] = '-'; End;
+          'x' : Begin FlX := True; OnX := S[1] = '-'; End;
+          'l' : FlL := S[1] = '-';
+          'u' : FlU := S[1] = '-';
+          'p' : FlP := True;
+          'f', 'F' : FlF := True;
+          'g' : FlG := True;
+          'n' : FlN := S[1] = '-';
+          't' : ;
+        End;
+      Continue;
     End;
-    K := Pos('=', A.It[I]^);
-    If K > 0 Then SetVar(N, Copy(A.It[I]^, K + 1, 255))
-    Else If Not VarSet(N) Then SetVar(N, '');
+    Opts := False;
+    Inc(Cnt);
+    { nom, indice, +=, valeur brute }
+    Nm := '';
+    Raw := '';
+    Sub := '';
+    App := False;
+    If Not SplitAssign(S, Nm, Sub, Raw, App) Then
+    Begin
+      Nm := S;
+      Raw := #0;
+    End;
+    If Not ValidName(Nm) Then
+    Begin
+      ShErr(Nm + ': ' + Msg(mNotId));
+      BiDeclare := 1;
+      Continue;
+    End;
+    If FlP Then
+    Begin
+      K := FindVar(Nm);
+      If K >= 0 Then ShowDecl(K) Else BiDeclare := 1;
+      Continue;
+    End;
+    If FlF Then Continue;
+    If (IsLocal Or (InFunc > 0)) And Not FlG Then LocalSave(Nm);
+    If FlN Then
+    Begin
+      { nameref : la valeur est le nom de la cible }
+      If Raw = #0 Then Raw := '';
+      K := FindVar(Nm);
+      If K < 0 Then
+      Begin
+        SetVar(Nm, Raw);
+        K := FindVar(Nm);
+      End
+      Else Vars[K].Val := Raw;
+      If K >= 0 Then Vars[K].Ref := True;
+      AnyRef := True;
+      Continue;
+    End;
+    If FlAA Then ArrDeclare(Nm, 2)
+    Else If FlA Then ArrDeclare(Nm, 1);
+    If Not VarSet(Nm) Then SetVar(Nm, '');
+    K := FindVar(Nm);
+    If K >= 0 Then
+    Begin
+      If FlI Then Vars[K].IntAttr := OnI;
+      If FlL Then Vars[K].CaseAttr := 1;
+      If FlU Then Vars[K].CaseAttr := 2;
+      If FlX Then Vars[K].Exp := OnX;
+    End;
+    If Raw <> #0 Then
+    Begin
+      If (Raw <> '') And (Raw[1] = #5) Then
+      Begin
+        If (FlA Or FlAA) Then
+        Else If ArrKind(Nm) = 0 Then ArrDeclare(Nm, 1);
+        AssignCompound(Nm, App, Copy(Raw, 2, 2000));
+      End
+      Else If Sub <> '' Then
+      Begin
+        If ArrKind(Nm) = 0 Then ArrDeclare(Nm, 1);
+        EN := ElemName(Nm, Sub);
+        If App Then
+        Begin
+          GetVar(EN, Cur);
+          Raw := Cur + Raw;
+        End;
+        SetVar(EN, Raw);
+      End
+      Else
+      Begin
+        If App Then
+        Begin
+          GetVar(Nm, Cur);
+          If FlI Then Raw := IntStr(ArithEval(Cur) + ArithEval(Raw))
+          Else Raw := Cur + Raw;
+        End;
+        SetVar(Nm, Raw);
+      End;
+    End;
+    K := FindVar(Nm);
+    If (K >= 0) And FlR Then Vars[K].RO := OnR;
   End;
+  If (Cnt = 0) Or FlP Then
+  Begin
+    If (Cnt = 0) And Not FlF Then
+      For I := 0 To MAXVARS - 1 Do
+        If Vars[I].Used And (Pos('[', Vars[I].Name) = 0) Then
+          If ((Not FlA) Or (Vars[I].Kind = 1)) And
+             ((Not FlAA) Or (Vars[I].Kind = 2)) And
+             ((Not FlX) Or Vars[I].Exp) And ((Not FlR) Or Vars[I].RO) Then
+            ShowDecl(I);
+  End;
+End;
+
+Function BiLocal(Var A : TArgs) : LongInt;
+Begin
+  BiLocal := BiDeclare(A, True);
+End;
+
+{ let "x=1+2" y=3 : chaque argument est une expression arithmetique }
+Function BiLet(Var A : TArgs) : LongInt;
+Var I : LongInt; V : LongInt;
+Begin
+  V := 0;
+  BiLet := 1;
+  If A.N < 2 Then
+  Begin
+    ShErr('let: expression expected');
+    BiLet := 1;
+    Exit;
+  End;
+  For I := 1 To A.N - 1 Do
+  Begin
+    V := ArithEval(A.It[I]^);
+    If ArFailed Then
+    Begin
+      BiLet := 1;
+      Exit;
+    End;
+  End;
+  If V <> 0 Then BiLet := 0 Else BiLet := 1;
+End;
+
+{ mapfile / readarray [-t] [-n N] [-O origine] [-s N] [-d delim] [-u fd] [nom] }
+Function BiMapfile(Var A : TArgs) : LongInt;
+Var I, Fd, N, Org, Skip, Cnt, Idx, Lim : LongInt; Nm, L : String;
+    Strip : Boolean;
+    Delim : Char; C : Char; B : Array[0..3] Of Byte; Got : LongInt;
+Begin
+  Nm := 'MAPFILE';
+  Strip := False;
+  Fd := 0;
+  Org := 0;
+  Skip := 0;
+  Lim := 0;
+  Delim := #10;
+  I := 1;
+  While I < A.N Do
+  Begin
+    L := A.It[I]^;
+    If L = '-t' Then Strip := True
+    Else If (L = '-n') And (I + 1 < A.N) Then
+    Begin
+      Inc(I);
+      StrInt(A.It[I]^, Lim);
+    End
+    Else If (L = '-O') And (I + 1 < A.N) Then
+    Begin
+      Inc(I);
+      StrInt(A.It[I]^, Org);
+    End
+    Else If (L = '-s') And (I + 1 < A.N) Then
+    Begin
+      Inc(I);
+      StrInt(A.It[I]^, Skip);
+    End
+    Else If (L = '-u') And (I + 1 < A.N) Then
+    Begin
+      Inc(I);
+      StrInt(A.It[I]^, Fd);
+    End
+    Else If (L = '-d') And (I + 1 < A.N) Then
+    Begin
+      Inc(I);
+      If A.It[I]^ = '' Then Delim := #0 Else Delim := A.It[I]^[1];
+    End
+    Else Nm := L;
+    Inc(I);
+  End;
+  ArrDeclare(Nm, 1);
+  If Org = 0 Then ArrClear(Nm);
+  Idx := Org;
+  Cnt := 0;
+  While True Do
+  Begin
+    L := '';
+    Got := 0;
+    While True Do
+    Begin
+      N := LnxSys3(3, Fd, LongInt(@B), 1);
+      If N = -4 Then Continue;
+      If N <= 0 Then Break;
+      Got := 1;
+      C := Chr(B[0]);
+      If C = Delim Then
+      Begin
+        If Not Strip Then L := L + C;
+        Break;
+      End;
+      If Length(L) < 254 Then L := L + C;
+    End;
+    If (N <= 0) And (L = '') And (Got = 0) Then Break;
+    Inc(Cnt);
+    If Cnt > Skip Then
+    Begin
+      SetVar(Nm + '[' + IntStr(Idx) + ']', L);
+      Inc(Idx);
+    End;
+    If (Lim > 0) And (Idx - Org >= Lim) Then Break;
+    If N <= 0 Then Break;
+  End;
+  BiMapfile := 0;
+End;
+
+{ printf [-v var] format [arguments] }
+Function BiPrintf(Var A : TArgs) : LongInt;
+Var Fmt, Out_, Arg : String; I, K, J, AI, Wd, Pr, X, Rc : LongInt;
+    VarN : String;
+    Fl : String; Conv : Char; V : LongInt; D : Double; Left, Zero, Plus,
+    Space, Alt, HavePr, Consumed, AnyArg : Boolean; Piece, Tmp : String;
+    StartAI : LongInt; Stop : Boolean;
+
+  Function NextArg : String;
+  Begin
+    If AI < A.N Then
+    Begin
+      NextArg := A.It[AI]^;
+      Inc(AI);
+      Consumed := True;
+    End
+    Else NextArg := '';
+  End;
+
+  Function ArgNum(Const S : String) : LongInt;
+  Var Q : LongInt; Xv : LongInt;
+  Begin
+    ArgNum := 0;
+    If S = '' Then Exit;
+    If (S[1] = '''') Or (S[1] = '"') Then
+    Begin
+      If Length(S) > 1 Then ArgNum := Ord(S[2]);
+      Exit;
+    End;
+    If StrInt(S, Xv) Then
+    Begin
+      ArgNum := Xv;
+      Exit;
+    End;
+    If (Length(S) > 2) And (S[1] = '0') And ((S[2] = 'x') Or (S[2] = 'X')) Then
+    Begin
+      Xv := 0;
+      For Q := 3 To Length(S) Do
+        If UpCase(S[Q]) In ['0'..'9', 'A'..'F'] Then
+          If S[Q] <= '9' Then Xv := Xv * 16 + Ord(S[Q]) - 48
+          Else Xv := Xv * 16 + Ord(UpCase(S[Q])) - 55;
+      ArgNum := Xv;
+      Exit;
+    End;
+    If (Length(S) > 1) And (S[1] = '0') Then
+    Begin
+      Xv := 0;
+      For Q := 2 To Length(S) Do
+        If S[Q] In ['0'..'7'] Then Xv := Xv * 8 + Ord(S[Q]) - 48;
+      ArgNum := Xv;
+      Exit;
+    End;
+    ShErr('printf: ' + S + ': ' + Msg(mBadNum));
+    Rc := 1;
+  End;
+
+  Function Pad(Const T : String; Fill : Char) : String;
+  Var R : String;
+  Begin
+    R := T;
+    If HavePr And (Conv = 's') And (Length(R) > Pr) Then R := Copy(R, 1, Pr);
+    While Length(R) < Wd Do
+      If Left Then R := R + ' '
+      Else If (Fill = '0') And (Length(R) > 0) And
+              ((R[1] = '-') Or (R[1] = '+')) And (Conv <> 's') Then
+        R := R[1] + '0' + Copy(R, 2, 255)
+      Else R := Fill + R;
+    Pad := R;
+  End;
+
+  Function Radix(U : LongInt; Base : LongInt; Upper : Boolean) : String;
+  Var R : String; Dg : LongInt; Neg : Boolean; Q : Double;
+  Begin
+    R := '';
+    If U = 0 Then R := '0';
+    While U <> 0 Do
+    Begin
+      If U < 0 Then
+      Begin
+        { entier non signe 32 bits }
+        Q := U + 4294967296.0;
+        Dg := Trunc(Q - Trunc(Q / Base) * Base);
+        U := Trunc(Q / Base);
+      End
+      Else
+      Begin
+        Dg := U Mod Base;
+        U := U Div Base;
+      End;
+      If Dg < 10 Then R := Chr(48 + Dg) + R
+      Else If Upper Then R := Chr(55 + Dg) + R
+      Else R := Chr(87 + Dg) + R;
+    End;
+    Radix := R;
+  End;
+
+  Function Esc(Const T : String; Var Stp : Boolean) : String;
+  Var Q, Xv, Cn : LongInt; R : String;
+  Begin
+    R := '';
+    Q := 1;
+    Stp := False;
+    While Q <= Length(T) Do
+    Begin
+      If (T[Q] = '\') And (Q < Length(T)) Then
+      Begin
+        Inc(Q);
+        Case T[Q] Of
+          'n' : R := R + #10;
+          't' : R := R + #9;
+          'r' : R := R + #13;
+          'a' : R := R + #7;
+          'b' : R := R + #8;
+          'f' : R := R + #12;
+          'v' : R := R + #11;
+          'e', 'E' : R := R + #27;
+          '\' : R := R + '\';
+          '''' : R := R + '''';
+          '"' : R := R + '"';
+          'c' : Begin Stp := True; Break; End;
+          '0'..'7' :
+            Begin
+              Xv := 0;
+              Cn := 0;
+              While (Q <= Length(T)) And (Cn < 3) And (T[Q] In ['0'..'7']) Do
+              Begin
+                Xv := Xv * 8 + Ord(T[Q]) - 48;
+                Inc(Q);
+                Inc(Cn);
+              End;
+              Dec(Q);
+              R := R + Chr(Xv And 255);
+            End;
+          'x' :
+            Begin
+              Xv := 0;
+              Cn := 0;
+              Inc(Q);
+              While (Q <= Length(T)) And (Cn < 2) And
+                    (UpCase(T[Q]) In ['0'..'9', 'A'..'F']) Do
+              Begin
+                If T[Q] <= '9' Then Xv := Xv * 16 + Ord(T[Q]) - 48
+                Else Xv := Xv * 16 + Ord(UpCase(T[Q])) - 55;
+                Inc(Q);
+                Inc(Cn);
+              End;
+              Dec(Q);
+              R := R + Chr(Xv And 255);
+            End;
+        Else
+          R := R + '\' + T[Q];
+        End;
+      End
+      Else R := R + T[Q];
+      Inc(Q);
+    End;
+    Esc := R;
+  End;
+
+Begin
+  Rc := 0;
+  VarN := '';
+  AI := 1;
+  If (AI < A.N) And (A.It[AI]^ = '-v') And (AI + 1 < A.N) Then
+  Begin
+    VarN := A.It[AI + 1]^;
+    AI := AI + 2;
+  End;
+  If (AI < A.N) And (A.It[AI]^ = '--') Then Inc(AI);
+  If AI >= A.N Then
+  Begin
+    ShErr('printf: usage: printf [-v var] format [arguments]');
+    BiPrintf := 2;
+    Exit;
+  End;
+  Fmt := A.It[AI]^;
+  Inc(AI);
+  Out_ := '';
+  Stop := False;
+  Repeat
+    Consumed := False;
+    AnyArg := AI < A.N;
+    K := 1;
+    While (K <= Length(Fmt)) And Not Stop Do
+    Begin
+      If Fmt[K] = '\' Then
+      Begin
+        J := K + 1;
+        If (J <= Length(Fmt)) And (Fmt[J] In ['0'..'7']) Then
+        Begin
+          J := K + 1;
+          While (J <= Length(Fmt)) And (J < K + 4) And (Fmt[J] In ['0'..'7']) Do
+            Inc(J);
+        End
+        Else If (J <= Length(Fmt)) And (Fmt[J] = 'x') Then
+        Begin
+          Inc(J);
+          While (J <= Length(Fmt)) And (J < K + 4) And
+                (UpCase(Fmt[J]) In ['0'..'9', 'A'..'F']) Do Inc(J);
+        End
+        Else Inc(J);
+        Out_ := Out_ + Esc(Copy(Fmt, K, J - K), Stop);
+        K := J;
+        Continue;
+      End;
+      If Fmt[K] <> '%' Then
+      Begin
+        Out_ := Out_ + Fmt[K];
+        Inc(K);
+        Continue;
+      End;
+      Inc(K);
+      If K > Length(Fmt) Then
+      Begin
+        Out_ := Out_ + '%';
+        Break;
+      End;
+      If Fmt[K] = '%' Then
+      Begin
+        Out_ := Out_ + '%';
+        Inc(K);
+        Continue;
+      End;
+      Left := False; Zero := False; Plus := False; Space := False; Alt := False;
+      While (K <= Length(Fmt)) And (Fmt[K] In ['-', '0', '+', ' ', '#']) Do
+      Begin
+        Case Fmt[K] Of
+          '-' : Left := True;
+          '0' : Zero := True;
+          '+' : Plus := True;
+          ' ' : Space := True;
+          '#' : Alt := True;
+        End;
+        Inc(K);
+      End;
+      Wd := 0;
+      If (K <= Length(Fmt)) And (Fmt[K] = '*') Then
+      Begin
+        Wd := ArgNum(NextArg);
+        If Wd < 0 Then
+        Begin
+          Left := True;
+          Wd := -Wd;
+        End;
+        Inc(K);
+      End
+      Else
+        While (K <= Length(Fmt)) And (Fmt[K] In ['0'..'9']) Do
+        Begin
+          Wd := Wd * 10 + Ord(Fmt[K]) - 48;
+          Inc(K);
+        End;
+      HavePr := False;
+      Pr := 0;
+      If (K <= Length(Fmt)) And (Fmt[K] = '.') Then
+      Begin
+        HavePr := True;
+        Inc(K);
+        If (K <= Length(Fmt)) And (Fmt[K] = '*') Then
+        Begin
+          Pr := ArgNum(NextArg);
+          Inc(K);
+        End
+        Else
+          While (K <= Length(Fmt)) And (Fmt[K] In ['0'..'9']) Do
+          Begin
+            Pr := Pr * 10 + Ord(Fmt[K]) - 48;
+            Inc(K);
+          End;
+      End;
+      While (K <= Length(Fmt)) And (Fmt[K] In ['l', 'h', 'L', 'j', 'z', 't']) Do
+        Inc(K);
+      If K > Length(Fmt) Then Break;
+      Conv := Fmt[K];
+      Inc(K);
+      Case Conv Of
+        's' : Out_ := Out_ + Pad(NextArg, ' ');
+        'b' :
+          Begin
+            Arg := Esc(NextArg, Stop);
+            Out_ := Out_ + Pad(Arg, ' ');
+          End;
+        'q' :
+          Begin
+            Arg := NextArg;
+            Piece := '';
+            For J := 1 To Length(Arg) Do
+              If Arg[J] In ['A'..'Z', 'a'..'z', '0'..'9', '_', '-', '.', '/',
+                            ',', ':', '@', '%', '+', '='] Then
+                Piece := Piece + Arg[J]
+              Else Piece := Piece + '\' + Arg[J];
+            If Arg = '' Then Piece := '''''';
+            Out_ := Out_ + Pad(Piece, ' ');
+          End;
+        'c' :
+          Begin
+            Arg := NextArg;
+            Out_ := Out_ + Pad(Copy(Arg, 1, 1), ' ');
+          End;
+        'd', 'i' :
+          Begin
+            V := ArgNum(NextArg);
+            Piece := IntStr(V);
+            If HavePr Then
+              While Length(Piece) - Ord(V < 0) < Pr Do
+                If V < 0 Then Piece := '-0' + Copy(Piece, 2, 255)
+                Else Piece := '0' + Piece;
+            If (V >= 0) And Plus Then Piece := '+' + Piece
+            Else If (V >= 0) And Space Then Piece := ' ' + Piece;
+            If Zero And Not Left And Not HavePr Then
+              Out_ := Out_ + Pad(Piece, '0')
+            Else Out_ := Out_ + Pad(Piece, ' ');
+          End;
+        'u', 'o', 'x', 'X' :
+          Begin
+            V := ArgNum(NextArg);
+            If Conv = 'u' Then
+            Begin
+              If V < 0 Then
+              Begin
+                D := V + 4294967296.0;
+                Str(D : 0 : 0, Piece);
+              End
+              Else Piece := IntStr(V);
+            End
+            Else If Conv = 'o' Then Piece := Radix(V, 8, False)
+            Else Piece := Radix(V, 16, Conv = 'X');
+            If HavePr Then
+              While Length(Piece) < Pr Do Piece := '0' + Piece;
+            If Alt And (V <> 0) Then
+            Begin
+              If Conv = 'x' Then Piece := '0x' + Piece
+              Else If Conv = 'X' Then Piece := '0X' + Piece
+              Else If Conv = 'o' Then Piece := '0' + Piece;
+            End;
+            If Zero And Not Left And Not HavePr Then
+              Out_ := Out_ + Pad(Piece, '0')
+            Else Out_ := Out_ + Pad(Piece, ' ');
+          End;
+        'f', 'F', 'e', 'E', 'g', 'G' :
+          Begin
+            Arg := NextArg;
+            If Arg = '' Then D := 0
+            Else If (Arg[1] = '''') Or (Arg[1] = '"') Then D := ArgNum(Arg)
+            Else
+            Begin
+              Val(Arg, D, X);
+              If X <> 0 Then
+              Begin
+                D := 0;
+                ShErr('printf: ' + Arg + ': ' + Msg(mBadNum));
+                Rc := 1;
+              End;
+            End;
+            If Not HavePr Then Pr := 6;
+            If (Conv = 'e') Or (Conv = 'E') Then
+            Begin
+              Str(D : 0 : Pr, Piece);
+              Piece := Piece;
+            End
+            Else Str(D : 0 : Pr, Piece);
+            If (Conv = 'g') Or (Conv = 'G') Then
+            Begin
+              Str(D : 0 : Pr, Piece);
+              If Pos('.', Piece) > 0 Then
+              Begin
+                While (Piece <> '') And (Piece[Length(Piece)] = '0') Do
+                  Delete(Piece, Length(Piece), 1);
+                If (Piece <> '') And (Piece[Length(Piece)] = '.') Then
+                  Delete(Piece, Length(Piece), 1);
+              End;
+            End;
+            If (D >= 0) And Plus Then Piece := '+' + Piece
+            Else If (D >= 0) And Space Then Piece := ' ' + Piece;
+            If Zero And Not Left Then Out_ := Out_ + Pad(Piece, '0')
+            Else Out_ := Out_ + Pad(Piece, ' ');
+          End;
+      Else
+        Begin
+          ShErr('printf: ' + Msg(mBadSub));
+          Rc := 1;
+        End;
+      End;
+    End;
+  Until Stop Or (AI >= A.N) Or Not Consumed;
+  If VarN <> '' Then SetVar(VarN, Out_)
+  Else Out(1, Out_);
+  BiPrintf := Rc;
+End;
+
+{ shopt [-s|-u|-q|-p] [nom...] }
+Function ShoptRef(Const N : String; Var Found : Boolean) : Boolean;
+Begin
+  Found := True;
+  If N = 'extglob' Then ShoptRef := ExtGlob
+  Else If N = 'nullglob' Then ShoptRef := NullGlob
+  Else If N = 'dotglob' Then ShoptRef := DotGlob
+  Else If N = 'nocasematch' Then ShoptRef := NoCaseMatch
+  Else If N = 'failglob' Then ShoptRef := FailGlob
+  Else If N = 'globstar' Then ShoptRef := StarStar
+  Else If (N = 'expand_aliases') Or (N = 'lastpipe') Or (N = 'cmdhist') Or
+          (N = 'progcomp') Or (N = 'extquote') Or (N = 'interactive_comments')
+          Or (N = 'sourcepath') Or (N = 'checkwinsize') Or (N = 'histappend')
+          Or (N = 'inherit_errexit') Or (N = 'nocaseglob') Or
+          (N = 'hostcomplete') Or (N = 'promptvars') Or (N = 'force_fignore')
+    Then ShoptRef := (N = 'expand_aliases') Or (N = 'cmdhist') Or
+         (N = 'progcomp') Or (N = 'extquote') Or (N = 'interactive_comments')
+         Or (N = 'sourcepath') Or (N = 'hostcomplete') Or (N = 'promptvars')
+         Or (N = 'force_fignore')
+  Else
+  Begin
+    Found := False;
+    ShoptRef := False;
+  End;
+End;
+
+Function BiShopt(Var A : TArgs) : LongInt;
+Var I : LongInt; Mode : Char; Nm : String; Ok, F : Boolean;
+    Quiet, Prt : Boolean;
+Const Names : String = 'dotglob,expand_aliases,extglob,failglob,globstar,' +
+  'nullglob,nocasematch';
+Begin
+  BiShopt := 0;
+  Mode := ' ';
+  Quiet := False;
+  Prt := False;
+  I := 1;
+  While (I < A.N) And (Length(A.It[I]^) > 1) And (A.It[I]^[1] = '-') Do
+  Begin
+    If A.It[I]^ = '-s' Then Mode := 's'
+    Else If A.It[I]^ = '-u' Then Mode := 'u'
+    Else If A.It[I]^ = '-q' Then Quiet := True
+    Else If A.It[I]^ = '-p' Then Prt := True
+    Else If A.It[I]^ = '-o' Then Mode := 'o';
+    Inc(I);
+  End;
+  If I >= A.N Then
+  Begin
+    Nm := Names + ',';
+    While Nm <> '' Do
+    Begin
+      Ok := ShoptRef(Copy(Nm, 1, Pos(',', Nm) - 1), F);
+      If Ok Then Say1('shopt -s ' + Copy(Nm, 1, Pos(',', Nm) - 1))
+      Else If Not Quiet Then
+        Say1('shopt -u ' + Copy(Nm, 1, Pos(',', Nm) - 1));
+      Delete(Nm, 1, Pos(',', Nm));
+    End;
+    Exit;
+  End;
+  While I < A.N Do
+  Begin
+    Nm := A.It[I]^;
+    Ok := ShoptRef(Nm, F);
+    If Not F Then
+    Begin
+      ShErr('shopt: ' + Nm + ': invalid shell option name');
+      BiShopt := 1;
+    End
+    Else If Mode = 's' Then
+    Begin
+      If Nm = 'extglob' Then ExtGlob := True
+      Else If Nm = 'nullglob' Then NullGlob := True
+      Else If Nm = 'dotglob' Then DotGlob := True
+      Else If Nm = 'nocasematch' Then NoCaseMatch := True
+      Else If Nm = 'failglob' Then FailGlob := True
+      Else If Nm = 'globstar' Then StarStar := True;
+    End
+    Else If Mode = 'u' Then
+    Begin
+      If Nm = 'extglob' Then ExtGlob := False
+      Else If Nm = 'nullglob' Then NullGlob := False
+      Else If Nm = 'dotglob' Then DotGlob := False
+      Else If Nm = 'nocasematch' Then NoCaseMatch := False
+      Else If Nm = 'failglob' Then FailGlob := False
+      Else If Nm = 'globstar' Then StarStar := False;
+    End
+    Else
+    Begin
+      If Not Ok Then BiShopt := 1;
+      If Not Quiet Then
+        If Ok Then Say1('shopt -s ' + Nm) Else Say1('shopt -u ' + Nm);
+    End;
+    Inc(I);
+  End;
+End;
+
+{ pile de repertoires : pushd popd dirs }
+Var
+  DirStack : Array[0..31] Of PStr;
+  NDirs : LongInt;
+
+Procedure ShowDirs;
+Var S : String; K : LongInt;
+Begin
+  S := SysGetCwd;
+  For K := NDirs - 1 DownTo 0 Do S := S + ' ' + DirStack[K]^;
+  Say1(S);
+End;
+
+Function BiPushd(Var A : TArgs; Mode : LongInt) : LongInt;
+Var Cur, Dst : String; K : LongInt; Cd : TArgs;
+Begin
+  BiPushd := 0;
+  If Mode = 3 Then
+  Begin
+    ShowDirs;
+    Exit;
+  End;
+  Cur := SysGetCwd;
+  If Mode = 1 Then
+  Begin
+    If A.N < 2 Then
+    Begin
+      If NDirs = 0 Then
+      Begin
+        ShErr('pushd: no other directory');
+        BiPushd := 1;
+        Exit;
+      End;
+      Dst := DirStack[NDirs - 1]^;
+      FreeStr(DirStack[NDirs - 1]);
+      Dec(NDirs);
+    End
+    Else Dst := A.It[1]^;
+    ArgsInit(Cd);
+    ArgsAdd(Cd, 'cd');
+    ArgsAdd(Cd, Dst);
+    K := BiCd(Cd);
+    ArgsFree(Cd);
+    If K <> 0 Then
+    Begin
+      BiPushd := 1;
+      Exit;
+    End;
+    If NDirs < 32 Then
+    Begin
+      DirStack[NDirs] := MkStr(Cur);
+      Inc(NDirs);
+    End;
+    ShowDirs;
+    Exit;
+  End;
+  { popd }
+  If NDirs = 0 Then
+  Begin
+    ShErr('popd: directory stack empty');
+    BiPushd := 1;
+    Exit;
+  End;
+  Dst := DirStack[NDirs - 1]^;
+  FreeStr(DirStack[NDirs - 1]);
+  Dec(NDirs);
+  ArgsInit(Cd);
+  ArgsAdd(Cd, 'cd');
+  ArgsAdd(Cd, Dst);
+  BiPushd := BiCd(Cd);
+  ArgsFree(Cd);
+  ShowDirs;
 End;
 
 Function BiGetopts(Var A : TArgs) : LongInt;
@@ -5618,6 +8910,15 @@ Begin
     37 : RunBuiltin := BiUnalias(A);
     38 : RunBuiltin := BiUnset(A);
     39 : RunBuiltin := BiWait(A);
+    43, 44 : RunBuiltin := BiDeclare(A, False);
+    45 : RunBuiltin := BiLet(A);
+    46, 47 : RunBuiltin := BiMapfile(A);
+    48 : RunBuiltin := BiPrintf(A);
+    49 : RunBuiltin := BiShopt(A);
+    50 : RunBuiltin := BiPushd(A, 1);
+    51 : RunBuiltin := BiPushd(A, 2);
+    52 : RunBuiltin := BiPushd(A, 3);
+    53, 54, 55, 56, 57, 58, 59 : RunBuiltin := 0;
   End;
 End;
 
@@ -6207,6 +9508,33 @@ BEGIN
   SetPwd;
   Arg0 := SysArgStr(0);
   DoLogin := (Arg0 <> '') And (Arg0[1] = '-');
+  A := Arg0;
+  While Pos('/', A) > 0 Do A := Copy(A, Pos('/', A) + 1, 255);
+  If (A <> '') And (A[1] = '-') Then A := Copy(A, 2, 255);
+  BashMode := (A = 'bash');
+  StartTime := SysTime;
+  If BashMode Then
+  Begin
+    SetVar('BASH', '/bin/bash');
+    SetVar('BASH_VERSION', '5.2.0(1)-release');
+    SetVar('OSTYPE', 'linux-gnu');
+    SetVar('BASH_VERSINFO[0]', '5');
+    SetVar('BASH_VERSINFO[1]', '2');
+    SetVar('BASH_VERSINFO[2]', '0');
+    SetVar('BASH_VERSINFO[3]', '1');
+    SetVar('BASH_VERSINFO[4]', 'release');
+    SetVar('BASH_VERSINFO[5]', 'i686-pc-linux-gnu');
+    ArrDeclare('BASH_VERSINFO', 1);
+    SetVar('SHLVL', '1');
+    S := '';
+    K := SysOpen('/proc/sys/kernel/hostname', O_RDONLY, 0);
+    If K >= 0 Then
+    Begin
+      SysReadLine(K, S);
+      SysClose(K);
+    End;
+    If S <> '' Then SetVar('HOSTNAME', S);
+  End;
   HaveCmd := False;
   Script := '';
   StdinMode := False;

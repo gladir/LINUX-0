@@ -8,6 +8,7 @@
 #   programme /bin/nettest (actif avec k32net) puis connexion de l'hote au
 #   serveur de l'invite.
 #     RUNNET.SH [-n]   (-n : ne pas regenerer les programmes embarques)
+#   NICMODEL=virtio-net-pci : carte virtio-net au lieu du RTL8139
 HERE=$(cd "$(dirname "$0")" && pwd)
 K32=$HERE/../..
 LPC=${LPC:-/tmp/claude-0/work/k32/bin/lpc}
@@ -79,7 +80,7 @@ SP=$!
 sleep 1
 timeout 120 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.txt" -display none \
   -m 64 -no-reboot -append "console=ttyS0 k32net k32power $KARGS" \
-  -nic user,model=rtl8139,hostfwd=tcp:127.0.0.1:5556-:7777 2>/dev/null
+  -nic user,model=${NICMODEL:-rtl8139},hostfwd=tcp:127.0.0.1:5556-:7777 2>/dev/null
 kill $SP 2>/dev/null
 tr -d '\r' < "$W/out.txt" | grep "KTEST: net\|NET-\|KPROG: /bin/nettest\|reseau"
 cat "$W/hostrecv.txt" 2>/dev/null; echo

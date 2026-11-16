@@ -21,6 +21,47 @@ int main(void){
    n=0;for(i=0;i<300&&n<=0;i++){l=sizeof f;n=recvfrom(s,rb,64,0x40,&f,&l);if(n<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
    ktest("net.ping_reply",n==36&&rb[20]==0&&rb[24]==0x55&&f.addr==HOST);
    close(s);}
+  /* AF_PACKET : requete ARP brute vers la passerelle (raw, dgram, ecoute) */
+  {struct sll{unsigned short fam,proto;int idx;unsigned short hat;unsigned char pk,hl,ad[8];};
+   struct sll ll,fr;unsigned char arp[28],fm[64],rb[128],mac[6],ifr[40];
+   int ps,pd,pa,sx,got=0,gotd=0,out_seen=0,rep_seen=0,own_out=0,k2,ok=1,r2;
+   sx=socket(2,2,0);memset(ifr,0,40);memcpy(ifr,"eth0",4);
+   ktest("pkt.hwaddr",ioctl(sx,0x8927,(long)ifr)==0);memcpy(mac,ifr+18,6);close(sx);
+   ps=socket(17,3,hs(0x0806));pd=socket(17,2,hs(0x0806));pa=socket(17,3,hs(3));
+   ktest("pkt.sockets",ps>=0&&pd>=0&&pa>=0);
+   ktest("pkt.type_einval",socket(17,1,hs(3))==-94);
+   memset(&ll,0,sizeof ll);ll.fam=17;ll.proto=hs(0x0806);ll.idx=2;
+   ktest("pkt.bind",bind(ps,&ll,sizeof ll)==0);
+   { int al=sizeof fr;memset(&fr,0,sizeof fr);
+     ktest("pkt.getsockname",getsockname(ps,&fr,&al)==0&&fr.fam==17&&fr.idx==2&&al==20&&fr.proto==hs(0x0806)); }
+   memset(arp,0,28);arp[1]=1;arp[2]=8;arp[4]=6;arp[5]=4;arp[7]=1;memcpy(arp+8,mac,6);
+   arp[14]=10;arp[15]=0;arp[16]=2;arp[17]=15;arp[24]=10;arp[25]=0;arp[26]=2;arp[27]=2;
+   memset(fm,0xff,6);memcpy(fm+6,mac,6);fm[12]=8;fm[13]=6;memcpy(fm+14,arp,28);
+   memset(&ll,0,sizeof ll);ll.fam=17;ll.idx=2;ll.hl=6;memset(ll.ad,0xff,6);
+   ktest("pkt.raw_send",sendto(ps,fm,42,0,&ll,sizeof ll)==42);
+   for(k2=0;k2<300&&!got;k2++){int al=sizeof fr;r2=recvfrom(ps,rb,sizeof rb,0x40,&fr,&al);
+     if(r2>=42&&rb[12]==8&&rb[13]==6&&rb[21]==2&&rb[28]==10&&rb[31]==2){got=1;
+       ktest("pkt.raw_reply_src",fr.fam==17&&fr.pk==0&&fr.hl==6&&fr.idx==2&&memcmp_(fr.ad,rb+6,6)==0&&memcmp_(rb,mac,6)==0);}
+     else if(r2>0&&fr.pk==4)own_out=1;
+     else if(r2<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+   ktest("pkt.raw_reply",got);
+   ktest("pkt.no_own_copy",!own_out);
+   for(k2=0;k2<100;k2++){int al=sizeof fr;r2=recvfrom(pa,rb,sizeof rb,0x40,&fr,&al);
+     if(r2<=0)break;
+     if(fr.pk==4&&r2>=42&&rb[12]==8&&rb[13]==6&&rb[21]==1&&memcmp_(rb+6,mac,6)==0)out_seen=1;
+     if(fr.pk==0&&r2>=42&&rb[12]==8&&rb[13]==6&&rb[21]==2)rep_seen=1;}
+   ktest("pkt.tap_outgoing",out_seen);
+   ktest("pkt.tap_incoming",rep_seen);
+   ll.proto=hs(0x0806);
+   ktest("pkt.dgram_send",sendto(pd,arp,28,0,&ll,sizeof ll)==28);
+   for(k2=0;k2<300&&!gotd;k2++){int al=sizeof fr;r2=recvfrom(pd,rb,sizeof rb,0x40,&fr,&al);
+     if(r2>=28&&rb[7]==2&&rb[14]==10&&rb[17]==2)gotd=1;
+     else if(r2<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+   ktest("pkt.dgram_reply",gotd);
+   ktest("pkt.raw_short_emsgsize",sendto(ps,fm,5,0,&ll,sizeof ll)==-90);
+   {int p=fork(),st=0;if(p==0){int x;sc1(23,1000);x=socket(17,3,hs(3));_exit(x==-1?0:1);}
+    waitpid(p,&st,0);ktest("pkt.eperm_nonroot",st==0);}
+   close(ps);close(pd);close(pa);(void)ok;(void)got;}
   /* UDP */
   s=socket(2,2,0);mksin(&a,HOST,9092);
   ktest("net.udp_send",sendto(s,"udp-hello",9,0,&a,16)==9);

@@ -123,7 +123,7 @@ if [ -z "$NOCMDS" ]; then
     [ -f "$f" ] || continue
     n=$(basename "$f" .PAS); l=$(echo "$n" | tr A-Z a-z)
     # remplaces par des programmes de USR/ (noms multiples via liens)
-    case $n in HALT|REBOOT|HSWD|WC|HEAD|TAIL|CUT|PASTE|MORE|VI|CRONTAB)
+    case $n in HALT|REBOOT|HSWD|WC|HEAD|TAIL|CUT|PASTE|MORE|VI|CRONTAB|DF|BASH|CLEAR)
       continue ;; esac
     [ -f "$W/root/bin/$l" ] || [ -f "$W/root/sbin/$l" ] && continue
     build_one "$f" bin/$l
@@ -164,6 +164,13 @@ for l in "chgrp chown bin" "realpath readlink bin" "pkill pgrep bin" \
          "zip ziptool bin" "unzip ziptool bin" "zipinfo ziptool bin" \
          "fsck e2fsck sbin" "fsck.ext2 e2fsck sbin" "fsck.ext3 e2fsck sbin" \
          "fsck.ext4 e2fsck sbin" \
+         "unxz xz bin" "xzcat xz bin" "lzma xz bin" "unlzma xz bin" \
+         "lzcat xz bin" "unshare nstools bin" "nsenter nstools bin" \
+         "chroot nstools bin" "pivot_root nstools sbin" \
+         "switch_root nstools sbin" "setpriv nstools bin" \
+         "visudo sudo bin" "clear tput bin" "reset tput bin" "infocmp tput bin" \
+         "tset tput bin" "bash sh bin" "df fsinfo bin" "blkid fsinfo bin" "lsblk fsinfo bin" \
+         "findmnt fsinfo bin" \
          "lsof procinfo bin" "fuser procinfo bin" "netstat procinfo bin" \
          "ss procinfo bin" "lspci procinfo bin" "lsusb procinfo bin" \
          "losetup procinfo bin" "telnet netutil bin" "ftp netutil bin" \
@@ -178,13 +185,17 @@ for f in "$W"/root/bin/*_; do
   [ -f "$f" ] && ln -sf "$(basename "$f")" "${f%_}" 2>/dev/null || true
 done
 # mkfs.ext2 = INSTALL sous un autre nom ; l'installateur copie / sur un disque
-ln -sf install "$W/root/sbin/mkfs.ext2" 2>/dev/null || true
+for n in mkfs.ext2 mkfs.ext3 mkfs.ext4 mke2fs; do
+  ln -sf install "$W/root/sbin/$n" 2>/dev/null || true
+done
 mkdir -p "$W/root/usr/share/boot"
 cp "$B/MBR.BIN" "$B/STAGE2.BIN" "$W/root/usr/share/boot/"
 echo "   $N programme(s)"
 # fichiers de configuration
 cp -a "$HERE/USR/ROOTFS"/. "$W/root"/
 chmod 600 "$W/root/etc/shadow"; chmod 700 "$W/root/root"
+chmod 440 "$W/root/etc/sudoers" 2>/dev/null || true
+chmod 4755 "$W/root/bin/sudo" 2>/dev/null || true
 mkdir -p "$W/root/home/linux"; chown 1000:1000 "$W/root/home/linux" 2>/dev/null || true
 chmod 1777 "$W/root/tmp" "$W/root/var/tmp"
 

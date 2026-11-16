@@ -299,3 +299,18 @@ Tests : TESTS/C/RUN.SH (TK1-TK3 noyaux sous QEMU, UX1-UX3 programmes sur
 l'hote) et TESTS/C/RUN16.SH (non-regression des cibles 16 bits).
 Exemption de style : LPC32.PAS garde le formatage d'OS2PC (lignes de plus
 de 80 colonnes) ; seules les parties ajoutees sont marquees "LPC32 :".
+
+Ajouts du lot E4 (cible 32 bits : -3X, -3K, -3M)
+------------------------------------------------
+* Temporaires String : le resultat de l'operateur +, de Copy et de Concat
+  est copie dans le prochain des 256 tampons de l'anneau STRRING (32 pour
+  un module -3M) et non plus dans un tampon unique. On peut donc ecrire
+  F(A + B, N, C + D), G(Copy(A, 1, 2), Copy(B, 1, 2)), (A + B) < (C + D)
+  ou des appels imbriques. Un temporaire reste valable pendant 255 autres
+  creations de chaines.
+* Delete(S, Pos, Len) : Pos hors chaine = sans effet, Len est borne par la
+  longueur restante (comme Turbo Pascal).
+* {$I fichier} introuvable : erreur "impossible d'ouvrir le fichier include"
+  et arret (avant : plantage ou boucle).
+* Piege : le mot reserve Packed ne peut pas servir de nom de variable.
+* Pas de type Int64 en -3X (utiliser Double pour les grandes tailles).

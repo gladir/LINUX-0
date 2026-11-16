@@ -32,7 +32,13 @@ int main(void){
    prm[0]=200;
    ktest("sched.einval",sc3(156,0,1,(long)prm)==-22&&sc1(157,99999)==-3);
    {long ts[2]={9,9};ktest("sched.rr_interval",sc2(161,0,(long)ts)==0&&ts[0]==0&&ts[1]>0);}
-   {unsigned m=0;ktest("sched.affinity",sc3(242,0,4,(long)&m)==4&&m==1&&({m=1;sc3(241,0,4,(long)&m)==0;})&&({m=2;sc3(241,0,4,(long)&m)==-22;}));}
+   {unsigned m=0,all,ncpu;int ok;
+    ok=sc3(242,0,4,(long)&m)==4&&m!=0&&(m&(m+1))==0;   /* 2^n - 1 */
+    all=m;for(ncpu=0;m>>ncpu;ncpu++);
+    m=1;ok=ok&&sc3(241,0,4,(long)&m)==0;
+    m=all;ok=ok&&sc3(241,0,4,(long)&m)==0;
+    m=1u<<ncpu;ok=ok&&sc3(241,0,4,(long)&m)==-22;
+    ktest("sched.affinity",ok);}
    {unsigned c=9,n=9;ktest("sched.getcpu",sc3(318,(long)&c,(long)&n,0)==0&&c==0&&n==0);}
    {unsigned a[12]={48,0,0,0,0,0,0,0,0,0,0,0};
     ktest("sched.getattr",sc4(352,0,(long)a,48,0)==0&&a[1]==0);

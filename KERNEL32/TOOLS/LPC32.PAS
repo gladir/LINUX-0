@@ -2214,6 +2214,7 @@ Procedure IncludePush(Const FileName : TString);
 Var
   FullPath : TString;
   SrcDir   : TString;
+  IncErr   : Integer;
 Begin
   If IncTop >= MAX_INCLUDE - 1 Then
   Begin
@@ -2235,7 +2236,8 @@ Begin
   Assign(LexSrcF, FullPath);
   Reset(LexSrcF);
   {$I+}
-  If IOResult <> 0 Then
+  IncErr := IOResult;
+  If IncErr <> 0 Then
   Begin
     { Tenter dans le repertoire du fichier source }
     SrcDir := ExtractDir(LexSrcFName);
@@ -2246,14 +2248,11 @@ Begin
       Assign(LexSrcF, FullPath);
       Reset(LexSrcF);
       {$I+}
+      IncErr := IOResult;
     End;
-    If IOResult <> 0 Then
+    If IncErr <> 0 Then
     Begin
-      WarnMsg('impossible d''ouvrir le fichier include: ' + FileName);
-      { Rouvrir le fichier precedent }
-      Assign(LexSrcF, IncSavedFName[IncTop]);
-      Reset(LexSrcF);
-      Dec(IncTop);
+      FatalError('impossible d''ouvrir le fichier include : ' + FileName);
       Exit;
     End;
   End;
@@ -14909,11 +14908,18 @@ Begin
             EmitInstr('POP EBX');          { Pos }
             EmitInstr('POP ESI');          { Source ptr }
             EmitInstr('CALL ' + TP_RT_PFX + 'COPY');
+            If L32Mode <> L32_MODE_NONE Then
+            Begin
+              { 32 bits : le resultat va dans l anneau STRRING (plusieurs
+                temporaires vivants dans le meme appel : F(Copy(..),Copy(..))) }
+              EmitInstr('MOV ESI,EAX');
+              EmitInstr('CALL ' + TP_RT_PFX + 'STRRET');
+            End;
           End;
         End; { Case }
-        { Resultat : pointeur vers STRBUF1 (ASCIIZ) }
+        { Resultat : STRBUF1 (ASCIIZ) ou anneau STRRING (Pascal, 32 bits) }
         LastVarTypeIdx := TY_IDX_STRING;
-        LastExprIsPascalStr := False;
+        LastExprIsPascalStr := (L32Mode <> L32_MODE_NONE);
         EPMatch(')');
       End;
       Exit;
@@ -15192,6 +15198,12 @@ Begin
                 Break;
             End;
             EmitInstr('LEA EAX,[STRBUF1]');
+            If L32Mode <> L32_MODE_NONE Then
+            Begin
+              EmitInstr('MOV ESI,EAX');
+              EmitInstr('CALL ' + TP_RT_PFX + 'STRRET');
+              LastExprIsPascalStr := True;
+            End;
           End;
         End; { Case }
         EPMatch(')');
@@ -20543,10 +20555,8 @@ Begin
           EmitInstr('CALL ' + TP_RT_PFX + 'PCAT_Z');
       End;
       EmitInstr('MOV ESI,ESP');
-      EmitInstr('LEA EDI,[STRBUF1]');
-      EmitInstr('CALL ' + TP_RT_PFX + 'PSTRASSIGN');
+      EmitInstr('CALL ' + TP_RT_PFX + 'PSTRRET');   { anneau STRRING }
       EmitInstr('ADD ESP,512');
-      EmitInstr('LEA EAX,[STRBUF1]');
       LastVarTypeIdx := TY_IDX_STRING;
       LastExprIsPascalStr := True;
       Continue;
@@ -32817,6 +32827,24 @@ Begin
   EmitInstr('POP EDI');
   EmitInstr('RET');
 
+  { ------ _TPRT_PSTRRET : ESI = chaine Pascal -> EAX = copie dans le prochain tampon ---- }
+  { de l anneau STRRING (temporaires de l operateur + : plusieurs vivants par appel)        }
+  EmitBlankLine;
+  EmitLabel(TP_RT_PFX + 'PSTRRET');
+  EmitInstr('PUSH EDI');
+  EmitInstr('MOV EAX,[STRRINGIDX]');
+  EmitInstr('INC EAX');
+  If L32Module Then EmitInstr('AND EAX,31')
+  Else EmitInstr('AND EAX,255');
+  EmitInstr('MOV [STRRINGIDX],EAX');
+  EmitInstr('SHL EAX,8');
+  EmitInstr('MOV EDI,OFFSET STRRING');
+  EmitInstr('ADD EAX,EDI');
+  EmitInstr('MOV EDI,EAX');
+  EmitInstr('CALL ' + TP_RT_PFX + 'PSTRASSIGN');
+  EmitInstr('POP EDI');
+  EmitInstr('RET');
+
   { ------ _TPRT_CARR2STR : ESI = tableau de Char, ECX = longueur -> EAX = chaine Pascal ---- }
   { dans le prochain tampon de l anneau STRRING                                           }
   EmitBlankLine;
@@ -33004,6 +33032,22 @@ Begin
   EmitLabel(TP_RT_PFX + 'DELETE');
   EmitInstr('PUSHAD');
   EmitInstr('DEC EBX');
+  { LPC32 : borne Pos et Len par la longueur de la chaine (octet de longueur
+    Pascal juste avant ESI) : Delete('a', 1, 2) ne doit pas lire au-dela }
+  EmitInstr('MOVZX EDX,BYTE PTR [ESI-1]');
+  EmitInstr('TEST EBX,EBX');
+  EmitInstr('JL ' + TP_RT_PFX + 'DEL_E');
+  EmitInstr('CMP EBX,EDX');
+  EmitInstr('JGE ' + TP_RT_PFX + 'DEL_E');
+  EmitInstr('TEST ECX,ECX');
+  EmitInstr('JLE ' + TP_RT_PFX + 'DEL_E');
+  EmitInstr('MOV EAX,EBX');
+  EmitInstr('ADD EAX,ECX');
+  EmitInstr('CMP EAX,EDX');
+  EmitInstr('JLE ' + TP_RT_PFX + 'DEL_K');
+  EmitInstr('MOV ECX,EDX');
+  EmitInstr('SUB ECX,EBX');
+  EmitLabel(TP_RT_PFX + 'DEL_K');
   { EDI = debut zone a supprimer, ESI = debut zone apres }
   EmitInstr('MOV EDI,ESI');
   EmitInstr('ADD EDI,EBX');
@@ -33014,6 +33058,7 @@ Begin
   EmitInstr('STOSB');
   EmitInstr('TEST AL,AL');
   EmitInstr('JNZ ' + TP_RT_PFX + 'DEL_L');
+  EmitLabel(TP_RT_PFX + 'DEL_E');
   EmitInstr('POPAD');
   EmitInstr('RET');
 

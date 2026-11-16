@@ -10,7 +10,7 @@ LPC=${LPC:-/tmp/claude-0/work/k32/bin/lpc}
 W=${W:-/tmp/linux0-u-tests}
 mkdir -p "$W"
 if [ -z "$SHBIN" ]; then
-  cp "$HERE/../../USR/SH.PAS" "$W/SH.PAS"
+  cp "$HERE/../../USR/SH.PAS" "$HERE/../../USR/REGEX.INC" "$W/"
   (cd "$W" && "$LPC" -3X -q SH.PAS) || exit 2
   SHBIN=$W/SH
 fi

@@ -19,7 +19,16 @@
      4. installe le MBR et le chargeur stage2 (52 secteurs apres le MBR) tires
         de /usr/share/boot/MBR.BIN et STAGE2.BIN.
    Usage : install [-d disque] [-l langue] [-s Mo] [-r racine] [-b taille]
-           [-I inode] [-N inodes] [-y] [-q]   (mkfs.ext2 : memes options)
+           [-I inode] [-N inodes] [-t type] [-O fonctions] [-J size=Mo]
+           [-L nom] [-m pct] [-j] [-y] [-q]
+           (mkfs.ext2, mkfs.ext3, mkfs.ext4, mke2fs : memes options)
+     -t  ext2 (defaut), ext3 (journal jbd2, dir_index) ou ext4 (journal,
+         extents, flex_bg, uninit_bg, huge_file, dir_nlink, extra_isize,
+         inodes de 256 octets par defaut) ; -O  liste de fonctions ajoutees
+         ou retirees (^nom) : extents, flex_bg, 64bit, metadata_csum,
+         uninit_bg, dir_index, has_journal, huge_file, dir_nlink, extra_isize,
+         large_file, ext_attr, none ; -J size=Mo : taille du journal ;
+         -j : journal (ext3) ; -L : nom du volume ; -m : blocs reserves (%)
      -d  disque cible (defaut : demande ; ex. /dev/hdb)
      -l  langue du systeme installe : FR, EN, GR (allemand), SP, IT
      -s  taille de la partition en Mo (defaut : tout le disque)
@@ -37,7 +46,8 @@ Const
   MAXGRP = 256;
   MAXBLK = 2097152;           { 2 Go }
   MAXDIRENT = 4000;
-  M : Array[1..17, 1..5] Of PChar = (
+  MAXEXT = 8192;
+  M : Array[1..18, 1..5] Of PChar = (
     ('Installation de LINUX-0 KERNEL32', 'LINUX-0 KERNEL32 installation',
      'Installation von LINUX-0 KERNEL32', 'Instalacion de LINUX-0 KERNEL32',
      'Installazione di LINUX-0 KERNEL32'),
@@ -97,10 +107,16 @@ Const
      'MBR.BIN o STAGE2.BIN non trovato in /usr/share/boot'),
     ('Systeme de fichiers ext2 cree.', 'ext2 file system created.',
      'ext2-Dateisystem erstellt.', 'Sistema de ficheros ext2 creado.',
-     'File system ext2 creato.'));
+     'File system ext2 creato.'),
+    ('Option inconnue ou fonction non geree : ',
+     'Unknown option or unsupported feature: ',
+     'Unbekannte Option oder Funktion: ',
+     'Opcion desconocida o funcion no soportada: ',
+     'Opzione sconosciuta o funzione non supportata: '));
   LangCode : Array[1..5] Of String[2] = ('FR', 'EN', 'GR', 'SP', 'IT');
 
 Type
+  TBlk15 = Array[0..14] Of LongInt;
   TDirEnt = Record
     Name : String[63];
     Ino : LongInt;
@@ -130,9 +146,32 @@ Var
   Copied : LongInt;
   NewLang, SrcRoot : String;
   Fail : Boolean;
+  { type de systeme de fichiers et fonctions (-t, -O) }
+  FsName : String;
+  FsType : LongInt;                    { 2, 3 ou 4 }
+  FeatSparse, FeatFiletype, FeatJournal, FeatDirIdx, FeatExtAttr : Boolean;
+  FeatExtents, FeatFlex, Feat64, FeatMcsum, FeatGdtCsum : Boolean;
+  FeatHuge, FeatDirNlink, FeatExtra, FeatLarge : Boolean;
+  FlexSz, LogFlex, DescSz : LongInt;   { groupes par groupe flex, taille d'un
+                                         descripteur de groupe }
+  JrnBlocks, JrnMb, ResPct : LongInt;
+  VolName : String;
+  GotInode, GotFeat : Boolean;
+  FsUuid : Array[0..15] Of Byte;
+  CsumSeed : LongInt;
+  FsCrcTab : Array[0..255] Of LongInt;
+  Crc16Tab : Array[0..255] Of LongInt;
+  GrpFlags, GrpUnused : Array[0..MAXGRP - 1] Of LongInt;
+  GrpBCsum, GrpICsum : Array[0..MAXGRP - 1] Of LongInt;
+  { extents du fichier en cours }
+  ExtLog, ExtPhys, ExtLen : Array[0..MAXEXT - 1] Of LongInt;
+  ExtN : LongInt;
+  FFlags : LongInt;                    { i_flags du fichier en cours }
+  JrnInode : TBlk15;
+  JrnSize : LongInt;
 
 Function Msg(Id : LongInt) : String;
-Var P : PChar; X : String;
+Var P : PChar; X : String; K : LongInt;
 Begin
   P := M[Id, Lang];
   X := '';
@@ -140,6 +179,15 @@ Begin
   Begin
     X := X + P^;
     Inc(P);
+  End;
+  If FsName <> 'ext2' Then
+  Begin
+    K := Pos('ext2', X);
+    While K > 0 Do
+    Begin
+      X := Copy(X, 1, K - 1) + FsName + Copy(X, K + 4, 255);
+      K := Pos('ext2', X);
+    End;
   End;
   Msg := X;
 End;
@@ -196,6 +244,80 @@ Begin
   PutB(Addr, Off + 1, V Shr 8);
 End;
 
+{ ---------- sommes de controle : crc32c (metadata_csum), crc16 ---------- }
+
+Procedure FsCrcInit;
+Var I, J, C, D : LongInt;
+Begin
+  For I := 0 To 255 Do
+  Begin
+    C := I;
+    D := I;
+    For J := 1 To 8 Do
+    Begin
+      If (C And 1) <> 0 Then C := (C Shr 1) Xor $82F63B78
+      Else C := C Shr 1;
+      If (D And 1) <> 0 Then D := (D Shr 1) Xor $A001
+      Else D := D Shr 1;
+    End;
+    FsCrcTab[I] := C;
+    Crc16Tab[I] := D;
+  End;
+End;
+
+Function FsCrc32c(Crc : LongInt; Addr, Len : LongInt) : LongInt;
+Var P : ^Byte; K : LongInt;
+Begin
+  For K := 0 To Len - 1 Do
+  Begin
+    P := Pointer(Addr + K);
+    Crc := FsCrcTab[(Crc Xor P^) And $FF] Xor (Crc Shr 8);
+  End;
+  FsCrc32c := Crc;
+End;
+
+Function FsCrc16(Crc : LongInt; Addr, Len : LongInt) : LongInt;
+Var P : ^Byte; K : LongInt;
+Begin
+  Crc := Crc And $FFFF;
+  For K := 0 To Len - 1 Do
+  Begin
+    P := Pointer(Addr + K);
+    Crc := Crc16Tab[(Crc Xor P^) And $FF] Xor (Crc Shr 8);
+  End;
+  FsCrc16 := Crc And $FFFF;
+End;
+
+{ crc32c(graine, numero d'inode, generation 0, donnees) : inodes, blocs de
+  repertoire, blocs d'extents }
+Function InoCsum(Ino, Addr, Len : LongInt) : LongInt;
+Var T : Array[0..1] Of LongInt; C : LongInt;
+Begin
+  T[0] := Ino;
+  T[1] := 0;
+  C := FsCrc32c(CsumSeed, LongInt(@T[0]), 4);
+  C := FsCrc32c(C, LongInt(@T[1]), 4);
+  InoCsum := FsCrc32c(C, Addr, Len);
+End;
+
+{ identifiant du volume : /dev/urandom, sinon derive de l'heure }
+Procedure MakeUuid;
+Var F, N, K : LongInt;
+Begin
+  FillChar(FsUuid, 16, 0);
+  F := SysOpen('/dev/urandom', O_RDONLY, 0);
+  N := 0;
+  If F >= 0 Then
+  Begin
+    N := LnxSys3(3, F, LongInt(@FsUuid), 16);
+    SysClose(F);
+  End;
+  If N < 16 Then
+    For K := 0 To 15 Do FsUuid[K] := ((Now Shr (K And 3)) + K * 17 + 5) And $FF;
+  FsUuid[6] := (FsUuid[6] And $0F) Or $40;
+  FsUuid[8] := (FsUuid[8] And $3F) Or $80;
+End;
+
 { ---------- geometrie et allocation ---------- }
 
 Function GroupBase(G : LongInt) : LongInt;
@@ -213,7 +335,8 @@ End;
 
 Function HasBackup(G : LongInt) : Boolean;
 Begin
-  HasBackup := (G = 0) Or (G = 1) Or IsPow(G, 3) Or IsPow(G, 5) Or IsPow(G, 7);
+  HasBackup := (Not FeatSparse) Or (G = 0) Or (G = 1) Or IsPow(G, 3) Or
+               IsPow(G, 5) Or IsPow(G, 7);
 End;
 
 Procedure SetBlkBit(B : LongInt);
@@ -231,52 +354,117 @@ Begin
   InoBm[I Shr 3] := InoBm[I Shr 3] Or (1 Shl (I And 7));
 End;
 
+Var
+  MetaIn : Array[0..MAXGRP - 1] Of LongInt;   { blocs de structure d'autres
+                                                groupes dans le groupe }
+
+Procedure MarkMeta(B : LongInt);
+Begin
+  SetBlkBit(B);
+  Inc(MetaIn[(B - FirstData) Div BPG]);
+End;
+
+Function GrpOverhead(G : LongInt) : LongInt;
+Begin
+  If HasBackup(G) Then GrpOverhead := 1 + GdtBlocks
+  Else GrpOverhead := 0;
+End;
+
 { calcule la disposition des groupes ; marque les blocs de structure }
 Procedure Layout;
-Var G, Base, B, Fixed, Last, K : LongInt;
+Var G, Base, B, Last, K, G0, N, Again, S0, Free : LongInt;
 Begin
-  NGroups := (NBlocks - FirstData + BPG - 1) Div BPG;
-  { inodes par groupe : BPG / 4 (1 Ko : 2048), ou -N ; multiple d'un bloc de
-    table }
-  IPG := BPG Div 4;
-  If WantInodes > 0 Then
-  Begin
-    IPG := (WantInodes + NGroups - 1) Div NGroups;
-    K := BS Div ISZ;
-    IPG := ((IPG + K - 1) Div K) * K;
-    If IPG < K Then IPG := K;
-    If IPG > BS * 8 Then IPG := BS * 8;
-  End;
-  ITB := IPG * ISZ Div BS;
-  GdtBlocks := (NGroups * 32 + BS - 1) Div BS;
+  Repeat
+    Again := 0;
+    NGroups := (NBlocks - FirstData + BPG - 1) Div BPG;
+    { inodes par groupe : BPG / 4 (1 Ko : 2048), ou -N ; multiple d'un bloc de
+      table }
+    IPG := BPG Div 4;
+    If WantInodes > 0 Then
+    Begin
+      IPG := (WantInodes + NGroups - 1) Div NGroups;
+      K := BS Div ISZ;
+      IPG := ((IPG + K - 1) Div K) * K;
+      If IPG < K Then IPG := K;
+      If IPG > BS * 8 Then IPG := BS * 8;
+    End;
+    ITB := IPG * ISZ Div BS;
+    GdtBlocks := (NGroups * DescSz + BS - 1) Div BS;
+    { groupe flex : au plus 16 groupes dont les tables tiennent dans la
+      premiere moitie du premier groupe }
+    FlexSz := 1;
+    LogFlex := 0;
+    If FeatFlex Then
+    Begin
+      FlexSz := 16;
+      LogFlex := 4;
+      While (FlexSz > 1) And (FlexSz * (2 + ITB) + 1 + GdtBlocks > BPG Div 2) Do
+      Begin
+        FlexSz := FlexSz Div 2;
+        Dec(LogFlex);
+      End;
+    End;
+    { dernier groupe trop petit pour ses propres structures : abandonne }
+    Last := NBlocks - GroupBase(NGroups - 1);
+    K := GrpOverhead(NGroups - 1) + 40;
+    If FlexSz = 1 Then K := K + 2 + ITB;
+    If (NGroups > 1) And (Last < K) Then
+    Begin
+      NBlocks := NBlocks - Last;
+      Again := 1;
+    End;
+  Until Again = 0;
+  If NGroups > MAXGRP Then Die('trop de groupes / too many groups');
   FreeBlocks := 0;
   FreeInodes := NGroups * IPG - 10;
   FillChar(BlkBm, SizeOf(BlkBm), 0);
   FillChar(InoBm, SizeOf(InoBm), 0);
+  FillChar(MetaIn, SizeOf(MetaIn), 0);
   For G := 0 To NGroups - 1 Do
   Begin
     Base := GroupBase(G);
-    B := Base;
-    If HasBackup(G) Then B := B + 1 + GdtBlocks;
-    GrpBBm[G] := B;
-    GrpIBm[G] := B + 1;
-    GrpITab[G] := B + 2;
-    Fixed := B + 2 + ITB - Base;
+    For K := 0 To GrpOverhead(G) - 1 Do SetBlkBit(Base + K);
+    If FlexSz = 1 Then
+    Begin
+      B := Base + GrpOverhead(G);
+      GrpBBm[G] := B;
+      GrpIBm[G] := B + 1;
+      GrpITab[G] := B + 2;
+    End
+    Else
+    Begin
+      G0 := (G Div FlexSz) * FlexSz;
+      N := NGroups - G0;
+      If N > FlexSz Then N := FlexSz;
+      S0 := GroupBase(G0) + GrpOverhead(G0);
+      GrpBBm[G] := S0 + (G - G0);
+      GrpIBm[G] := S0 + N + (G - G0);
+      GrpITab[G] := S0 + 2 * N + (G - G0) * ITB;
+    End;
+    MarkMeta(GrpBBm[G]);
+    MarkMeta(GrpIBm[G]);
+    For K := 0 To ITB - 1 Do MarkMeta(GrpITab[G] + K);
+  End;
+  For G := 0 To NGroups - 1 Do
+  Begin
+    Base := GroupBase(G);
     Last := Base + BPG - 1;
     If Last > NBlocks - 1 Then Last := NBlocks - 1;
-    For K := Base To B + 2 + ITB - 1 Do SetBlkBit(K);
     { blocs au-dela de la fin du systeme de fichiers : occupes }
     For K := Last + 1 To Base + BPG - 1 Do SetBlkBit(K);
-    GrpFreeBlk[G] := Last - Base + 1 - Fixed;
+    Free := 0;
+    For K := Base To Last Do
+      If Not GetBlkBit(K) Then Inc(Free);
+    GrpFreeBlk[G] := Free;
     GrpFreeIno[G] := IPG;
     GrpDirs[G] := 0;
-    FreeBlocks := FreeBlocks + GrpFreeBlk[G];
+    FreeBlocks := FreeBlocks + Free;
   End;
   { inodes reserves 1..10 }
   For K := 1 To 10 Do SetInoBit(K - 1);
   GrpFreeIno[0] := IPG - 10;
   NextIno := 12;
-  Cursor := GrpITab[0] + ITB;
+  Cursor := FirstData;
 End;
 
 Function AllocBlock : LongInt;
@@ -313,28 +501,38 @@ End;
 
 { ---------- ecriture d'un inode ---------- }
 
-Type
-  TBlk15 = Array[0..14] Of LongInt;
-
 Procedure PutInode(Ino : LongInt; Mode, Uid, Gid, Size, ATime, CTime, MTime,
-    Links, Sectors : LongInt; Var Blocks : TBlk15);
-Var Off, G, Idx, K : LongInt; I128 : Array[0..255] Of Byte;
+    Links, Sectors, Flags : LongInt; Var Blocks : TBlk15);
+Var Off, G, Idx, K, C, A : LongInt; I128 : Array[0..255] Of Byte;
 Begin
   FillChar(I128, SizeOf(I128), 0);
-  PutW(LongInt(@I128), 0, Mode);
-  PutW(LongInt(@I128), 2, Uid);
-  PutD(LongInt(@I128), 4, Size);
-  PutD(LongInt(@I128), 8, ATime);
-  PutD(LongInt(@I128), 12, CTime);
-  PutD(LongInt(@I128), 16, MTime);
-  PutW(LongInt(@I128), 24, Gid);
-  PutW(LongInt(@I128), 26, Links);
-  PutD(LongInt(@I128), 28, Sectors);
-  For K := 0 To 14 Do PutD(LongInt(@I128), 40 + K * 4, Blocks[K]);
+  A := LongInt(@I128);
+  PutW(A, 0, Mode);
+  PutW(A, 2, Uid);
+  PutD(A, 4, Size);
+  PutD(A, 8, ATime);
+  PutD(A, 12, CTime);
+  PutD(A, 16, MTime);
+  PutW(A, 24, Gid);
+  PutW(A, 26, Links);
+  PutD(A, 28, Sectors);
+  PutD(A, 32, Flags);
+  For K := 0 To 14 Do PutD(A, 40 + K * 4, Blocks[K]);
+  If (ISZ > 128) And FeatExtra Then
+  Begin
+    PutW(A, 128, 32);              { i_extra_isize }
+    PutD(A, 144, Now);             { i_crtime }
+  End;
+  If FeatMcsum Then
+  Begin
+    C := InoCsum(Ino, A, ISZ);
+    PutW(A, 124, C And $FFFF);
+    If (ISZ > 128) And FeatExtra Then PutW(A, 130, C Shr 16);
+  End;
   G := (Ino - 1) Div IPG;
   Idx := (Ino - 1) Mod IPG;
   Off := PartStart * 512 + GrpITab[G] * BS + Idx * ISZ;
-  WriteAt(Off, LongInt(@I128), ISZ);
+  WriteAt(Off, A, ISZ);
 End;
 
 { ---------- ecriture de donnees : blocs directs et indirects ---------- }
@@ -352,6 +550,8 @@ Procedure FileBegin;
 Var K : LongInt;
 Begin
   For K := 0 To 14 Do FBlocks[K] := 0;
+  FFlags := 0;
+  ExtN := 0;
   FNBlk := 0;
   FSect := 0;
   Ind1 := 0;
@@ -375,6 +575,22 @@ Begin
   N := FNBlk;
   Inc(FNBlk);
   Inc(FSect, BS Div 512);
+  If FeatExtents Then
+  Begin
+    { extents : on prolonge le dernier si le bloc est contigu }
+    If (ExtN > 0) And (ExtPhys[ExtN - 1] + ExtLen[ExtN - 1] = B) And
+       (ExtLen[ExtN - 1] < 32768) Then
+      Inc(ExtLen[ExtN - 1])
+    Else
+    Begin
+      If ExtN >= MAXEXT Then Die('fichier trop fragmente / too fragmented');
+      ExtLog[ExtN] := N;
+      ExtPhys[ExtN] := B;
+      ExtLen[ExtN] := 1;
+      Inc(ExtN);
+    End;
+    Exit;
+  End;
   If N < 12 Then
   Begin
     FBlocks[N] := B;
@@ -415,6 +631,69 @@ Begin
   WriteBlk(Ind1, LongInt(@Ind1Buf));
 End;
 
+{ ecrit l'en-tete d'un noeud d'extents a l'adresse A }
+Procedure ExtHeader(A, Entries, MaxEnt, Depth : LongInt);
+Begin
+  PutW(A, 0, $F30A);
+  PutW(A, 2, Entries);
+  PutW(A, 4, MaxEnt);
+  PutW(A, 6, Depth);
+  PutD(A, 8, 0);
+End;
+
+{ termine le fichier : en mode extents, construit l'arbre dans i_block
+  (au plus 4 extents, sinon 4 feuilles) ; Ino sert a la somme de controle }
+Procedure FileEnd(Ino : LongInt);
+Var K, J, A, LeafMax, NL, Cnt, Blk, Lb : LongInt;
+    Lf : Array[0..4095] Of Byte;
+Begin
+  If Not FeatExtents Then Exit;
+  FFlags := $80000;
+  FillChar(FBlocks, SizeOf(FBlocks), 0);
+  A := LongInt(@FBlocks);
+  If ExtN <= 4 Then
+  Begin
+    ExtHeader(A, ExtN, 4, 0);
+    For K := 0 To ExtN - 1 Do
+    Begin
+      PutD(A, 12 + K * 12, ExtLog[K]);
+      PutW(A, 16 + K * 12, ExtLen[K]);
+      PutW(A, 18 + K * 12, 0);
+      PutD(A, 20 + K * 12, ExtPhys[K]);
+    End;
+    Exit;
+  End;
+  LeafMax := (BS - 12) Div 12;
+  NL := (ExtN + LeafMax - 1) Div LeafMax;
+  If NL > 4 Then Die('fichier trop fragmente / too fragmented');
+  ExtHeader(A, NL, 4, 1);
+  K := 0;
+  For J := 0 To NL - 1 Do
+  Begin
+    Cnt := ExtN - K;
+    If Cnt > LeafMax Then Cnt := LeafMax;
+    Lb := LongInt(@Lf);
+    FillChar(Lf, BS, 0);
+    ExtHeader(Lb, Cnt, LeafMax, 0);
+    For Blk := 0 To Cnt - 1 Do
+    Begin
+      PutD(Lb, 12 + Blk * 12, ExtLog[K + Blk]);
+      PutW(Lb, 16 + Blk * 12, ExtLen[K + Blk]);
+      PutW(Lb, 18 + Blk * 12, 0);
+      PutD(Lb, 20 + Blk * 12, ExtPhys[K + Blk]);
+    End;
+    If FeatMcsum Then
+      PutD(Lb, 12 + LeafMax * 12, InoCsum(Ino, Lb, 12 + LeafMax * 12));
+    Blk := AllocBlock;
+    Inc(FSect, BS Div 512);
+    WriteBlk(Blk, Lb);
+    PutD(A, 12 + J * 12, ExtLog[K]);
+    PutD(A, 16 + J * 12, Blk);
+    PutD(A, 20 + J * 12, 0);
+    K := K + Cnt;
+  End;
+End;
+
 { ---------- repertoires ---------- }
 
 Function DirBlockCount(Ents : PDirEnts; N : LongInt) : LongInt;
@@ -446,13 +725,30 @@ Begin
   For K := 1 To NameLen Do PutB(Addr, Off + 7 + K, Ord(Name[K]));
 End;
 
+{ ferme un bloc de repertoire : le dernier enregistrement s'etend jusqu'a Cap ;
+  avec metadata_csum, un enregistrement final de 12 octets porte la somme }
+Procedure CloseDirBlock(Ino, LastOff, Cap : LongInt);
+Begin
+  PutW(LongInt(@Buf), LastOff + 4, Cap - LastOff);
+  If FeatMcsum Then
+  Begin
+    PutD(LongInt(@Buf), Cap, 0);
+    PutW(LongInt(@Buf), Cap + 4, 12);
+    PutB(LongInt(@Buf), Cap + 6, 0);
+    PutB(LongInt(@Buf), Cap + 7, $DE);
+    PutD(LongInt(@Buf), Cap + 8, InoCsum(Ino, LongInt(@Buf), Cap));
+  End;
+End;
+
 { ecrit le repertoire Ino (parent Par) avec ses entrees ; rend les blocs }
 Procedure WriteDir(Ino, Par : LongInt; Ents : PDirEnts; N : LongInt;
     Mode, Uid, Gid, ATime, CTime, MTime,
       SubDirs : LongInt; MinBlocks : LongInt);
-Var K, Off, LastOff, Need, Blk, NB : LongInt;
+Var K, Off, LastOff, Need, Blk, NB, Cap : LongInt;
 Begin
   FileBegin;
+  Cap := BS;
+  If FeatMcsum Then Cap := BS - 12;
   FillChar(Buf, BS, 0);
   Off := 0;
   EmitDirent(LongInt(@Buf), 0, Ino, 12, 1, 2, '.');
@@ -463,10 +759,9 @@ Begin
   For K := 0 To N - 1 Do
   Begin
     Need := (8 + Length(Ents^[K].Name) + 3) And Not 3;
-    If Off + Need > BS Then
+    If Off + Need > Cap Then
     Begin
-      { fermer le bloc : le dernier enregistrement s'etend jusqu'au bout }
-      PutW(LongInt(@Buf), LastOff + 4, BS - LastOff);
+      CloseDirBlock(Ino, LastOff, Cap);
       Blk := AllocBlock;
       WriteBlk(Blk, LongInt(@Buf));
       FileAddBlock(Blk);
@@ -481,7 +776,7 @@ Begin
   End;
   { dernier bloc }
   If Off = 24 Then LastOff := 12;
-  PutW(LongInt(@Buf), LastOff + 4, BS - LastOff);
+  CloseDirBlock(Ino, LastOff, Cap);
   Blk := AllocBlock;
   WriteBlk(Blk, LongInt(@Buf));
   FileAddBlock(Blk);
@@ -490,16 +785,15 @@ Begin
   While NB < MinBlocks Do
   Begin
     FillChar(Buf, BS, 0);
-    PutD(LongInt(@Buf), 0, 0);
-    PutW(LongInt(@Buf), 4, BS);
+    CloseDirBlock(Ino, 0, Cap);
     Blk := AllocBlock;
     WriteBlk(Blk, LongInt(@Buf));
     FileAddBlock(Blk);
     Inc(NB);
   End;
+  FileEnd(Ino);
   PutInode(Ino, $4000 Or (Mode And $FFF), Uid, Gid, NB * BS, ATime, CTime,
-    MTime,
-           2 + SubDirs, FSect, FBlocks);
+    MTime, 2 + SubDirs, FSect, FFlags, FBlocks);
 End;
 
 { ---------- copie de l'arborescence ---------- }
@@ -548,9 +842,10 @@ Begin
     End;
     SysClose(In1);
   End;
+  FileEnd(Ino);
   Blocks := FBlocks;
   PutInode(Ino, St.Mode, St.Uid, St.Gid, Total, St.ATime, St.MTime, St.MTime,
-           1, FSect, Blocks);
+           1, FSect, FFlags, Blocks);
 End;
 
 Procedure CopyProfile(Ino : LongInt; Var St : TSysStat);
@@ -583,8 +878,9 @@ Begin
   Blk := AllocBlock;
   WriteBlk(Blk, LongInt(@Chunk));
   FileAddBlock(Blk);
+  FileEnd(Ino);
   PutInode(Ino, St.Mode, St.Uid, St.Gid, Len, St.ATime, St.MTime, St.MTime, 1,
-           FSect, FBlocks);
+           FSect, FFlags, FBlocks);
 End;
 
 { copie le repertoire Src (chemin absolu sur la source) ; Rel : chemin
@@ -647,7 +943,7 @@ Begin
                     PutB(LongInt(@Blocks), K - 1, Ord(Link[K]));
                   PutInode(Ino2, S2.Mode, S2.Uid, S2.Gid, Length(Link),
                     S2.ATime,
-                           S2.MTime, S2.MTime, 1, 0, Blocks);
+                           S2.MTime, S2.MTime, 1, 0, 0, Blocks);
                 End
                 Else
                 Begin
@@ -656,10 +952,11 @@ Begin
                   K := AllocBlock;
                   WriteBlk(K, LongInt(@Buf));
                   FileAddBlock(K);
+                  FileEnd(Ino2);
                   Blocks := FBlocks;
                   PutInode(Ino2, S2.Mode, S2.Uid, S2.Gid, Length(Link),
                     S2.ATime,
-                           S2.MTime, S2.MTime, 1, FSect, Blocks);
+                           S2.MTime, S2.MTime, 1, FSect, FFlags, Blocks);
                 End;
               End;
           Else
@@ -668,7 +965,7 @@ Begin
               FillChar(Blocks, SizeOf(Blocks), 0);
               Blocks[0] := S2.RDev;
               PutInode(Ino2, S2.Mode, S2.Uid, S2.Gid, 0, S2.ATime, S2.MTime,
-                       S2.MTime, 1, 0, Blocks);
+                       S2.MTime, 1, 0, 0, Blocks);
             End;
           End;
         End;
@@ -695,15 +992,53 @@ End;
 
 { ---------- structures du systeme de fichiers ---------- }
 
+Function CompatBits : LongInt;
+Var V : LongInt;
+Begin
+  V := 0;
+  If FeatJournal Then V := V Or $4;
+  If FeatExtAttr Then V := V Or $8;
+  If FeatDirIdx Then V := V Or $20;
+  CompatBits := V;
+End;
+
+Function IncompatBits : LongInt;
+Var V : LongInt;
+Begin
+  V := 0;
+  If FeatFiletype Then V := V Or $2;
+  If FeatExtents Then V := V Or $40;
+  If Feat64 Then V := V Or $80;
+  If FlexSz > 1 Then V := V Or $200;
+  IncompatBits := V;
+End;
+
+Function RoCompatBits : LongInt;
+Var V : LongInt;
+Begin
+  V := 0;
+  If FeatSparse Then V := V Or $1;
+  If FeatLarge Then V := V Or $2;
+  If FeatHuge Then V := V Or $8;
+  If FeatGdtCsum Then V := V Or $10;
+  If FeatDirNlink Then V := V Or $20;
+  If FeatExtra Then V := V Or $40;
+  If FeatMcsum Then V := V Or $400;
+  RoCompatBits := V;
+End;
+
 Procedure WriteSuper(G : LongInt);
 Var Sb : Array[0..4095] Of Byte; K : LongInt; Base : LongInt; SbA : LongInt;
+    Rsv, A : LongInt;
 Begin
   FillChar(Sb, BS, 0);
   SbA := LongInt(@Sb);
+  A := SbA;
   If (G = 0) And (BS > 1024) Then SbA := SbA + 1024;
+  Rsv := NBlocks Div 100 * ResPct;
   PutD(SbA, 0, NGroups * IPG);
   PutD(SbA, 4, NBlocks);
-  PutD(SbA, 8, 0);
+  PutD(SbA, 8, Rsv);
   PutD(SbA, 12, FreeBlocks);
   PutD(SbA, 16, FreeInodes);
   PutD(SbA, 20, FirstData);
@@ -729,50 +1064,132 @@ Begin
   PutD(SbA, 84, 11);
   PutW(SbA, 88, ISZ);
   PutW(SbA, 90, G);
-  PutD(SbA, 92, 0);
-  PutD(SbA, 96, 2);
-  PutD(SbA, 100, 1);
-  For K := 0 To 15 Do PutB(SbA, 104 + K, (Now Shr (K And 3)) + K * 17);
-  PutB(SbA, 120, Ord('L'));
-  PutB(SbA, 121, Ord('I'));
-  PutB(SbA, 122, Ord('N'));
-  PutB(SbA, 123, Ord('U'));
-  PutB(SbA, 124, Ord('X'));
-  PutB(SbA, 125, Ord('0'));
+  PutD(SbA, 92, CompatBits);
+  PutD(SbA, 96, IncompatBits);
+  PutD(SbA, 100, RoCompatBits);
+  For K := 0 To 15 Do PutB(SbA, 104 + K, FsUuid[K]);
+  For K := 1 To Length(VolName) Do PutB(SbA, 119 + K, Ord(VolName[K]));
+  If FeatJournal Then
+  Begin
+    PutD(SbA, 224, 8);                       { s_journal_inum }
+    PutB(SbA, 253, 1);                       { s_jnl_backup_type }
+    For K := 0 To 14 Do PutD(SbA, 268 + K * 4, JrnInode[K]);
+    PutD(SbA, 268 + 60, 0);                  { i_size_high }
+    PutD(SbA, 268 + 64, JrnSize);            { i_size }
+  End;
+  If FeatDirIdx Then
+  Begin
+    For K := 0 To 15 Do PutB(SbA, 236 + K, FsUuid[(K + 5) And 15] Xor $5A);
+    PutB(SbA, 252, 1);                       { half_md4 }
+    PutD(SbA, 352, 1);                       { s_flags : signed hash }
+  End;
+  If Feat64 Then PutW(SbA, 254, DescSz);
+  If FeatExtra Then
+  Begin
+    PutW(SbA, 348, 32);                      { s_min_extra_isize }
+    PutW(SbA, 350, 32);                      { s_want_extra_isize }
+  End;
+  If FlexSz > 1 Then PutB(SbA, 372, LogFlex);
+  If FeatMcsum Then
+  Begin
+    PutB(SbA, 373, 1);                       { crc32c }
+    PutD(SbA, 1020, FsCrc32c(-1, SbA, 1020));
+  End;
   Base := GroupBase(G);
-  WriteBlk(Base, LongInt(@Sb));
+  WriteBlk(Base, A);
+End;
+
+{ somme de controle d'un descripteur de groupe (crc16 ou crc32c) }
+Procedure GdCsum(G, Addr : LongInt);
+Var C, Gn : LongInt;
+Begin
+  If Not (FeatMcsum Or FeatGdtCsum) Then Exit;
+  PutW(Addr, G * DescSz + 30, 0);
+  Gn := G;
+  If FeatMcsum Then
+  Begin
+    C := FsCrc32c(CsumSeed, LongInt(@Gn), 4);
+    C := FsCrc32c(C, Addr + G * DescSz, DescSz) And $FFFF;
+  End
+  Else
+  Begin
+    C := FsCrc16(-1, LongInt(@FsUuid), 16);
+    C := FsCrc16(C, LongInt(@Gn), 4);
+    C := FsCrc16(C, Addr + G * DescSz, 30);
+    If DescSz > 32 Then C := FsCrc16(C, Addr + G * DescSz + 32, DescSz - 32);
+  End;
+  PutW(Addr, G * DescSz + 30, C);
 End;
 
 Procedure WriteMeta;
-Var G, K, B : LongInt; Gd : Array[0..4095] Of Byte; Bb : Array[0..4095] Of Byte;
-    Gdt : Array[0..8191] Of Byte;
+Var G, K, B, Used, Hi, Ov, Last, Gb, Lo : LongInt;
+    Gd : Array[0..4095] Of Byte; Bb : Array[0..4095] Of Byte;
+    Gdt : Array[0..16383] Of Byte; Bcs, Ics : LongInt;
 Begin
   FillChar(Gdt, SizeOf(Gdt), 0);
   For G := 0 To NGroups - 1 Do
   Begin
-    PutD(LongInt(@Gdt), G * 32, GrpBBm[G]);
-    PutD(LongInt(@Gdt), G * 32 + 4, GrpIBm[G]);
-    PutD(LongInt(@Gdt), G * 32 + 8, GrpITab[G]);
-    PutW(LongInt(@Gdt), G * 32 + 12, GrpFreeBlk[G]);
-    PutW(LongInt(@Gdt), G * 32 + 14, GrpFreeIno[G]);
-    PutW(LongInt(@Gdt), G * 32 + 16, GrpDirs[G]);
-  End;
-  For G := 0 To NGroups - 1 Do
-  Begin
+    Gb := GroupBase(G);
     { bitmap des blocs : bits du groupe (le debut du groupe est un
       multiple de 8 + 1 : on recopie bit a bit) }
     FillChar(Bb, BS, 0);
     For K := 0 To BPG - 1 Do
-      If GetBlkBit(GroupBase(G) + K) Then Bb[K Shr 3] := Bb[K Shr 3] Or (1 Shl
+      If GetBlkBit(Gb + K) Then Bb[K Shr 3] := Bb[K Shr 3] Or (1 Shl
         (K And 7));
+    Bcs := FsCrc32c(CsumSeed, LongInt(@Bb), BPG Div 8);
     WriteBlk(GrpBBm[G], LongInt(@Bb));
     FillChar(Bb, BS, 0);
+    Used := 0;
+    Hi := 0;
     For K := 0 To IPG - 1 Do
       If (InoBm[(G * IPG + K) Shr 3] And (1 Shl ((G * IPG + K) And 7))) <> 0
         Then
+      Begin
         Bb[K Shr 3] := Bb[K Shr 3] Or (1 Shl (K And 7));
+        Inc(Used);
+        Hi := K + 1;
+      End;
+    Ics := FsCrc32c(CsumSeed, LongInt(@Bb), IPG Div 8);
     For K := IPG To BPG - 1 Do Bb[K Shr 3] := Bb[K Shr 3] Or (1 Shl (K And 7));
     WriteBlk(GrpIBm[G], LongInt(@Bb));
+    { indicateurs de groupe (uninit_bg / metadata_csum) }
+    GrpFlags[G] := 0;
+    GrpUnused[G] := 0;
+    If FeatMcsum Or FeatGdtCsum Then
+    Begin
+      GrpFlags[G] := 4;                          { ITABLE_ZEROED }
+      GrpUnused[G] := IPG - Hi;
+      If (Used = 0) And (G > 0) Then GrpFlags[G] := GrpFlags[G] Or 1;
+      If (G > 0) And (G < NGroups - 1) Then
+      Begin
+        Ov := GrpOverhead(G);
+        If FlexSz = 1 Then Ov := Ov + 2 + ITB;
+        Last := BPG - GrpFreeBlk[G];
+        If Last = Ov Then GrpFlags[G] := GrpFlags[G] Or 2;
+      End;
+    End;
+    Lo := G * DescSz;
+    PutD(LongInt(@Gdt), Lo, GrpBBm[G]);
+    PutD(LongInt(@Gdt), Lo + 4, GrpIBm[G]);
+    PutD(LongInt(@Gdt), Lo + 8, GrpITab[G]);
+    PutW(LongInt(@Gdt), Lo + 12, GrpFreeBlk[G]);
+    PutW(LongInt(@Gdt), Lo + 14, GrpFreeIno[G]);
+    PutW(LongInt(@Gdt), Lo + 16, GrpDirs[G]);
+    PutW(LongInt(@Gdt), Lo + 18, GrpFlags[G]);
+    If FeatMcsum Then
+    Begin
+      PutW(LongInt(@Gdt), Lo + 24, Bcs And $FFFF);
+      PutW(LongInt(@Gdt), Lo + 26, Ics And $FFFF);
+      If DescSz >= 64 Then
+      Begin
+        PutW(LongInt(@Gdt), Lo + 56, Bcs Shr 16);
+        PutW(LongInt(@Gdt), Lo + 58, Ics Shr 16);
+      End;
+    End;
+    PutW(LongInt(@Gdt), Lo + 28, GrpUnused[G]);
+    GdCsum(G, LongInt(@Gdt));
+  End;
+  For G := 0 To NGroups - 1 Do
     If HasBackup(G) Then
     Begin
       WriteSuper(G);
@@ -782,7 +1199,6 @@ Begin
         WriteBlk(GroupBase(G) + 1 + K, LongInt(@Gd));
       End;
     End;
-  End;
 End;
 
 { ---------- mke2fs : zone des inodes a zero, lost+found ---------- }
@@ -806,6 +1222,58 @@ Begin
   Inc(GrpDirs[0]);
   WriteDir(11, 2, Ents, 0, $1C0, 0, 0, Now, Now, Now, 0, 12);
   FreeMem(Ents, SizeOf(TDirEnts));
+End;
+
+{ ---------- journal jbd2 : inode 8 ---------- }
+
+Procedure PutBE(Addr, Off, V : LongInt);
+Begin
+  PutB(Addr, Off, V Shr 24);
+  PutB(Addr, Off + 1, V Shr 16);
+  PutB(Addr, Off + 2, V Shr 8);
+  PutB(Addr, Off + 3, V);
+End;
+
+{ taille par defaut en blocs (comme mke2fs) }
+Function DefaultJournal : LongInt;
+Begin
+  If NBlocks < 2048 Then DefaultJournal := 0
+  Else If NBlocks < 32768 Then DefaultJournal := 1024
+  Else If NBlocks < 262144 Then DefaultJournal := 4096
+  Else If NBlocks < 524288 Then DefaultJournal := 8192
+  Else If NBlocks < 4194304 Then DefaultJournal := 16384
+  Else DefaultJournal := 32768;
+End;
+
+Procedure MakeJournal;
+Var K, Blk, A : LongInt; Jb : Array[0..4095] Of Byte;
+Begin
+  FileBegin;
+  A := LongInt(@Jb);
+  For K := 0 To JrnBlocks - 1 Do
+  Begin
+    FillChar(Jb, BS, 0);
+    If K = 0 Then
+    Begin
+      PutBE(A, 0, $C03B3998);
+      PutBE(A, 4, 4);                 { superbloc v2 }
+      PutBE(A, 12, BS);
+      PutBE(A, 16, JrnBlocks);
+      PutBE(A, 20, 1);                { s_first }
+      PutBE(A, 24, 1);                { s_sequence }
+      PutBE(A, 28, 0);                { s_start : journal propre }
+      For Blk := 0 To 15 Do PutB(A, 48 + Blk, FsUuid[Blk]);
+      PutBE(A, 64, 1);                { s_nr_users }
+    End;
+    Blk := AllocBlock;
+    WriteBlk(Blk, A);
+    FileAddBlock(Blk);
+  End;
+  FileEnd(8);
+  PutInode(8, $8180, 0, 0, JrnBlocks * BS, Now, Now, Now, 1, FSect, FFlags,
+           FBlocks);
+  JrnInode := FBlocks;
+  JrnSize := JrnBlocks * BS;
 End;
 
 { ---------- partitionnement et amorce ---------- }
@@ -890,15 +1358,118 @@ Begin
   Ask := S;
 End;
 
+{ ---------- type de systeme de fichiers et fonctions (-t, -O) ---------- }
+
+Procedure SetType(T : LongInt);
+Begin
+  FsType := T;
+  FeatSparse := True;
+  FeatFiletype := True;
+  FeatJournal := T >= 3;
+  FeatDirIdx := T >= 3;
+  FeatExtAttr := T >= 3;
+  FeatLarge := T >= 3;
+  FeatExtents := T >= 4;
+  FeatFlex := T >= 4;
+  FeatGdtCsum := T >= 4;
+  FeatHuge := T >= 4;
+  FeatDirNlink := T >= 4;
+  FeatExtra := T >= 4;
+  FeatMcsum := False;
+  Feat64 := False;
+  If T = 3 Then FsName := 'ext3'
+  Else If T = 4 Then FsName := 'ext4'
+  Else FsName := 'ext2';
+End;
+
+Procedure SetFeature(Const Nm : String; On : Boolean);
+Begin
+  If Nm = 'sparse_super' Then FeatSparse := On
+  Else If Nm = 'filetype' Then FeatFiletype := On
+  Else If Nm = 'has_journal' Then FeatJournal := On
+  Else If Nm = 'dir_index' Then FeatDirIdx := On
+  Else If Nm = 'ext_attr' Then FeatExtAttr := On
+  Else If Nm = 'large_file' Then FeatLarge := On
+  Else If (Nm = 'extents') Or (Nm = 'extent') Then FeatExtents := On
+  Else If Nm = 'flex_bg' Then FeatFlex := On
+  Else If Nm = '64bit' Then Feat64 := On
+  Else If Nm = 'metadata_csum' Then FeatMcsum := On
+  Else If (Nm = 'uninit_bg') Or (Nm = 'gdt_csum') Then FeatGdtCsum := On
+  Else If Nm = 'huge_file' Then FeatHuge := On
+  Else If Nm = 'dir_nlink' Then FeatDirNlink := On
+  Else If Nm = 'extra_isize' Then FeatExtra := On
+  Else If (Nm = 'resize_inode') Or (Nm = 'none') Then
+  Else Die(Msg(18) + Nm);
+End;
+
+{ -O liste : "a,b,^c" ; "none" efface tout }
+Procedure ApplyFeatures(Const L : String);
+Var K, J : LongInt; Nm : String; On : Boolean;
+Begin
+  K := 1;
+  While K <= Length(L) Do
+  Begin
+    J := K;
+    While (J <= Length(L)) And (L[J] <> ',') Do Inc(J);
+    Nm := Copy(L, K, J - K);
+    On := True;
+    If (Nm <> '') And ((Nm[1] = '^') Or (Nm[1] = '-')) Then
+    Begin
+      On := False;
+      Nm := Copy(Nm, 2, 60);
+    End
+    Else If (Nm <> '') And (Nm[1] = '+') Then Nm := Copy(Nm, 2, 60);
+    If Nm = 'none' Then
+    Begin
+      FeatSparse := False; FeatFiletype := False; FeatJournal := False;
+      FeatDirIdx := False; FeatExtAttr := False; FeatLarge := False;
+      FeatExtents := False; FeatFlex := False; FeatGdtCsum := False;
+      FeatHuge := False; FeatDirNlink := False; FeatExtra := False;
+      FeatMcsum := False; Feat64 := False;
+    End
+    Else If Nm <> '' Then SetFeature(Nm, On);
+    K := J + 1;
+  End;
+End;
+
+{ cree le journal (inode 8) si la fonction has_journal est demandee }
+Procedure SetupJournal;
+Begin
+  If Not FeatJournal Then Exit;
+  If JrnMb > 0 Then JrnBlocks := JrnMb * (1048576 Div BS)
+  Else JrnBlocks := DefaultJournal;
+  If JrnBlocks = 0 Then
+  Begin
+    FeatJournal := False;
+    Exit;
+  End;
+  If JrnBlocks < 1024 Then Die('-J size : journal trop petit / too small');
+  If JrnBlocks > FreeBlocks Div 2 Then Die(Msg(13));
+  If JrnBlocks > 12 + BS Div 4 + (BS Div 4) * (BS Div 4) Then
+    Die('-J size : trop grand / too large');
+  MakeJournal;
+End;
+
 Var
-  Dev, A, S : String;
+  Dev, A, S, FeatList : String;
   I, K2, Mb, Sectors, PartSectors, Root : LongInt;
   St : TSysStat;
   Ents : PDirEnts;
   MkfsOnly : Boolean;
+  WantType : LongInt;
+  ArgV : Array[0..63] Of String;
+  NArgs : LongInt;
 
 BEGIN
   Now := SysTime;
+  FsCrcInit;
+  FsName := 'ext2';
+  FeatList := '';
+  VolName := 'LINUX0';
+  ResPct := 0;
+  JrnMb := 0;
+  GotInode := False;
+  WantType := 2;
   Dev := '';
   NewLang := '';
   SrcRoot := '';
@@ -906,57 +1477,118 @@ BEGIN
   ISZ := 128;
   WantInodes := 0;
   A := SysArgStr(0);
-  MkfsOnly := Pos('mkfs', A) > 0;
+  MkfsOnly := (Pos('mkfs', A) > 0) Or (Pos('mke2fs', A) > 0);
+  If Pos('ext3', A) > 0 Then WantType := 3;
+  If Pos('ext4', A) > 0 Then WantType := 4;
   Mb := 0;
   Quiet := False;
   Yes := False;
   Lang := SysLang;
-  I := 1;
-  While I < SysArgCount Do
+  { arguments : "-b1024" est decoupe en "-b" "1024" }
+  NArgs := 0;
+  For I := 1 To SysArgCount - 1 Do
   Begin
     A := SysArgStr(I);
-    If (A = '-d') And (I + 1 < SysArgCount) Then
+    If (NArgs < 62) And (Length(A) > 2) And (A[1] = '-') And
+       (A[2] In ['b', 'I', 'N', 't', 'O', 'J', 'L', 'm', 'd', 's', 'l', 'r'])
+    Then
     Begin
-      Inc(I);
-      Dev := SysArgStr(I);
+      ArgV[NArgs + 1] := Copy(A, 1, 2);
+      ArgV[NArgs + 2] := Copy(A, 3, 200);
+      NArgs := NArgs + 2;
     End
-    Else If (A = '-l') And (I + 1 < SysArgCount) Then
+    Else If NArgs < 63 Then
+    Begin
+      Inc(NArgs);
+      ArgV[NArgs] := A;
+    End;
+  End;
+  Inc(NArgs);
+  I := 1;
+  While I < NArgs Do
+  Begin
+    A := ArgV[I];
+    If (A = '-d') And (I + 1 < NArgs) Then
     Begin
       Inc(I);
-      NewLang := SysArgStr(I);
+      Dev := ArgV[I];
+    End
+    Else If (A = '-l') And (I + 1 < NArgs) Then
+    Begin
+      Inc(I);
+      NewLang := ArgV[I];
       For K2 := 1 To Length(NewLang) Do NewLang[K2] := UpCase(NewLang[K2]);
     End
-    Else If (A = '-s') And (I + 1 < SysArgCount) Then
+    Else If (A = '-s') And (I + 1 < NArgs) Then
     Begin
       Inc(I);
-      Val(SysArgStr(I), Mb, Sectors);
+      Val(ArgV[I], Mb, Sectors);
     End
-    Else If (A = '-r') And (I + 1 < SysArgCount) Then
+    Else If (A = '-r') And (I + 1 < NArgs) Then
     Begin
       Inc(I);
-      SrcRoot := SysArgStr(I);
+      SrcRoot := ArgV[I];
       While (Length(SrcRoot) > 0) And (SrcRoot[Length(SrcRoot)] = '/') Do
         Delete(SrcRoot, Length(SrcRoot), 1);
     End
-    Else If (A = '-b') And (I + 1 < SysArgCount) Then
+    Else If (A = '-b') And (I + 1 < NArgs) Then
     Begin
       Inc(I);
-      Val(SysArgStr(I), BS, K2);
+      Val(ArgV[I], BS, K2);
       If (BS <> 1024) And (BS <> 2048) And (BS <> 4096) Then
         Die('-b : 1024, 2048 ou 4096');
     End
-    Else If (A = '-I') And (I + 1 < SysArgCount) Then
+    Else If (A = '-I') And (I + 1 < NArgs) Then
     Begin
       Inc(I);
-      Val(SysArgStr(I), ISZ, K2);
+      Val(ArgV[I], ISZ, K2);
+      GotInode := True;
       If (ISZ <> 128) And (ISZ <> 256) Then Die('-I : 128 ou 256');
     End
-    Else If (A = '-N') And (I + 1 < SysArgCount) Then
+    Else If (A = '-N') And (I + 1 < NArgs) Then
     Begin
       Inc(I);
-      Val(SysArgStr(I), WantInodes, K2);
+      Val(ArgV[I], WantInodes, K2);
     End
-    Else If (A = '-t') And (I + 1 < SysArgCount) Then Inc(I)
+    Else If (A = '-t') And (I + 1 < NArgs) Then
+    Begin
+      Inc(I);
+      A := ArgV[I];
+      If A = 'ext2' Then WantType := 2
+      Else If A = 'ext3' Then WantType := 3
+      Else If A = 'ext4' Then WantType := 4
+      Else Die(Msg(18) + A);
+    End
+    Else If (A = '-O') And (I + 1 < NArgs) Then
+    Begin
+      Inc(I);
+      If FeatList <> '' Then FeatList := FeatList + ',';
+      FeatList := FeatList + ArgV[I];
+    End
+    Else If (A = '-J') And (I + 1 < NArgs) Then
+    Begin
+      Inc(I);
+      A := ArgV[I];
+      If Copy(A, 1, 5) = 'size=' Then Val(Copy(A, 6, 10), JrnMb, K2)
+      Else Die(Msg(18) + A);
+      If JrnMb < 1 Then Die(Msg(18) + A);
+      If WantType < 3 Then WantType := 3;
+    End
+    Else If A = '-j' Then
+    Begin
+      If WantType < 3 Then WantType := 3;
+    End
+    Else If (A = '-L') And (I + 1 < NArgs) Then
+    Begin
+      Inc(I);
+      VolName := Copy(ArgV[I], 1, 16);
+    End
+    Else If (A = '-m') And (I + 1 < NArgs) Then
+    Begin
+      Inc(I);
+      Val(ArgV[I], ResPct, K2);
+      If (ResPct < 0) Or (ResPct > 50) Then Die('-m : 0..50');
+    End
     Else If A = '-y' Then Yes := True
     Else If A = '-q' Then Quiet := True
     Else If MkfsOnly And (A <> '') And (A[1] <> '-') Then Dev := A
@@ -968,6 +1600,23 @@ BEGIN
     Inc(I);
   End;
   If MkfsOnly Then Yes := True;
+  SetType(WantType);
+  If (WantType = 4) And Not GotInode Then ISZ := 256;
+  If FeatList <> '' Then ApplyFeatures(FeatList);
+  { coherence des fonctions }
+  If FeatMcsum Then FeatGdtCsum := False;
+  If Feat64 And Not FeatExtents Then Die(Msg(18) + '64bit/extents');
+  If FeatExtra And (ISZ < 256) Then FeatExtra := False;
+  DescSz := 32;
+  If Feat64 Then DescSz := 64;
+  FsType := 2;
+  If FeatJournal Then FsType := 3;
+  If FeatExtents Then FsType := 4;
+  If FsType = 2 Then FsName := 'ext2'
+  Else If FsType = 3 Then FsName := 'ext3'
+  Else FsName := 'ext4';
+  MakeUuid;
+  CsumSeed := FsCrc32c(-1, LongInt(@FsUuid), 16);
   LogBs := 10;
   While (1 Shl LogBs) < BS Do Inc(LogBs);
   BPG := BS * 8;
@@ -1018,6 +1667,7 @@ BEGIN
     Ents^[0].Ino := 11;
     Ents^[0].Typ := 2;
     WriteDir(2, 2, Ents, 1, $1ED, 0, 0, Now, Now, Now, 1, 0);
+    SetupJournal;
     WriteMeta;
     SysSync;
     SysClose(Fd);
@@ -1046,6 +1696,7 @@ BEGIN
   { l'inode 2 (racine) fait partie des 10 reserves ; lost+found = 11 }
   Inc(GrpDirs[0]);
   MakeLostFound;
+  SetupJournal;
   A := SrcRoot + '/';
   CopyDir(A, '', Root, Root, St);
   WriteMeta;

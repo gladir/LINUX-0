@@ -110,7 +110,7 @@ int main(void){
    *g=0;
    pid=fork();
    if(pid==0){fx(g,0,1,0,0,0);_exit(0);}
-   *g=1;nap(40);
+   *g=1;nap(150);
    {int op=(0<<28)|(0<<24)|(7<<12)|1;   /* SET 7 ; si ancien == 1 */
     ktest("futex.wake_op",sc6(240,(long)f,5,0,1,(long)g,op)>=1&&*g==7);}
    waitpid(pid,&st,0);

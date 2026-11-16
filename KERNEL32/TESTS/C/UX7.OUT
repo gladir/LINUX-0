@@ -1,0 +1,19 @@
+abcd|5|efab
+abcd|cdef|efab
+abcdef|cdefab|efabcd
+bc|CDEF|12ab
+abcd|1|efab|2|cdef|3|abcd
+ab|hij|op
+ab|ghijklmnopqr|op
+abcdefghijkl|ghijklmnopqr|mnopqrabcdef
+ABCDEF|qq|77
+abcdefgh|amnopqr|kghijkl
+1218
+Aabcdef|aB|abcdefC
+abcdefghijklmnopqrabcdef|ghijklmnopqr|mnopqr
+abcdefghijkl|mnopqrabcdef|ghijklmnopqr|ghijklabcdef|abcdefmnopqr|mnopqrghijkl|e
+abcdefghijkl|ghijklmnopqr|mnopqrabcdef
+24 1
+ne
+lt
+efghklmnqrab
