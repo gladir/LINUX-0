@@ -382,7 +382,8 @@ End;
 Procedure FreeLoopDev(Const Dev : String);
 Var Fd : LongInt;
 Begin
-  Fd := SysOpen(Dev, O_RDONLY, 0);
+  Fd := SysOpen(Dev, O_RDWR, 0);
+  If Fd < 0 Then Fd := SysOpen(Dev, O_RDONLY, 0);
   If Fd < 0 Then Exit;
   SysIoctlL(Fd, LOOP_CLR_FD, 0);
   SysClose(Fd);

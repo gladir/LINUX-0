@@ -34,12 +34,24 @@ for _ in range(50):
     try: s.connect(w + '/mon.sock'); break
     except OSError: time.sleep(0.1)
 time.sleep(0.3)
-for cmd in ['mouse_move 10 5', 'mouse_button 1', 'mouse_move 3 3', 'mouse_button 0', 'mouse_move -4 2']:
-    try:
-        s.send((cmd + '\n').encode()); time.sleep(0.3)
-    except OSError: break
+def out():
+    try: return open(w + '/out.txt', errors='replace').read()
+    except OSError: return ''
+def wait(mark):
+    for _ in range(300):
+        if mark in out(): return
+        time.sleep(0.1)
+def send(cmd):
+    try: s.send((cmd + '\n').encode()); time.sleep(0.3)
+    except OSError: pass
+for cmd in ['mouse_move 10 5', 'mouse_button 1', 'mouse_move 3 3', 'mouse_button 0', 'mouse_move -4 2', 'mouse_move 0 0 -1']:
+    send(cmd)
+wait('KEY-READY')
+send('sendkey a'); send('sendkey up')
+wait('RAW-READY')
+send('sendkey b')
 PY
 wait $QP
-tr -d '\r' < "$W/out.txt" | grep "KTEST: mouse\|MOUSE\|KPROG: /bin/mousetest"
-if grep -q "KTEST: mouse.motion OK" "$W/out.txt" && ! grep -q "KTEST: mouse.* FAIL" "$W/out.txt"; then echo "RESULTAT : SUCCES"; rm -rf "$W"; exit 0
+tr -d '\r' < "$W/out.txt" | grep "KTEST: mouse\|KTEST: evdev\|KTEST: kbd\|MOUSE\|KPROG: /bin/mousetest"
+if grep -q "KTEST: mouse.motion OK" "$W/out.txt" && ! grep -q "KTEST: \(mouse\|evdev\|kbd\).* FAIL" "$W/out.txt"; then echo "RESULTAT : SUCCES"; rm -rf "$W"; exit 0
 else echo "RESULTAT : ECHEC (traces dans $W)"; exit 1; fi

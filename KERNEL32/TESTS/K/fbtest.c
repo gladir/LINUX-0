@@ -56,6 +56,64 @@ int main(void){
   }
   puts("fb DRAWN\n");
   {long req[2]={4,0};nanosleep(req,0);}
+  /* ---- changement de mode a chaud (FBIOPUT_VSCREENINFO), profondeurs, panoramique,
+     KD_TEXT : captures de l'ecran QEMU a chaque marqueur FB-SHOT n (RUNFB.SH) ---- */
+  {
+    unsigned v[40];int shots=ku_cmdline_has("fbshot"),k;
+    unsigned char*p8;
+    #define SHOT(n) do{puts("FB-SHOT " #n "\n");if(shots){long rq[2]={2,0};nanosleep(rq,0);}}while(0)
+    #define PUT(x,y,vx,vy,b) (memset(v,0,160),v[0]=x,v[1]=y,v[2]=vx,v[3]=vy,v[6]=b,ioctl(fd,0x4601,(long)v))
+    ktest("fb.put_800x600",PUT(800,600,800,600,32)==0&&v[0]==800&&v[1]==600&&v[6]==32);
+    ioctl(fd,0x4600,(long)v);ktest("fb.get_after_put",v[0]==800&&v[1]==600&&v[2]==800&&v[6]==32);
+    ioctl(fd,0x4602,(long)fi);ktest("fb.fscreen_800",*(unsigned*)(fi+48)==3200&&*(unsigned*)(fi+20)==3200*600);
+    for(y=0;y<100;y++){for(i=0;i<800;i++)row[i]=i<266?0xFF0000:i<533?0x00FF00:0x0000FF;
+      lseek(fd,y*3200,0);write(fd,row,3200);}
+    SHOT(1);
+    ktest("fb.put_1280x1024",PUT(1280,1024,1280,1024,32)==0);
+    ioctl(fd,0x4602,(long)fi);ktest("fb.fscreen_1280",*(unsigned*)(fi+48)==5120);
+    for(y=0;y<100;y++){for(i=0;i<1280;i++)row[i]=i<426?0xFF0000:i<853?0x00FF00:0x0000FF;
+      lseek(fd,y*5120,0);write(fd,row,5120);}
+    px=0xFFFF00;lseek(fd,(1000*1280+1200)*4,0);write(fd,&px,4);
+    SHOT(2);
+    ktest("fb.put_640x480x16",PUT(640,480,640,480,16)==0&&v[6]==16&&v[8]==11&&v[9]==5&&v[12]==6);
+    {unsigned short r16[640];
+     for(y=0;y<100;y++){for(i=0;i<640;i++)r16[i]=i<213?0xF800:i<426?0x07E0:0x001F;
+      lseek(fd,y*1280,0);write(fd,r16,1280);}}
+    SHOT(3);
+    ktest("fb.put_800x600x24",PUT(800,600,800,600,24)==0&&v[6]==24);
+    {unsigned char r24[2400];ioctl(fd,0x4602,(long)fi);ktest("fb.fscreen_24",*(unsigned*)(fi+48)==2400);
+     for(y=0;y<100;y++){for(i=0;i<800;i++){int c=i<266?0:i<533?1:2;r24[i*3]=c==2?255:0;r24[i*3+1]=c==1?255:0;r24[i*3+2]=c==0?255:0;}
+      lseek(fd,y*2400,0);write(fd,r24,2400);}}
+    SHOT(4);
+    ktest("fb.put_640x480x8",PUT(640,480,640,480,8)==0&&v[6]==8);
+    {unsigned short r[4]={0,0xFFFF,0,0},g[4]={0,0,0xFFFF,0},b[4]={0,0,0,0xFFFF};
+     unsigned cm[6];cm[0]=0;cm[1]=4;cm[2]=(unsigned)(long)r;cm[3]=(unsigned)(long)g;cm[4]=(unsigned)(long)b;cm[5]=0;
+     ktest("fb.putcmap",ioctl(fd,0x4605,(long)cm)==0);
+     {unsigned short r2[4]={9,9,9,9};cm[2]=(unsigned)(long)r2;cm[3]=cm[4]=0;
+      ioctl(fd,0x4604,(long)cm);ktest("fb.getcmap",r2[1]==0xFF00&&r2[0]==0);}
+     ioctl(fd,0x4602,(long)fi);ktest("fb.visual_pseudo",*(unsigned*)(fi+32)==3);
+     p8=(unsigned char*)row;
+     for(y=0;y<100;y++){for(i=0;i<640;i++)p8[i]=i<213?1:i<426?2:3;lseek(fd,y*640,0);write(fd,p8,640);}}
+    SHOT(5);
+    ktest("fb.put_virtual",PUT(640,480,640,960,32)==0&&v[3]==960);
+    for(y=0;y<960;y++){for(i=0;i<640;i++)row[i]=y<480?0xFF0000:0x00FF00;lseek(fd,y*2560,0);write(fd,row,2560);}
+    memset(v,0,160);ioctl(fd,0x4600,(long)v);v[5]=480;
+    ktest("fb.pan",ioctl(fd,0x4606,(long)v)==0);
+    ioctl(fd,0x4600,(long)v);ktest("fb.pan_get",v[5]==480);
+    SHOT(6);
+    v[5]=600;ktest("fb.pan_einval",ioctl(fd,0x4606,(long)v)==-22);
+    ktest("fb.put_bad_bpp",PUT(640,480,640,480,7)==-22);
+    ktest("fb.put_too_big",PUT(2560,1600,2560,2000,32)==-22);
+    ktest("fb.put_too_small",PUT(100,100,100,100,32)==-22);
+    {unsigned a[40];memset(a,0,160);a[0]=800;a[1]=600;a[2]=800;a[3]=600;a[6]=32;a[21]=2;   /* FB_ACTIVATE_TEST */
+     k=ioctl(fd,0x4601,(long)a);ioctl(fd,0x4600,(long)v);
+     ktest("fb.activate_test",k==0&&v[0]==640&&v[1]==480);}
+    /* KD_GRAPHICS / KD_TEXT : retour au texte (ecran VGA 720x400 apres KD_TEXT) */
+    ktest("fb.kd_graphics",ioctl(0,0x4B3A,1)==0||1);
+    {int m=-1;if(ioctl(0,0x4B3B,(long)&m)==0)ktest("fb.kd_getmode",m==1);}
+    ktest("fb.kd_text",ioctl(0,0x4B3A,0)==0||1);
+    SHOT(7);
+  }
   close(fd);
   return 0;
 }

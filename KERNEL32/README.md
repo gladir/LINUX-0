@@ -847,7 +847,64 @@ allocations du noyau.
 
 **CD-ROM d'installation** : amorce El Torito (`BOOT/STAGE2CD.ASM`, `TOOLS/MKCD.SH`, `TOOLS/MKINITRD.PY`, `RUNCD.SH`) : voir `BOOT/README.md`, section "Amorce depuis CD-ROM". Le noyau accepte un initramfs sans `/init` mais avec `/sbin/init`.
 
-Tests : `nltest` (17 verifications, 25 avec une carte reseau ; RUNK), `oomtest` (8 ; RUNK), `idetest` (5 verifications + 3 pour vda1 ; RUNVBLK.SH : virtio seul, avec un disque IDE, racine `/dev/vda1`, `e2fsck`, contenu relu par `debugfs`), le bloc `pkt.*` de `nettest` (15, avec RUNNET.SH), `smptest` (14 verifications, 20 avec plusieurs CPU : sysfs/proc, affinite, getcpu, chaque CPU
+**Framebuffer** (`/dev/fb0`, carte Bochs/QEMU VGA ; `fb=LxH[xP]` ou `vga=0x31B...`
+(tableau des modes VESA 640x480 a 1280x1024, 8/16/32 bits) a l'amorce, ou a chaud) :
+`/dev/fb0` existe des que la carte est la, le mode graphique n'est programme que
+sur demande. `FBIOPUT_VSCREENINFO` change de mode a chaud (320x200 a 2560x1600,
+profondeurs 8, 16 (565), 24, 32 ; `yres_virtual` > `yres` ; `FB_ACTIVATE_TEST`
+verifie sans changer ; `EINVAL` si le mode ne tient pas dans les 16 Mo de
+memoire video, `fbmem=N` Mo pour une carte plus petite), `FBIOGET_VSCREENINFO`
+(champs de couleur exacts selon la profondeur), `FBIOGET_FSCREENINFO` (pas de
+ligne, `smem_len`, visuel TRUECOLOR/PSEUDOCOLOR), `FBIOPAN_DISPLAY` (decalage
+du pave visible), `FBIOGETCMAP/PUTCMAP` (palette du DAC en 8 bits), mmap partage de toute la
+memoire. `KDSETMODE` : `KD_GRAPHICS`/`KD_TEXT` (`KDGETMODE`) ; `KD_TEXT` ramene le mode
+texte VGA (registres du mode 3, polices et palette sauvegardees avant le
+premier mode graphique, console redessinee). Verifie par captures d'ecran
+QEMU (`RUNFB.SH` : 8 captures, pixels exacts dans chaque mode, texte revenu en
+720x400). Limites : pas de double tampon, pas de blanking (`FBIOBLANK` sans
+effet), la lecture de l'index `VIDEO_MEMORY_64K` de la carte fait avorter QEMU
+(taille fixee a 16 Mo), sur BIOS reel il n'y a pas de VBE du chargeur.
+
+**Entrees** : `/dev/input/event0` (clavier) et `event1` (souris), `struct
+input_event` de Linux i386 (16 octets), `EVIOCGVERSION/GID/GNAME/GPHYS/GBIT/
+GKEY/GRAB`, lecture bloquante ou `O_NONBLOCK`, `poll` ; clavier : `EV_KEY` avec
+codes Linux (touches etendues E0 : fleches, Inser/Suppr/Debut/Fin..., Alt
+Gr, pave numerique), appui 1, relachement 0, repetition 2 ; souris :
+`REL_X`, `REL_Y` (positif vers le bas), `REL_WHEEL` (IntelliMouse negociee au
+demarrage, identifiant 3), `BTN_LEFT/RIGHT/MIDDLE`, `EV_SYN`. `KDSKBMODE`
+`K_RAW` (octets de balayage bruts, prefixes E0/E1 compris) et `K_MEDIUMRAW`
+(code de touche, bit 7 = relachement) sur la console active, `KDGKBMODE` ;
+`/dev/input/mice` reste en protocole PS/2 a 3 octets. Limites : un seul clavier
+et une seule souris, pas de LED, pas de `EVIOCSREP`, le mode clavier est global
+(pas restaure a la fermeture), pas de `/proc/bus/input/devices`. Verifie par
+injection QEMU (`sendkey`, `mouse_move` avec molette) : `RUNMOUSE.SH`.
+
+**Partitionnement** (disques IDE et vda) : `BLKRRPART` (relit la table :
+`EBUSY` si une partition est montee, `EACCES` hors root, `EINVAL` sur une
+partition ; vide et invalide les tampons, recree les noeuds `/dev/hdXN` et
+`/sys/block/hdX/hdXN/{dev,size,start,partition}`, supprime ceux des partitions
+disparues), `BLKPG` (`ADD_PARTITION`, `DEL_PARTITION`, `RESIZE_PARTITION`,
+chevauchement et bornes verifies), `HDIO_GETGEO` (255 tetes, 63 secteurs,
+`start` de la partition), `BLKGETSIZE/SIZE64`. **GPT** lue (MBR de protection
+EEh, en-tete `EFI PART` du secteur 1, jusqu'a 15 entrees, LBA 32 bits, sommes
+de controle non verifiees). Le secteur 0 et les secteurs 1 a 2047 s'ecrivent par `/dev/hdX`
+(tampons de 1 Ko, `sync`). Verifie par `RUNPART.SH` (MBR : ecriture de la table
+par le programme, `BLKRRPART`, `BLKPG`, retour de la table d'origine, montage
+ext2 apres chaque etape, `e2fsck` propre ; GPT : montage). Limites : pas
+d'ecriture GPT par le noyau (c'est l'installateur), une table logique
+etendue n'est lue qu'en MBR, secteurs > 2^32 non geres.
+
+**Noyau de production** : `TOOLS/MKPROD.SH [-o NOYAU.ELF]` compile
+`KERNEL32.PAS` sans les programmes de test embarques (2,6 Mo contre 3,4 Mo ; le
+reste est de la memoire initialisee a zero que le compilateur ecrit dans le
+fichier) ; `RUNCD.SH` l'utilise. **Corrections issues de BUGS_NOYAU.md [E4]** :
+`BufShrink/BufReclaim` non reentrants (Oops sous pression du cache avec un
+peripherique de boucle), `/dev/fd`, `/dev/stdin|stdout|stderr` (liens vers
+`/proc/self/fd`), `Name:` des threads du noyau (`kthread`, `bdflush`), `mount`
+d'une source inexistante : `ENOENT`, le bloc `--- taches` n'est plus ecrit
+sans `debug` sur la ligne de commande.
+
+Tests : `nltest` (17 verifications, 25 avec une carte reseau ; RUNK), `oomtest` (8 ; RUNK), `parttest` (RUNPART.SH), `fbtest` (+ 22 verifications de modes) et `mousetest` (+ 20 : evdev, clavier brut), `idetest` (5 verifications + 3 pour vda1 ; RUNVBLK.SH : virtio seul, avec un disque IDE, racine `/dev/vda1`, `e2fsck`, contenu relu par `debugfs`), le bloc `pkt.*` de `nettest` (15, avec RUNNET.SH), `smptest` (14 verifications, 20 avec plusieurs CPU : sysfs/proc, affinite, getcpu, chaque CPU
 execute une tache epinglee, parallelisme mesure par les ticks `cpuN`, vidage de
 TLB prouve par SIGSEGV d'un thread d'un autre CPU apres `mprotect` ;
 temoin negatif : sans l'IPI le test echoue), toute la suite RUNK sous

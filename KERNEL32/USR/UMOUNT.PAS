@@ -174,7 +174,8 @@ Var Fd : LongInt; Li : TLoopInfo; Mine : Boolean;
 Begin
   If Copy(Dev, 1, 9) <> '/dev/loop' Then Exit;
   Mine := Tracked(Dev);
-  Fd := SysOpen(Dev, O_RDONLY, 0);
+  Fd := SysOpen(Dev, O_RDWR, 0);
+  If Fd < 0 Then Fd := SysOpen(Dev, O_RDONLY, 0);
   If Fd < 0 Then Exit;
   FillChar(Li, SizeOf(Li), 0);
   If SysIoctl(Fd, LOOP_GET_STATUS64, Li) = 0 Then
