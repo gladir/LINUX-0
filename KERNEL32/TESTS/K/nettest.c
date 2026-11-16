@@ -12,6 +12,37 @@ static unsigned short ipcs(const unsigned char*p,int n){unsigned s=0;while(n>1){
 static int mkip(unsigned char*pk,int proto,const unsigned char*src,const unsigned char*dst,const unsigned char*pl,int plen){
   int c;memset(pk,0,20);pk[0]=0x45;pk[2]=(20+plen)>>8;pk[3]=(20+plen)&255;pk[6]=0x40;pk[8]=64;pk[9]=proto;
   memcpy(pk+12,src,4);memcpy(pk+16,dst,4);c=ipcs(pk,20);pk[10]=c>>8;pk[11]=c&255;memcpy(pk+20,pl,plen);return 20+plen;}
+/* table nat : une regle au plus par chaine (PRE, OUT, POST) */
+struct nr{char k;unsigned char md[4];int hasd;unsigned char to[4];int tp;const char*oif;};
+static int natbuild(unsigned char*tb,struct nr*pre,struct nr*out,struct nr*post){
+  int o=92,i,hk[5],un[5],n=0;struct nr*ch[5];ch[0]=pre;ch[1]=0;ch[2]=0;ch[3]=out;ch[4]=post;
+  memset(tb,0,92);memcpy(tb,"nat",4);
+  for(i=0;i<5;i++){
+    if(i==2){hk[i]=un[i]=0;continue;}
+    hk[i]=o-92;
+    if(ch[i]&&ch[i]->k){struct nr*r=ch[i];unsigned char*e=tb+o;const char*nm=r->k=='D'?"DNAT":r->k=='S'?"SNAT":"MASQUERADE";
+      memset(e,0,168);
+      if(r->hasd){memcpy(e+4,r->md,4);memset(e+12,255,4);}
+      if(r->oif){memcpy(e+32,r->oif,5);memset(e+64,255,16);}
+      *(unsigned short*)(e+80)=17;*(unsigned short*)(e+88)=112;*(unsigned short*)(e+90)=168;
+      *(unsigned short*)(e+112)=56;memcpy(e+114,nm,strlen(nm)+1);
+      *(unsigned*)(e+144)=1;*(unsigned*)(e+148)=(r->k=='M'?0:1)|(r->tp?2:0);
+      memcpy(e+152,r->to,4);memcpy(e+156,r->to,4);
+      *(unsigned short*)(e+160)=hs(r->tp);*(unsigned short*)(e+162)=hs(r->tp);
+      o+=168;n++;}
+    un[i]=o-92;memset(tb+o,0,152);*(unsigned short*)(tb+o+88)=112;*(unsigned short*)(tb+o+90)=152;
+    *(unsigned short*)(tb+o+112)=40;*(unsigned*)(tb+o+144)=(unsigned)-2;o+=152;n++;}
+  memset(tb+o,0,176);*(unsigned short*)(tb+o+88)=112;*(unsigned short*)(tb+o+90)=176;
+  *(unsigned short*)(tb+o+112)=64;memcpy(tb+o+114,"ERROR",6);o+=176;n++;
+  *(unsigned*)(tb+32)=0x1B;*(unsigned*)(tb+36)=n;*(unsigned*)(tb+40)=o-92;
+  for(i=0;i<5;i++){*(unsigned*)(tb+44+4*i)=hk[i];*(unsigned*)(tb+64+4*i)=un[i];}
+  return o;}
+/* somme de controle UDP (pseudo-en-tete) d'un paquet IPv4 ; 0 si valide */
+static unsigned short udpchk(const unsigned char*ip){
+  unsigned char b[1600];int l=(ip[2]<<8)|ip[3],pl=l-20;memcpy(b,ip+12,8);b[8]=0;b[9]=17;b[10]=pl>>8;b[11]=pl&255;memcpy(b+12,ip+20,pl);
+  return ipcs(b,12+pl);}
+/* ecrit la somme UDP dans le paquet */
+static void udpfix(unsigned char*ip){int c;ip[26]=0;ip[27]=0;c=udpchk(ip);if(c==0)c=0xffff;ip[26]=c>>8;ip[27]=c&255;}
 /* ifreq pour ioctl d'interface : nom, adresse IPv4 en octets */
 static void mkifr(unsigned char*r,const char*nm,const unsigned char*ad){
   memset(r,0,40);memcpy(r,nm,5);if(ad){r[16]=2;memcpy(r+20,ad,4);}}
@@ -125,8 +156,11 @@ int main(void){
     sendto(s=socket(2,2,0),"nf-ok",5,0,&a,16);
     n=0;for(i=0;i<300&&n<=0;i++){l=sizeof f;n=recvfrom(s,b,100,0x40,&f,&l);if(n<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
     ktest("nf.accept_after_flush",n==5&&memcmp_(b,"nf-ok",5)==0);close(s);
-    memcpy(tb,"nat",4);
-    ktest("nf.nat_unsupported",setsockopt(rs,0,64,tb,off)==-2);
+    {unsigned char gi[84];int gl=84;memset(gi,0,84);memcpy(gi,"nat",4);
+     nt=getsockopt(rs,0,64,gi,&gl);
+     ktest("nf.nat_get_info_default",nt==0&&*(unsigned*)(gi+32)==0x1B&&*(unsigned*)(gi+76)==4);}
+    memcpy(tb,"mangle",7);
+    ktest("nf.unknown_table",setsockopt(rs,0,64,tb,off)==-2);
     BUILD(0,0,0,0,0,0);tb[92+112+2]='x';  /* correspondance inconnue : sur la 1re entree (politique) cible nommee */
     ktest("nf.bad_target",setsockopt(rs,0,64,tb,off)==-2);
     ktest("nf.nonroot_eperm",({int pp=fork(),st=0;if(pp==0){int r2;sc1(23,1000);r2=socket(2,3,255);_exit(r2==-1?0:1);}waitpid(pp,&st,0);st==0;}));
@@ -180,14 +214,118 @@ int main(void){
      ktest("tun.forward_dropped",got<0);
      BUILD(0,0,0,0,0,0);
      ktest("tun.forward_accept_rule",setsockopt(rs,0,64,tb,off)==0);
-     write(tf,pk,r);
-     /* l'echo de l'hote revient vers 192.168.77.2 : retransmis sur tun0 */
-     got=-1;for(t=0;t<300&&got<0;t++){int n=read(tf,rb,sizeof rb);
-       if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
-     ktest("tun.forward_roundtrip",got==35&&rb[9]==17&&memcmp_(rb+12,hostip,4)==0&&memcmp_(rb+16,lan,4)==0&&memcmp_(rb+28,"tun-fwd",7)==0&&ipcs(rb,20)==0);
+     /* ecoute AF_PACKET sur eth0 : la trame retransmise (TTL 63, source
+        inchangee) doit sortir */
+     {struct sll2{unsigned short fam,proto;int idx;unsigned short hat;unsigned char pk,hl,ad[8];}fr;
+      static unsigned char fb[2048];int ps=socket(17,3,hs(3)),seen=0,k3;
+      write(tf,pk,r);
+      for(k3=0;k3<100&&!seen;k3++){int al=sizeof fr,n2=recvfrom(ps,fb,sizeof fb,0x40,&fr,&al);
+        if(n2>=14+35&&fr.pk==4&&fb[12]==8&&fb[13]==0&&fb[14+9]==17&&fb[14+8]==63&&memcmp_(fb+14+12,lan,4)==0
+           &&memcmp_(fb+14+16,hostip,4)==0&&memcmp_(fb+14+20+8,"tun-fwd",7)==0&&ipcs(fb+14,20)==0)seen=1;
+        else if(n2<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+      ktest("tun.forward_out_eth0",seen);close(ps);}
     }
     {int fd=open("/proc/sys/net/ipv4/ip_forward",O_RDWR,0);write(fd,"0\n",2);close(fd);}
     close(rs);close(tf);close(sk);
+  }
+  /* NAT : MASQUERADE d'un hote LAN derriere tun0, DNAT local, REJECT, LOG */
+  {
+    int tf=open("/dev/net/tun",O_RDWR|0x800,0),sk=socket(2,2,0),r,t,got,rs=socket(2,3,255),off,fd;
+    static unsigned char ifr[40],pk[256],rb[2048],tb[4096],fb[2048];
+    unsigned char me[4]={192,168,77,1},lan[4]={192,168,77,2},mk[4]={255,255,255,0},hostip[4]={10,0,2,2},eth[4]={10,0,2,15};
+    struct nr pre,out,post;
+    memset(ifr,0,40);*(unsigned short*)(ifr+16)=0x1001;ioctl(tf,0x400454CA,(long)ifr);
+    mkifr(ifr,"tun0",me);ioctl(sk,0x8916,(long)ifr);
+    mkifr(ifr,"tun0",mk);ioctl(sk,0x891C,(long)ifr);
+    mkifr(ifr,"tun0",0);*(unsigned short*)(ifr+16)=1;ioctl(sk,0x8914,(long)ifr);
+    fd=open("/proc/sys/net/ipv4/ip_forward",O_RDWR,0);write(fd,"1\n",2);close(fd);
+    memset(&pre,0,sizeof pre);memset(&out,0,sizeof out);memset(&post,0,sizeof post);
+    post.k='M';post.oif="eth0";
+    off=natbuild(tb,&pre,&out,&post);
+    ktest("nat.masq_rule",setsockopt(rs,0,64,tb,off)==0);
+    {unsigned char u[8+7];int ps=socket(17,3,hs(3)),seen=0,k3,c;
+     memset(u,0,sizeof u);u[0]=0x0f;u[1]=0xa0;u[2]=9092>>8;u[3]=9092&255;u[5]=15;memcpy(u+8,"tun-nat",7);
+     r=mkip(pk,17,lan,hostip,u,15);udpfix(pk);
+     ktest("nat.udp_sum_ok",udpchk(pk)==0);
+     write(tf,pk,r);
+     {struct{unsigned short fam,proto;int idx;unsigned short hat;unsigned char pk,hl,ad[8];}fr;int ob=0;
+      for(k3=0;k3<100&&!seen;k3++){int al=sizeof fr,n2=recvfrom(ps,fb,sizeof fb,0x40,&fr,&al);
+        if(n2>=14+35&&fr.pk==4&&fb[12]==8&&fb[13]==0&&fb[14+9]==17&&memcmp_(fb+14+16,hostip,4)==0&&memcmp_(fb+14+20+8,"tun-nat",7)==0){
+          seen=1;ob=memcmp_(fb+14+12,eth,4)==0&&udpchk(fb+14)==0&&ipcs(fb+14,20)==0&&fb[14+8]==63;}
+        else if(n2<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+      ktest("nat.masq_source",seen&&ob);}
+     close(ps);
+     got=-1;for(t=0;t<300&&got<0;t++){int n=read(tf,rb,sizeof rb);
+       if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
+     ktest("nat.masq_reply_untranslated",got==35&&memcmp_(rb+12,hostip,4)==0&&memcmp_(rb+16,lan,4)==0&&rb[20]==9092>>8&&rb[21]==(9092&255)&&rb[22]==0x0f&&rb[23]==0xa0&&memcmp_(rb+28,"tun-nat",7)==0&&ipcs(rb,20)==0&&udpchk(rb)==0);
+     (void)c;}
+    /* DNAT en sortie : 10.0.2.99 -> 10.0.2.2, la reponse revient comme venant de 10.0.2.99 */
+    memset(&post,0,sizeof post);
+    out.k='D';out.hasd=1;out.md[0]=10;out.md[1]=0;out.md[2]=2;out.md[3]=99;memcpy(out.to,hostip,4);
+    off=natbuild(tb,&pre,&out,&post);
+    ktest("nat.dnat_rule",setsockopt(rs,0,64,tb,off)==0);
+    {int us=socket(2,2,0);struct sin a2,f2;char b2[64];int n2=0,i2,l2;
+     mksin(&a2,0x6300020a,9092);
+     ktest("nat.dnat_send",sendto(us,"dnat-out",8,0,&a2,16)==8);
+     for(i2=0;i2<300&&n2<=0;i2++){l2=sizeof f2;n2=recvfrom(us,b2,64,0x40,&f2,&l2);if(n2<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+     ktest("nat.dnat_reply_source",n2==8&&memcmp_(b2,"dnat-out",8)==0&&f2.addr==0x6300020a&&hs(f2.port)==9092);
+     close(us);}
+    /* retour a une table nat vide */
+    memset(&out,0,sizeof out);off=natbuild(tb,&pre,&out,&post);
+    ktest("nat.flush",setsockopt(rs,0,64,tb,off)==0);
+    /* REJECT en entree : un hote LAN envoie vers un port UDP ferme */
+    {static unsigned char fb2[4096];int base=92;
+     unsigned char u[8+4];
+     memset(fb2,0,sizeof fb2);
+     {unsigned char*sv=tb;(void)sv;}
+     /* table filter : INPUT = [REJECT udp dport 1234], politiques ACCEPT */
+     {int o=92,i2;memset(tb,0,92);memcpy(tb,"filter",7);
+      memset(tb+o,0,192);*(unsigned short*)(tb+o+80)=17;*(unsigned short*)(tb+o+88)=152;*(unsigned short*)(tb+o+90)=192;
+      *(unsigned short*)(tb+o+112)=40;memcpy(tb+o+114,"udp",4);*(unsigned short*)(tb+o+144)=0;*(unsigned short*)(tb+o+146)=65535;
+      *(unsigned short*)(tb+o+148)=1234;*(unsigned short*)(tb+o+150)=1234;
+      *(unsigned short*)(tb+o+152)=40;memcpy(tb+o+154,"REJECT",7);*(unsigned*)(tb+o+184)=3;o+=192;
+      for(i2=0;i2<3;i2++){memset(tb+o,0,152);*(unsigned short*)(tb+o+88)=112;*(unsigned short*)(tb+o+90)=152;*(unsigned short*)(tb+o+112)=40;*(unsigned*)(tb+o+144)=(unsigned)-2;o+=152;}
+      memset(tb+o,0,176);*(unsigned short*)(tb+o+88)=112;*(unsigned short*)(tb+o+90)=176;*(unsigned short*)(tb+o+112)=64;memcpy(tb+o+114,"ERROR",6);o+=176;
+      *(unsigned*)(tb+32)=0xE;*(unsigned*)(tb+36)=5;*(unsigned*)(tb+40)=o-92;
+      *(unsigned*)(tb+44+4)=0;*(unsigned*)(tb+44+8)=192+152;*(unsigned*)(tb+44+12)=192+304;
+      *(unsigned*)(tb+64+4)=192;*(unsigned*)(tb+64+8)=192+152;*(unsigned*)(tb+64+12)=192+304;
+      off=o;}
+     ktest("nat.reject_rule",setsockopt(rs,0,64,tb,off)==0);
+     memset(u,0,sizeof u);u[0]=0x0f;u[1]=0xa0;u[2]=1234>>8;u[3]=1234&255;u[5]=12;memcpy(u+8,"nope",4);
+     r=mkip(pk,17,lan,me,u,12);udpfix(pk);
+     write(tf,pk,r);
+     got=-1;for(t=0;t<100&&got<0;t++){int n=read(tf,rb,sizeof rb);
+       if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
+     ktest("nat.reject_icmp",got==20+8+20+8&&rb[9]==1&&rb[20]==3&&rb[21]==3&&memcmp_(rb+12,me,4)==0&&memcmp_(rb+16,lan,4)==0&&memcmp_(rb+28,pk,28)==0&&ipcs(rb+20,got-20)==0);
+     (void)base;(void)fb2;}
+    /* LOG en sortie : le journal du noyau garde le prefixe */
+    {int o=92,i2;
+     memset(tb,0,92);memcpy(tb,"filter",7);
+     for(i2=0;i2<2;i2++){memset(tb+o,0,152);*(unsigned short*)(tb+o+88)=112;*(unsigned short*)(tb+o+90)=152;*(unsigned short*)(tb+o+112)=40;*(unsigned*)(tb+o+144)=(unsigned)-2;o+=152;}
+     {int ho=o-92;
+      memset(tb+o,0,176);*(unsigned short*)(tb+o+88)=112;*(unsigned short*)(tb+o+90)=176;
+      *(unsigned short*)(tb+o+112)=64;memcpy(tb+o+114,"LOG",4);tb[o+144]=4;memcpy(tb+o+146,"K32LOG:",8);o+=176;
+      memset(tb+o,0,152);*(unsigned short*)(tb+o+88)=112;*(unsigned short*)(tb+o+90)=152;*(unsigned short*)(tb+o+112)=40;*(unsigned*)(tb+o+144)=(unsigned)-2;o+=152;
+      memset(tb+o,0,176);*(unsigned short*)(tb+o+88)=112;*(unsigned short*)(tb+o+90)=176;*(unsigned short*)(tb+o+112)=64;memcpy(tb+o+114,"ERROR",6);o+=176;
+      *(unsigned*)(tb+32)=0xE;*(unsigned*)(tb+36)=5;*(unsigned*)(tb+40)=o-92;
+      *(unsigned*)(tb+44+4)=0;*(unsigned*)(tb+44+8)=152;*(unsigned*)(tb+44+12)=ho;
+      *(unsigned*)(tb+64+4)=0;*(unsigned*)(tb+64+8)=152;*(unsigned*)(tb+64+12)=ho+176;
+      off=o;}
+     ktest("nat.log_rule",setsockopt(rs,0,64,tb,off)==0);
+     {int us=socket(2,2,0);struct sin a2;static char km[16384];int kn,i3,seen=0;
+      mksin(&a2,HOST,9092);sendto(us,"logme",5,0,&a2,16);close(us);
+      kn=sc3(103,3,(long)km,sizeof km-1);
+      for(i3=0;i3+14<kn;i3++)if(memcmp_(km+i3,"K32LOG: IN= OUT=eth0",20)==0)seen=1;
+      ktest("nat.log_journal",seen);}}
+    {int o=92,i2;memset(tb,0,92);memcpy(tb,"filter",7);
+     for(i2=0;i2<3;i2++){memset(tb+o,0,152);*(unsigned short*)(tb+o+88)=112;*(unsigned short*)(tb+o+90)=152;*(unsigned short*)(tb+o+112)=40;*(unsigned*)(tb+o+144)=(unsigned)-2;o+=152;}
+     memset(tb+o,0,176);*(unsigned short*)(tb+o+88)=112;*(unsigned short*)(tb+o+90)=176;*(unsigned short*)(tb+o+112)=64;memcpy(tb+o+114,"ERROR",6);o+=176;
+     *(unsigned*)(tb+32)=0xE;*(unsigned*)(tb+36)=4;*(unsigned*)(tb+40)=o-92;
+     *(unsigned*)(tb+44+4)=0;*(unsigned*)(tb+44+8)=152;*(unsigned*)(tb+44+12)=304;
+     *(unsigned*)(tb+64+4)=0;*(unsigned*)(tb+64+8)=152;*(unsigned*)(tb+64+12)=304;
+     off=o;setsockopt(rs,0,64,tb,off);}
+    fd=open("/proc/sys/net/ipv4/ip_forward",O_RDWR,0);write(fd,"0\n",2);close(fd);
+    close(rs);close(tf);close(sk);(void)mk;
   }
   /* TCP client */
   s=socket(2,1,0);mksin(&a,HOST,9091);

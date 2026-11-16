@@ -82,9 +82,9 @@ timeout 120 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.txt" -di
   -m 64 -no-reboot -append "console=ttyS0 k32net k32power $KARGS" \
   -nic user,model=${NICMODEL:-rtl8139},hostfwd=tcp:127.0.0.1:5556-:7777 2>/dev/null
 kill $SP 2>/dev/null
-tr -d '\r' < "$W/out.txt" | grep "KTEST: net\|KTEST: nf\|NET-\|KPROG: /bin/nettest\|reseau"
+tr -d '\r' < "$W/out.txt" | grep "KTEST: net\|KTEST: nf\|KTEST: tun\|KTEST: nat\|NET-\|KPROG: /bin/nettest\|reseau"
 cat "$W/hostrecv.txt" 2>/dev/null; echo
-if ! grep -q "KTEST: net.accept OK" "$W/out.txt" || grep -q "KTEST: \(net\|nf\).* FAIL" "$W/out.txt" \
+if ! grep -q "KTEST: net.accept OK" "$W/out.txt" || grep -q "KTEST: \(net\|nf\|tun\|nat\).* FAIL" "$W/out.txt" \
    || ! grep -q "pong-in" "$W/hostrecv.txt" 2>/dev/null; then
   echo "RESULTAT : ECHEC (traces dans $W)"; exit 1
 fi

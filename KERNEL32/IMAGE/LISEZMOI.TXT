@@ -64,3 +64,13 @@ Lot E6 : accueil et aide (F1) en tete de l'assistant, touches mortes
   Guide pas a pas QEMU / VirtualBox : KERNEL32/README.md, "Guide
   d'installation". VirtualBox (VBoxVGA, pas de /dev/fb0) : l'assistant passe
   seul en mode texte ; controleur de disque IDE (pas encore AHCI).
+
+=== VirtualBox : version avec SATA/AHCI (D7) ===
+Le noyau gere maintenant le controleur SATA (AHCI) : le CD et le disque
+peuvent etre sur un controleur SATA ou IDE. Prouve sous QEMU
+(-device ich9-ahci) : demarrage de l'assistant depuis un CD AHCI, RUNAHCI.
+Carte e1000 (Intel PRO/1000 MT, defaut de VirtualBox) : prouvee sous QEMU.
+Arret et redemarrage par ACPI : prouves sous QEMU.
+Carte graphique VBoxVGA (PCI 80EE:BEEF) : detection ecrite mais NON testee
+(QEMU n'a pas cette carte) ; repli texte automatique si le mode est refuse.
+VMSVGA et PCnet : non pris en charge.
