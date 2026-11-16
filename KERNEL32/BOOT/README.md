@@ -175,3 +175,34 @@ gzip) est lu apres le noyau (a l'adresse arrondie a la page, **sous 16 Mo**,
 limite de INT 15h/87h) et transmis comme **module Multiboot** (flag 3,
 `mods_count` en 20, `mods_addr` en 24, un module en `7E070h`). `TOOLS/MKIMAGE.SH
 -I initrd.cpio.gz` le copie en `/boot/initrd.img` et ecrit la ligne.
+
+## Amorce depuis CD-ROM (El Torito, partie 39)
+
+`TOOLS/MKCD.SH -o KERNEL32.ISO -k NOYAU.ELF [-R RACINE | -I initrd.cpio.gz]
+[-r DOSSIER] [-c "ligne de commande"]` fabrique un ISO 9660 (niveau 1 + Rock
+Ridge + Joliet, **genisoimage** ou mkisofs requis : xorriso ne sait pas fixer le
+segment de chargement) amorcable en **El Torito sans emulation** :
+
+| Fichier | Role |
+|---|---|
+| `STAGE2CD.ASM` / `STAGE2CDH.BIN` | tete du chargeur de CD : meme code que `STAGE2.ASM` mais pas de MBR (DL = unite fournie par le BIOS, type de partition `CDh`, debut 0) |
+| `LOADER.SYS` | meme corps Pascal que pour le disque ; si le type de partition est `CDh` il lit un ISO 9660 : descripteur de volume primaire au secteur 16, repertoires, noms sans casse, sans `;N`, sans point final ; fichiers contigus ; lecture par INT 13h AH=42h en **secteurs de 2048 octets** |
+| `boot/stage2cd.bin` | `STAGE2CDH.BIN + LOADER.SYS` complete a 2048 octets, charge par le BIOS en `0000:8000` (`-boot-load-seg 0x800 -boot-load-size N`) |
+
+Le CD contient `/boot/linux0` (noyau ELF32), `/boot/initrd.img` (cpio newc,
+brut ou gzip : module Multiboot, **sous 16 Mo avec le noyau**) et
+`/boot/linux0.cfg` (`kernel=`, `initrd=`, `cmdline=`) ; sans fichier de
+configuration la ligne de commande est `root=/dev/hdc rootfstype=iso9660 ro`
+(QEMU place le CD en `hdc`). `-R DOSSIER` convertit un dossier en initramfs
+(`TOOLS/MKINITRD.PY`) : le noyau lance `/init`, sinon `/sbin/init` (racine
+"live" de BUILD.SH). `-r DOSSIER` copie son contenu a la racine du CD (le
+systeme live monte le CD : `mount -t iso9660 /dev/hdc /cdrom`). Le noyau
+contient les programmes de test embarques (3,4 Mo) : pour un CD de production
+un noyau sans eux gagnerait 1,8 Mo.
+
+Essai : `TESTS/K/RUNCD.SH` (noyau + initramfs `cdtest.c` + fichier connu ;
+SeaBIOS `-cdrom -boot d`, 1 puis 2 CPU : chargeur, initrd, ligne de commande,
+`init` de l'initramfs, montage iso9660 sous `/cdrom`, lecture). Les
+parametres de la tete et du corps sont ceux de la section precedente. Limites :
+fichiers contigus (norme ISO), un seul volume, pas de menu, pas d'amorce
+hybride USB (isohybrid non fait), BIOS seulement (pas d'UEFI).

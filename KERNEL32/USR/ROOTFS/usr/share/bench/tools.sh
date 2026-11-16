@@ -76,7 +76,7 @@ umount $W/mnt1 && ok 'umount loop' || ko 'umount loop' 'rc'
 losetup -a | grep -q d.img && ko 'loop libere' 'encore la' || ok 'loop libere'
 # --- xz ---
 seq 1 20000 > $W/x.txt
-xz -k $W/x.txt && xz -dc $W/x.txt.xz | cmp - $W/x.txt && ok 'xz aller-retour' ||
+xz -k $W/x.txt && xz -dc $W/x.txt.xz > $W/x2.txt && cmp $W/x2.txt $W/x.txt && ok 'xz aller-retour' ||
   ko 'xz aller-retour' 'cmp'
 xz -t $W/x.txt.xz && ok 'xz -t' || ko 'xz -t' 'rc'
 # --- tput, unshare ---

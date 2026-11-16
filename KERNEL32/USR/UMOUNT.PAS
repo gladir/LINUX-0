@@ -142,22 +142,26 @@ Begin
 End;
 
 { le peripherique a-t-il ete mis en place par mount ? (retire l'entree) }
+Var Keep : Array[1..32] Of String[40];
+
 Function Tracked(Const Dev : String) : Boolean;
-Var Fd, N, K : LongInt; L : String; Keep : Array[1..32] Of String;
+Var Fd, N, K : LongInt; L : String; Found : Boolean;
 Begin
   Tracked := False;
+  Found := False;
   N := 0;
   Fd := SysOpen('/var/run/mount.loops', O_RDONLY, 0);
   If Fd < 0 Then Exit;
   While SysReadLine(Fd, L) Do
-    If L = Dev Then Tracked := True
+    If L = Dev Then Found := True
     Else If (L <> '') And (N < 32) Then
     Begin
       Inc(N);
       Keep[N] := L;
     End;
   SysClose(Fd);
-  If Not Tracked Then Exit;
+  Tracked := Found;
+  If Not Found Then Exit;
   Fd := SysOpen('/var/run/mount.loops', O_WRONLY Or O_TRUNC, 0);
   If Fd < 0 Then Exit;
   For K := 1 To N Do SysPut(Fd, Keep[K] + #10);

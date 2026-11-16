@@ -3972,7 +3972,7 @@ End;
 
 { Creer un thread noyau (processus sans espace utilisateur) }
 Function KernelThread(Fn : LongInt) : PTask;
-Var T : PTask;
+Var T : PTask; I : LongInt;
 Begin
   KernelThread := Nil;
   T := NewTaskSlot;
@@ -3994,6 +3994,8 @@ Begin
   End;
   MemL[0:T^.KStack] := StackMagic;
   T^.ThreadFn := Fn;
+  For I := 0 To 15 Do T^.Comm[I] := 0;
+  For I := 1 To 7 Do T^.Comm[I - 1] := Ord('kthread'[I]);
   T^.NeedBkl := 1; T^.Preempted := 0; T^.PreemptCount := 0; T^.CpuDue := 0;
   T^.OnCpu := -1; T^.Affinity := -1; T^.LastCpu := 0;
   T^.Mm := Nil;
@@ -5898,9 +5900,16 @@ Begin
 End;
 
 { Recuperer de la place : liberer les tampons non utilises les plus anciens }
+Var
+  ShrinkBusy : Boolean;       { BufShrink / BufReclaim en cours (non reentrants) }
+
 Procedure BufShrink;
 Var B, N : PBuf; Limit : LongInt;
 Begin
+  { l'ecriture d'un tampon (peripherique de boucle) peut allouer des
+    tampons donc rappeler BufShrink pendant le parcours de la liste }
+  If ShrinkBusy Then Exit;
+  ShrinkBusy := True;
   Limit := Jiffies - 6000;
   B := BufAll;
   While (B <> Nil) And (BufCount > BufMaxCount - 64) Do
@@ -5924,6 +5933,7 @@ Begin
     End;
     B := N;
   End;
+  ShrinkBusy := False;
 End;
 
 { Memoire insuffisante : ecrire puis liberer tous les tampons inutilises (les
@@ -5931,6 +5941,8 @@ End;
 Procedure BufReclaim;
 Var B, N : PBuf;
 Begin
+  If ShrinkBusy Then Exit;
+  ShrinkBusy := True;
   B := BufAll;
   While B <> Nil Do
   Begin
@@ -5942,6 +5954,7 @@ Begin
     End;
     B := N;
   End;
+  ShrinkBusy := False;
 End;
 
 { Tampon du bloc (sans lecture) ; Count est incremente }
@@ -20925,8 +20938,10 @@ Const
   FbVirt = $F8000000;
 
 Var
-  FbOn : Boolean;
+  FbOn, FbGfx : Boolean;         { FbGfx : mode graphique programme }
   FbW, FbH, FbLine, FbSize, FbPhys : LongInt;
+  FbVW, FbVH, FbBpp, FbVram, FbXOff, FbYOff : LongInt;
+  FbPal : Array[0..767] Of Byte;
   FbFOps : Array[0..15] Of LongInt;
 
 Procedure BgaWrite(Idx, V : LongInt);
@@ -20939,6 +20954,84 @@ Function BgaRead(Idx : LongInt) : LongInt;
 Begin
   PortW[$1CE] := Idx;
   BgaRead := PortW[$1CF];
+End;
+
+{ Mode acceptable ? (profondeurs 8, 16, 24, 32 ; tient dans la memoire video) }
+Function FbCheck(X, Y, VX, VY, B : LongInt) : LongInt;
+Begin
+  FbCheck := -EINVAL;
+  If (B <> 8) And (B <> 16) And (B <> 24) And (B <> 32) Then Exit;
+  If (X < 320) Or (X > 2560) Or (Y < 200) Or (Y > 1600) Then Exit;
+  If (VX < X) Or (VY < Y) Or (VX > 4096) Then Exit;
+  If VX * (B Shr 3) * VY > FbVram Then Exit;
+  FbCheck := 0;
+End;
+
+{ Programme le mode (sans effacer ? : l'ecran est efface) ; 0 ou -errno }
+Function FbSetMode(X, Y, VX, VY, B : LongInt) : LongInt;
+Begin
+  FbSetMode := FbCheck(X, Y, VX, VY, B);
+  If FbSetMode <> 0 Then Exit;
+  BgaWrite(4, 0);
+  BgaWrite(1, X);
+  BgaWrite(2, Y);
+  BgaWrite(3, B);
+  BgaWrite(6, VX);
+  BgaWrite(7, VY);
+  BgaWrite(8, 0);
+  BgaWrite(9, 0);
+  BgaWrite(4, $41);
+  FbW := X; FbH := Y; FbVW := VX; FbVH := VY; FbBpp := B;
+  FbLine := VX * (B Shr 3);
+  FbSize := FbLine * VY;
+  FbXOff := 0; FbYOff := 0;
+  FbGfx := True;
+  MemFill(FbVirt, 0, FbSize);
+End;
+
+Function FbPan(X, Y : LongInt) : LongInt;
+Begin
+  FbPan := -EINVAL;
+  If (X < 0) Or (Y < 0) Or (X + FbW > FbVW) Or (Y + FbH > FbVH) Then Exit;
+  BgaWrite(8, X);
+  BgaWrite(9, Y);
+  FbXOff := X; FbYOff := Y;
+  FbPan := 0;
+End;
+
+{ fb_var_screeninfo : 160 octets }
+Procedure FbFillVar(Arg : LongInt);
+Begin
+  MemFill(Arg, 0, 160);
+  MemL[0:Arg] := FbW;                    { xres, yres }
+  MemL[0:Arg + 4] := FbH;
+  MemL[0:Arg + 8] := FbVW;               { virtuelle }
+  MemL[0:Arg + 12] := FbVH;
+  MemL[0:Arg + 16] := FbXOff;            { decalages d'affichage }
+  MemL[0:Arg + 20] := FbYOff;
+  MemL[0:Arg + 24] := FbBpp;             { bits_per_pixel }
+  Case FbBpp Of
+    8 :
+      Begin
+        MemL[0:Arg + 36] := 8; MemL[0:Arg + 48] := 8; MemL[0:Arg + 60] := 8;
+      End;
+    16 :
+      Begin
+        MemL[0:Arg + 32] := 11; MemL[0:Arg + 36] := 5;
+        MemL[0:Arg + 44] := 5; MemL[0:Arg + 48] := 6;
+        MemL[0:Arg + 56] := 0; MemL[0:Arg + 60] := 5;
+      End;
+  Else
+    MemL[0:Arg + 32] := 16; MemL[0:Arg + 36] := 8;
+    MemL[0:Arg + 44] := 8; MemL[0:Arg + 48] := 8;
+    MemL[0:Arg + 56] := 0; MemL[0:Arg + 60] := 8;
+    If FbBpp = 32 Then
+    Begin
+      MemL[0:Arg + 68] := 24; MemL[0:Arg + 72] := 8;
+    End;
+  End;
+  MemL[0:Arg + 88] := LongInt($FFFFFFFF);    { hauteur, largeur (mm) }
+  MemL[0:Arg + 92] := LongInt($FFFFFFFF);
 End;
 
 Function FbRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
@@ -20994,7 +21087,7 @@ Begin
 End;
 
 Function FbIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt;
-Var Id : String;
+Var Id : String; R, X, Y, B, VX, VY, Act, I, N, Start, Lp : LongInt;
 Begin
   FbIoctl := -ENOTTY;
   Case Cmd Of
@@ -21005,27 +21098,51 @@ Begin
           FbIoctl := -EFAULT;
           Exit;
         End;
-        MemFill(Arg, 0, 160);
-        MemL[0:Arg] := FbW;                  { xres, yres }
-        MemL[0:Arg + 4] := FbH;
-        MemL[0:Arg + 8] := FbW;              { virtuelle }
-        MemL[0:Arg + 12] := FbH;
-        MemL[0:Arg + 24] := 32;              { bits_per_pixel }
-        MemL[0:Arg + 32] := 16;              { rouge : decalage, longueur }
-        MemL[0:Arg + 36] := 8;
-        MemL[0:Arg + 44] := 8;               { vert }
-        MemL[0:Arg + 48] := 8;
-        MemL[0:Arg + 56] := 0;               { bleu }
-        MemL[0:Arg + 60] := 8;
-        MemL[0:Arg + 68] := 24;              { transparence }
-        MemL[0:Arg + 72] := 0;
-        MemL[0:Arg + 84] := LongInt($FFFFFFFF);   { hauteur, largeur (mm) }
-        MemL[0:Arg + 88] := LongInt($FFFFFFFF);
+        FbFillVar(Arg);
         FbIoctl := 0;
       End;
-    $4601, $4606, $4611 :
-      { FBIOPUT_VSCREENINFO, FBIOPAN_DISPLAY, FBIOBLANK : sans effet }
-      FbIoctl := 0;
+    $4601, $4606 :                           { FBIOPUT_VSCREENINFO, FBIOPAN }
+      Begin
+        If Not EnsureUser(Arg, 160, True) Then
+        Begin
+          FbIoctl := -EFAULT;
+          Exit;
+        End;
+        X := MemL[0:Arg]; Y := MemL[0:Arg + 4];
+        VX := MemL[0:Arg + 8]; VY := MemL[0:Arg + 12];
+        B := MemL[0:Arg + 24];
+        Act := MemL[0:Arg + 84] And $F;
+        If Cmd = $4606 Then
+        Begin
+          R := FbPan(MemL[0:Arg + 16], MemL[0:Arg + 20]);
+          If R = 0 Then FbFillVar(Arg);
+          FbIoctl := R;
+          Exit;
+        End;
+        If VX < X Then VX := X;
+        If VY < Y Then VY := Y;
+        If B = 0 Then B := FbBpp;
+        R := FbCheck(X, Y, VX, VY, B);
+        If R <> 0 Then
+        Begin
+          FbIoctl := R;
+          Exit;
+        End;
+        If Act <> 2 Then              { FB_ACTIVATE_TEST : seulement verifier }
+        Begin
+          R := FbSetMode(X, Y, VX, VY, B);
+          If R <> 0 Then
+          Begin
+            FbIoctl := R;
+            Exit;
+          End;
+          If (MemL[0:Arg + 16] <> 0) Or (MemL[0:Arg + 20] <> 0) Then
+            FbPan(MemL[0:Arg + 16], MemL[0:Arg + 20]);
+        End;
+        FbFillVar(Arg);
+        FbIoctl := 0;
+      End;
+    $4611 : FbIoctl := 0;                    { FBIOBLANK : sans effet }
     $4602 :                                  { FBIOGET_FSCREENINFO }
       Begin
         If Not EnsureUser(Arg, 68, True) Then
@@ -21039,43 +21156,131 @@ Begin
         MemL[0:Arg + 16] := FbPhys;          { smem_start }
         MemL[0:Arg + 20] := FbSize;          { smem_len }
         MemL[0:Arg + 24] := 0;               { FB_TYPE_PACKED_PIXELS }
-        MemL[0:Arg + 32] := 2;               { FB_VISUAL_TRUECOLOR }
+        If FbBpp = 8 Then MemL[0:Arg + 32] := 3  { PSEUDOCOLOR }
+        Else MemL[0:Arg + 32] := 2;          { TRUECOLOR }
+        MemW[0:Arg + 36] := 1;               { xpanstep, ypanstep }
+        MemW[0:Arg + 38] := 1;
         MemL[0:Arg + 48] := FbLine;          { line_length }
+        FbIoctl := 0;
+      End;
+    $4604, $4605 :                           { FBIOGETCMAP, FBIOPUTCMAP }
+      Begin
+        { struct fb_cmap : start, len, red, green, blue, transp }
+        If Not EnsureUser(Arg, 24, False) Then
+        Begin
+          FbIoctl := -EFAULT;
+          Exit;
+        End;
+        Start := MemL[0:Arg]; N := MemL[0:Arg + 4];
+        If (Start < 0) Or (N < 0) Or (Start + N > 256) Then
+        Begin
+          FbIoctl := -EINVAL;
+          Exit;
+        End;
+        For I := 0 To N - 1 Do
+        Begin
+          For Lp := 0 To 2 Do
+          Begin
+            X := MemL[0:Arg + 8 + Lp * 4];
+            If X <> 0 Then
+            Begin
+              If Not EnsureUser(X + I * 2, 2, Cmd = $4604) Then
+              Begin
+                FbIoctl := -EFAULT;
+                Exit;
+              End;
+              If Cmd = $4604 Then MemW[0:X + I * 2] := FbPal[(Start + I) * 3
+                  + Lp] Shl 8
+              Else
+              Begin
+                FbPal[(Start + I) * 3 + Lp] := MemW[0:X + I * 2] Shr 8;
+              End;
+            End;
+          End;
+          If (Cmd = $4605) And (FbBpp = 8) Then
+          Begin
+            Port[$3C8] := Start + I;
+            Port[$3C9] := FbPal[(Start + I) * 3] Shr 2;
+            Port[$3C9] := FbPal[(Start + I) * 3 + 1] Shr 2;
+            Port[$3C9] := FbPal[(Start + I) * 3 + 2] Shr 2;
+          End;
+        End;
         FbIoctl := 0;
       End;
   End;
 End;
 
 Procedure FbInit;
-Var S : String; P, D, Id, Bar, Pt, I, Pages, Nt, T : LongInt;
+Var S : String; P, D, I, Bar, Pt, Pages, Nt, T, W0, H0, B0, V : LongInt;
 Begin
   FbOn := False;
+  FbGfx := False;
+  W0 := 0; H0 := 0; B0 := 32;
   S := CmdGet('fb');
-  If S = '' Then Exit;
-  P := Pos('x', S);
-  If P = 0 Then Exit;
-  FbW := StrVal(Copy(S, 1, P - 1));
-  FbH := StrVal(Copy(S, P + 1, 10));
-  If (FbW < 320) Or (FbW > 2560) Or (FbH < 200) Or (FbH > 1600) Then
+  If S <> '' Then
   Begin
-    KLog('framebuffer : mode ' + S + ' refuse');
-    Exit;
+    { fb=LxH ou fb=LxHxP (profondeur 8, 16, 24 ou 32) }
+    P := Pos('x', S);
+    If P = 0 Then Exit;
+    W0 := StrVal(Copy(S, 1, P - 1));
+    S := Copy(S, P + 1, 20);
+    P := Pos('x', S);
+    If P > 0 Then
+    Begin
+      B0 := StrVal(Copy(S, P + 1, 5));
+      S := Copy(S, 1, P - 1);
+    End;
+    H0 := StrVal(S);
+  End
+  Else
+  Begin
+    { vga=NNN (numeros de mode VESA de Linux) }
+    S := CmdGet('vga');
+    If S <> '' Then
+    Begin
+      If Copy(S, 1, 2) = '0x' Then
+      Begin
+        V := 0;
+        For I := 3 To Length(S) Do
+          If (S[I] >= '0') And (S[I] <= '9') Then V := V * 16 + Ord(S[I]) - 48
+          Else If (UpCase(S[I]) >= 'A') And (UpCase(S[I]) <= 'F') Then
+            V := V * 16 + Ord(UpCase(S[I])) - 55;
+      End
+      Else V := StrVal(S);
+      Case V Of
+        $311 : Begin W0 := 640;  H0 := 480;  B0 := 16; End;
+        $312 : Begin W0 := 640;  H0 := 480;  B0 := 32; End;
+        $314 : Begin W0 := 800;  H0 := 600;  B0 := 16; End;
+        $315 : Begin W0 := 800;  H0 := 600;  B0 := 32; End;
+        $317 : Begin W0 := 1024; H0 := 768;  B0 := 16; End;
+        $318 : Begin W0 := 1024; H0 := 768;  B0 := 32; End;
+        $31A : Begin W0 := 1280; H0 := 1024; B0 := 16; End;
+        $31B : Begin W0 := 1280; H0 := 1024; B0 := 32; End;
+        $301 : Begin W0 := 640;  H0 := 480;  B0 := 8;  End;
+        $303 : Begin W0 := 800;  H0 := 600;  B0 := 8;  End;
+        $305 : Begin W0 := 1024; H0 := 768;  B0 := 8;  End;
+        $307 : Begin W0 := 1280; H0 := 1024; B0 := 8;  End;
+      End;
+    End;
   End;
   D := -1;
   For I := 0 To 31 Do
     If PciRead(0, I, 0, 0) = LongInt($11111234) Then D := I;
   If (D < 0) Or (BgaRead(0) < $B0C0) Then
   Begin
-    KLog('framebuffer : carte Bochs/QEMU VGA absente');
+    If W0 > 0 Then KLog('framebuffer : carte Bochs/QEMU VGA absente');
     Exit;
   End;
   Bar := PciRead(0, D, 0, $10) And LongInt($FFFFFFF0);
   If Bar = 0 Then Exit;
   PciWrite(0, D, 0, 4, (PciRead(0, D, 0, 4) And $FFFF) Or 2);
-  FbLine := FbW * 4;
-  FbSize := FbLine * FbH;
+  FbVram := BgaRead($A) * 65536;
+  If FbVram < 1048576 Then FbVram := 4194304;
+  If FbVram > 16777216 Then FbVram := 16777216;
   FbPhys := Bar;
-  Pages := (FbSize + 4095) Shr 12;
+  { /dev/fb0 est toujours disponible ; le mode graphique n'est programme
+    qu'avec fb=/vga= ou un FBIOPUT_VSCREENINFO. Fenetre : jusqu'a 16 Mo }
+  Pages := FbVram Shr 12;
   Nt := (Pages + 1023) Shr 10;
   For T := 0 To Nt - 1 Do
   Begin
@@ -21091,12 +21296,16 @@ Begin
         MemL[0:Pt + I * 4] := (Bar + (T * 1024 + I) * 4096) Or $13;
   End;
   FlushTlb;
-  BgaWrite(4, 0);
-  BgaWrite(1, FbW);
-  BgaWrite(2, FbH);
-  BgaWrite(3, 32);
-  BgaWrite(4, $41);
-  MemFill(FbVirt, 0, FbSize);
+  FbW := 640; FbH := 480; FbVW := 640; FbVH := 480; FbBpp := 32;
+  FbLine := 640 * 4; FbSize := FbLine * 480;
+  If W0 > 0 Then
+  Begin
+    If FbSetMode(W0, H0, W0, H0, B0) <> 0 Then
+    Begin
+      KLog('framebuffer : mode refuse');
+      Exit;
+    End;
+  End;
   MemFill(LongInt(@FbFOps[0]), 0, SizeOf(FbFOps));
   FbFOps[FoRead] := LongInt(@FbRead);
   FbFOps[FoWrite] := LongInt(@FbWrite);
@@ -21104,8 +21313,9 @@ Begin
   FbFOps[FoIoctl] := LongInt(@FbIoctl);
   ChrOps[29] := LongInt(@FbFOps[0]);
   FbOn := True;
-  KLog('framebuffer : ' + IntStr(FbW) + 'x' + IntStr(FbH) + 'x32 en '
-      + HexStr(FbPhys, 8));
+  KLog('framebuffer : ' + IntStr(FbW) + 'x' + IntStr(FbH) + 'x'
+      + IntStr(FbBpp) + ' en ' + HexStr(FbPhys, 8) + ', memoire video '
+      + IntStr(FbVram Shr 10) + ' Ko');
 End;
 
 { ==================================================================== }
@@ -26838,7 +27048,7 @@ Begin
 End;
 
 Function SysMount(DevA, DirA, TypeA, Flags, Data : LongInt) : LongInt;
-Var Dv, Dr, Tp : String; R : LongInt;
+Var Dv, Dr, Tp : String; R : LongInt; Dm : PDentry;
 Begin
   If Cur^.Euid <> 0 Then
   Begin
@@ -26889,7 +27099,14 @@ Begin
     SysMount := R;
     Exit;
   End;
-  SysMount := VfsMount(Dv, Dr, Tp, Flags And $FFFF, Data);
+  R := VfsMount(Dv, Dr, Tp, Flags And $FFFF, Data);
+  { source inexistante : ENOENT (et non ENOTBLK) }
+  If (R = -ENOTBLK) And (Dv <> '') Then
+  Begin
+    If PathWalk(Dv, True, Dm) = 0 Then DentryPut(LongInt(Dm))
+    Else R := -ENOENT;
+  End;
+  SysMount := R;
 End;
 
 Function SysUmount2(PathA, Flags : LongInt) : LongInt;
@@ -40388,6 +40605,10 @@ Begin
       I));
   KMknod('/dev/ttyS0', S_IFCHR Or $1B6, MkDev(4, 64));
   KMknod('/dev/ram0', S_IFBLK Or $1B0, MkDev(1, 0));
+  VfsSymlink('/proc/self/fd', '/dev/fd');
+  VfsSymlink('/proc/self/fd/0', '/dev/stdin');
+  VfsSymlink('/proc/self/fd/1', '/dev/stdout');
+  VfsSymlink('/proc/self/fd/2', '/dev/stderr');
   For I := 0 To 7 Do KMknod('/dev/loop' + IntStr(I), S_IFBLK Or $1B0,
       MkDev(MajLoop, I));
   KMknod('/dev/loop-control', S_IFCHR Or $1B0, MkDev(10, 237));
@@ -42731,6 +42952,16 @@ Begin
     DentryPut(LongInt(D));
     If CmdGet('init') = '' Then InitPath := Ri;
     InitramfsLoad := True;
+  End
+  Else If CpCount > 0 Then
+  Begin
+    { racine "live" sans /init (CD-ROM d'installation) : /sbin/init }
+    Ri := '/sbin/init';
+    If PathWalk(Ri, True, D) = 0 Then
+    Begin
+      DentryPut(LongInt(D));
+      InitramfsLoad := True;
+    End;
   End;
 End;
 
@@ -43992,7 +44223,7 @@ Begin
     If (Me = 0) And (Jiffies - IdleDump > 2000) Then
     Begin
       IdleDump := Jiffies;
-      If NrTasks > 3 Then DumpTasks;
+      If KDebug And (NrTasks > 3) Then DumpTasks;
     End;
     BklReleaseSmp;
     asm
@@ -51099,6 +51330,8 @@ Begin
   T := KernelThread(LongInt(@BdflushMain));
   If T <> Nil Then
   Begin
+    For I := 0 To 15 Do T^.Comm[I] := 0;
+    For I := 1 To 7 Do T^.Comm[I - 1] := Ord('bdflush'[I]);
     T^.State := TsSleepUn;
     T^.WakeAt := 0;
     T^.State := TsRunnable;
@@ -51120,7 +51353,7 @@ Begin
     If PreemptOn And (Jiffies - IdleDump > 3000) Then
     Begin
       IdleDump := Jiffies;
-      If NrTasks > 3 Then DumpTasks;
+      If KDebug And (NrTasks > 3) Then DumpTasks;
     End;
   End;
   I := 0;

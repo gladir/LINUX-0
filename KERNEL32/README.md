@@ -845,6 +845,8 @@ Limites : le score est le nombre de pages residentes seulement (pas de
 (zero, copie sur ecriture, relecture du swap) passent par le tueur, pas les
 allocations du noyau.
 
+**CD-ROM d'installation** : amorce El Torito (`BOOT/STAGE2CD.ASM`, `TOOLS/MKCD.SH`, `TOOLS/MKINITRD.PY`, `RUNCD.SH`) : voir `BOOT/README.md`, section "Amorce depuis CD-ROM". Le noyau accepte un initramfs sans `/init` mais avec `/sbin/init`.
+
 Tests : `nltest` (17 verifications, 25 avec une carte reseau ; RUNK), `oomtest` (8 ; RUNK), `idetest` (5 verifications + 3 pour vda1 ; RUNVBLK.SH : virtio seul, avec un disque IDE, racine `/dev/vda1`, `e2fsck`, contenu relu par `debugfs`), le bloc `pkt.*` de `nettest` (15, avec RUNNET.SH), `smptest` (14 verifications, 20 avec plusieurs CPU : sysfs/proc, affinite, getcpu, chaque CPU
 execute une tache epinglee, parallelisme mesure par les ticks `cpuN`, vidage de
 TLB prouve par SIGSEGV d'un thread d'un autre CPU apres `mprotect` ;

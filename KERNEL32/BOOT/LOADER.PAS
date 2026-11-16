@@ -76,6 +76,9 @@ Var
  LoadEnd:LongInt;
  MemTop:LongInt;
  Shown:LongInt;
+ { CD-ROM El Torito / ISO 9660 (type de partition CDh de la tete) }
+ IsoMode:Boolean;
+ IsoRoot,IsoRootSize,IsoExt:LongInt;
 
 { ------------------------------------------------------------ console }
 
@@ -249,6 +252,9 @@ End;
 { lit le bloc ext2 B dans BufSeg:Ofs (0 = trou : des zeros) }
 Procedure ReadBlock(B:LongInt;Ofs:Word);
 Begin
+ If IsoMode Then Begin
+  ReadSec(B,1,BufSeg,Ofs); Exit;
+ End;
  If B=0 Then Begin
   FillChar(Mem[BufSeg:Ofs],BlkSize,0); Exit;
  End;
@@ -373,6 +379,7 @@ End;
 Function Bmap(N:LongInt):LongInt;
 Var X,Y:LongInt;
 Begin
+ If IsoMode Then Begin Bmap:=IsoExt+N; Exit; End;
  If (IFlags And $80000)<>0 Then Begin Bmap:=ExtMap(N); Exit; End;
  If N<12 Then Begin Bmap:=IBlk[N]; Exit; End;
  Dec(N,12);
@@ -471,10 +478,63 @@ Begin
  ReadLink:=LinkBuf;
 End;
 
+{ ISO 9660 : resout un chemin (sans tenir compte de la casse, ni de ;N, ni
+  du point final : noms de niveau 1). Retourne 1 et remplit IMode (4000h
+  repertoire, 8000h fichier), ISize et IsoExt ; 0 si absent }
+Function IsoResolve(Path:Str255):LongInt;
+Var DExt,DSize,Sz,Ext:LongInt; Name,Nm:Str255; P,Q,Len,NL:Word; K,I:Integer;
+    Found,IsDir:Boolean; C:Char;
+Begin
+ IsoResolve:=0; DExt:=IsoRoot; DSize:=IsoRootSize;
+ IMode:=$4000; ISize:=DSize; IsoExt:=DExt;
+ While True Do Begin
+  While (Length(Path)>0) And (Path[1]='/') Do Delete(Path,1,1);
+  If Path='' Then Begin IsoResolve:=1; Exit; End;
+  If IMode<>$4000 Then Exit;
+  P:=Pos('/',Path);
+  If P=0 Then Begin Name:=Path; Path:=''; End
+  Else Begin Name:=Copy(Path,1,P-1); Delete(Path,1,P-1); End;
+  For I:=1 To Length(Name) Do Name[I]:=UpCase(Name[I]);
+  Found:=False; IsDir:=False; Sz:=0; Ext:=0;
+  K:=0;
+  While (Not Found) And (LongInt(K)*2048<DSize) Do Begin
+   ReadBlock(DExt+K,DirBuf);
+   P:=0;
+   While P<2048 Do Begin
+    Len:=Mem[BufSeg:DirBuf+P];
+    If Len=0 Then P:=2048
+    Else Begin
+     NL:=Mem[BufSeg:DirBuf+P+32];
+     If (NL>1) Or ((NL=1) And (Mem[BufSeg:DirBuf+P+33]>1)) Then Begin
+      Nm:=''; Q:=0;
+      While (Q<NL) And (Mem[BufSeg:DirBuf+P+33+Q]<>59) Do Begin
+       C:=UpCase(Chr(Mem[BufSeg:DirBuf+P+33+Q]));
+       Nm:=Nm+C; Inc(Q);
+      End;
+      If (Length(Nm)>0) And (Nm[Length(Nm)]='.') Then Dec(Nm[0]);
+      If Nm=Name Then Begin
+       Found:=True;
+       Ext:=MemL[BufSeg:DirBuf+P+2]; Sz:=MemL[BufSeg:DirBuf+P+10];
+       IsDir:=(Mem[BufSeg:DirBuf+P+25] And 2)<>0;
+       P:=2048;
+      End;
+     End;
+     If P<2048 Then Inc(P,Len);
+    End;
+   End;
+   Inc(K);
+  End;
+  If Not Found Then Exit;
+  DExt:=Ext; DSize:=Sz; ISize:=Sz; IsoExt:=Ext;
+  If IsDir Then IMode:=$4000 Else IMode:=$8000;
+ End;
+End;
+
 { resout un chemin : le numero d'inode (inode courant charge), 0 si absent }
 Function Resolve(Path:Str255):LongInt;
 Var Cur,Nxt:LongInt; Name,Target:Str255; P,Links:Integer;
 Begin
+ If IsoMode Then Begin Resolve:=IsoResolve(Path); Exit; End;
  Resolve:=0; Cur:=2; Links:=0;
  While True Do Begin
   While (Length(Path)>0) And (Path[1]='/') Do Delete(Path,1,1);
@@ -500,12 +560,25 @@ End;
 Procedure Mount;
 Var Magic:Word; Rev,Inc2,Ro,I:LongInt; Sh:Word;
 Begin
+ IsoMode:=False;
+ If Mem[0:HPartTyp]=$CD Then Begin
+  { CD-ROM : descripteur de volume primaire au secteur 16 (2048 octets) }
+  If Not HasExt Then Die('le CD-ROM exige les extensions INT 13h');
+  ReadSec(16,1,BufSeg,SbBuf);
+  If (Mem[BufSeg:SbBuf]<>1) Or (Mem[BufSeg:SbBuf+1]<>67) Or
+     (Mem[BufSeg:SbBuf+2]<>68) Then
+   Die('pas de systeme de fichiers ISO 9660 sur le CD-ROM');
+  IsoRoot:=MemL[BufSeg:SbBuf+158]; IsoRootSize:=MemL[BufSeg:SbBuf+166];
+  IsoMode:=True; BlkSize:=2048; SecPerBlk:=4; InoSize:=0;
+  Exit;
+ End;
  ReadSec(PartLba+2,2,BufSeg,SbBuf);
  Magic:=MemW[BufSeg:SbBuf+56];
  If Magic<>$EF53 Then
   Die('pas de systeme de fichiers ext2/ext3/ext4 sur la partition active');
  Sh:=Word(MemL[BufSeg:SbBuf+24]);
- If Sh>2 Then Die('taille de bloc ext2/3/4 non supportee par le chargeur (> 4096)');
+ If Sh>2 Then
+  Die('taille de bloc ext2/3/4 non supportee par le chargeur (> 4096)');
  BlkSize:=1024 Shl Sh; SecPerBlk:=BlkSize Shr 9;
  Ppb:=BlkSize Div 4;
  FirstData:=MemL[BufSeg:SbBuf+20];
@@ -646,7 +719,9 @@ Begin
  IStart:=0; IEnd:=0;
  If Length(IPath)=0 Then Exit;
  Ino:=Resolve(IPath);
- If Ino=0 Then Begin PrintLn('initrd '+IPath+' introuvable : ignore'); Exit; End;
+ If Ino=0 Then Begin
+  PrintLn('initrd '+IPath+' introuvable : ignore'); Exit;
+ End;
  If (IMode And $F000)<>$8000 Then Begin
   PrintLn('initrd '+IPath+' n''est pas un fichier : ignore'); Exit;
  End;
@@ -772,10 +847,12 @@ Begin
  PrintLn('Memoire : '+Num(MemW[0:HMemLow])+' Ko + '+
          Num(MemL[MbiSeg:8])+' Ko');
  Mount;
- PrintLn('ext2 : blocs de '+Num(BlkSize)+' octets, inodes de '+
+ If IsoMode Then PrintLn('ISO 9660 (CD-ROM) : secteurs de 2048 octets')
+ Else PrintLn('ext2 : blocs de '+Num(BlkSize)+' octets, inodes de '+
          Num(InoSize)+' octets');
  KPath:='/boot/linux0';
  CmdLine:='root=/dev/hd'+Chr(97+(Drive And $7F))+Chr(49+PartIdx)+' ro';
+ If IsoMode Then CmdLine:='root=/dev/hdc rootfstype=iso9660 ro';
  IPath:=''; IStart:=0; IEnd:=0;
  ReadConfig;
  LoadElf;
