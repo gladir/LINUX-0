@@ -36,3 +36,20 @@ KERNEL32/TOOLS/MKINSTALLCD.SH -o KERNEL32-INSTALL.ISO).
 CAPTURES/ : captures d'ecran PNG de l'assistant (francais : fr-*, allemand :
   de-*, installations automatiques : auto-*, mode texte : text-*), prises par
   KERNEL32/TESTS/U/RUNINST.SH sous QEMU (screendump).
+
+=== Essai dans VirtualBox (KERNEL32-INSTALL.ISO, 16 Mo) ===
+Machine virtuelle : type Linux / Other Linux (32-bit), 256 Mo de RAM
+(128 Mo minimum), BIOS (pas EFI), disque virtuel de 2 Go ou plus.
+- Stockage : controleur IDE (PIIX4) UNIQUEMENT, pour le CD et pour le disque.
+  Le noyau n'a pas de pilote AHCI/SATA, NVMe ni SCSI : sur un controleur SATA
+  le CD ne sera pas vu. Le CD doit etre le maitre du 2e canal IDE.
+- Ordre d'amorcage : optique en premier.
+- Affichage : l'interface graphique ne s'active que sur la carte Bochs/QEMU
+  (PCI 1234:1111). VirtualBox emule une autre carte (VBoxVGA/VMSVGA) : le
+  meme assistant demarre alors en MODE TEXTE VGA (meme ecrans, memes etapes).
+  Ce repli a ete teste sous QEMU avec une carte non-Bochs (-vga cirrus), pas
+  sous VirtualBox lui-meme.
+- Clavier et souris : PS/2 (par defaut). Reseau : sans importance (non utilise).
+- Apres l'installation : retirer le CD (Peripheriques > Lecteurs optiques) et
+  redemarrer ; le disque installe s'amorce par MBR + STAGE2 + /boot/linux0.
+- Shell de secours : F2 dans l'assistant, ou Alt+F2 / Alt+F3 (root / root).
