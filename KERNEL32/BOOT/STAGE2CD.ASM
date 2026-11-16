@@ -90,6 +90,26 @@ kbwi:   mov cx,0FFFFh
         loopnz .l
         ret
 
+; force A20 sans test : sous VirtualBox (NEM/Hyper-V) le test de
+; rebouclage de la memoire est trompeur (le processeur est reel, il n'y a pas
+; de rebouclage) et le BIOS (INT 15h/87h) remet la porte A20 a son etat
+; initial (coupe) apres chaque copie en memoire haute. On l'active donc
+; toujours explicitement, avant le test et juste avant le mode protege.
+a20force: mov ax,2401h          ; BIOS
+        int 15h
+        in al,92h               ; porte rapide
+        or al,2
+        and al,0FEh
+        out 92h,al
+        call kbwi               ; controleur de clavier 8042
+        mov al,0D1h
+        out 64h,al
+        call kbwi
+        mov al,0DFh
+        out 60h,al
+        call kbwi
+        ret
+
 a20try: call a20test
         jnz .ok
         mov ax,2401h            ; BIOS
@@ -121,6 +141,7 @@ f_a20:  pushad
         mov ds,ax
         mov es,ax
         mov byte [a20ok],0
+        call a20force
         mov bp,8                ; quelques essais
 .t:     call a20try
         jnz .on
@@ -203,7 +224,8 @@ f_mem:  pushad
         retf
 
 ; ---------------------------------------------------------------- mode protege
-f_go32: cli
+f_go32: call a20force          ; le BIOS a pu recouper A20
+        cli
         cld
         xor ax,ax
         mov ds,ax

@@ -206,3 +206,15 @@ SeaBIOS `-cdrom -boot d`, 1 puis 2 CPU : chargeur, initrd, ligne de commande,
 parametres de la tete et du corps sont ceux de la section precedente. Limites :
 fichiers contigus (norme ISO), un seul volume, pas de menu, pas d'amorce
 hybride USB (isohybrid non fait), BIOS seulement (pas d'UEFI).
+
+## Porte A20 sous VirtualBox (correctif)
+
+Sous VirtualBox (Hyper-V/NEM), le noyau se bloquait au moment d'activer la
+pagination (triple faute, EIP = 0010182Eh, code lu a zero). Cause : le test
+de rebouclage de A20 est trompeur sur un processeur reel (aucun rebouclage
+memoire), donc le chargeur croyait A20 deja active et ne l'allumait jamais ;
+de plus le BIOS (INT 15h AH=87h) remet A20 a son etat initial (coupe) apres
+chaque copie en memoire haute. STAGE2.ASM et STAGE2CD.ASM forcent maintenant
+A20 (INT 15h AX=2401h, porte 92h, controleur 8042) sans condition, au debut
+de f_a20 et encore juste avant le passage en mode protege (f_go32).
+Reproduit sous QEMU en coupant A20 avant f_go32 (blocage) puis corrige.
