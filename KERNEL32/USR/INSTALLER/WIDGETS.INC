@@ -23,6 +23,7 @@ Const
   MAXITEMS = 1500;
   RES_TIMEOUT = -1;
   RES_NOTIFY = 1000;
+  RES_REFUSE = 1099;
   MB_OK = 1;  MB_YESNO = 2;  MB_OKCANCEL = 3;
 
 Type
@@ -84,6 +85,12 @@ Function UiLabel(X, Y, W, H : LongInt; Const T : String; Fl : LongInt) :
   LongInt;
 Begin
   UiLabel := UiAdd(W_LABEL, 0, X, Y, W, H, Fl Or WF_NOFOCUS, T);
+End;
+
+Function UiLabelId(Id, X, Y, W, H : LongInt; Const T : String; Fl : LongInt) :
+  LongInt;
+Begin
+  UiLabelId := UiAdd(W_LABEL, Id, X, Y, W, H, Fl Or WF_NOFOCUS, T);
 End;
 
 Function UiButton(Id, X, Y, W : LongInt; Const T : String; Fl : LongInt) :
@@ -184,6 +191,15 @@ Var I : LongInt;
 Begin
   I := UiFind(Id);
   If (I >= 0) And UiCanFocus(I) Then UiFoc := I;
+End;
+
+Procedure UiSetFlag(Id, Fl : LongInt; On : Boolean);
+Var I : LongInt;
+Begin
+  I := UiFind(Id);
+  If I < 0 Then Exit;
+  If On Then UiWd[I].Fl := UiWd[I].Fl Or Fl
+  Else UiWd[I].Fl := UiWd[I].Fl And Not Fl;
 End;
 
 Procedure UiSetEnabled(Id : LongInt; On : Boolean);
@@ -510,8 +526,15 @@ Begin
     H := GCH;
     If (UiWd[I].Fl And WF_DIS) <> 0 Then GFillRect(Px, Py + 1, W, H - 2,
       $E4E8EF)
+    Else If (UiWd[I].Fl And WF_ERR) <> 0 Then
+      GFillRect(Px, Py + 1, W, H - 2, UiRoleBg[R_FERR])
     Else GFillRect(Px, Py + 1, W, H - 2, $FFFFFF);
-    If Foc Then
+    If (UiWd[I].Fl And WF_ERR) <> 0 Then
+    Begin
+      GFrame(Px, Py + 1, W, H - 2, $C0281E);
+      GFrame(Px + 1, Py + 2, W - 2, H - 4, $C0281E);
+    End
+    Else If Foc Then
     Begin
       GFrame(Px, Py + 1, W, H - 2, $2F6DB5);
       GFrame(Px + 1, Py + 2, W - 2, H - 4, $2F6DB5);
@@ -521,15 +544,25 @@ Begin
       GFrame(Px, Py + 1, W, H - 2, $7A869A);
       GHLine(Px + 1, Py + 2, W - 2, $C5CCD9);
     End;
-    GText(Px + 6, Py, Vis, UiRoleFg[R_FIELD], -1);
+    If (UiWd[I].Fl And WF_ERR) <> 0 Then
+      GText(Px + 6, Py, Vis, UiRoleFg[R_FERR], -1)
+    Else GText(Px + 6, Py, Vis, UiRoleFg[R_FIELD], -1);
     If Foc Then
       GFillRect(Px + 6 + (UiWd[I].CPos - First) * GCW, Py + 4, 2, H - 8,
         $1D4E89);
   End
   Else
   Begin
-    UiFill(UiWd[I].X, UiWd[I].Y, UiWd[I].W, 1, R_FIELD);
-    UiPutS(UiWd[I].X, UiWd[I].Y, Vis, R_FIELD);
+    If (UiWd[I].Fl And WF_ERR) <> 0 Then
+    Begin
+      UiFill(UiWd[I].X, UiWd[I].Y, UiWd[I].W, 1, R_FERR);
+      UiPutS(UiWd[I].X, UiWd[I].Y, Vis, R_FERR);
+    End
+    Else
+    Begin
+      UiFill(UiWd[I].X, UiWd[I].Y, UiWd[I].W, 1, R_FIELD);
+      UiPutS(UiWd[I].X, UiWd[I].Y, Vis, R_FIELD);
+    End;
     If Foc Then
     Begin
       TxCurX := UiWd[I].X + UiWd[I].CPos - First;
@@ -974,7 +1007,11 @@ Begin
       End;
     W_EDIT :
       Begin
-        If Key = K_ENTER Then UiKey := UiDefButton
+        If Key = K_ENTER Then
+        Begin
+          UiKey := UiDefButton;
+          If UiKey < 0 Then UiKey := RES_REFUSE;
+        End
         Else If (Key = K_DOWN) Then UiFocusMove(1)
         Else If (Key = K_UP) Then UiFocusMove(-1)
         Else UiKey := UiKeyEdit(I, Key);
@@ -1087,6 +1124,7 @@ Begin
             Exit;
           End;
           R := UiKey(A);
+          If R = -1 Then R := RES_REFUSE;
           Need := True;
         End;
       EV_CLICK :

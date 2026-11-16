@@ -14,22 +14,22 @@ Const
   R_BG = 0;  R_HEAD = 1;  R_HINT = 2;  R_WIN = 3;  R_TITLE = 4;
   R_FIELD = 5;  R_SEL = 6;  R_SELDIM = 7;  R_BTN = 8;  R_BTNF = 9;
   R_DIS = 10;  R_ERR = 11;  R_BAR = 12;  R_TROUGH = 13;  R_DLGT = 14;
-  R_OK = 15;  R_DIM = 16;  R_BTNDEF = 17;
+  R_OK = 15;  R_DIM = 16;  R_BTNDEF = 17;  R_FERR = 18;
 
   { couleurs du theme graphique : premier plan, fond (-1 = transparent) }
-  UiRoleFg : Array[0..17] Of LongInt = (
+  UiRoleFg : Array[0..18] Of LongInt = (
     $FFFFFF, $FFFFFF, $B9CCE6, $1E2430, $FFFFFF, $101820, $FFFFFF, $1E2430,
     $1E2430, $FFFFFF, $8A93A3, $B3261E, $2F6DB5, $D5DBE5, $FFFFFF, $1B7F3B,
-    $5B6678, $1E2430);
-  UiRoleBg : Array[0..17] Of LongInt = (
+    $5B6678, $1E2430, $5A0000);
+  UiRoleBg : Array[0..18] Of LongInt = (
     $14406E, -1, -1, $F3F5F9, -1, $FFFFFF, $2F6DB5, $C5D3E8,
     -1, -1, $F3F5F9, $F3F5F9, $3C8DE0, $D5DBE5, -1, $F3F5F9,
-    $F3F5F9, -1);
+    $F3F5F9, -1, $FFC9C9);
 
   { attributs texte : bits 0-2 premier plan, bit 3 gras, bits 4-6 fond }
-  TxRoleAt : Array[0..17] Of Byte = (
+  TxRoleAt : Array[0..18] Of Byte = (
     $4F, $4F, $47, $70, $4F, $60, $4F, $30, $70, $4F, $78, $71, $4F, $60,
-    $4F, $72, $78, $70);
+    $4F, $72, $78, $70, $1F);
 
   UiBlue1 = $0B2A4A;
   UiBlue2 = $1B5694;

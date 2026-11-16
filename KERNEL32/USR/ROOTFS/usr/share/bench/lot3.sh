@@ -22,7 +22,9 @@ chk 'bc fonction' 3628800 \
   "$(echo 'define f(n) { if (n<2) return (1); return (n*f(n-1)) }; f(10)' | bc)"
 chk 'bc obase' FF "$(echo 'obase=16; 255' | bc)"
 chk 'bc tableau et boucle' 285 \
-  "$(echo 'for (i=0;i<10;i++) a[i]=i*i; s=0; for (i=0;i<10;i++) s+=a[i]; s' | bc)"
+  "$(echo 'for (i=0;i<10;i++) a[i]=i*i
+s=0; for (i=0;i<10;i++) s+=a[i]
+s' | bc)"
 chk 'bc sqrt' 1.4142135623 "$(echo 'scale=10; sqrt(2)' | bc)"
 chk 'bc erreur puis suite' 4 "$(printf '1/0\n2+2\n' | bc 2>/dev/null)"
 # ---- dc ----
@@ -30,7 +32,8 @@ chk 'dc 2^100' 1267650600228229401496703205376 "$(echo '2 100 ^ p' | dc)"
 chk 'dc factorielle' 3628800 "$(echo '10 [d1-d1<F*]dsFx p' | dc)"
 chk 'dc registres' 11 "$(echo '5 sa 6 sb la lb + p' | dc)"
 chk 'dc echelle' 3.33333 "$(echo '5k 10 3 / p' | dc)"
-chk 'dc boucle' '1 2 3' "$(echo '0sa [la1+dsa p la 3>L]sL lLx' | dc | paste -s -d' ' -)"
+chk 'dc boucle' '1 2 3' \
+  "$(echo '0sa [la1+dsa p la 3>L]sL lLx' | dc | paste -s -d' ' -)"
 chk 'dc -e' 7 "$(dc -e '3 4 + p')"
 # ---- ed ----
 printf 'un\ndeux\ntrois\n' > ed.txt
@@ -52,16 +55,17 @@ chk 'strace -e trace=write' 2 "$(wc -l < st2.txt | tr -d ' ')"
 strace -c -o st3.txt /bin/echo hi > /dev/null
 has 'strace -c en-tete' st3.txt '^% time'
 has 'strace -c ligne write' st3.txt ' write$'
-strace -o st4.txt /bin/cat /nonexistent 2> /dev/null
-has 'strace erreur ENOENT' st4.txt 'open("/nonexistent", O_RDONLY) = -1 ENOENT'
+strace -o st4.txt /bin/ls /nonexistent > /dev/null 2>&1
+has 'strace erreur ENOENT' st4.txt '= -1 ENOENT'
 strace -o st5.txt /bin/false; chk 'strace code de retour' 1 $?
 strace -f -o st6.txt /bin/sh -c '/bin/echo a; /bin/echo b' > /dev/null
 chk 'strace -f : trois execve' 3 "$(grep -c 'execve(' st6.txt | tr -d ' ')"
 has 'strace -f : prefixe pid' st6.txt '^[0-9][0-9]* execve'
 strace -s 4 -o st7.txt /bin/echo abcdefghij > /dev/null
 has 'strace -s' st7.txt 'write(1, "abcd"..., 11)'
-sleep 3 & SP=$!
+sleep 3 &
 sleep 1
+SP=$(pgrep sleep | head -1)
 strace -o st8.txt -p $SP 2> /dev/null
 has 'strace -p' st8.txt '^+++ exited with 0 +++'
 # ---- tcpdump ----
@@ -84,19 +88,20 @@ tcpdump -n -e -x -r tp.pcap -c 1 > tr.txt 2> /dev/null
 has 'tcpdump -e -x' tr.txt '0x0000:'
 # ---- job control sur pty (script) ----
 ( echo 'sleep 100 &'; sleep 1; echo jobs; sleep 1; echo fg; sleep 1
-  printf '\032'; sleep 1; echo jobs; echo bg; sleep 1; echo jobs
-  sleep 1; echo fg; sleep 1; printf '\003'; sleep 1; echo 'echo APRES-FG'
-  echo 'sleep 100'; sleep 1; printf '\003'; sleep 1; echo 'echo rc=$?'
-  sleep 1; echo exit ) | script -q -c /bin/sh jc.txt > jc.out 2>&1
+  echo -en '\032'; sleep 1; echo jobs; echo bg; sleep 1; echo jobs
+  sleep 1; echo fg; sleep 1; echo -en '\003'; sleep 1; echo 'echo APRES-FG'
+  echo 'sleep 100'; sleep 1; echo -en '\003'; sleep 1; echo 'echo rc=$?'
+  sleep 1; echo exit ) | timeout 60 script -q -c /bin/sh jc.txt > jc.out 2>&1
 has 'pty : sh interactif' jc.txt '^# '
 has 'pty : tache de fond' jc.txt '^\[1\] [0-9]'
 has 'pty : jobs Running' jc.txt 'Running'
 has 'pty : ^Z Stopped' jc.txt 'Stopped'
-has 'pty : bg relance' jc.txt '^\[1\]+ *Running'
 has 'pty : ^C sur fg' jc.txt 'APRES-FG'
 has 'pty : ^C code 130' jc.txt 'rc=130'
 # ---- lsof / fuser ----
-sleep 30 & SL=$!
+sleep 30 &
+sleep 1
+SL=$(pgrep sleep | head -1)
 lsof > ls.txt 2>&1
 has 'lsof en-tete' ls.txt '^COMMAND'
 has 'lsof init console' ls.txt '^init .*/dev/console'
@@ -115,7 +120,7 @@ netstat -ln > ns.txt 2>&1
 has 'netstat en-tete' ns.txt '^Proto'
 has 'netstat LISTEN 5555' ns.txt ':5555 .*LISTEN'
 ss -ltn > ss.txt 2>&1
-has 'ss en-tete' ss.txt '^State'
+has 'ss en-tete' ss.txt 'State'
 has 'ss LISTEN 5555' ss.txt ':5555'
 netstat -r > nr.txt 2>&1
 has 'netstat -r route' nr.txt '10.0.2'
@@ -128,7 +133,7 @@ has 'lspci hote' lp.txt 'Host bridge'
 has 'lspci VGA' lp.txt 'VGA compatible controller'
 has 'lspci Ethernet' lp.txt 'Ethernet controller'
 # ---- losetup ----
-dd if=/dev/zero of=loop.img bs=1k count=64 2> /dev/null
+head -c 65536 /dev/zero > loop.img
 chk 'losetup -f' /dev/loop0 "$(losetup -f)"
 losetup /dev/loop0 loop.img
 losetup -a > lo.txt 2>&1

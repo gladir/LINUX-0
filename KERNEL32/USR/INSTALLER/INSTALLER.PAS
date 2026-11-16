@@ -405,6 +405,8 @@ Begin
   If PartMode = 2 Then StepTotal := 14 Else StepTotal := 12;
 End;
 
+Var PageF5 : Boolean;
+
 { debut de page : titre, aide, boutons de navigation }
 Procedure BeginPage(Id : LongInt; Const Name : String);
 Begin
@@ -413,6 +415,7 @@ Begin
   UiTitle := Msg(M_STEP) + ' ' + NumS(StepNo(Id)) + '/' + NumS(StepTotal) +
              ' - ' + Name;
   UiFoot := Msg(M_FOOT);
+  PageF5 := False;
   OpMark('page ' + NumS(Id));
 End;
 
@@ -480,6 +483,7 @@ Begin
       PageHelp;
       R := RES_REBUILD;
     End
+    Else If (R = 2005) And PageF5 Then R := RES_NOTIFY + 98
     Else If R >= 2001 Then R := 0
     Else If R = NAV_CANCEL Then
     Begin
@@ -492,6 +496,90 @@ End;
 Procedure ErrBox(Const S : String);
 Begin
   UiMsgBox(Msg(M_ERR_T), S, Msg(M_OK), '');
+End;
+
+{ ---- validation par champ : fond rouge + message sous le champ ---- }
+
+Const
+  FV_MAX = 8;
+
+Var
+  FvE, FvL : Array[0..FV_MAX - 1] Of LongInt;   { champ, etiquette d'etat }
+  FvHint : Array[0..FV_MAX - 1] Of String;
+  FvTouched : Array[0..FV_MAX - 1] Of Boolean;
+  FvN, FvBad, FvBlock : LongInt;
+  ShowPw : Boolean;
+
+Procedure FvStart;
+Var K : LongInt;
+Begin
+  FvN := 0;
+  For K := 0 To FV_MAX - 1 Do FvTouched[K] := False;
+End;
+
+{ declare un champ contraint : Ed = identifiant du champ, Lb = identifiant de
+  l'etiquette placee dessous (creee ici), Y = ligne, indice en gris }
+Function FvAdd(Ed, Lb, X, Y, W : LongInt; Const Hint : String) : LongInt;
+Begin
+  FvE[FvN] := Ed;
+  FvL[FvN] := Lb;
+  FvHint[FvN] := Hint;
+  FvTouched[FvN] := False;
+  UiLabelId(Lb, X, Y, W, 1, Hint, WF_DIM);
+  FvAdd := FvN;
+  Inc(FvN);
+End;
+
+Procedure FvBegin;
+Begin
+  FvBad := 0;
+  FvBlock := 0;
+End;
+
+{ etat d'un champ : 0 neutre (indice) ; 1 invalide (rouge + message) ;
+  2 valide avec remarque (vert) ; 3 incomplet (indice, bloque Suivant) }
+Procedure FvSet(K, State : LongInt; Const Msg_ : String);
+Var I : LongInt;
+Begin
+  UiSetFlag(FvE[K], WF_ERR, State = 1);
+  I := UiFind(FvL[K]);
+  If I >= 0 Then
+  Begin
+    UiWd[I].Fl := UiWd[I].Fl And Not (WF_ERR Or WF_OK Or WF_DIM);
+    If State = 1 Then
+    Begin
+      UiWd[I].Text := Msg_;
+      UiWd[I].Fl := UiWd[I].Fl Or WF_ERR;
+    End
+    Else If State = 2 Then
+    Begin
+      UiWd[I].Text := Msg_;
+      UiWd[I].Fl := UiWd[I].Fl Or WF_OK;
+    End
+    Else
+    Begin
+      UiWd[I].Text := FvHint[K];
+      UiWd[I].Fl := UiWd[I].Fl Or WF_DIM;
+    End;
+  End;
+  If State = 1 Then
+  Begin
+    If FvBad = 0 Then FvBad := FvE[K];
+    Inc(FvBlock);
+  End
+  Else If State = 3 Then
+  Begin
+    If FvBad = 0 Then FvBad := FvE[K];
+    Inc(FvBlock);
+  End;
+End;
+
+{ fin de passe : Suivant grise tant qu'un champ est rouge ou incomplet ; si
+  Refuse (Entree sur Suivant grise) le premier champ fautif recoit le focus }
+Procedure FvEnd(Refuse : Boolean);
+Begin
+  UiSetEnabled(NAV_NEXT, FvBlock = 0);
+  If Refuse And (FvBad <> 0) Then UiSetFocusId(FvBad);
 End;
 
 { ---- contenu existant d'un disque ---- }
@@ -757,6 +845,7 @@ Procedure BuildClk;
 Var Dt, Tm : String; Off : LongInt;
 Begin
   BeginPage(S_CLK, Msg(M_CLK_T));
+  FvStart;
   If ClkDate = '' Then
   Begin
     NowLocal(Dt, Tm, Off);
@@ -767,13 +856,33 @@ Begin
   End;
   UiLabel(0, 0, UiCw, 3, Msg(M_CLK_I), 0);
   UiLabel(0, 4, 26, 1, Msg(M_CLK_DATE), 0);
-  UiEdit(10, 27, 4, 12, ClkDate, 10, 0);
+  UiEdit(10, 27, 4, 12, ClkDate, 10, WF_NOTIFY);
+  FvAdd(10, 20, 27, 5, UiCw - 27, Msg(M_FH_DATE));
   UiLabel(0, 6, 26, 1, Msg(M_CLK_TIME), 0);
-  UiEdit(11, 27, 6, 10, ClkTime, 8, 0);
+  UiEdit(11, 27, 6, 10, ClkTime, 8, WF_NOTIFY);
+  FvAdd(11, 21, 27, 7, UiCw - 27, Msg(M_FH_TIME));
   UiRadio(12, 1, 0, 9, UiCw, Msg(M_CLK_UTC), ClkUtc = 1, 0);
   UiRadio(13, 1, 0, 10, UiCw, Msg(M_CLK_LOC), ClkUtc = 0, 0);
   NavButtons(True, Msg(M_NEXT));
   UiSetFocusId(10);
+End;
+
+{ revalide la date et l'heure ; Touch : marque les champs comme visites }
+Procedure CheckClk(Touch : Boolean);
+Var Y, M, D, H, Mi, S : LongInt; T : String;
+Begin
+  FvBegin;
+  T := UiGetText(10);
+  If Touch Then FvTouched[0] := True;
+  If ParseDate(T, Y, M, D) Then FvSet(0, 0, '')
+  Else If (T = '') And Not FvTouched[0] Then FvSet(0, 3, '')
+  Else FvSet(0, 1, Msg(M_FE_DATE));
+  T := UiGetText(11);
+  If Touch Then FvTouched[1] := True;
+  If ParseTime(T, H, Mi, S) Then FvSet(1, 0, '')
+  Else If (T = '') And Not FvTouched[1] Then FvSet(1, 3, '')
+  Else FvSet(1, 1, Msg(M_FE_TIME));
+  FvEnd(Touch);
 End;
 
 Function PageClk : LongInt;
@@ -781,6 +890,7 @@ Var R, Y, M, D, H, Mi, S : LongInt;
 Begin
   Repeat
     BuildClk;
+    CheckClk(False);
     Repeat
       R := PageRun;
       ClkDate := UiGetText(10);
@@ -793,7 +903,11 @@ Begin
           ErrBox(Msg(M_CLK_BAD));
           R := 0;
         End;
-      If (R >= RES_NOTIFY) Then R := 0;
+      If R >= RES_NOTIFY Then
+      Begin
+        CheckClk(R = RES_REFUSE);
+        R := 0;
+      End;
     Until R <> 0;
   Until R <> RES_REBUILD;
   PageClk := R;
@@ -816,16 +930,31 @@ Begin
   ValidHost := True;
 End;
 
+Procedure CheckHost(Touch : Boolean);
+Var T : String;
+Begin
+  FvBegin;
+  T := UiGetText(10);
+  If Touch Then FvTouched[0] := True;
+  If ValidHost(T) Then FvSet(0, 0, '')
+  Else If (T = '') And Not FvTouched[0] Then FvSet(0, 3, '')
+  Else FvSet(0, 1, Msg(M_FE_HOST));
+  FvEnd(Touch);
+End;
+
 Function PageHost : LongInt;
 Var R : LongInt;
 Begin
   Repeat
     BeginPage(S_HOST, Msg(M_HOST_T));
+    FvStart;
     UiLabel(0, 0, UiCw, 3, Msg(M_HOST_I), 0);
     UiLabel(0, 4, 26, 1, Msg(M_HOST_L), 0);
-    UiEdit(10, 27, 4, 30, Host, 63, 0);
+    UiEdit(10, 27, 4, 30, Host, 63, WF_NOTIFY);
+    FvAdd(10, 20, 2, 5, UiCw - 2, Msg(M_FH_HOST));
     NavButtons(True, Msg(M_NEXT));
     UiSetFocusId(10);
+    CheckHost(False);
     Repeat
       R := PageRun;
       Host := UiGetText(10);
@@ -834,7 +963,11 @@ Begin
         ErrBox(Msg(M_HOST_BAD));
         R := 0;
       End;
-      If R >= RES_NOTIFY Then R := 0;
+      If R >= RES_NOTIFY Then
+      Begin
+        CheckHost(R = RES_REFUSE);
+        R := 0;
+      End;
     Until R <> 0;
   Until R <> RES_REBUILD;
   PageHost := R;
@@ -864,26 +997,115 @@ Begin
     (S = 'man') Or (S = 'mail') Or (S = 'news') Or (S = 'www-data');
 End;
 
+Var UserConv : Boolean;
+
+{ revalide la page des comptes ; Chg : identifiant du champ modifie (0 = aucun)
+  ; Touch : Entree sur Suivant grise -> tous les champs sont consideres
+  comme visites }
+Procedure CheckAcc(Chg : LongInt; Touch : Boolean);
+Var A, B, U : String; K : LongInt; Cv : Boolean;
+Begin
+  FvBegin;
+  If Touch Then
+    For K := 0 To 3 Do FvTouched[K] := True;
+  If Chg = 10 Then FvTouched[0] := True;
+  If Chg = 11 Then FvTouched[1] := True;
+  If Chg = 13 Then FvTouched[2] := True;
+  If Chg = 15 Then FvTouched[3] := True;
+  { identifiant : espaces de fin retires, majuscules converties }
+  U := UiGetText(13);
+  If Chg = 13 Then
+  Begin
+    Cv := False;
+    While (Length(U) > 0) And (U[Length(U)] = ' ') Do Delete(U, Length(U), 1);
+    For K := 1 To Length(U) Do
+      If (U[K] >= 'A') And (U[K] <= 'Z') Then
+      Begin
+        U[K] := Chr(Ord(U[K]) + 32);
+        Cv := True;
+      End;
+    UserConv := Cv;
+    If U <> UiGetText(13) Then
+    Begin
+      K := UiWd[UiFind(13)].CPos;
+      UiSetText(13, U);
+      If K < Length(U) Then UiWd[UiFind(13)].CPos := K;
+    End;
+  End;
+  { mot de passe root }
+  A := UiGetText(10);
+  B := UiGetText(11);
+  If A = '' Then
+  Begin
+    If FvTouched[0] Then FvSet(0, 1, Msg(M_FE_ROOT)) Else FvSet(0, 3, '');
+  End
+  Else FvSet(0, 0, '');
+  { confirmation }
+  If A <> B Then
+  Begin
+    If (B <> '') Or FvTouched[1] Then FvSet(1, 1, Msg(M_FE_CONF))
+    Else FvSet(1, 3, '');
+  End
+  Else If A <> '' Then FvSet(1, 2, Msg(M_FK_CONF))
+  Else FvSet(1, 0, '');
+  { utilisateur }
+  If U = '' Then FvSet(2, 0, '')
+  Else If Not ValidUser(U) Then FvSet(2, 1, Msg(M_FE_USER))
+  Else If ReservedUser(U) Then FvSet(2, 1, Msg(M_FE_USERRES))
+  Else If UserConv Then FvSet(2, 2, Msg(M_FK_CONV))
+  Else FvSet(2, 0, '');
+  A := UiGetText(14);
+  B := UiGetText(15);
+  If U = '' Then FvSet(3, 0, '')
+  Else If A <> B Then
+  Begin
+    If (B <> '') Or FvTouched[3] Then FvSet(3, 1, Msg(M_FE_CONF))
+    Else FvSet(3, 3, '');
+  End
+  Else If A <> '' Then FvSet(3, 2, Msg(M_FK_CONF))
+  Else FvSet(3, 0, '');
+  FvEnd(Touch);
+End;
+
+Procedure ApplyShowPw;
+Var K : LongInt;
+Begin
+  For K := 10 To 15 Do
+    If (K = 10) Or (K = 11) Or (K = 14) Or (K = 15) Then
+      UiSetFlag(K, WF_PWD, Not ShowPw);
+  UiSetChecked(16, ShowPw);
+End;
+
 Function PageAcc : LongInt;
 Var R : LongInt;
 Begin
   Repeat
     BeginPage(S_ACC, Msg(M_ACC_T));
-    UiLabel(0, 0, UiCw, 3, Msg(M_ACC_I), 0);
-    UiLabel(0, 4, 28, 1, Msg(M_ACC_ROOT), 0);
-    UiEdit(10, 29, 4, 28, RootPw, 40, WF_PWD);
+    PageF5 := True;
+    FvStart;
+    UiLabel(0, 0, UiCw, 2, Msg(M_ACC_I), 0);
+    UiLabel(0, 3, 28, 1, Msg(M_ACC_ROOT), 0);
+    UiEdit(10, 29, 3, 28, RootPw, 40, WF_PWD Or WF_NOTIFY);
+    FvAdd(10, 20, 2, 4, UiCw - 2, Msg(M_FH_ROOT));
     UiLabel(0, 5, 28, 1, Msg(M_ACC_AGAIN), 0);
-    UiEdit(11, 29, 5, 28, RootPw2, 40, WF_PWD);
-    UiLabel(0, 7, 28, 1, Msg(M_ACC_FULL), 0);
-    UiEdit(12, 29, 7, 28, UserFull, 40, 0);
-    UiLabel(0, 8, 28, 1, Msg(M_ACC_USER), 0);
-    UiEdit(13, 29, 8, 28, UserName, 31, 0);
-    UiLabel(0, 9, 28, 1, Msg(M_ACC_PW), 0);
-    UiEdit(14, 29, 9, 28, UserPw, 40, WF_PWD);
-    UiLabel(0, 10, 28, 1, Msg(M_ACC_AGAIN), 0);
-    UiEdit(15, 29, 10, 28, UserPw2, 40, WF_PWD);
+    UiEdit(11, 29, 5, 28, RootPw2, 40, WF_PWD Or WF_NOTIFY);
+    FvAdd(11, 21, 2, 6, UiCw - 2, Msg(M_FH_CONF));
+    UiLabel(0, 8, 28, 1, Msg(M_ACC_FULL), 0);
+    UiEdit(12, 29, 8, 28, UserFull, 40, 0);
+    UiLabel(0, 9, 28, 1, Msg(M_ACC_USER), 0);
+    UiEdit(13, 29, 9, 28, UserName, 31, WF_NOTIFY);
+    FvAdd(13, 23, 2, 10, UiCw - 2, Msg(M_FH_USER));
+    UiLabel(0, 11, 28, 1, Msg(M_ACC_PW), 0);
+    UiEdit(14, 29, 11, 28, UserPw, 40, WF_PWD Or WF_NOTIFY);
+    UiLabel(0, 12, 28, 1, Msg(M_ACC_AGAIN), 0);
+    UiEdit(15, 29, 12, 28, UserPw2, 40, WF_PWD Or WF_NOTIFY);
+    FvAdd(15, 25, 2, 13, UiCw - 2, Msg(M_FH_CONF));
+    UiCheck(16, 0, 15, UiCw, Msg(M_SHOWPW), ShowPw, WF_NOTIFY);
     NavButtons(True, Msg(M_NEXT));
     UiSetFocusId(10);
+    ApplyShowPw;
+    UserConv := False;
+    CheckAcc(0, False);
     Repeat
       R := PageRun;
       RootPw := UiGetText(10);
@@ -892,6 +1114,17 @@ Begin
       UserName := UiGetText(13);
       UserPw := UiGetText(14);
       UserPw2 := UiGetText(15);
+      If R = RES_NOTIFY + 98 Then
+      Begin
+        ShowPw := Not ShowPw;
+        ApplyShowPw;
+        R := RES_NOTIFY + 16;
+      End
+      Else If R = RES_NOTIFY + 16 Then
+      Begin
+        ShowPw := UiChecked(16);
+        ApplyShowPw;
+      End;
       If R = NAV_NEXT Then
       Begin
         If RootPw = '' Then
@@ -920,7 +1153,13 @@ Begin
           R := 0;
         End;
       End;
-      If R >= RES_NOTIFY Then R := 0;
+      If R >= RES_NOTIFY Then
+      Begin
+        If R = RES_REFUSE Then CheckAcc(0, True)
+        Else CheckAcc(R - RES_NOTIFY, False);
+        UserName := UiGetText(13);
+        R := 0;
+      End;
     Until R <> 0;
   Until R <> RES_REBUILD;
   PageAcc := R;
@@ -975,6 +1214,24 @@ End;
 
 { ---- page : methode de partitionnement ---- }
 
+Procedure CheckMeth(Touch : Boolean);
+Var Mb, E, Sz : LongInt; T : String;
+Begin
+  FvBegin;
+  Sz := DkSectors(DiskPath) Div 2048;
+  T := UiGetText(13);
+  If Touch Then FvTouched[0] := True;
+  If (Not UiChecked(12)) Or (Not UiChecked(10)) Then FvSet(0, 0, '')
+  Else
+  Begin
+    Val(T, Mb, E);
+    If (E = 0) And (Mb >= 8) And (Mb <= Sz Div 2) Then FvSet(0, 0, '')
+    Else If (T = '') And Not FvTouched[0] Then FvSet(0, 3, '')
+    Else FvSet(0, 1, Fmt(M_FE_SWAP, NumS(Sz Div 2), '', ''));
+  End;
+  FvEnd(Touch);
+End;
+
 Function PageMeth : LongInt;
 Var R, Mb, E, Sz : LongInt;
 Begin
@@ -988,18 +1245,22 @@ Begin
   End;
   Repeat
     BeginPage(S_METH, Msg(M_METH_T));
+    FvStart;
     UiLabel(0, 0, UiCw, 2, Fmt(M_METH_I, DiskPath, '', ''), 0);
     UiRadio(10, 1, 0, 2, UiCw, Msg(M_METH_GUIDED), PartMode = 1, WF_NOTIFY);
     UiRadio(11, 1, 0, 3, UiCw, Msg(M_METH_MANUAL), PartMode = 2, WF_NOTIFY);
     UiCheck(12, 3, 5, UiCw - 3, Msg(M_METH_SWAP), UseSwap, WF_NOTIFY);
     UiLabel(3, 6, 28, 1, Msg(M_METH_SWAPMB), 0);
-    UiEdit(13, 32, 6, 8, SwapMb, 6, 0);
+    UiEdit(13, 32, 6, 8, SwapMb, 6, WF_NOTIFY);
+    FvAdd(13, 22, 3, 7, UiCw - 3,
+          Fmt(M_FH_SWAP, NumS(DkSectors(DiskPath) Div 2048 Div 2), '', ''));
     UiLabel(0, 8, UiCw, 1, Msg(M_METH_FS), 0);
     UiRadio(14, 2, 3, 9, 10, 'ext4', FsKind = 4, 0);
     UiRadio(15, 2, 16, 9, 10, 'ext3', FsKind = 3, 0);
     UiRadio(16, 2, 29, 9, 10, 'ext2', FsKind = 2, 0);
     NavButtons(True, Msg(M_NEXT));
     UiSetFocusId(10);
+    CheckMeth(False);
     Repeat
       R := PageRun;
       If UiChecked(10) Then PartMode := 1 Else PartMode := 2;
@@ -1027,7 +1288,11 @@ Begin
           End;
         End;
       End;
-      If R >= RES_NOTIFY Then R := 0;
+      If R >= RES_NOTIFY Then
+      Begin
+        CheckMeth(R = RES_REFUSE);
+        R := 0;
+      End;
     Until R <> 0;
   Until R <> RES_REBUILD;
   PageMeth := R;
@@ -1179,6 +1444,16 @@ End;
 
 Var NewGap, NewTyp, NewKind : LongInt;   { NewKind : 2 primaire, 3 logique }
 
+Procedure CheckSize(Gz : LongInt; Touch : Boolean);
+Var T : String;
+Begin
+  FvBegin;
+  T := UiGetText(10);
+  If ParseSize(T, Gz Div 2048 * 2048) >= 2048 Then FvSet(0, 0, '')
+  Else FvSet(0, 1, Fmt(M_FE_SIZE, NumS(DkMb(Gz)), '', ''));
+  FvEnd(Touch);
+End;
+
 { sous-page : nouvelle partition dans l'espace libre NewGap }
 Function PageNewPart : Boolean;
 Var R, Gs, Gz, Sz, Slot : LongInt; SzS : String;
@@ -1198,15 +1473,18 @@ Begin
     UiTitle := Msg(M_PED_T) + ' - ' + Msg(M_PED_NEWT);
     UiFoot := Msg(M_FOOT);
     UiLabel(0, 0, UiCw, 2, Fmt(M_PED_I, Dsk, '', ''), WF_DIM);
+    FvStart;
     UiLabel(0, 3, UiCw, 1, Msg(M_PED_SIZE), 0);
-    UiEdit(10, 0, 4, 14, SzS, 10, 0);
+    UiEdit(10, 0, 4, 14, SzS, 10, WF_NOTIFY);
     UiLabel(16, 4, 30, 1, '(max ' + NumS(DkMb(Gz)) + ' MB)', WF_DIM);
+    FvAdd(10, 20, 0, 5, UiCw, Fmt(M_FH_SIZE, NumS(DkMb(Gz)), '', ''));
     UiRadio(11, 1, 0, 6, 40, Msg(M_PED_TLINUX), NewTyp = PT_LINUX, 0);
     UiRadio(12, 1, 0, 7, 40, Msg(M_PED_TSWAP), NewTyp = PT_SWAP, 0);
     If (NewKind = 2) And (DkExt = 0) Then
       UiRadio(13, 1, 0, 8, 50, Msg(M_PED_TEXT), NewTyp = PT_EXT, 0);
     NavButtons(True, Msg(M_OK));
     UiSetFocusId(10);
+    CheckSize(Gz, False);
     Repeat
       R := PageRun;
       SzS := UiGetText(10);
@@ -1233,7 +1511,11 @@ Begin
           Else PageNewPart := True;
         End;
       End;
-      If R >= RES_NOTIFY Then R := 0;
+      If R >= RES_NOTIFY Then
+      Begin
+        CheckSize(Gz, R = RES_REFUSE);
+        R := 0;
+      End;
     Until R <> 0;
   Until R <> RES_REBUILD;
 End;

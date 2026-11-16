@@ -80,6 +80,23 @@ def qemu_cd(name, iso, disk, mem=256, iface='ide'):
              serial_io=True)
 
 
+def px(q, name, rgb, tol=10):
+    """nombre de pixels proches de rgb dans une capture (PPM) de l'ecran"""
+    q.shot(name)
+    from PIL import Image
+    im = Image.open(os.path.join(q.work, name + '.ppm')).convert('RGB')
+    r0, g0, b0 = rgb
+    n = 0
+    for (r, g, b) in im.getdata():
+        if abs(r - r0) <= tol and abs(g - g0) <= tol and abs(b - b0) <= tol:
+            n += 1
+    return n
+
+
+PINK = (255, 201, 201)       # fond d'un champ invalide (graphique)
+VGARED = (170, 0, 0)         # fond rouge en mode texte VGA
+
+
 def page(q, n, timeout=120, settle=0.8):
     ok = q.wait(r'K32SETUP: page %d\b' % n, timeout)
     time.sleep(settle)
@@ -461,23 +478,80 @@ def t_ui_fr():
     q.key('ret')
     check('ui-fr : date et heure', page(q, 4))
     cap(q, 'c2', 'fr-04-heure')
+    check('ui-fr : date valide : aucun champ rouge', px(q, 'p4a', PINK) == 0)
+    q.key('tab')
+    q.key('end')
+    q.key('backspace')
+    time.sleep(0.4)
+    check('ui-fr : heure invalide : champ sur fond rouge',
+          px(q, 'p4b', PINK) > 150)
+    cap(q, 'c3', 'fr-04b-heure-invalide')
+    q.key('ret')
+    check('ui-fr : Entree refusee tant que le champ est rouge',
+          not page(q, 5, 3, 0.1))
+    q.key('shift-1')
+    time.sleep(0.4)
+    check('ui-fr : heure corrigee : retour au fond normal',
+          px(q, 'p4c', PINK) == 0)
     q.key('ret')
     check('ui-fr : nom de machine', page(q, 5))
+    q.key('end')
+    q.key('comma')
+    time.sleep(0.4)
+    check('ui-fr : nom de machine invalide : champ sur fond rouge',
+          px(q, 'p5a', PINK) > 150)
+    cap(q, 'c4', 'fr-04c-nom-invalide')
+    q.key('backspace')
+    time.sleep(0.4)
+    check('ui-fr : nom de machine corrige : fond normal',
+          px(q, 'p5b', PINK) == 0)
     q.key('ret')
     check('ui-fr : comptes', page(q, 6))
     q.type('secret')
     q.key('tab')
-    q.type('secret')
+    q.type('secre')
+    time.sleep(0.4)
+    check('ui-fr : confirmation differente : champ rouge',
+          px(q, 'p6a', PINK) > 150)
+    cap(q, 'd0', 'fr-05a-confirmation-rouge')
+    q.type('t')
+    time.sleep(0.4)
+    check('ui-fr : mots de passe identiques : plus de rouge',
+          px(q, 'p6b', PINK) == 0)
     q.key('tab')
     # AZERTY actif : les touches a q z w m changent ; on tape des lettres sures
     q.type('Luc Dubois')
     q.key('tab')
-    q.type('luc')
+    q.type('Luc')
+    time.sleep(0.4)
+    check('ui-fr : majuscules converties : pas de rouge',
+          px(q, 'p6c', PINK) == 0)
+    cap(q, 'd1', 'fr-05b-majuscules-converties')
+    q.key('comma')
+    time.sleep(0.4)
+    check('ui-fr : identifiant invalide : champ sur fond rouge',
+          px(q, 'p6d', PINK) > 150)
+    cap(q, 'd2', 'fr-05c-identifiant-invalide')
+    q.key('ret')
+    check('ui-fr : Suivant refuse tant que l\'identifiant est rouge',
+          not page(q, 7, 3, 0.1))
+    q.key('backspace')
+    time.sleep(0.4)
+    check('ui-fr : identifiant corrige : retour au fond normal',
+          px(q, 'p6e', PINK) == 0)
     q.key('tab')
     q.type('secret')
     q.key('tab')
-    q.type('secret')
+    q.type('secrex')
+    time.sleep(0.4)
+    check('ui-fr : confirmation utilisateur differente : rouge',
+          px(q, 'p6f', PINK) > 150)
+    cap(q, 'd3', 'fr-05d-confirmation-utilisateur')
+    q.key('backspace')
+    q.type('t')
     time.sleep(0.5)
+    check('ui-fr : tout valide : plus aucun champ rouge',
+          px(q, 'p6g', PINK) == 0)
     cap(q, 'd', 'fr-05-comptes')
     q.key('ret')
     check('ui-fr : disque', page(q, 7))
@@ -801,6 +875,36 @@ def t_text():
     q.key('ret')
     page(q, 3)
     cap(q, 'c', 'text-03-fuseau')
+    q.key('ret')
+    check('text : date et heure', page(q, 4))
+    q.key('ret')
+    check('text : nom de machine', page(q, 5))
+    q.key('ret')
+    check('text : comptes', page(q, 6))
+    check('text : comptes valides : aucun champ rouge',
+          px(q, 't6a', VGARED, 20) == 0)
+    q.type('abc')
+    q.key('tab')
+    q.type('abd')
+    time.sleep(0.5)
+    check('text : confirmation differente : champ sur fond rouge VGA',
+          px(q, 't6b', VGARED, 20) > 60)
+    cap(q, 'e', 'text-04-confirmation-rouge')
+    q.key('ret')
+    check('text : Entree refusee tant que le champ est rouge',
+          not page(q, 7, 3, 0.1))
+    q.key('backspace')
+    q.type('c')
+    time.sleep(0.5)
+    check('text : mots de passe identiques : plus de rouge',
+          px(q, 't6c', VGARED, 20) == 0)
+    q.key('tab')
+    q.key('tab')
+    q.type('Bad,')
+    time.sleep(0.5)
+    check('text : identifiant invalide : fond rouge VGA',
+          px(q, 't6d', VGARED, 20) > 60)
+    cap(q, 'f', 'text-05-identifiant-invalide')
     q.quit()
 
 

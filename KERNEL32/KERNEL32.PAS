@@ -3156,6 +3156,7 @@ Procedure SendSigPgrp(Pgrp, Sig : LongInt); Forward;
 Procedure TtyDisassociate(T : PTask); Forward;
 Procedure TimerSignals; Forward;
 Procedure NetTick; Forward;
+Procedure FbTick; Forward;
 Function SigPendingUnblocked(T : PTask) : Boolean; Forward;
 Procedure HandleSignals(F : PFrame); Forward;
 Procedure SignalsExitCleanup(T : PTask); Forward;
@@ -3929,6 +3930,7 @@ Begin
   TimerSignals;
   PosixTimersTick;
   NetTick;
+  FbTick;
 End;
 
 Procedure TimerTick(FromUser : Boolean);
@@ -23657,6 +23659,11 @@ Var
                                        premier mode graphique }
   FbSaveDac : Array[0..191] Of Byte;
   FbFOps : Array[0..15] Of LongInt;
+  { cartes : 1 Bochs/VirtualBox VBE (1CEh/1CFh), 2 VMware SVGA II (VMSVGA) }
+  FbKind, FbBase, FbOpens, FbMapped, FbTk : LongInt;
+  VmIo, VmFifo, VmFifoOn, VmFifoSz, VmMaxW, VmMaxH, FbBar : LongInt;
+  FbInfo : String;                 { cartes VGA vues et carte choisie }
+  FbPci : String;                  { liste des cartes PCI VGA }
 
 Procedure BgaWrite(Idx, V : LongInt);
 Begin
@@ -23668,6 +23675,83 @@ Function BgaRead(Idx : LongInt) : LongInt;
 Begin
   PortW[$1CE] := Idx;
   BgaRead := PortW[$1CF];
+End;
+
+{ ---- VMware SVGA II (PCI 15AD:0405 : VirtualBox 7 par defaut, QEMU
+  -vga vmware) : registres par ports d'E/S (BAR 0 : index en +0, valeur en
+  +1), memoire video BAR 1, file de commandes (FIFO) BAR 2. Seule la
+  profondeur 32 est offerte, pas de panoramique ; l'hote ne redessine qu'apres
+  une commande UPDATE dans la FIFO : FbTick l'envoie (20 Hz) tant que
+  /dev/fb0 est ouvert ou a ete mappe ---- }
+
+Function VmR(Idx : LongInt) : LongInt;
+Begin
+  OutL(VmIo, Idx);
+  VmR := InL(VmIo + 1);
+End;
+
+Procedure VmW(Idx, V : LongInt);
+Begin
+  OutL(VmIo, Idx);
+  OutL(VmIo + 1, V);
+End;
+
+{ Commande UPDATE (1, x, y, largeur, hauteur) dans la FIFO ; ignoree si la
+  FIFO est presque pleine }
+Procedure VmUpdate(X, Y, W, H : LongInt);
+Var Nx, St, Mn, Mx, Used, I : LongInt; V : Array[0..4] Of LongInt;
+Begin
+  If VmFifoOn = 0 Then Exit;
+  Mn := MemL[0:VmFifo]; Mx := MemL[0:VmFifo + 4];
+  Nx := MemL[0:VmFifo + 8]; St := MemL[0:VmFifo + 12];
+  If (Mx <= Mn) Or (Nx < Mn) Or (Nx >= Mx) Then Exit;
+  Used := Nx - St;
+  If Used < 0 Then Used := Used + (Mx - Mn);
+  If Used + 24 >= Mx - Mn Then Exit;
+  V[0] := 1; V[1] := X; V[2] := Y; V[3] := W; V[4] := H;
+  For I := 0 To 4 Do
+  Begin
+    MemL[0:VmFifo + Nx] := V[I];
+    Nx := Nx + 4;
+    If Nx >= Mx Then Nx := Mn;
+  End;
+  MemL[0:VmFifo + 8] := Nx;
+End;
+
+{ Initialise la FIFO (une seule fois) : minimum apres la zone des registres,
+  maximum = taille de la memoire de commandes, pointeurs au minimum }
+Procedure VmFifoInit;
+Begin
+  If VmFifoOn <> 0 Then Exit;
+  MemL[0:VmFifo] := 1200;
+  MemL[0:VmFifo + 4] := VmFifoSz;
+  MemL[0:VmFifo + 8] := 1200;
+  MemL[0:VmFifo + 12] := 1200;
+  VmW(20, 1);                               { CONFIG_DONE }
+  VmFifoOn := 1;
+End;
+
+{ Mode X x Y x 32 ; 0 ou -ENODEV si la carte ne le prend pas }
+Function VmSetMode(X, Y : LongInt) : LongInt;
+Var I : LongInt;
+Begin
+  VmW(2, X);
+  VmW(3, Y);
+  VmW(7, 32);
+  VmW(1, 1);                                { ENABLE }
+  VmFifoInit;
+  If (VmR(2) <> X) Or (VmR(3) <> Y) Then
+  Begin
+    VmSetMode := -ENODEV;
+    Exit;
+  End;
+  FbLine := VmR(12);                        { octets par ligne }
+  If FbLine < X * 4 Then FbLine := X * 4;
+  I := VmR(14);                             { FB_OFFSET }
+  If (I < 0) Or (I > FbVram - FbLine * Y) Or ((I And $FFF) <> 0) Then I := 0;
+  FbBase := FbVirt + I;
+  FbPhys := FbBar + I;
+  VmSetMode := 0;
 End;
 
 { Avant le premier mode graphique : sauver les 256 premiers Ko de la memoire
@@ -23689,6 +23773,9 @@ Function FbCheck(X, Y, VX, VY, B : LongInt) : LongInt;
 Begin
   FbCheck := -EINVAL;
   If (B <> 8) And (B <> 16) And (B <> 24) And (B <> 32) Then Exit;
+  If (FbKind = 2) And ((B <> 32) Or (VX <> X) Or (VY <> Y)
+     Or ((VmMaxW > 0) And (X > VmMaxW)) Or ((VmMaxH > 0) And (Y > VmMaxH)))
+    Then Exit;
   If (X < 320) Or (X > 2560) Or (Y < 200) Or (Y > 1600) Then Exit;
   If (VX < X) Or (VY < Y) Or (VX > 4096) Then Exit;
   If VX * (B Shr 3) * VY > FbVram Then Exit;
@@ -23703,6 +23790,24 @@ Begin
   FbSetMode := R;
   If R <> 0 Then Exit;
   FbSaveText;
+  If FbKind = 2 Then
+  Begin
+    If VmSetMode(X, Y) <> 0 Then
+    Begin
+      FbGfx := True;
+      FbTextMode;
+      FbSetMode := -ENODEV;
+      Exit;
+    End;
+    FbW := X; FbH := Y; FbVW := X; FbVH := Y; FbBpp := 32;
+    FbSize := FbLine * Y;
+    FbXOff := 0; FbYOff := 0;
+    FbGfx := True;
+    MemFill(FbBase, 0, FbSize);
+    VmUpdate(0, 0, X, Y);
+    FbSetMode := 0;
+    Exit;
+  End;
   BgaWrite(4, 0);
   BgaWrite(1, X);
   BgaWrite(2, Y);
@@ -23725,7 +23830,7 @@ Begin
   FbSize := FbLine * VY;
   FbXOff := 0; FbYOff := 0;
   FbGfx := True;
-  MemFill(FbVirt, 0, FbSize);
+  MemFill(FbBase, 0, FbSize);
   FbSetMode := 0;
 End;
 
@@ -23733,6 +23838,12 @@ Function FbPan(X, Y : LongInt) : LongInt;
 Begin
   FbPan := -EINVAL;
   If (X < 0) Or (Y < 0) Or (X + FbW > FbVW) Or (Y + FbH > FbVH) Then Exit;
+  If FbKind = 2 Then
+  Begin
+    FbPan := 0;
+    VmUpdate(0, 0, FbW, FbH);
+    Exit;
+  End;
   BgaWrite(8, X);
   BgaWrite(9, Y);
   FbXOff := X; FbYOff := Y;
@@ -23784,7 +23895,7 @@ Begin
   End;
   N := FbSize - F^.Pos;
   If N > Cnt Then N := Cnt;
-  MemCopy(Buf, FbVirt + F^.Pos, N);
+  MemCopy(Buf, FbBase + F^.Pos, N);
   F^.Pos := F^.Pos + N;
   FbRead := N;
 End;
@@ -23799,7 +23910,7 @@ Begin
   End;
   N := FbSize - F^.Pos;
   If N > Cnt Then N := Cnt;
-  MemCopy(FbVirt + F^.Pos, Buf, N);
+  MemCopy(FbBase + F^.Pos, Buf, N);
   F^.Pos := F^.Pos + N;
   FbWrite := N;
 End;
@@ -23862,6 +23973,10 @@ Begin
         If VX < X Then VX := X;
         If VY < Y Then VY := Y;
         If B = 0 Then B := FbBpp;
+        If FbKind = 2 Then
+        Begin
+          VX := X; VY := Y;
+        End;
         R := FbCheck(X, Y, VX, VY, B);
         If R <> 0 Then
         Begin
@@ -23891,7 +24006,7 @@ Begin
           Exit;
         End;
         MemFill(Arg, 0, 68);
-        Id := 'BOCHS VBE';
+        If FbKind = 2 Then Id := 'VMWARE SVGA II' Else Id := 'BOCHS VBE';
         MemCopy(Arg, LongInt(@Id) + 1, Length(Id));
         MemL[0:Arg + 16] := FbPhys;          { smem_start }
         MemL[0:Arg + 20] := FbSize;          { smem_len }
@@ -23966,7 +24081,7 @@ Var I : LongInt;
 Begin
   If FbOn And FbGfx Then
   Begin
-    BgaWrite(4, 0);
+    If FbKind = 2 Then VmW(1, 0) Else BgaWrite(4, 0);
     FbGfx := False;
     Port[$3C2] := $67;
     Port[$3C4] := 0; Port[$3C5] := 1;
@@ -24002,8 +24117,34 @@ Begin
   End;
 End;
 
+Function FbOpen(I : PInode; F : PFile) : LongInt;
+Begin
+  Inc(FbOpens);
+  FbOpen := 0;
+End;
+
+Procedure FbRelease(F : PFile);
+Begin
+  If FbOpens > 0 Then Dec(FbOpens);
+End;
+
+{ Tous les 5 ticks (20 Hz) : ecran entier redessine par l'hote (VMware) }
+Procedure FbTick;
+Begin
+  If (FbKind <> 2) Or (Not FbGfx) Or (VmFifoOn = 0) Then Exit;
+  If (FbOpens <= 0) And (FbMapped = 0) Then Exit;
+  Inc(FbTk);
+  If FbTk >= 5 Then
+  Begin
+    FbTk := 0;
+    VmUpdate(0, 0, FbW, FbH);
+  End;
+End;
+
 Procedure FbInit;
-Var S : String; P, D, I, Bar, Pt, Pages, Nt, T, W0, H0, B0, V, Cmd0 : LongInt;
+Var S : String;
+    P, D, I, Bar, Pt, Pages, Nt, T, W0, H0, B0, V, Cmd0, Cl, Dv, BarReg,
+    Bar2 : LongInt;
 Begin
   FbOn := False;
   FbGfx := False;
@@ -24055,26 +24196,99 @@ Begin
       End;
     End;
   End;
-  D := -1;
+  { cartes PCI de classe affichage vues (journal, /proc/fb) ; choix :
+    Bochs/VirtualBox VBE (1234:1111, 80EE:BEEF) sinon VMware SVGA II
+    (15AD:0405, controleur VMSVGA de VirtualBox 7 et de -vga vmware) }
+  FbInfo := ''; FbPci := ''; FbKind := 0;
+  D := -1; Dv := -1;
   For I := 0 To 31 Do
-    If (PciRead(0, I, 0, 0) = LongInt($11111234))      { Bochs }
-       Or (PciRead(0, I, 0, 0) = LongInt($BEEF80EE)) Then D := I;  { VBox }
-  If (D < 0) Or (BgaRead(0) < $B0C0) Then
   Begin
-    If W0 > 0 Then KLog('framebuffer : carte Bochs/QEMU VGA absente');
+    V := PciRead(0, I, 0, 0);
+    If V <> LongInt($FFFFFFFF) Then
+    Begin
+      Cl := (PciRead(0, I, 0, 8) Shr 16) And $FFFF;
+      If (Cl = $0300) Or (Cl = $0380) Then
+      Begin
+        FbPci := FbPci + '00:' + HexStr(I, 2) + '.0 ' + HexStr(V And $FFFF, 4)
+            + ':' + HexStr((V Shr 16) And $FFFF, 4) + ' classe '
+            + HexStr(Cl, 4) + #10;
+        KLog('fb: PCI VGA 00:' + HexStr(I, 2) + '.0 ' + HexStr(V And $FFFF, 4)
+            + ':' + HexStr((V Shr 16) And $FFFF, 4));
+      End;
+      If (V = LongInt($11111234)) Or (V = LongInt($BEEF80EE)) Then D := I;
+      If V = LongInt($040515AD) Then Dv := I;
+    End;
+  End;
+  If (D >= 0) And (BgaRead(0) >= $B0C0) Then FbKind := 1
+  Else If Dv >= 0 Then
+  Begin
+    D := Dv;
+    FbKind := 2;
+  End;
+  If FbKind = 0 Then
+  Begin
+    FbInfo := 'aucune carte compatible, texte seul';
+    KLog('fb: aucune carte compatible, texte seul');
     Exit;
   End;
-  Bar := PciRead(0, D, 0, $10) And LongInt($FFFFFFF0);
-  If Bar = 0 Then Exit;
-  PciWrite(0, D, 0, 4, (PciRead(0, D, 0, 4) And $FFFF) Or 2);
-  { memoire video : taille du BAR 0, mesuree decodage coupe (comme PciScan) ;
+  If FbKind = 2 Then BarReg := $14 Else BarReg := $10;
+  Bar := PciRead(0, D, 0, BarReg) And LongInt($FFFFFFF0);
+  If Bar = 0 Then
+  Begin
+    FbInfo := 'memoire video non attribuee, texte seul';
+    KLog('fb: carte sans memoire video (BAR), texte seul');
+    FbKind := 0;
+    Exit;
+  End;
+  If FbKind = 2 Then
+  Begin
+    I := PciRead(0, D, 0, $10);
+    If (I And 1) = 0 Then
+    Begin
+      FbInfo := 'VMware SVGA II : pas de ports d''E/S, texte seul';
+      KLog('fb: ' + FbInfo);
+      FbKind := 0;
+      Exit;
+    End;
+    VmIo := I And $FFFC;
+    PciWrite(0, D, 0, 4, (PciRead(0, D, 0, 4) And $FFFF) Or 7);
+    VmW(0, LongInt($90000002));             { SVGA_REG_ID : version 2 }
+    If VmR(0) <> LongInt($90000002) Then
+    Begin
+      FbInfo := 'VMware SVGA : version non prise en charge, texte seul';
+      KLog('fb: ' + FbInfo);
+      FbKind := 0;
+      Exit;
+    End;
+    VmMaxW := VmR(4); VmMaxH := VmR(5);
+    Bar2 := PciRead(0, D, 0, $18) And LongInt($FFFFFFF0);
+    VmFifoSz := VmR(19);                    { MEM_SIZE }
+    If (Bar2 = 0) Or (VmFifoSz < 8192) Then
+    Begin
+      FbInfo := 'VMware SVGA : pas de FIFO, texte seul';
+      KLog('fb: ' + FbInfo);
+      FbKind := 0;
+      Exit;
+    End;
+    If VmFifoSz > 4194304 Then VmFifoSz := 4194304;
+    Pt := AllocZeroPage;
+    If Pt = 0 Then Exit;
+    For I := 0 To (VmFifoSz Shr 12) - 1 Do
+      MemL[0:Pt + I * 4] := ((Bar2 And LongInt($FFFFF000)) + I * 4096) Or $13;
+    MemL[0:MasterPd + 1005 * 4] := V2P(Pt) Or $13;
+    FlushTlb;
+    VmFifo := LongInt(1005 Shl 22) + (Bar2 And $FFF);
+    VmFifoOn := 0;
+  End
+  Else PciWrite(0, D, 0, 4, (PciRead(0, D, 0, 4) And $FFFF) Or 2);
+  { memoire video : taille du BAR, mesuree decodage coupe (comme PciScan) ;
     16 Mo au plus mappes ; fbmem=N (Mo) pour la forcer }
   Cmd0 := PciRead(0, D, 0, 4);
   PciWrite(0, D, 0, 4, Cmd0 And Not 7);
-  Pt := PciRead(0, D, 0, $10);
-  PciWrite(0, D, 0, $10, -1);
-  FbVram := PciRead(0, D, 0, $10) And LongInt($FFFFFFF0);
-  PciWrite(0, D, 0, $10, Pt);
+  Pt := PciRead(0, D, 0, BarReg);
+  PciWrite(0, D, 0, BarReg, -1);
+  FbVram := PciRead(0, D, 0, BarReg) And LongInt($FFFFFFF0);
+  PciWrite(0, D, 0, BarReg, Pt);
   PciWrite(0, D, 0, 4, Cmd0);
   If (FbVram = 0) Or (FbVram = LongInt($FFFFFFF0)) Then FbVram := 16777216
   Else FbVram := (Not FbVram) + 1;
@@ -24082,6 +24296,9 @@ Begin
   If FbVram < 1048576 Then FbVram := 4194304;
   If CmdGet('fbmem') <> '' Then FbVram := StrVal(CmdGet('fbmem')) * 1048576;
   FbPhys := Bar;
+  FbBar := Bar;
+  FbBase := FbVirt;
+  If FbKind = 2 Then B0 := 32;
   { /dev/fb0 est toujours disponible ; le mode graphique n'est programme
     qu'avec fb=/vga= ou un FBIOPUT_VSCREENINFO. Fenetre : jusqu'a 16 Mo }
   Pages := FbVram Shr 12;
@@ -24115,8 +24332,17 @@ Begin
   FbFOps[FoWrite] := LongInt(@FbWrite);
   FbFOps[FoLlseek] := LongInt(@FbLseek);
   FbFOps[FoIoctl] := LongInt(@FbIoctl);
+  FbFOps[FoOpen] := LongInt(@FbOpen);
+  FbFOps[FoRelease] := LongInt(@FbRelease);
   ChrOps[29] := LongInt(@FbFOps[0]);
   FbOn := True;
+  If FbKind = 2 Then
+    FbInfo := 'carte VMware SVGA II 15AD:0405 detectee (ES ' + HexStr(VmIo, 4)
+        + ', video ' + HexStr(FbPhys, 8) + ', FIFO ' + IntStr(VmFifoSz Shr 10)
+        + ' Ko)'
+  Else FbInfo := 'carte Bochs/VirtualBox VBE detectee (video '
+      + HexStr(FbPhys, 8) + ')';
+  KLog('fb: ' + FbInfo);
   KLog('framebuffer : ' + IntStr(FbW) + 'x' + IntStr(FbH) + 'x'
       + IntStr(FbBpp) + ' en ' + HexStr(FbPhys, 8) + ', memoire video '
       + IntStr(FbVram Shr 10) + ' Ko');
@@ -31195,6 +31421,7 @@ Begin
         Exit;
       End;
       PhysMap := True;
+      FbMapped := 1;
       Flags := Flags Or MAP_SHARED;
     End
     Else If (F^.Inode^.Mode And S_IFMT) <> S_IFREG Then
@@ -43608,7 +43835,7 @@ Const
   PxMax = 40;
   PxPart = 1; PxDiskst = 2; PxDevices = 3; PxIntr = 4; PxIoports = 5;
   PxIomem = 6; PxVmstat = 7; PxBuddy = 8; PxMisc = 9; PxCgroups = 10;
-  PxTty = 11; PxTtyDrv = 12; PxSysrq = 20;
+  PxTty = 11; PxTtyDrv = 12; PxFb = 13; PxSysrq = 20;
   PxNTcp = 30; PxNUdp = 31; PxNRaw = 32; PxNUnix = 33; PxNSnmp = 34;
   PxNSock = 35; PxNArp = 36; PxNProto = 37;
   PidEntMax = 25;                { entrees des repertoires /proc/PID }
@@ -43658,6 +43885,7 @@ Var I : LongInt;
 Begin
   PxN := 0;
   PxAdd(1, 'partitions', 0, PxPart);
+  PxAdd(1, 'fb', 0, PxFb);
   PxAdd(1, 'diskstats', 0, PxDiskst);
   PxAdd(1, 'devices', 0, PxDevices);
   PxAdd(1, 'interrupts', 0, PxIntr);
@@ -43987,6 +44215,28 @@ Begin
         + ' ' + PxPadL(IntStr(PdBlk[I]), 10) + ' ' + PdName[I]);
 End;
 
+{ /proc/fb : ligne Linux (numero, nom), puis la carte choisie et les cartes
+  PCI VGA vues (sans port serie, c'est la seule trace du choix) }
+Procedure PxGenFb;
+Var I, K : LongInt; L : String;
+Begin
+  If FbOn Then
+  Begin
+    If FbKind = 2 Then PAddLn('0 VMWARE SVGA II') Else PAddLn('0 BOCHS VBE');
+  End;
+  PAddLn('# fb: ' + FbInfo);
+  L := '';
+  For I := 1 To Length(FbPci) Do
+    If FbPci[I] = #10 Then
+    Begin
+      PAddLn('# pci ' + L);
+      L := '';
+    End
+    Else L := L + FbPci[I];
+  K := 0;
+  If FbPci = '' Then PAddLn('# pci : aucune carte de classe VGA');
+End;
+
 Procedure PxGenDiskstats;
 Var I, X : LongInt;
 Begin
@@ -44309,6 +44559,7 @@ Begin
   Begin
     Case Ino - PxBase Of
       PxPart : PxGenPartitions;
+      PxFb : PxGenFb;
       PxDiskst : PxGenDiskstats;
       PxDevices : PxGenDevices;
       PxIntr : PxGenIntr;
@@ -47646,6 +47897,17 @@ Begin
           VfsSymlink(SysPathV, SysValV);
         End;
     End;
+  KMkdir('/sys/class/graphics', $1ED);
+  KWriteStr('/sys/class/graphics/info', $124, FbInfo + #10 + FbPci);
+  If FbOn Then
+  Begin
+    SysDevFile('/sys/class/graphics/fb0', 29, 0);
+    If FbKind = 2 Then SysValV := 'VMWARE SVGA II' + #10
+    Else SysValV := 'BOCHS VBE' + #10;
+    KWriteStr('/sys/class/graphics/fb0/name', $124, SysValV);
+    KWriteStr('/sys/class/graphics/fb0/modes', $124, 'U:640x480p-0' + #10);
+    KWriteStr('/sys/class/graphics/fb0/info', $124, FbInfo + #10 + FbPci);
+  End;
   KMkdir('/sys/class/net/lo', $1ED);
   KWriteStr('/sys/class/net/lo/address', $124, '00:00:00:00:00:00' + #10);
   KWriteStr('/sys/class/net/lo/mtu', $124, '65536' + #10);
@@ -47776,16 +48038,16 @@ Const
   EmbSize : Array[0..57] Of LongInt = (
     3876, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
     2320, 1104, 12408, 6948, 3124, 2476, 3268, 8788, 2376, 2004, 5100, 3932,
-    4588, 18968, 2812, 10804, 6644, 4256, 2196, 3468, 2552, 4028, 12328, 8776,
+    4588, 18968, 2812, 10804, 8460, 4256, 2196, 3468, 2552, 4028, 12328, 8776,
     6368, 7332, 11572, 7548, 7316, 5932, 9416, 11828, 5256, 3912, 6836, 5400,
     2128, 4404, 1128, 4016, 9456, 3276, 1336, 980, 816, 2288);
   EmbStart : Array[0..58] Of LongInt = (
     0, 87, 125, 169, 220, 271, 321, 409, 447, 484, 536, 637, 698, 750, 775,
     1051, 1206, 1276, 1332, 1405, 1601, 1654, 1699, 1813, 1901, 2003, 2425,
-    2488, 2729, 2877, 2972, 3021, 3099, 3156, 3246, 3520, 3716, 3858, 4021,
-    4279, 4447, 4610, 4742, 4952, 5215, 5332, 5419, 5571, 5691, 5739, 5837,
-    5863, 5953, 6164, 6237, 6267, 6289, 6308, 6359);
-  EmbData : Array[0..6358] Of String[60] = (
+    2488, 2729, 2917, 3012, 3061, 3139, 3196, 3286, 3560, 3756, 3898, 4061,
+    4319, 4487, 4650, 4782, 4992, 5255, 5372, 5459, 5611, 5731, 5779, 5877,
+    5903, 5993, 6204, 6277, 6307, 6329, 6348, 6399);
+  EmbData : Array[0..6398] Of String[60] = (
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAAAMDgAAAAAAADQAIAAC',
     'ACgABwAGAAEAAAAAAAAAAIAECACABAhMDAAATAwAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuBQAAACJ5VdWU4Pk8IHskAUA',
@@ -50515,154 +50777,194 @@ Const
     'AAASAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAA7CcAANAAAAAAAAAAAAAA',
     'AAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAALwoAAA3AAAAAAAAAAAAAAABAAAA',
     'AAAAAA==',
-    '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',
-    '6/Qx0oX/eB2NjYj2//+4AwAAALr/AAAAifvNgInCuAYAAADNgDHJjQQOOcJ8',
-    'Ko2FiPb//408CDHAOcZ0D4ocB0A6mAyVBAh08EHr28eFsPX//wEAAADrCDHJ',
-    'iY2w9f//jYXo9f//6F0MAACLnbT1//+4NgAAAMeF6PX//yADAADHhez1//9Y',
-    'AgAAuQFGAACNlej1///HhfD1//8gAwAAx4X09f//WAIAAMeFAPb//yAAAADN',
-    'gInChcB1JoG96PX//yADAAB1HIG97PX//1gCAAB1EDHSg70A9v//IA+UwusC',
-    'MdK4FJUECOgMDAAAi5209f//uDYAAAC5AEYAAI2V6PX//82AMdKBvej1//8g',
-    'AwAAdSSBvez1//9YAgAAdRiBvfD1//8gAwAAdQwx0oO9APb//yAPlMK4I5UE',
-    'COi4CwAAi5209f//uDYAAAC5AkYAALrApgQIzYAx0oE98KYECIAMAAB1DzHS',
-    'gT3UpgQIAEwdAA+Uwrg0lQQIMfa//wAAAOhzCwAAMcC6AAD/AIkUhcCnBAhA',
-    'PSADAAB0G7oAAP8APQkBAAB+5T0UAgAAugD/AAAPT9fr1oudtPX//7gTAAAA',
-    'ifEx0s2AuAQAAAC6gAwAALnApwQIi5209f//zYCBxoAMAACB/gDiBAB1mbhD',
-    'lQQI6OIKAACDvbD1//8AdCEx0o2diPb//7iiAAAAMcnHhYj2//8CAAAAiZWM',
-    '9v//zYCNhej1//++NgAAAOiXCgAAifC5AUYAAMeF6PX//wAFAADHhez1//8A',
-    'BAAAi5209f//jZXo9f//x4Xw9f//AAUAAMeF9PX//wAEAADHhQD2//8gAAAA',
-    'zYAx0oXAuE6VBAgPlMLocAoAAInwuQJGAACLnbT1//+6wKYECM2AMdK4X5UE',
-    'CIE98KYECAAUAAAPlMIx9uhBCgAAMcC6AAD/AIkUhcCnBAhAPQAFAAB0ILoA',
-    'AP8APakBAAB+5T1UAwAAugD/AAC//wAAAA9P1+vRvxMAAACLnbT1//+J8THS',
-    'ifjNgLgEAAAAugAUAAC5wKcECIudtPX//82AgcYAFAAAgf4A0AcAdZKLnbT1',
-    '//+J+LnAMk4AMdLHhcT1//8A//8AzYC4BAAAAIudtPX//42NxPX//4nCzYC4',
-    'b5UECOh5CQAAg72w9f//AHQhMcCNnYj2//8xyceFiPb//wIAAACJhYz2//+4',
-    'ogAAAM2AjYXo9f//6DMJAACLnbT1//+4NgAAAMeF6PX//4ACAADHhez1///g',
-    'AQAAuQFGAACNlej1///HhfD1//+AAgAAx4X09f//4AEAAMeFAPb//xAAAADN',
-    'gInChcB1KYO9APb//xB1IoO9CPb//wt1GYO9DPb//wV1EDHSg70Y9v//Bg+U',
-    'wusCMdK4epUECDH26N0IAAAxwLoA+P//jb2I9v//ZokUR0A9gAIAAHQgugD4',
-    '//891AAAAH7iPakBAAC64AcAAL8fAAAAD0/X686LnbT1//+4EwAAAInxMdLN',
-    'gLgEAAAAi5209f//ugAFAACJ+c2AgcYABQAAgf4A9AEAdZS4jJUECOhHCAAA',
-    'g72w9f//AHQdx4WI9v//AgAAADHAifsxyYmFjPb//7iiAAAAzYCNhej1///o',
-    'BQgAAIudtPX//7g2AAAAx4Xo9f//IAMAAMeF7PX//1gCAAC5AUYAAI2V6PX/',
-    '/8eF8PX//yADAADHhfT1//9YAgAAx4UA9v//GAAAAM2AMdKFwHUMMdKDvQD2',
-    '//8YD5TCuJeVBAjo0AcAALg2AAAAuQJGAACLnbT1//+6wKYECM2AMdK4qZUE',
-    'CL8TAAAAgT3wpgQIYAkAAA+UwjH26JkHAACNnYj2//8x0jHAMcmD+AGICw+U',
-    'wffZg/gBGMBCiEsBg8MDiEP/gfogAwAAdCCB+gkBAAB+0zHAgfoVAgAAD53A',
-    'QIH6FQIAAA+cwUnrv4udtPX//4n4ifEx0s2AuAQAAACLnbT1//+6YAkAAI2N',
-    'iPb//82AgcZgCQAAgf6AqQMAD4V7////uLeVBAjo6gYAAIO9sPX//wB0ITHA',
-    'jZ2I9v//McnHhYj2//8CAAAAiYWM9v//uKIAAADNgI2F6PX//+ikBgAAi520',
-    '9f//uDYAAADHhej1//+AAgAAx4Xs9f//4AEAALkBRgAAjZXo9f//x4Xw9f//',
-    'gAIAAMeF9PX//+ABAADHhQD2//8IAAAAzYAx0oXAdQwx0oO9APb//wgPlMK4',
-    'wpUECDH2Mf8x2+hpBgAAjYXI9f//uQVGAACJtdj1//+JhZD2//+NhdD1//++',
-    'NgAAAImFlPb//42F2PX//4m9iPb//429iPb//4mFmPb//zHAifqJncz1//+J',
-    'ndD1//+LnbT1//+JhZz2//+J8MeFyPX//wAA///HhdT1/////wAAx4Xc9f//',
-    'AAD//8eFjPb//wQAAADNgDHShcC405UECA+UwujQBQAAjYXg9f//i5209f//',
-    'ifqJhZD2//8xwLkERgAAiYWY9v//iYWU9v//ifDHheD1//8JAAkAx4Xk9f//',
-    'CQAJAM2AMdJmgb3i9f//AP91DTHSZoO94PX//wAPlMK43pUECOhtBQAAuDYA',
-    'AAC5AkYAAIudtPX//7rApgQIzYAx0oM94KYECAO46ZUECA+UwjH/6D4FAAAx',
-    '9rABiIbApwQIRoH+gAIAAHQYsAGB/tQAAAB+54H+qQEAAA+fwIPAAuvZi520',
-    '9f//uBMAAACJ+THSzYC4BAAAAIudtPX//7nApwQIifLNgIHHgAIAAIH/APoA',
-    'AHWiuPqVBAjotgQAAIO9sPX//wB0ITHJjZ2I9v//uKIAAADHhYj2//8CAAAA',
-    'iY2M9v//McnNgI2F6PX//+hwBAAAi5209f//uDYAAADHhej1//+AAgAAx4Xs',
-    '9f//4AEAALkBRgAAjZXo9f//x4Xw9f//gAIAAMeF9PX//8ADAADHhQD2//8g',
-    'AAAAzYAx0oXAdQ8x0oG99PX//8ADAAAPlMK4BZYECDH2vwAA/wDoMQQAAIH+',
-    '3wEAALoA/wAAD07XMcCJFIXApwQIQD2AAgAAdfFpzgAKAACLnbT1//+4EwAA',
-    'ADHSzYC4BAAAALoACgAAucCnBAiLnbT1///NgEaB/sADAAB1rI2F6PX//742',
-    'AAAAvwBGAADolwMAAIudtPX//4nwifmNlej1///NgLkGRgAAi5209f//ifDH',
-    'hfz1///gAQAAzYAx0oXAuBSWBAgPlMLojAMAAIudtPX//4nwifmNlej1///N',
-    'gDHSuBuWBAiBvfz1///gAQAAD5TC6GEDAAC4JpYECOg3AwAAg72w9f//AHQh',
-    'MdKNnYj2//+4ogAAADHJx4WI9v//AgAAAImVjPb//82AvjYAAACLnbT1//+5',
-    'BkYAAMeF/PX//1gCAACJ8I2V6PX//82AMdKD+Oq4MZYECL8BRgAAD5TC6PIC',
-    'AACNhej1///otgIAAIudtPX//4nwifnHhej1//+AAgAAjZXo9f//x4Xs9f//',
-    '4AEAAMeF8PX//4ACAADHhfT1///gAQAAx4UA9v//BwAAAM2AMdKD+Oq4P5YE',
-    'CA+UwuiRAgAAjYXo9f//6FUCAACLnbT1//+J8In5x4Xo9f//AAoAAI2V6PX/',
-    '/8eF7PX//0AGAADHhfD1//8ACgAAx4X09f//0AcAAMeFAPb//yAAAADNgDHS',
-    'g/jquE6WBAgPlMLoMAIAAI2F6PX//+j0AQAAi5209f//ifCJ+ceF6PX//2QA',
-    'AACNlej1///Hhez1//9kAAAAx4Xw9f//ZAAAAMeF9PX//2QAAADHhQD2//8g',
-    'AAAAzYAx0oP46rhdlgQID5TC6M8BAACNlYj2//+J0OiRAQAAi5209f//ifCJ',
-    '+ceFiPb//yADAACNlYj2///HhYz2//9YAgAAx4WQ9v//IAMAAMeFlPb//1gC',
-    'AADHhaD2//8gAAAAx4Xc9v//AgAAAM2AuQBGAACJx4nwi5209f//jZXo9f//',
-    'zYCF/3Ufgb3o9f//gAIAAHUVMcCBvez1///gAQAAD5TAicfrAjH/ifq4bpYE',
-    'CL42AAAAMdvoJQEAAInwuTpLAAC6AQAAAM2AuH+WBAiNvYj2///oBwEAAInw',
-    'uTtLAACJ+seFiPb////////NgIXAdRYx0oO9iPb//wG4jpYECA+UwujYAAAA',
-    'Mfa4NgAAALk6SwAAifOJ8s2AugEAAAC4nJYECOi3AAAAuKeWBAjojQAAAIO9',
-    'sPX//wB0HceFiPb//wIAAAAxwIn7ifGJhYz2//+4ogAAAM2AuAYAAACLnbT1',
-    '///NgI1l8DHAWVteX12NYfzDVVdWU4tEJBSLXCQYi0wkHItUJCCLdCQki3wk',
-    'KItsJCzNgFteX13DuK0AAADNgDHtieCD5PBQ6HUAAACNkKAAAACJwUDGAQA5',
-    '0HX2w1WJwTHSieVTgDwRAHQDQuv3uAQAAAC7AQAAAM2AW13DVYnlVonGuMaT',
-    'BAhTidPozf///4nw6Mb///+F27i/kwQIurqTBAgPRcLosv///4XbdAj/BcTP',
-    'BAjrBv8FwM8ECFteXcNVieVTg+wIi0UIixCNSASNRJAIUFFS6Ojs//+Jw7gB',
-    'AAAAzYCDxBDr/iBPSwoAIEZBSUwKAEtURVNUOiAAL2Rldi9mYjAAICAocGFz',
-    'IGRlIC9kZXYvZmIwIDogdGVzdHMgZnJhbWVidWZmZXIgaWdub3JlcykKAGZi',
-    'LnZzY3JlZW5pbmZvAGZiLmdlb21ldHJ5AEJPQ0hTAGZiLmZzY3JlZW5pbmZv',
-    'AGZiLmlvY3RsX2JhZABmYi53cml0ZV9yb3dzAGZiLmxzZWVrX3BpeGVsAGZi',
-    'LndyaXRlX3BpeGVsAGZiLnJlYWRfYmFjawBmYi5yZWFkX3JvdwBmYi5zZWVr',
-    'X2VuZABmYi5zZWVrX2JhZABmYi5tbWFwAGZiLm1tYXBfcmVhZABmYi5tbWFw',
-    'X3dyaXRlAGZiLm1tYXBfZm9ya19zaGFyZWQAZmIubXVubWFwAGZiLm1tYXBf',
-    'YmFkX3JhbmdlAGZiIERSQVdOCgAvcHJvYy9jbWRsaW5lAGZic2hvdABmYi5w',
-    'dXRfODAweDYwMABmYi5nZXRfYWZ0ZXJfcHV0AGZiLmZzY3JlZW5fODAwAEZC',
-    'LVNIT1QgMQoAZmIucHV0XzEyODB4MTAyNABmYi5mc2NyZWVuXzEyODAARkIt',
-    'U0hPVCAyCgBmYi5wdXRfNjQweDQ4MHgxNgBGQi1TSE9UIDMKAGZiLnB1dF84',
-    'MDB4NjAweDI0AGZiLmZzY3JlZW5fMjQARkItU0hPVCA0CgBmYi5wdXRfNjQw',
-    'eDQ4MHg4AGZiLnB1dGNtYXAAZmIuZ2V0Y21hcABmYi52aXN1YWxfcHNldWRv',
-    'AEZCLVNIT1QgNQoAZmIucHV0X3ZpcnR1YWwAZmIucGFuAGZiLnBhbl9nZXQA',
-    'RkItU0hPVCA2CgBmYi5wYW5fZWludmFsAGZiLnB1dF9iYWRfYnBwAGZiLnB1',
-    'dF90b29fYmlnAGZiLnB1dF90b29fc21hbGwAZmIuYWN0aXZhdGVfdGVzdABm',
-    'Yi5rZF9ncmFwaGljcwBmYi5rZF9nZXRtb2RlAGZiLmtkX3RleHQARkItU0hP',
-    'VCA3CgBHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0LjA0LjEpIDEz',
-    'LjMuMAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8KAAAAHJME',
-    'CBEAAAACAAEAJAAAAC2TBAggAAAAAgABACkAAABNkwQIRAAAAAIAAQAvAAAA',
-    'xM8ECAQAAAABAAMANwAAAMDPBAgEAAAAAQADAD8AAAAgpwQIoAAAAAEAAwBC',
-    'AAAAwKYECEQAAAABAAMARQAAAMCnBAgAKAAAAQADAEkAAACRkwQIKQAAABIA',
-    'AQBPAAAA4ZIECAAAAAAQAAEAVgAAAAiTBAgAAAAAEAABAGgAAAAPkwQIAAAA',
-    'ABAAAQBjAAAAwKYECAAAAAAQAAMASgAAAJSABAhNEgAAEgABAG8AAACypgQI',
-    'AAAAABAAAwB2AAAAyM8ECAAAAAAQAAMAAGZidGVzdC5jAG1lbXNldC5jb25z',
-    'dHByb3AuMC5pc3JhLjAAcHV0cwBrdGVzdABrdV9wYXNzAGt1X2ZhaWwAdmkA',
-    'ZmkAcm93AGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQA',
-    'X2VkYXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQA',
-    'LnJvZGF0YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiUAAAAJhMAAAAA',
-    'AAAAAAAAAQAAAAAAAAAhAAAAAQAAADIAAAC6kwQIuhMAAPgCAAAAAAAAAAAA',
-    'AAEAAAABAAAAKQAAAAgAAAADAAAAwKYECMAWAAAIKQAAAAAAAAAAAAAgAAAA',
-    'AAAAAC4AAAABAAAAMAAAAAAAAACyFgAALQAAAAAAAAAAAAAAAQAAAAEAAAAB',
-    'AAAAAgAAAAAAAAAAAAAA4BYAACABAAAGAAAACgAAAAQAAAAQAAAACQAAAAMA',
-    'AAAAAAAAAAAAAAAYAAB7AAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAA',
-    'AAAAAAB7GAAANwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    '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',
+    '0oXAD5TCuP+aBAjouhIAAIudtPX//4PJ/zHSuBMAAADNgDHSg/jquAubBAgP',
+    'lMLolhIAAFBqAP+1tPX//2oBagP/taz1//9qAGjAAAAA6EERAAAx0oPEIIXA',
+    'ica4F5sECA+fwuhhEgAAhfYPjkcBAAAxyYF+FAAA/wB1MYuFsPX//7sCAAAA',
+    'mff7gTyGAP8AAHUaaYWw9f//IAMAADHJgbwGkAEAAFY0EgAPlMGJyrgfmwQI',
+    '6BESAACLnbT1//8x0mmFsPX//7AEAADHhAbIAAAA782rAGmFsPX//ywBAACN',
+    'DIXIAAAAuBMAAADNgDH/uAMAAACLnbT1//+6BAAAAIm9xPX//42NxPX//82A',
+    'MdK4LJsECIG9xPX//+/NqwAPlMLooxEAALgCAAAAzYCJw2mFsPX//7QEAACN',
+    'vAbIAAAAhdt1D8cHmYh3ALgBAAAAzYDr/jHJuAcAAACJys2AMdKBP5mIdwC4',
+    'OpsECA+UwuhWEQAAMdJphbD1//9ABgAAAfCLvbD1//85+n0MxwD///8AQoPA',
+    'BOvqi42s9f//uFsAAACJ882AMdKFwLhOmwQID5TC6BIRAABTi4Ws9f//MfaN',
+    'nYj2//9qAAUAIAAA/7W09f//agFqAVBqAGjAAAAA6K8PAACDxCDB6B+JwrhY',
+    'mwQI6NMQAAC4apsECOipEAAAibWM9v//uKIAAAAxyceFiPb//wQAAADNgLh0',
+    'mwQI6NIPAACJhbD1//+4e5sECOjCDwAAiYWs9f//jYXo9f//6FQQAACLnbT1',
+    '//+4NgAAAMeF6PX//yADAADHhez1//9YAgAAuQFGAACNlej1///HhfD1//8g',
+    'AwAAx4X09f//WAIAAMeFAPb//yAAAADNgInChcB1JoG96PX//yADAAB1HIG9',
+    '7PX//1gCAAB1EDHSg70A9v//IA+UwusCMdK4gZsECOgDEAAAi5209f//uDYA',
+    'AAC5AEYAAI2V6PX//82AMdKBvej1//8gAwAAdSSBvez1//9YAgAAdRiBvfD1',
+    '//8gAwAAdQwx0oO9APb//yAPlMK4kJsECOivDwAAi5209f//uDYAAAC5AkYA',
+    'ALoApAQIzYAx0oE9MKQECIAMAAB1DzHSgT0UpAQIAEwdAA+UwrihmwQIMfa/',
+    '/wAAAOhqDwAAMcC6AAD/AIkUhQClBAhAPSADAAB0G7oAAP8APQkBAAB+5T0U',
+    'AgAAugD/AAAPT9fr1oudtPX//7gTAAAAifEx0s2AuAQAAAC6gAwAALkApQQI',
+    'i5209f//zYCBxoAMAACB/gDiBAB1mbiwmwQI6NkOAACDvbD1//8AdCExyY2d',
+    'iPb//7iiAAAAx4WI9v//AgAAAImNjPb//zHJzYCNhej1//++NgAAAOiODgAA',
+    'ifC5AUYAAMeF6PX//wAFAADHhez1//8ABAAAi5209f//jZXo9f//x4Xw9f//',
+    'AAUAAMeF9PX//wAEAADHhQD2//8gAAAAzYAx0oXAuLubBAgPlMLoZw4AAInw',
+    'uQJGAACLnbT1//+6AKQECM2AMdK4zJsECIE9MKQECAAUAAAPlMIx9ug4DgAA',
+    'McC6AAD/AIkUhQClBAhAPQAFAAB0ILoAAP8APakBAAB+5T1UAwAAugD/AAC/',
+    '/wAAAA9P1+vRvxMAAACLnbT1//+J8THSifjNgLgEAAAAugAUAAC5AKUECIud',
+    'tPX//82AgcYAFAAAgf4A0AcAdZKLnbT1//+J+LnAMk4AMdLHhcT1//8A//8A',
+    'zYC4BAAAAIudtPX//42NxPX//4nCzYC43JsECOhwDQAAg72w9f//AHQhMdKN',
+    'nYj2//+4ogAAADHJx4WI9v//AgAAAImVjPb//82Ag72s9f//AI2F6PX//w+F',
+    'RQYAAOgdDQAAi5209f//uDYAAADHhej1//+AAgAAx4Xs9f//4AEAALkBRgAA',
+    'jZXo9f//x4Xw9f//gAIAAMeF9PX//+ABAADHhQD2//8QAAAAzYCJwoXAdSmD',
+    'vQD2//8QdSKDvQj2//8LdRmDvQz2//8FdRAx0oO9GPb//wYPlMLrAjHSuOeb',
+    'BAgx9ujHDAAAMcC6APj//429iPb//2aJFEdAPYACAAB0ILoA+P//PdQAAAB+',
+    '4j2pAQAAuuAHAAC/HwAAAA9P1+vOi5209f//uBMAAACJ8THSzYC4BAAAAIud',
+    'tPX//7oABQAAifnNgIHGAAUAAIH+APQBAHWUuPmbBAjoMQwAAIO9sPX//wB0',
+    'HceFiPb//wIAAAAxwIn7McmJhYz2//+4ogAAAM2AjYXo9f//6O8LAACLnbT1',
+    '//+4NgAAAMeF6PX//yADAADHhez1//9YAgAAuQFGAACNlej1///HhfD1//8g',
+    'AwAAx4X09f//WAIAAMeFAPb//xgAAADNgDHShcB1DDHSg70A9v//GA+UwrgE',
+    'nAQI6LoLAAC4NgAAALkCRgAAi5209f//ugCkBAjNgDHSuBacBAi/EwAAAIE9',
+    'MKQECGAJAAAPlMIx9uiDCwAAjZ2I9v//MdIxwDHJg/gBiAsPlMH32YP4ARjA',
+    'QohLAYPDA4hD/4H6IAMAAHQggfoJAQAAftMxwIH6FQIAAA+dwECB+hUCAAAP',
+    'nMFJ67+LnbT1//+J+InxMdLNgLgEAAAAi5209f//umAJAACNjYj2///NgIHG',
+    'YAkAAIH+gKkDAA+Fe////7gknAQI6NQKAACDvbD1//8AdCExwI2diPb//zHJ',
+    'x4WI9v//AgAAAImFjPb//7iiAAAAzYCNhej1///ojgoAAIudtPX//7g2AAAA',
+    'x4Xo9f//gAIAAMeF7PX//+ABAAC5AUYAAI2V6PX//8eF8PX//4ACAADHhfT1',
+    '///gAQAAx4UA9v//CAAAAM2AMdKFwHUMMdKDvQD2//8ID5TCuC+cBAgx9jH/',
+    '6FUKAAAxwLkFRgAAibXM9f//iYWI9v//jYXI9f//i5209f//iYWQ9v//jYXQ',
+    '9f//iYWU9v//jYXY9f//ibXQ9f//vjYAAACJvdj1//+NvYj2//+JhZj2//8x',
+    'wIn6iYWc9v//ifDHhcj1//8AAP//x4XU9f////8AAMeF3PX//wAA///HhYz2',
+    '//8EAAAAzYAx0oXAuECcBAgPlMLougkAAI2F4PX//4udtPX//4n6iYWQ9v//',
+    'McC5BEYAAImFmPb//4mFlPb//4nwx4Xg9f//CQAJAMeF5PX//wkACQDNgDHS',
+    'ZoG94vX//wD/dQ0x0maDveD1//8AD5TCuEucBAjoVwkAALg2AAAAuQJGAACL',
+    'nbT1//+6AKQECM2AMdKDPSCkBAgDuFacBAgPlMIx/+goCQAAMfawAYiGAKUE',
+    'CEaB/oACAAB0GLABgf7UAAAAfueB/qkBAAAPn8CDwALr2YudtPX//7gTAAAA',
+    'ifkx0s2AuAQAAACLnbT1//+5AKUECInyzYCBx4ACAACB/wD6AAB1orhnnAQI',
+    '6KAIAACDvbD1//8AdCEx27iiAAAAMcnHhYj2//8CAAAAiZ2M9v//jZ2I9v//',
+    'zYCNhej1///oWggAAIudtPX//7g2AAAAx4Xo9f//gAIAAMeF7PX//+ABAAC5',
+    'AUYAAI2V6PX//8eF8PX//4ACAADHhfT1///AAwAAx4UA9v//IAAAAM2AMdKF',
+    'wHUPMdKBvfT1///AAwAAD5TCuHKcBAgx9r8A/wAA6BsIAACB/t8BAAC6AAD/',
+    'AA9P1zHAiRSFAKUECEA9gAIAAHXxac4ACgAAi5209f//uBMAAAAx0s2AuAQA',
+    'AAC6AAoAALkApQQIi5209f//zYBGgf7AAwAAdayNhej1//++NgAAAL8ARgAA',
+    '6IEHAACLnbT1//+J8In5jZXo9f//zYC5BkYAAIudtPX//4nwx4X89f//4AEA',
+    'AM2AMdKFwLiBnAQID5TC6HYHAACLnbT1//+J8In5jZXo9f//zYAx0riInAQI',
+    'gb389f//4AEAAA+UwuhLBwAAuJOcBAjoIQcAAIO9sPX//wAPhB4DAAAxyY2d',
+    'iPb//7iiAAAAx4WI9v//AgAAAImNjPb//zHJzYDp+AIAAOjYBgAAvjYAAAC/',
+    'AUYAAMeF6PX//4ACAADHhez1///gAQAAifCLnbT1//+J+ceF8PX//4ACAACN',
+    'lej1///HhfT1///gAQAAx4UA9v//EAAAAM2AMdKD+Oq4npwECA+UwuipBgAA',
+    'jYXo9f//6G0GAACLnbT1//+J8In5x4Xo9f//gAIAAI2V6PX//8eF7PX//+AB',
+    'AADHhfD1//+AAgAAx4X09f//4AEAAMeFAPb//wgAAADNgDHSg/jquLScBAgP',
+    'lMLoSAYAAI2F6PX//+gMBgAAi5209f//ifCJ+ceF6PX//wAEAACNlej1///H',
+    'hez1//8AAwAAx4Xw9f//AAQAAMeF9PX//wAGAADHhQD2//8gAAAAzYCJwoXA',
+    'dR2Bvez1//8AAwAAdRMx0oG99PX//wADAAAPlMLrAjHSuMmcBAjoygUAAI2F',
+    '6PX//+iOBQAAi5209f//uDYAAADHhej1//8ABAAAx4Xs9f//AAMAALkBRgAA',
+    'jZXo9f//x4Xw9f//AAQAAMeF9PX//wADAADHhQD2//8gAAAAzYCJwoXAdRqB',
+    'vej1//8ABAAAdRAx0oO9APb//yAPlMLrAjHSuOCcBAjoSQUAALg2AAAAuQJG',
+    'AACLnbT1//+6AKQECM2AuQYAAAC6CJoECLgApAQIv/8AAADoHgQAADHShcC4',
+    '9JwECA+UwjH26AYFAAAxwLoAAP8AiRSFAKUECEA9AAQAAHQbugAA/wA9VAEA',
+    'AH7lPakCAAC6AP8AAA9P1+vWi5209f//uBMAAACJ8THSzYC4BAAAALoAEAAA',
+    'uQClBAiLnbT1///NgIHGABAAAIH+AEAGAHWZuPmbBAjodQQAAIO9sPX//wB0',
+    'ITHSjZ2I9v//uKIAAAAxyceFiPb//wIAAACJlYz2///NgI2F6PX//+gvBAAA',
+    'uDYAAAC5AUYAAMeF6PX//wAFAADHhez1//8ABAAAi5209f//jZXo9f//x4Xw',
+    '9f//AAUAAMeF9PX//wAEAADHhQD2//8gAAAAzYC+NgAAAIudtPX//7kGRgAA',
+    'x4X89f//WAIAAInwjZXo9f//zYAx0oP46rj+nAQIvwFGAAAPlMLo2wMAAI2F',
+    '6PX//+ifAwAAi5209f//ifCJ+ceF6PX//4ACAACNlej1///Hhez1///gAQAA',
+    'x4Xw9f//gAIAAMeF9PX//+ABAADHhQD2//8HAAAAzYAx0oP46rgMnQQID5TC',
+    '6HoDAACNhej1///oPgMAAIudtPX//4nwifnHhej1//8ACgAAjZXo9f//x4Xs',
+    '9f//QAYAAMeF8PX//wAKAADHhfT1///QBwAAx4UA9v//IAAAAM2AMdKD+Oq4',
+    'G50ECA+UwugZAwAAjYXo9f//6N0CAACLnbT1//+J8In5x4Xo9f//ZAAAAI2V',
+    '6PX//8eF7PX//2QAAADHhfD1//9kAAAAx4X09f//ZAAAAMeFAPb//yAAAADN',
+    'gDHSg/jquCqdBAgPlMLouAIAAI2ViPb//4nQ6HoCAACLnbT1//+J8In5x4WI',
+    '9v//IAMAAI2ViPb//8eFjPb//1gCAADHhZD2//8gAwAAx4WU9v//WAIAAMeF',
+    'oPb//yAAAADHhdz2//8CAAAAzYC5AEYAAInHifCLnbT1//+Nlej1///NgIX/',
+    'dT6Dvaz1//8BGcAlgP3//wUABQAAOYXo9f//dSWDvaz1//8BGcAl4P3//wUA',
+    'BAAAOYXs9f//D5TAD7bAicfrAjH/ifq4O50ECL42AAAAMdvo7wEAAInwuTpL',
+    'AAC6AQAAAM2AuEydBAiNvYj2///o0QEAAInwuTtLAACJ+seFiPb////////N',
+    'gIXAdRYx0oO9iPb//wG4W50ECA+UwuiiAQAAMfa4NgAAALk6SwAAifOJ8s2A',
+    'ugEAAAC4aZ0ECOiBAQAAuHSdBAjoVwEAAIO9sPX//wB0HceFiPb//wIAAAAx',
+    'wIn7ifGJhYz2//+4ogAAAM2AuAYAAACLnbT1///NgI1l8DHAWVteX12NYfzD',
+    'VVdWU4tEJBSLXCQYi0wkHItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADN',
+    'gDHtieCD5PBQ6D8BAABVAcGJ5VaJ1lOJwznLdBIPtgMPthY40HQEKdDrBkNG',
+    '6+oxwFteXcNVMdKJ0YnlV1a+BQAAAFO7i5kECIHsHAEAAImF4P7//4nwzYAx',
+    '/4nGi4Xg/v//gDw4AHQDR+vxMcCJheT+//+F9nghjY3o/v//uAMAAAC6/wAA',
+    'AInzzYCJheT+//+4BgAAAM2AMfaLjeT+//+NBDc5yH8cjYXo/v//i5Xg/v//',
+    'ifkB8OhR////hcB0B0br1zHA6wW4AQAAAIHEHAEAAFteX13DjZCgAAAAicFA',
+    'xgEAOdB19sNVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJ',
+    'xrilmQQIU4nT6M3///+J8OjG////hdu4npkECLqZmQQID0XC6LL///+F23QI',
+    '/wUEzQQI6wb/BQDNBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBRUugX5///',
+    'icO4AQAAAM2Ag8QQ6/4vcHJvYy9jbWRsaW5lACBPSwoAIEZBSUwKAEtURVNU',
+    'OiAAL2Rldi9mYjAAICAocGFzIGRlIC9kZXYvZmIwIDogdGVzdHMgZnJhbWVi',
+    'dWZmZXIgaWdub3JlcykKAGZiLnZzY3JlZW5pbmZvAGZiLmdlb21ldHJ5AEJP',
+    'Q0hTAFZNV0FSRQBmYi5mc2NyZWVuaW5mbwAvcHJvYy9mYgAjIGZiOgAjIHBj',
+    'aSAwMDoAMCBCT0NIUyBWQkUAMCBWTVdBUkUgU1ZHQSBJSQBmYi5wcm9jX2Zi',
+    'AC9zeXMvY2xhc3MvZ3JhcGhpY3MvZmIwL25hbWUAZmIuc3lzX25hbWUAL3N5',
+    'cy9jbGFzcy9ncmFwaGljcy9pbmZvAGZiLnN5c19pbmZvAGZiLmlvY3RsX2Jh',
+    'ZABmYi53cml0ZV9yb3dzAGZiLmxzZWVrX3BpeGVsAGZiLndyaXRlX3BpeGVs',
+    'AGZiLnJlYWRfYmFjawBmYi5yZWFkX3JvdwBmYi5zZWVrX2VuZABmYi5zZWVr',
+    'X2JhZABmYi5tbWFwAGZiLm1tYXBfcmVhZABmYi5tbWFwX3dyaXRlAGZiLm1t',
+    'YXBfZm9ya19zaGFyZWQAZmIubXVubWFwAGZiLm1tYXBfYmFkX3JhbmdlAGZi',
+    'IERSQVdOCgBmYnNob3QAZmJ2bXcAZmIucHV0XzgwMHg2MDAAZmIuZ2V0X2Fm',
+    'dGVyX3B1dABmYi5mc2NyZWVuXzgwMABGQi1TSE9UIDEKAGZiLnB1dF8xMjgw',
+    'eDEwMjQAZmIuZnNjcmVlbl8xMjgwAEZCLVNIT1QgMgoAZmIucHV0XzY0MHg0',
+    'ODB4MTYARkItU0hPVCAzCgBmYi5wdXRfODAweDYwMHgyNABmYi5mc2NyZWVu',
+    'XzI0AEZCLVNIT1QgNAoAZmIucHV0XzY0MHg0ODB4OABmYi5wdXRjbWFwAGZi',
+    'LmdldGNtYXAAZmIudmlzdWFsX3BzZXVkbwBGQi1TSE9UIDUKAGZiLnB1dF92',
+    'aXJ0dWFsAGZiLnBhbgBmYi5wYW5fZ2V0AEZCLVNIT1QgNgoAZmIudm13X3B1',
+    'dF8xNl9yZWZ1c2VkAGZiLnZtd19wdXRfOF9yZWZ1c2VkAGZiLnZtd192aXJ0',
+    'dWFsX2NsYW1wZWQAZmIudm13X3B1dF8xMDI0eDc2OABmYi52bXdfaWQAZmIu',
+    'cGFuX2VpbnZhbABmYi5wdXRfYmFkX2JwcABmYi5wdXRfdG9vX2JpZwBmYi5w',
+    'dXRfdG9vX3NtYWxsAGZiLmFjdGl2YXRlX3Rlc3QAZmIua2RfZ3JhcGhpY3MA',
+    'ZmIua2RfZ2V0bW9kZQBmYi5rZF90ZXh0AEZCLVNIT1QgNwoAR0NDOiAoVWJ1',
+    'bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAA',
+    'AAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8KAAAAI5gECCcAAAACAAEAEgAAAEqY',
+    'BAijAAAAAgABACEAAADtmAQIEQAAAAIAAQA7AAAA/pgECCAAAAACAAEAQAAA',
+    'AB6ZBAhEAAAAAgABAEYAAAAEzQQIBAAAAAEAAwBOAAAAAM0ECAQAAAABAAMA',
+    'VgAAAGCkBAigAAAAAQADAFkAAAAApAQIRAAAAAEAAwBcAAAAAKAECAAEAAAB',
+    'AAMAYQAAAAClBAgAKAAAAQADAGUAAABimQQIKQAAABIAAQBrAAAA6JcECAAA',
+    'AAAQAAEAcgAAAA+YBAgAAAAAEAABAIQAAAAWmAQIAAAAABAAAQB/AAAAAKAE',
+    'CAAAAAAQAAMAZgAAAJSABAhUFwAAEgABAIsAAAAAoAQIAAAAABAAAwCSAAAA',
+    'CM0ECAAAAAAQAAMAAGZidGVzdC5jAG1lbWNtcF8Aa3VfY21kbGluZV9oYXMA',
+    'bWVtc2V0LmNvbnN0cHJvcC4wLmlzcmEuMABwdXRzAGt0ZXN0AGt1X3Bhc3MA',
+    'a3VfZmFpbAB2aQBmaQBwYi4wAHJvdwBjbWFpbgBrdV9zYzYAX19yZXN0b3Jl',
+    'X3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIA',
+    'LnNoc3RydGFiAC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYA',
+    'AACUgAQIlAAAAPcYAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAyAAAAi5kE',
+    'CIsZAAD0AwAAAAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAAACgBAgAIAAA',
+    'CC0AAAAAAAAAAAAAIAAAAAAAAAAuAAAAAQAAADAAAAAAAAAAfx0AAC0AAAAA',
+    'AAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAAKwdAABQAQAABgAAAA0A',
+    'AAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAAD8HgAAlwAAAAAAAAAAAAAAAQAA',
+    'AAAAAAARAAAAAwAAAAAAAAAAAAAAkx8AADcAAAAAAAAAAAAAAAEAAAAAAAAA',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAp4cECDQAAABgDwAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAgODQAADg0AAAUAAAAAEAAAAQAAAAAA',
     'AAAAkAQIAJAECAAAAAAIGAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',

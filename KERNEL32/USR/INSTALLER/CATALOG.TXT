@@ -1321,3 +1321,163 @@ it: La radice (/) deve essere una partizione primaria: il boot loader legge /boo
 es: La raíz (/) debe ser una partición primaria: el cargador lee /boot de la partición activa.
 pt: A raiz (/) tem de ser uma partição primária: o carregador lê /boot da partição ativa.
 nl: De root (/) moet een primaire partitie zijn: de bootloader leest /boot van de actieve partitie.
+@FH_ROOT
+fr: Obligatoire : ne peut pas être vide.
+en: Required: cannot be empty.
+de: Pflichtfeld: darf nicht leer sein.
+it: Obbligatoria: non può essere vuota.
+es: Obligatoria: no puede estar vacía.
+pt: Obrigatória: não pode estar vazia.
+nl: Verplicht: mag niet leeg zijn.
+@FE_ROOT
+fr: Mot de passe root : ne peut pas être vide.
+en: Root password: cannot be empty.
+de: Root-Kennwort: darf nicht leer sein.
+it: Password di root: non può essere vuota.
+es: Contraseña de root: no puede estar vacía.
+pt: Palavra-passe de root: não pode estar vazia.
+nl: Root-wachtwoord: mag niet leeg zijn.
+@FH_CONF
+fr: Retapez le même mot de passe.
+en: Type the same password again.
+de: Geben Sie dasselbe Kennwort erneut ein.
+it: Digitate di nuovo la stessa password.
+es: Escriba de nuevo la misma contraseña.
+pt: Escreva novamente a mesma palavra-passe.
+nl: Typ hetzelfde wachtwoord nogmaals.
+@FE_CONF
+fr: Mots de passe différents : confirmation.
+en: Passwords differ: confirmation.
+de: Kennwörter verschieden: Bestätigung.
+it: Password diverse: conferma.
+es: Contraseñas distintas: confirmación.
+pt: Palavras-passe diferentes: confirmação.
+nl: Wachtwoorden verschillen: bevestiging.
+@FK_CONF
+fr: Les mots de passe sont identiques.
+en: The passwords match.
+de: Die Kennwörter stimmen überein.
+it: Le password coincidono.
+es: Las contraseñas coinciden.
+pt: As palavras-passe coincidem.
+nl: De wachtwoorden komen overeen.
+@FH_USER
+fr: Facultatif. Minuscules, chiffres, - et _ ; commence par une lettre.
+en: Optional. Lowercase letters, digits, - and _; starts with a letter.
+de: Optional. Kleinbuchstaben, Ziffern, - und _; beginnt mit Buchstabe.
+it: Facoltativo. Minuscole, cifre, - e _; inizia con una lettera.
+es: Opcional. Minúsculas, cifras, - y _; empieza por una letra.
+pt: Opcional. Minúsculas, algarismos, - e _; começa por uma letra.
+nl: Optioneel. Kleine letters, cijfers, - en _; begint met een letter.
+@FE_USER
+fr: Identifiant : minuscules, chiffres, - et _ ; commence par une lettre.
+en: User name: lowercase, digits, - and _; must start with a letter.
+de: Benutzername: Kleinbuchstaben, Ziffern, - und _; Buchstabe zuerst.
+it: Nome utente: minuscole, cifre, - e _; inizia con una lettera.
+es: Usuario: minúsculas, cifras, - y _; debe empezar por una letra.
+pt: Utilizador: minúsculas, algarismos, - e _; começa por uma letra.
+nl: Gebruikersnaam: kleine letters, cijfers, - en _; begin met letter.
+@FE_USERRES
+fr: Identifiant : nom réservé au système.
+en: User name: reserved by the system.
+de: Benutzername: vom System reserviert.
+it: Nome utente: riservato al sistema.
+es: Usuario: reservado por el sistema.
+pt: Utilizador: reservado pelo sistema.
+nl: Gebruikersnaam: gereserveerd door het systeem.
+@FK_CONV
+fr: Majuscules converties en minuscules.
+en: Capital letters converted to lowercase.
+de: Großbuchstaben in Kleinbuchstaben umgewandelt.
+it: Maiuscole convertite in minuscole.
+es: Mayúsculas convertidas en minúsculas.
+pt: Maiúsculas convertidas em minúsculas.
+nl: Hoofdletters omgezet naar kleine letters.
+@FH_HOST
+fr: Lettres, chiffres, tiret et point (63 au plus) ; pas de tiret au début.
+en: Letters, digits, hyphen and dot (max 63); no leading hyphen.
+de: Buchstaben, Ziffern, - und . (höchstens 63); nicht mit - beginnen.
+it: Lettere, cifre, trattino e punto (max 63); non iniziare con trattino.
+es: Letras, cifras, guion y punto (máx. 63); sin guion al principio.
+pt: Letras, algarismos, hífen e ponto (máx. 63); sem hífen no início.
+nl: Letters, cijfers, koppelteken en punt (max. 63); geen koppelteken vooraan.
+@FE_HOST
+fr: Nom de la machine : lettres, chiffres, tiret et point seulement.
+en: Computer name: letters, digits, hyphen and dot only.
+de: Rechnername: nur Buchstaben, Ziffern, Bindestrich und Punkt.
+it: Nome del computer: solo lettere, cifre, trattino e punto.
+es: Nombre del equipo: solo letras, cifras, guion y punto.
+pt: Nome do computador: apenas letras, algarismos, hífen e ponto.
+nl: Computernaam: alleen letters, cijfers, koppelteken en punt.
+@FH_DATE
+fr: Format AAAA-MM-JJ (ex. 2026-11-16).
+en: Format YYYY-MM-DD (e.g. 2026-11-16).
+de: Format JJJJ-MM-TT (z. B. 2026-11-16).
+it: Formato AAAA-MM-GG (es. 2026-11-16).
+es: Formato AAAA-MM-DD (p. ej. 2026-11-16).
+pt: Formato AAAA-MM-DD (ex. 2026-11-16).
+nl: Notatie JJJJ-MM-DD (bijv. 2026-11-16).
+@FE_DATE
+fr: Date : format AAAA-MM-JJ attendu, date existante.
+en: Date: expected format YYYY-MM-DD, a real date.
+de: Datum: Format JJJJ-MM-TT, gültiges Datum erwartet.
+it: Data: formato AAAA-MM-GG, data esistente.
+es: Fecha: formato AAAA-MM-DD, fecha existente.
+pt: Data: formato AAAA-MM-DD, data existente.
+nl: Datum: notatie JJJJ-MM-DD, bestaande datum.
+@FH_TIME
+fr: Format HH:MM:SS (24 h).
+en: Format HH:MM:SS (24 h).
+de: Format HH:MM:SS (24 Std.).
+it: Formato HH:MM:SS (24 ore).
+es: Formato HH:MM:SS (24 h).
+pt: Formato HH:MM:SS (24 h).
+nl: Notatie UU:MM:SS (24 uur).
+@FE_TIME
+fr: Heure : format HH:MM:SS attendu (00:00:00 à 23:59:59).
+en: Time: expected format HH:MM:SS (00:00:00 to 23:59:59).
+de: Uhrzeit: Format HH:MM:SS erwartet (00:00:00 bis 23:59:59).
+it: Ora: formato HH:MM:SS (da 00:00:00 a 23:59:59).
+es: Hora: formato HH:MM:SS (de 00:00:00 a 23:59:59).
+pt: Hora: formato HH:MM:SS (de 00:00:00 a 23:59:59).
+nl: Tijd: notatie UU:MM:SS (00:00:00 tot 23:59:59).
+@FH_SWAP
+fr: Entre 8 Mo et %1 Mo.
+en: Between 8 MB and %1 MB.
+de: Zwischen 8 MB und %1 MB.
+it: Tra 8 MB e %1 MB.
+es: Entre 8 MB y %1 MB.
+pt: Entre 8 MB e %1 MB.
+nl: Tussen 8 MB en %1 MB.
+@FE_SWAP
+fr: Taille de swap : un nombre entre 8 et %1 Mo.
+en: Swap size: a number between 8 and %1 MB.
+de: Swap-Größe: Zahl zwischen 8 und %1 MB.
+it: Dimensione swap: numero tra 8 e %1 MB.
+es: Tamaño de swap: número entre 8 y %1 MB.
+pt: Tamanho do swap: número entre 8 e %1 MB.
+nl: Swapgrootte: getal tussen 8 en %1 MB.
+@FH_SIZE
+fr: Ex. 500, 500M ou 2G ; vide = tout l'espace libre (max %1 Mo).
+en: E.g. 500, 500M or 2G; empty = all free space (max %1 MB).
+de: z. B. 500, 500M oder 2G; leer = gesamter freier Platz (max. %1 MB).
+it: Es. 500, 500M o 2G; vuoto = tutto lo spazio (max %1 MB).
+es: P. ej. 500, 500M o 2G; vacío = todo el espacio (máx. %1 MB).
+pt: Ex. 500, 500M ou 2G; vazio = todo o espaço (máx. %1 MB).
+nl: Bijv. 500, 500M of 2G; leeg = alle ruimte (max. %1 MB).
+@FE_SIZE
+fr: Taille : nombre invalide ou supérieur à %1 Mo (minimum 1 Mo).
+en: Size: invalid number or larger than %1 MB (minimum 1 MB).
+de: Größe: ungültige Zahl oder größer als %1 MB (mindestens 1 MB).
+it: Dimensione: numero non valido o oltre %1 MB (minimo 1 MB).
+es: Tamaño: número no válido o superior a %1 MB (mínimo 1 MB).
+pt: Tamanho: número inválido ou superior a %1 MB (mínimo 1 MB).
+nl: Grootte: ongeldig getal of groter dan %1 MB (minimaal 1 MB).
+@SHOWPW
+fr: Afficher les mots de passe (F5).
+en: Show passwords (F5).
+de: Kennwörter anzeigen (F5).
+it: Mostra le password (F5).
+es: Mostrar contraseñas (F5).
+pt: Mostrar palavras-passe (F5).
+nl: Wachtwoorden tonen (F5).

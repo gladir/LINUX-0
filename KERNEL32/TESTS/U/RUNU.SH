@@ -41,7 +41,7 @@ W=${W:-/tmp/linux0-u-tests}
 QT=${QEMU_T:-600}
 export LPC W
 mkdir -p "$W/bin" "$W/src"
-STEPS=${*:-sh bash host utils lot2host qemu tools lot2 power net install mod}
+STEPS=${*:-sh bash host utils lot2host lot3host qemu tools lot2 lot3 power net install mod}
 FAIL=0
 build() {
   [ -n "$IMAGE" ] && return 0
@@ -61,8 +61,11 @@ for st in $STEPS; do
       xargs -P4 -I{} sh -c "cd $W/src && $LPC -3X -q {}.PAS >/dev/null 2>$W/bin/{}.err || echo ECHEC compilation {}; mv {} $W/bin/ 2>/dev/null"
     # versions de USR/ qui remplacent celles du depot (awk, sed, grep)
     cp "$K32"/USR/*.INC "$K32"/USR/AWK.PAS "$K32"/USR/SED.PAS \
-       "$K32"/USR/GREP.PAS "$W/src/"
-    for n in AWK SED GREP; do
+       "$K32"/USR/GREP.PAS "$K32"/USR/DATE.PAS "$K32"/USR/CHMOD.PAS \
+       "$K32"/USR/BC.PAS "$K32"/USR/DC.PAS "$K32"/USR/ED.PAS \
+       "$K32"/USR/STRACE.PAS "$K32"/USR/TCPDUMP.PAS "$K32"/USR/SCRIPT.PAS \
+       "$K32"/USR/IPTABLES.PAS "$W/src/"
+    for n in AWK SED GREP DATE CHMOD BC DC ED STRACE TCPDUMP SCRIPT IPTABLES; do
       ( cd "$W/src" && $LPC -3X -q $n.PAS > /dev/null 2> "$W/bin/$n.err" &&
         mv $n "$W/bin/$n" ) || echo "ECHEC compilation USR/$n"
     done
@@ -203,6 +206,35 @@ for st in $STEPS; do
       -c '=sh /usr/share/bench/tools.sh' -c '=echo QFIN' -s 'QFIN$' > "$W/tools.txt" 2>&1
     grep 'TOOLS-KO\|TOOLS-FIN' "$W/tools.txt"
     grep -q 'TOOLS-FIN ok=[0-9]* ko=0' "$W/tools.txt" || FAIL=1 ;;
+  lot3host)
+    # lot E6 (suite 2) sur l'hote : strace (contre strace GNU), tcpdump (pcap
+    # fabriques + capture sur lo), bc (contre GNU bc), dc, ed
+    build
+    mkdir -p "$W/l3"; cp "$K32"/USR/*.PAS "$K32"/USR/*.INC "$W/l3/"
+    for n in STRACE TCPDUMP BC DC ED; do
+      ( cd "$W/l3" && $LPC -3X -q $n.PAS >/dev/null 2>"$W/l3/$n.err" ) ||
+        { echo "ECHEC compilation $n"; FAIL=1; }
+    done
+    for t in "stracetest.py $W/l3/STRACE $W/build/root/bin" \
+             "tcpdumptest.py $W/l3/TCPDUMP" "bctest.py $W/l3/BC" \
+             "dctest.py $W/l3/DC" "edtest.py $W/l3/ED"; do
+      set -- $t
+      python3 "$HERE/$1" "$2" $3 > "$W/l3/$1.txt" 2>&1
+      grep '^KO' "$W/l3/$1.txt" | head -5
+      tail -1 "$W/l3/$1.txt"
+      grep -q '^KO\|Traceback' "$W/l3/$1.txt" && FAIL=1
+    done ;;
+  lot3)
+    build
+    [ -f "$IMAGE" ] || { FAIL=1; continue; }
+    cp "$IMAGE" "$W/l3.img"
+    python3 "$K32/TESTS/QEMU.PY" run "$W/l3.img" -m 64 -t "$QT" \
+      -x=-nic -x=user,model=rtl8139 \
+      -c 'login: =root' -c 'Mot de passe : =root' \
+      -c '=sh /usr/share/bench/lot3.sh' -c '=echo QFIN' -s 'QFIN$' \
+      > "$W/lot3.txt" 2>&1
+    grep 'LOT3-KO\|LOT3-FIN' "$W/lot3.txt"
+    grep -q 'LOT3-FIN ok=[0-9]* ko=0' "$W/lot3.txt" || FAIL=1 ;;
   lot2host)
     # lot E6 sur l'hote : date (contre GNU date), ntpdate/rdate (serveurs
     # factices), logrotate, dumpe2fs/tune2fs/e2label/resize2fs (e2fsprogs)

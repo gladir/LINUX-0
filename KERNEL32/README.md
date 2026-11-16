@@ -967,6 +967,28 @@ Le mode du clavier (`KDSKBMODE`) est maintenant propre a chaque console
 (`console=tty0 console=ttyS0` : port serie). Tests : `devtest` (4
 verifications), `k32conmark`.
 
+**Affichage : VMware SVGA II / VMSVGA (lot D7-4)** : le controleur par defaut
+des invites Linux de VirtualBox 7 (PCI 15AD:0405, `-vga vmware` sous QEMU) est
+pris en charge par la couche `/dev/fb0` existante : negociation `SVGA_REG_ID`
+(version 2), mode par `WIDTH/HEIGHT/BITS_PER_PIXEL/ENABLE`, `BYTES_PER_LINE`
+et `FB_OFFSET` relus, memoire video BAR 1 (16 Mo au plus), FIFO BAR 2 initialisee
+(min 1200, max = taille, `CONFIG_DONE`). L'hote ne redessine qu'apres une
+commande `UPDATE` : `FbTick` en pousse une pour l'ecran entier a 20 Hz tant que
+`/dev/fb0` est ouvert ou a ete mappe, et a chaque changement de mode. Limites
+de la carte : 32 bits seulement (8/16/24 : `EINVAL`), pas d'ecran virtuel ni de
+panoramique (la hauteur virtuelle demandee est ramenee a la hauteur), le retour
+au texte (`KD_TEXT`, `ENABLE=0` puis registres VGA) est identique a Bochs.
+Choix de la carte : Bochs/VBoxVGA (1234:1111, 80EE:BEEF) puis VMware SVGA II ;
+sinon texte seul. Messages du noyau (journal, donc `dmesg`) : `fb: PCI VGA
+00:02.0 15AD:0405` pour chaque carte de classe affichage, `fb: carte VMware
+SVGA II 15AD:0405 detectee (...)` ou `fb: aucune carte compatible, texte seul` ;
+les memes informations sont dans `/proc/fb` (ligne Linux `0 VMWARE SVGA II` puis
+lignes `# fb:` et `# pci`) et `/sys/class/graphics/{info,fb0/{name,dev,info}}`.
+Teste sous QEMU : `VGA=vmware ./RUNFB.SH -n` (captures d'ecran exactes en
+1024x768, 800x600, 1280x1024, retour au texte 720x400, mmap) et `RUNFB.SH`
+(Bochs) restent verts. **Non teste** : VirtualBox lui-meme (ni VMSVGA ni
+VBoxVGA : ports, taille de la FIFO et rafraichissement a verifier).
+
 **PCnet** (AMD 79C970A/973, PCI 1022:2000 : carte de VirtualBox, `-nic
 user,model=pcnet` sous QEMU) : mode 32 bits (DWIO, SWSTYLE 2), anneaux de 32
 descripteurs de reception et 8 d'emission, interruptions ; RUNNET.SH vert avec
@@ -1526,7 +1548,49 @@ fichiers terminfo (`/usr/share/terminfo`, `TERMINFO=`) dans la racine. Sous QEMU
 `/usr/share/bench/lot2.sh` (`RUNU.SH lot2`). `RUNU.SH` sans argument rejoue
 maintenant tout, `lot2host` et `lot2` compris.
 
-**Pas encore fait** (lot 2 de E6) : strace, tcpdump, iptables (front-end),
-job control verifie sur pty, lsof/fuser/netstat/ss/lspci/losetup verifies sous
-KERNEL32 avec tests dedies, nano/ed/bc/dc audites contre GNU, COMMANDES.TXT
-regenere.
+### Validation par champ de l'assistant (retour VirtualBox)
+
+Chaque page a saisie (date et heure, nom de machine, comptes, taille de swap,
+taille d'une partition) valide **champ par champ**, en direct pendant la frappe :
+
+* le champ invalide passe sur **fond rouge** (graphique : rose + cadre rouge ; texte
+  VGA : attribut rouge) et un message d'une ligne, qui nomme le champ, remplace
+  l'indice gris place sous lui (`Identifiant : minuscules, chiffres, - et _ ; commence
+  par une lettre.`, `Mots de passe differents : confirmation.`, 7 langues) ; il
+  redevient normal des que le contenu est valide ;
+* sous chaque champ contraint, l'**indice** de la regle s'affiche en gris
+  (identifiant : minuscules, chiffres, - et _, commence par une lettre ; mot de
+  passe root non vide ; nom de machine : lettres, chiffres, tiret et point ;
+  AAAA-MM-JJ, HH:MM:SS ; taille de swap entre 8 Mo et la moitie du disque) ;
+* **Suivant** est grise tant qu'un champ est rouge ou incomplet ; Entree sur une
+  page invalide est refusee et donne le focus au premier champ fautif ;
+* l'identifiant accepte les **majuscules** : elles sont converties en minuscules
+  (remarque verte `Majuscules converties en minuscules.`) et les espaces de fin
+  sont retires ;
+* mots de passe : indicateur de concordance (rouge tant que la confirmation differe,
+  vert `Les mots de passe sont identiques.`), case **Afficher les mots de passe**
+  ou touche `F5`.
+
+Essais : `RUNINST.SH ui-fr text` (pixels de la capture : champ rouge puis retour au
+fond normal, Entree refusee) ; captures `fr-04b-heure-invalide`, `fr-04c-nom-invalide`,
+`fr-05a-confirmation-rouge`, `fr-05b-majuscules-converties`,
+`fr-05c-identifiant-invalide`, `fr-05d-confirmation-utilisateur`,
+`text-04-confirmation-rouge`, `text-05-identifiant-invalide` dans `IMAGE/CAPTURES`.
+
+### Lot E6 (suite 2) : strace, tcpdump, bc, dc, ed, script
+
+| programme | contenu | essai |
+|---|---|---|
+| `STRACE.PAS` (`/bin/strace`) | ptrace du noyau : `-f` (fork, vfork, clone), `-c` (tableau recapitulatif), `-e trace=liste` / `!liste` / `%file %process %network %signal %desc %memory %ipc`, `-o fichier`, `-s N`, `-T`, `-q`, `-p pid` ; noms d'appels i386 (`STRACE.INC`, genere par `mkstrace.py` depuis asm/unistd_32.h), arguments decodes (chaines, tampons, drapeaux `O_*`, `PROT_*`, `MAP_*`, `AT_FDCWD`, argv/envp, struct stat, wait status), signaux avec `siginfo`, `+++ exited with N +++` ; entree/sortie d'appel par `PTRACE_GET_SYSCALL_INFO` | `stracetest.py` : suite des appels et comptes `-c` identiques a strace GNU sur 7 programmes i386, `-f` sur un shell, `-e`, signal, `-p` (28 essais) |
+| `TCPDUMP.PAS` (`/sbin/tcpdump`) | socket `AF_PACKET` : `-i -n -c -e -x -xx -q -s -w -r`, filtres `tcp udp icmp arp ip ip6 host net port src dst less greater broadcast and or not ( )` ; decode Ethernet, ARP, IPv4/IPv6 (adresses), ICMP, TCP (drapeaux, options mss wscale sackOK TS), UDP, DNS, BOOTP/DHCP ; `-w` ecrit un fichier pcap relu par `-r` ; numeros de sequence TCP absolus (comme `-S`) | `tcpdumptest.py` : 14 trames fabriquees (texte exact), 17 filtres, pcap, capture reelle sur `lo` (47 essais) ; sous QEMU : capture d'un ping de la passerelle |
+| `BC.PAS` + `BIGNUM.INC` (`/bin/bc`) | bc complet : `scale ibase obase last`, noms de variables de plusieurs lettres, tableaux, `define` (`void`), `auto`, `return`, `if else while for break continue halt quit print`, `++ -- += -= *= /= %= ^=`, `&& \|\| !`, `length scale sqrt read`, chaines, `-l` (`s c a l e j`), coupure des lignes a 69 caracteres (`BC_LINE_LENGTH`), precision arbitraire | `bctest.py` : 60 scripts compares au GNU bc de l'hote, 0 ecart |
+| `DC.PAS` (`/bin/dc`) | dc : `+ - * / % ~ ^ \| v`, pile et registres (`s l S L`), tableaux (`: ;`), chaines et macros (`x`, appels terminaux), `< > = !< !> !=`, `k K i I o O z Z X p n P f a c d r R q Q ?`, `-e -f` | `dctest.py` : 63 essais, dont 250 operations aleatoires recoupees avec bc |
+| `ED.PAS` (`/bin/ed`) | ed POSIX + GNU : adresses `. $ % , ; +n -n /re/ ?re? 'x`, `a i c d e E f g G h H j k l m n p P q Q r s t u v V w W wq x y z = ! #`, suffixes `p n l`, `s` avec `g n p l & \1 %`, annulation `u`, `r !cmd` | `edtest.py` : 106 essais |
+| `SCRIPT.PAS` (`/bin/script`) | commande sur un pty (`/dev/ptmx`), recopie et journal (`-q -a -e -c`) ; sert a verifier le job control | `lot3.sh` sous QEMU |
+
+Verifie sous KERNEL32 par `/usr/share/bench/lot3.sh` (`RUNU.SH lot3`) : strace, tcpdump,
+bc, dc, ed, **job control sur un pty** (`script` + `sh` : `jobs`, `fg`, `^Z`, `^C`,
+code 130), `lsof`, `fuser`, `netstat`, `ss`, `lspci`, `losetup` (sorties verifiees,
+sockets d'ecoute `nc -l`, peripherique loop). `RUNU.SH lot3host` : les tests de
+l'hote. Pas encore fait : `nano` (non audite), `ed -G` / chiffrement `x`, filtre
+`iptables` branche sur le noyau.
