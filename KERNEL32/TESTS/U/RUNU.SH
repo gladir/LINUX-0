@@ -25,6 +25,10 @@
 #              poweroff et reboot)
 #     net      reseau sous QEMU (-nic user,model=rtl8139) : ifconfig, route,
 #              ping 127.0.0.1, wget d'un serveur http de l'hote (10.0.2.2)
+#     lot2host (hote) lot E6 : date contre GNU date, ntpdate/rdate, logrotate,
+#              dumpe2fs/tune2fs/e2label/resize2fs contre e2fsprogs
+#     lot2     (QEMU) /usr/share/bench/lot2.sh : date -d + fuseaux, run-parts,
+#              cron.*, logrotate, e2tools, loadkeys -n, zoneinfo/terminfo
 #     build    (automatique avant qemu/install) fabrique l'image avec BUILD.SH
 #              dans $W (pas dans IMAGE/, partage) ; KSRC=... choisit le noyau
 #   Variables : LPC (compilateur), W (travail, defaut /tmp/linux0-u-tests),
@@ -37,7 +41,7 @@ W=${W:-/tmp/linux0-u-tests}
 QT=${QEMU_T:-600}
 export LPC W
 mkdir -p "$W/bin" "$W/src"
-STEPS=${*:-sh bash host utils qemu tools power net install mod}
+STEPS=${*:-sh bash host utils lot2host qemu tools lot2 power net install mod}
 FAIL=0
 build() {
   [ -n "$IMAGE" ] && return 0
@@ -199,6 +203,34 @@ for st in $STEPS; do
       -c '=sh /usr/share/bench/tools.sh' -c '=echo QFIN' -s 'QFIN$' > "$W/tools.txt" 2>&1
     grep 'TOOLS-KO\|TOOLS-FIN' "$W/tools.txt"
     grep -q 'TOOLS-FIN ok=[0-9]* ko=0' "$W/tools.txt" || FAIL=1 ;;
+  lot2host)
+    # lot E6 sur l'hote : date (contre GNU date), ntpdate/rdate (serveurs
+    # factices), logrotate, dumpe2fs/tune2fs/e2label/resize2fs (e2fsprogs)
+    mkdir -p "$W/l2"; cp "$K32"/USR/*.PAS "$K32"/USR/*.INC "$W/l2/"
+    cp "$K32"/USR/INSTALLER/LAYOUTS.INC "$W/l2/"
+    for n in DATE NTPDATE LOGROTATE E2TOOLS LOADKEYS; do
+      ( cd "$W/l2" && $LPC -3X -q $n.PAS >/dev/null 2>"$W/l2/$n.err" ) ||
+        { echo "ECHEC compilation $n"; FAIL=1; }
+    done
+    python3 "$HERE/datetest.py" "$W/l2/DATE" | tail -1 || FAIL=1
+    python3 "$HERE/nettime.py" "$W/l2/NTPDATE" | grep -c '^ok' |
+      grep -q '^4$' && echo "ok    ntpdate/rdate : 4 essais" ||
+      { echo "ECHEC ntpdate/rdate"; FAIL=1; }
+    python3 "$HERE/logrotatetest.py" "$W/l2/LOGROTATE" | grep -q ECHEC &&
+      { echo "ECHEC logrotate"; FAIL=1; } || echo "ok    logrotate (12 essais)"
+    python3 "$HERE/e2toolstest.py" "$W/l2/E2TOOLS" | grep -q ECHEC &&
+      { echo "ECHEC e2tools"; FAIL=1; } ||
+      echo "ok    dumpe2fs/tune2fs/e2label/resize2fs = e2fsprogs" ;;
+  lot2)
+    build
+    [ -f "$IMAGE" ] || { FAIL=1; continue; }
+    cp "$IMAGE" "$W/l2.img"
+    python3 "$K32/TESTS/QEMU.PY" run "$W/l2.img" -m 64 -t "$QT" \
+      -c 'login: =root' -c 'Mot de passe : =root' \
+      -c '=sh /usr/share/bench/lot2.sh' -c '=echo QFIN' -s 'QFIN$' \
+      > "$W/lot2.txt" 2>&1
+    grep 'LOT2-KO\|LOT2-FIN' "$W/lot2.txt"
+    grep -q 'LOT2-FIN ok=[0-9]* ko=0' "$W/lot2.txt" || FAIL=1 ;;
   net)
     build
     [ -f "$IMAGE" ] || { FAIL=1; continue; }

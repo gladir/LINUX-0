@@ -68,6 +68,63 @@ int main(void){
   n=0;for(i=0;i<300&&n<=0;i++){l=sizeof f;n=recvfrom(s,b,100,0x40,&f,&l);if(n<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
   ktest("net.udp_echo",n==9&&memcmp_(b,"udp-hello",9)==0&&hs(f.port)==9092);
   close(s);
+  /* netfilter : table filter par setsockopt(SOL_IP) sur une socket brute IPPROTO_RAW */
+  {
+    static unsigned char tb[4096];
+    int rs=socket(2,3,255),nt,off,rl;
+    #define PUT16(o,v) (*(unsigned short*)(tb+(o))=(v))
+    #define PUT32(o,v) (*(unsigned*)(tb+(o))=(v))
+    /* regle UDP (udp match 40 octets) + cible standard 40 */
+    #define RULE(base,sport0,sport1,dport0,dport1,verd) do{ \
+      memset(tb+(base),0,192);PUT16((base)+80,17);PUT16((base)+88,112+40);PUT16((base)+90,192); \
+      PUT16((base)+112,40);memcpy(tb+(base)+114,"udp",4); \
+      PUT16((base)+144,sport0);PUT16((base)+146,sport1);PUT16((base)+148,dport0);PUT16((base)+150,dport1); \
+      PUT16((base)+152,40);PUT32((base)+184,(unsigned)(verd));}while(0)
+    #define POLICY(base) do{memset(tb+(base),0,152);PUT16((base)+88,112);PUT16((base)+90,152);PUT16((base)+112,40);PUT32((base)+144,(unsigned)-2);}while(0)
+    /* tb[0..91] : en-tete ipt_replace ; entrees a partir de 92 */
+    #define BUILD(inrule,outrule,sp0,sp1,dp0,dp1) do{ int o=92,hin,hfw,hou,uin,ufw,uou; \
+      memset(tb,0,92);memcpy(tb,"filter",7); \
+      hin=0;if(inrule){RULE(o,sp0,sp1,dp0,dp1,-1);o+=192;}uin=o-92;POLICY(o);o+=152; \
+      hfw=o-92;ufw=hfw;POLICY(o);o+=152; \
+      hou=o-92;if(outrule){RULE(o,sp0,sp1,dp0,dp1,-1);o+=192;}uou=o-92;POLICY(o);o+=152; \
+      memset(tb+o,0,176);PUT16(o+88,112);PUT16(o+90,176);PUT16(o+112,64);memcpy(tb+o+114,"ERROR",6);o+=176; \
+      PUT32(32,0xE);PUT32(36,2+(inrule?1:0)+(outrule?1:0)+1+1);PUT32(40,o-92); \
+      PUT32(44+4,hin);PUT32(44+8,hfw);PUT32(44+12,hou);PUT32(64+4,uin);PUT32(64+8,ufw);PUT32(64+12,uou); \
+      off=o;}while(0)
+    ktest("nf.socket",rs>=0);
+    {unsigned char gi[84];int gl=84;memset(gi,0,84);memcpy(gi,"filter",7);
+     nt=getsockopt(rs,0,64,gi,&gl);
+     ktest("nf.get_info_default",nt==0&&*(unsigned*)(gi+32)==0xE&&*(unsigned*)(gi+76)==3);}
+    BUILD(0,1,0,65535,9092,9092);
+    ktest("nf.replace_output_drop",setsockopt(rs,0,64,tb,off)==0);
+    {long ts[2]={0,0};(void)ts;}
+    sendto(s=socket(2,2,0),"nf-out",6,0,&a,16);
+    n=0;for(i=0;i<60&&n<=0;i++){l=sizeof f;n=recvfrom(s,b,100,0x40,&f,&l);if(n<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+    ktest("nf.output_dropped",n<=0);
+    {static unsigned char ge[8192];int gl=36+2000;memset(ge,0,sizeof ge);memcpy(ge,"filter",7);
+     {unsigned char gi[84];int gl2=84;memset(gi,0,84);memcpy(gi,"filter",7);getsockopt(rs,0,64,gi,&gl2);*(unsigned*)(ge+32)=*(unsigned*)(gi+80);gl=36+*(unsigned*)(gi+80);}
+     nt=getsockopt(rs,0,65,ge,&gl);
+     {unsigned long long pc=0;int po=36+ *(unsigned*)(tb+44+12)+ 0;pc=*(unsigned*)(ge+po+96);
+      ktest("nf.get_entries_counter",nt==0&&pc>=1);}}
+    close(s);
+    BUILD(1,0,9092,9092,0,65535);
+    ktest("nf.replace_input_drop",setsockopt(rs,0,64,tb,off)==0);
+    sendto(s=socket(2,2,0),"nf-in",5,0,&a,16);
+    n=0;for(i=0;i<60&&n<=0;i++){l=sizeof f;n=recvfrom(s,b,100,0x40,&f,&l);if(n<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+    ktest("nf.input_dropped",n<=0);close(s);
+    BUILD(0,0,0,0,0,0);
+    ktest("nf.replace_default",setsockopt(rs,0,64,tb,off)==0);
+    sendto(s=socket(2,2,0),"nf-ok",5,0,&a,16);
+    n=0;for(i=0;i<300&&n<=0;i++){l=sizeof f;n=recvfrom(s,b,100,0x40,&f,&l);if(n<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+    ktest("nf.accept_after_flush",n==5&&memcmp_(b,"nf-ok",5)==0);close(s);
+    memcpy(tb,"nat",4);
+    ktest("nf.nat_unsupported",setsockopt(rs,0,64,tb,off)==-2);
+    BUILD(0,0,0,0,0,0);tb[92+112+2]='x';  /* correspondance inconnue : sur la 1re entree (politique) cible nommee */
+    ktest("nf.bad_target",setsockopt(rs,0,64,tb,off)==-2);
+    ktest("nf.nonroot_eperm",({int pp=fork(),st=0;if(pp==0){int r2;sc1(23,1000);r2=socket(2,3,255);_exit(r2==-1?0:1);}waitpid(pp,&st,0);st==0;}));
+    (void)rl;
+    close(rs);
+  }
   /* TCP client */
   s=socket(2,1,0);mksin(&a,HOST,9091);
   ktest("net.tcp_connect",connect(s,&a,16)==0);

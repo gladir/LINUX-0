@@ -792,6 +792,25 @@ Begin
   LnxTzIsDst := (LnxTzMode = 1) And (LnxTzDst[LnxTzType(T)] <> 0);
 End;
 
+{ sigle de la zone (CET, CEST...) en vigueur a l'instant UTC T ; '' si la zone
+  est un decalage fixe }
+Function LnxTzAbbr(T : LongInt) : String;
+Var I, K : LongInt; R : String;
+Begin
+  LnxTzAbbr := '';
+  If LnxTzDone = 0 Then LnxTzSelect('');
+  If LnxTzMode <> 1 Then Exit;
+  K := LnxTzType(T);
+  I := LnxTzAbI[K];
+  R := '';
+  While (I < 256) And (LnxTzAbc[I] <> 0) Do
+  Begin
+    R := R + Chr(LnxTzAbc[I]);
+    Inc(I);
+  End;
+  LnxTzAbbr := R;
+End;
+
 { instant UTC correspondant a une heure locale L }
 Function LnxTzUtcOf(L : LongInt) : LongInt;
 Var U : LongInt;

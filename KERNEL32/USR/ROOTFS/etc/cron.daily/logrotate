@@ -1,0 +1,4 @@
+#!/bin/sh
+# rotation des journaux (/etc/logrotate.conf)
+[ -x /sbin/logrotate ] && /sbin/logrotate /etc/logrotate.conf
+exit 0

@@ -7,6 +7,7 @@
 #   contenu connu, l'amorce sous QEMU (SeaBIOS : -cdrom -boot d) et verifie que
 #   le chargeur El Torito a charge le noyau + l'initrd + la ligne de commande,
 #   que /init demarre et que le CD se monte en iso9660 sous /cdrom.
+#   Troisieme essai : le CD sur un controleur AHCI (/dev/sr0, defaut de VirtualBox).
 #     RUNCD.SH [-t secondes]
 HERE=$(cd "$(dirname "$0")" && pwd)
 K32=$HERE/../..
@@ -23,11 +24,13 @@ mkdir "$W/root"; printf 'hello from cd\n' > "$W/root/readme.txt"
 "$K32/TOOLS/MKCD.SH" -o "$W/k32.iso" -k "$W/KERNEL32" -I "$W/ird.cpio.gz" -r "$W/root" \
     -c "console=ttyS0 cdlive=1" || exit 1
 RC=0
-for SET in "cd" "cd-smp"; do
+for SET in "cd" "cd-smp" "cd-ahci"; do
   echo "== $SET"
   rm -f "$W/out.txt"
   X=; [ "$SET" = cd-smp ] && X="-smp 2"
-  timeout "$TMO" qemu-system-i386 -cdrom "$W/k32.iso" -boot d -serial "file:$W/out.txt" \
+  CDARGS=(-cdrom "$W/k32.iso")
+  [ "$SET" = cd-ahci ] && CDARGS=(-device ich9-ahci,id=ahci -drive "file=$W/k32.iso,if=none,id=c0,media=cdrom,format=raw,readonly=on" -device ide-cd,drive=c0,bus=ahci.0)
+  timeout "$TMO" qemu-system-i386 "${CDARGS[@]}" -boot d -serial "file:$W/out.txt" \
       -display none -m 64 -no-reboot $X $QX 2>/dev/null &
   QP=$!
   for i in $(seq 1 "$TMO"); do

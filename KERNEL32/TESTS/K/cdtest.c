@@ -11,7 +11,7 @@ int main(void){
   n=slurp("/proc/cmdline",b,sizeof b);
   ktest("cd.cmdline",n>0&&ku_cmdline_has("cdlive=1"));
   mkdir("/cdrom",0755);
-  ktest("cd.mount",mount("/dev/hdc","/cdrom","iso9660",1,0)==0);
+  ktest("cd.mount",mount("/dev/hdc","/cdrom","iso9660",1,0)==0||mount("/dev/sr0","/cdrom","iso9660",1,0)==0);
   n=slurp("/cdrom/readme.txt",b,sizeof b);
   ktest("cd.readme",n==14&&memcmp_(b,"hello from cd\n",14)==0);
   fd=open("/cdrom/boot/linux0",O_RDONLY,0);

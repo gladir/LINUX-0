@@ -1,0 +1,25 @@
+#!/bin/sh
+# run-parts [--test|--list] DOSSIER : execute les fichiers executables de
+# DOSSIER (noms de lettres, chiffres, _ et -), dans l'ordre alphabetique.
+MODE=run
+while [ $# -gt 1 ]; do
+  case $1 in
+    --test|--list) MODE=${1#--} ;;
+  esac
+  shift
+done
+D=$1
+[ -d "$D" ] || { echo "run-parts: $D : pas un dossier" >&2; exit 1; }
+RC=0
+for f in "$D"/*; do
+  [ -f "$f" ] && [ -x "$f" ] || continue
+  case ${f##*/} in
+    *[!a-zA-Z0-9_-]*) continue ;;
+  esac
+  if [ $MODE = run ]; then
+    "$f" || RC=1
+  else
+    echo "$f"
+  fi
+done
+exit $RC

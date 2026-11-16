@@ -141,6 +141,26 @@ int main(){
      }
      if(!ok){puts("  tlb: ready=");putd(th_ready);puts(" segv=");putd(th_segv);puts(" cpu=");putd(th_cpu);puts("\n");{int r2=slurp("/proc/interrupts",b,sizeof b);write(1,b,r2);}}
      ktest("smp.tlb_shootdown_mprotect",ok);}
+    /* appels systeme sans verrou noyau : getpid en parallele sur 2 CPU */
+    if(!ku_cmdline_has("nofastsys")){
+      long t0,t1,t2,f0,f1;int p1,p2,st,j;
+      #define NLOOP 300000
+      #define STATV(key) ({int rr=slurp("/proc/stat",b,sizeof b),ii;long vv=-1;for(ii=0;ii+8<rr;ii++)if(memcmp_(b+ii,key" ",strlen(key)+1)==0){vv=0;int jj=ii+strlen(key)+1;while(b[jj]>='0'&&b[jj]<='9'){vv=vv*10+b[jj]-'0';jj++;}break;}vv;})
+      f0=STATV("fastsys");
+      t0=us();p1=fork();
+      if(p1==0){setaff(0,1);for(j=0;j<NLOOP;j++)sc0(SYS_getpid);_exit(0);}
+      waitpid(p1,&st,0);t1=us()-t0;
+      f1=STATV("fastsys");
+      ktest("smp.fastsys_counted",f0>=0&&f1-f0>=NLOOP);
+      t0=us();p1=fork();
+      if(p1==0){setaff(0,1);for(j=0;j<NLOOP;j++)sc0(SYS_getpid);_exit(0);}
+      p2=fork();
+      if(p2==0){setaff(0,2);for(j=0;j<NLOOP;j++)sc0(SYS_getpid);_exit(0);}
+      waitpid(p1,&st,0);waitpid(p2,&st,0);t2=us()-t0;
+      puts("  getpid : un CPU ");putd(t1/1000);puts(" ms, deux CPU ");putd(t2/1000);puts(" ms\n");
+      /* sous un verrou unique le temps doublerait (rapport 2) ; en parallele il reste proche de 1 */
+      ktest("smp.fastsys_parallel",t2*10<t1*16);
+    }
     /* /proc/interrupts : une colonne par CPU, minuterie locale qui avance */
     r=slurp("/proc/interrupts",b,sizeof b);
     {char key[8];int has=0;key[0]='C';key[1]='P';key[2]='U';key[3]='0'+(n_online>9?9:n_online-1);key[4]=0;

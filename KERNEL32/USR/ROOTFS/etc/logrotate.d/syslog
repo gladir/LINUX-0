@@ -1,0 +1,12 @@
+/var/log/messages /var/log/auth.log /var/log/kern.log /var/log/cron.out {
+  weekly
+  rotate 4
+  missingok
+  notifempty
+}
+/var/log/install.log {
+  monthly
+  rotate 2
+  missingok
+  notifempty
+}

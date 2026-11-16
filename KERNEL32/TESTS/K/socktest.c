@@ -112,7 +112,8 @@ int main(void){
   ktest("sock.udp_recvfrom",n==5&&memcmp_(b,"dgram",5)==0&&sb.fam==2&&sb.addr==0x0100007f&&hs(sb.port)>=32768);
   ktest("sock.udp_reply",sendto(s,"back",4,0,&sb,16)==4&&recvfrom(c,b,10,0x40,0,0)==4);
   ktest("sock.udp_connected",connect(c,&si,16)==0&&write(c,"c",1)==1&&recvfrom(s,b,10,0x40,0,0)==1);
-  ktest("sock.udp_unreach",({struct sin ext;mksin(&ext,53);ext.addr=0x08080808;sendto(s,"x",1,0,&ext,16)==-101;}));
+  /* sans carte reseau : ENETUNREACH ; QEMU ajoute une carte e1000 par defaut (supportee depuis la partie 39) : envoi accepte */
+  ktest("sock.udp_unreach",({struct sin ext;int r2,nic=open("/sys/class/net/eth0",O_RDONLY|O_DIRECTORY,0);mksin(&ext,53);ext.addr=0x08080808;r2=sendto(s,"x",1,0,&ext,16);nic>=0?(r2==1||r2==-101):r2==-101;}));
   ktest("sock.udp_poll",poll1(s,1,0)==0);
   close(s);close(c);
   /* ---- TCP en bouclage ---- */

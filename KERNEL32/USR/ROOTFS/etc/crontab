@@ -1,0 +1,7 @@
+# /etc/crontab : tables de crond (champ utilisateur apres les 5 champs de temps)
+SHELL=/bin/sh
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+17 *  * * *  root  run-parts /etc/cron.hourly
+25 6  * * *  root  run-parts /etc/cron.daily
+47 6  * * 7  root  run-parts /etc/cron.weekly
+52 6  1 * *  root  run-parts /etc/cron.monthly
