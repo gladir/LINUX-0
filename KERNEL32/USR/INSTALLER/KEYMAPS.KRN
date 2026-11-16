@@ -1,5 +1,6 @@
 { KEYMAPS.KRN : genere par MKDATA.PY depuis LAYOUTS.TXT (E5).
-  Procedure KbdLoadLayout(Const N : String) : remplit KbdMapLo/Hi/Alt
+  Procedure KbdLoadLayout(Const N : String) : remplit
+  KbdMapLo/Hi/Alt
   pour keymap=N (us uk fr be de chde chfr it es pt nl). }
 Procedure KbdLoadLayout(Const N : String);
 Begin

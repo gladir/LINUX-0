@@ -1,10 +1,16 @@
-{ GFX.INC : bibliotheque graphique de KERNEL32 sur /dev/fb0 (LPC -3X).
-  Memoire d'image hors ecran 32 bits (0x00RRGGBB), primitives (pixel, rectangle,
-  ligne, degrade, ombre, copie), polices bitmap 8x16, 12x24 et 16x32
-  (FONTS.INC, jeu Windows-1252 : un octet par caractere), curseur de souris
-  dessine par le logiciel. Tout est dessine dans le tampon GBack ; GFlush
-  (ou GFlushRect) le recopie dans la memoire video : pas de scintillement.
-  Inclure apres FONTS.INC. Noms globaux prefixes G... }
+{ @author: Sylvain Maltais (support@gladir.com)
+  @created: 2026
+  @website(https://www.gladir.com/linux-0)
+  @abstract(Target: LPC -3X)
+  @description: GFX.INC : bibliotheque graphique de KERNEL32 sur /dev/fb0 (LPC
+      -3X). Memoire d'image hors ecran 32 bits (0x00RRGGBB), primitives
+      (pixel, rectangle, ligne, degrade, ombre, copie), polices bitmap 8x16,
+      12x24 et 16x32 (FONTS.INC, jeu Windows-1252 : un octet par caractere),
+      curseur de souris dessine par le logiciel. Tout est dessine dans le
+      tampon GBack ; GFlush (ou GFlushRect) le recopie dans la memoire video :
+      pas de scintillement. Inclure apres FONTS.INC. Noms globaux prefixes
+      G...
+}
 
 Var
   GFbFd, GW, GH, GStride, GFb, GBack, GMapLen : LongInt;

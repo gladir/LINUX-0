@@ -1,9 +1,14 @@
-{ UIBASE.INC : couche d'affichage de l'assistant (graphique ET texte).
-  L'ecran est une grille de cellules (Ui_Cols x Ui_Rows) ; chaque dessin
-  porte un ROLE (couleurs). Mode graphique : cellule = police GFX.INC sur
-  /dev/fb0 ; mode texte : sequences ANSI sur la console (repli, mode expert).
-  Les chaines sont en Windows-1252 (un octet par caractere).
-  Inclure apres GFX.INC. }
+{ @author: Sylvain Maltais (support@gladir.com)
+  @created: 2026
+  @website(https://www.gladir.com/linux-0)
+  @abstract(Target: LPC -3X)
+  @description: UIBASE.INC : couche d'affichage de l'assistant (graphique ET
+      texte). L'ecran est une grille de cellules (Ui_Cols x Ui_Rows) ; chaque
+      dessin porte un ROLE (couleurs). Mode graphique : cellule = police
+      GFX.INC sur /dev/fb0 ; mode texte : sequences ANSI sur la console
+      (repli, mode expert). Les chaines sont en Windows-1252 (un octet par
+      caractere). Inclure apres GFX.INC.
+}
 
 Const
   R_BG = 0;  R_HEAD = 1;  R_HINT = 2;  R_WIN = 3;  R_TITLE = 4;
@@ -67,7 +72,8 @@ Begin
   Else UiFoldCh := Ord(UiFold1[C - 159]);
 End;
 
-{ Windows-1252 -> CP437 (console VGA du noyau) ; 0 si le caractere n'existe pas }
+{ Windows-1252 -> CP437 (console VGA du noyau) ; 0 si le caractere n'existe
+  pas }
 Function UiToCp437(C : LongInt) : LongInt;
 Begin
   Case C Of

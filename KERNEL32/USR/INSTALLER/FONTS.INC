@@ -1,4 +1,5 @@
-{ FONTS.INC : genere par MKFONT.PY (DejaVu Sans Mono, Windows-1252)
+{ FONTS.INC : genere par MKFONT.PY (DejaVu Sans Mono,
+  Windows-1252)
   Glyphe i = code i + 32 (32..255) ; ligne = octets de gauche a
   droite, bit 7 = pixel de gauche. Ne pas modifier a la main. }
 

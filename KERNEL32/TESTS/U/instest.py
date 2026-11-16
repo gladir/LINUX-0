@@ -3,9 +3,11 @@
 # @created: 2026
 # @website(https://www.gladir.com/linux-0)
 # @description: Essais de l'assistant d'installation (appele par RUNINST.SH) :
-#   tz        fuseaux horaires de L32API contre l'heure de l'hote (TZif, heure d'ete)
-#   auto-fr   CD amorce sous QEMU, installation automatique (preseed) en francais
-#             (AZERTY, Europe/Paris, ext4 + swap), puis amorce du disque installe
+#   tz        fuseaux horaires de L32API contre l'heure de l'hote (TZif, heure
+#             d'ete)
+#   auto-fr   CD amorce sous QEMU, installation automatique (preseed) en
+#             francais (AZERTY, Europe/Paris, ext4 + swap), puis amorce du
+#             disque installe
 #   auto-de   idem en allemand, partitionnement manuel (ext3 + swap + /home)
 #   ui-fr     interface : touches (sendkey) en francais, captures, installation
 #   ui-de     interface : souris + editeur de partitions en allemand, captures
@@ -29,8 +31,8 @@ RESULTS = []
 
 def check(name, ok, detail=''):
     RESULTS.append((name, bool(ok)))
-    print(('ok    ' if ok else 'ECHEC ') + name + (' : ' + detail if detail and not ok else ''),
-          flush=True)
+    extra = (' : ' + detail) if (detail and not ok) else ''
+    print(('ok    ' if ok else 'ECHEC ') + name + extra, flush=True)
     return ok
 
 
@@ -84,8 +86,10 @@ def fs_check(disk, parts):
     for i, (start, size) in enumerate(parts):
         img = disk + '.p%d' % i
         subprocess.run(['dd', 'if=' + disk, 'of=' + img, 'bs=512',
-                        'skip=%d' % start, 'count=%d' % size], stderr=subprocess.DEVNULL)
-        r = subprocess.run(['e2fsck', '-fn', img], capture_output=True, text=True)
+                        'skip=%d' % start, 'count=%d' % size],
+                       stderr=subprocess.DEVNULL)
+        r = subprocess.run(['e2fsck', '-fn', img], capture_output=True,
+                           text=True)
         if r.returncode != 0:
             print(r.stdout[-800:])
         good = good and r.returncode == 0
@@ -122,11 +126,18 @@ def read_table(disk):
     return out
 
 
-def boot_verify(tag, disk, rootpw, checks, mem=128):
+def boot_verify(tag, disk, rootpw, checks, mem=128, rtc_tz=None):
     """amorce le disque installe SANS le CD, ouvre une session root et execute
-    les commandes ; checks = [(libelle, commande, regex attendue)]"""
-    q = Q(os.path.join(WORK, tag + '-boot'), ['-m', str(mem), '-drive',
-          'file=%s,format=raw,if=ide,index=0' % disk], serial_io=True)
+    les commandes ; checks = [(libelle, commande, regex attendue)] ;
+    rtc_tz : fuseau de l'horloge materielle de QEMU (-rtc base=localtime)"""
+    extra = []
+    env = None
+    if rtc_tz:
+        extra = ['-rtc', 'base=localtime']
+        env = {'TZ': rtc_tz}
+    q = Q(os.path.join(WORK, tag + '-boot'), extra + ['-m', str(mem), '-drive',
+          'file=%s,format=raw,if=ide,index=0' % disk], serial_io=True,
+          env=env)
     ok = q.wait(r'login:', 90)
     check(tag + ' : amorce du disque installe (login:)', ok)
     if not ok:
@@ -173,7 +184,8 @@ def local_hhmm(zone):
 def host_offset(zone):
     from zoneinfo import ZoneInfo
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).astimezone(ZoneInfo(zone)).utcoffset().total_seconds()
+    now = datetime.now(timezone.utc).astimezone(ZoneInfo(zone))
+    return now.utcoffset().total_seconds()
 
 
 # ---------------------------------------------------------------- tz
@@ -191,14 +203,16 @@ Begin
   End;
 End.
 """)
-    r = subprocess.run([LPC, '-3X', '-q', 'TZT.PAS'], cwd=src, capture_output=True, text=True)
+    r = subprocess.run([LPC, '-3X', '-q', 'TZT.PAS'], cwd=src,
+                       capture_output=True, text=True)
     if not os.path.exists(src + '/TZT'):
         check('tz : compilation', False, r.stdout + r.stderr)
         return
-    zones = ['Europe/Paris', 'Europe/Berlin', 'Europe/London', 'America/New_York',
-             'America/Los_Angeles', 'America/Sao_Paulo', 'Asia/Tokyo', 'Asia/Kolkata',
-             'Australia/Sydney', 'Pacific/Auckland', 'Africa/Cairo', 'Europe/Moscow',
-             'UTC', 'Asia/Kathmandu', 'America/St_Johns', 'Europe/Lisbon']
+    zones = ['Europe/Paris', 'Europe/Berlin', 'Europe/London',
+             'America/New_York', 'America/Los_Angeles', 'America/Sao_Paulo',
+             'Asia/Tokyo', 'Asia/Kolkata', 'Australia/Sydney',
+             'Pacific/Auckland', 'Africa/Cairo', 'Europe/Moscow', 'UTC',
+             'Asia/Kathmandu', 'America/St_Johns', 'Europe/Lisbon']
     stamps = []
     t0 = 1262304000
     for k in range(0, 56):
@@ -212,7 +226,8 @@ End.
                              capture_output=True, text=True).stdout.split('\n')
         for s, line in zip(stamps, out):
             exp = subprocess.run(['date', '-d', '@%d' % s, '+%z'],
-                                 env=dict(os.environ, TZ=z), capture_output=True,
+                                 env=dict(os.environ, TZ=z),
+                                 capture_output=True,
                                  text=True).stdout.strip()
             sign = -1 if exp[0] == '-' else 1
             e = sign * (int(exp[1:3]) * 3600 + int(exp[3:5]) * 60)
@@ -268,29 +283,37 @@ reboot=halt
     q.quit()
     tab = read_table(disk)
     check('auto-fr : table MBR : Linux 83 active + swap 82',
-          len(tab) == 4 and tab[0][0] == 0x83 and tab[0][3] and tab[1][0] == 0x82,
-          str(tab))
-    check('auto-fr : e2fsck -fn propre', fs_check(disk, [(tab[0][1], tab[0][2])]))
+          len(tab) == 4 and tab[0][0] == 0x83 and tab[0][3] and
+          tab[1][0] == 0x82, str(tab))
+    check('auto-fr : e2fsck -fn propre',
+          fs_check(disk, [(tab[0][1], tab[0][2])]))
     check('auto-fr : /etc/localtime = fichier TZif Europe/Paris',
           zone_copy_ok(disk, tab[0][1], 'Europe/Paris'))
     checks = [
         ('nom de machine', 'hostname', r'poste-fr'),
         ('langue (LANGUAGE=FR)', '. /etc/profile; echo L=$LANGUAGE', r'L=FR'),
         ('fuseau (/etc/timezone)', 'cat /etc/timezone', r'Europe/Paris'),
-        ('heure locale (date) = heure de Paris', 'date +%H:%M', local_hhmm('Europe/Paris')),
+        ('heure locale (date) = heure de Paris', 'date +%H:%M',
+         local_hhmm('Europe/Paris')),
         ('TZ=America/New_York date (L32API)', 'TZ=America/New_York date +%H:%M',
          local_hhmm('America/New_York')),
-        ('TZ=Asia/Tokyo date (L32API)', 'TZ=Asia/Tokyo date +%H:%M', local_hhmm('Asia/Tokyo')),
+        ('TZ=Asia/Tokyo date (L32API)', 'TZ=Asia/Tokyo date +%H:%M',
+         local_hhmm('Asia/Tokyo')),
         ('utilisateur marie (uid 1000)', 'id marie', r'uid=1000\(marie\)'),
-        ('nom complet dans /etc/passwd', 'grep marie /etc/passwd', r'Marie Curie'),
-        ('clavier fr (/etc/default/keyboard)', 'cat /etc/default/keyboard', r'fr'),
-        ('fstab : racine ext4 + swap', 'cat /etc/fstab', r'hda1 / ext4(.|\n)*hda2 none swap'),
+        ('nom complet dans /etc/passwd', 'grep marie /etc/passwd',
+         r'Marie Curie'),
+        ('clavier fr (/etc/default/keyboard)', 'cat /etc/default/keyboard',
+         r'fr'),
+        ('fstab : racine ext4 + swap', 'cat /etc/fstab',
+         r'hda1 / ext4(.|\n)*hda2 none swap'),
         ('noyau et configuration du chargeur',
-         'ls /boot; cat /boot/linux0.cfg', r'linux0(.|\n)*root=/dev/hda1 rw(.|\n)*keymap=fr'),
+         'ls /boot; cat /boot/linux0.cfg',
+         r'linux0(.|\n)*root=/dev/hda1 rw(.|\n)*keymap=fr'),
         ('racine montee (df)', 'df | grep hda1', r'/dev/hda1'),
         ('ext4 (blkid)', 'blkid /dev/hda1', r'ext4'),
-        ('journal de l\'installation copie', 'ls /var/log/install.log', r'install.log'),
-        ('systeme de fichiers racine en ecriture', 'echo ok > /root/t; cat /root/t', r'^ok'),
+        ('journal de l\'installation copie', 'ls /var/log/install.log',
+         r'install.log'),
+        ('racine en ecriture', 'echo ok > /root/t; cat /root/t', r'^ok'),
     ]
     boot_verify('auto-fr', disk, 'motdepasse', checks)
 
@@ -304,14 +327,16 @@ clock=local
 hostname=rechner-de
 rootpw=geheim
 user=hans
-fullname=Hans Müller
+fullname=Hans M\u00fcller
 userpw=passwort
 partitioning=manual
-parts=ext3:/:250M,swap:swap:32M,ext3:/home:*
+parts=ext3:/:250M,swap:swap:32M,ext4:/home:*
+ui=text
 endwait=3
 reboot=halt
 """
-    iso = build_iso('auto-de', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+    # ui=text : installation entierement en mode texte (console VGA)
+    iso = build_iso('auto-de', 'console=tty0 console=ttyS0 rw '
                     'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
                     {'preseed.cfg': pre})
     disk = new_disk('auto-de', 700)
@@ -319,9 +344,10 @@ reboot=halt
     ok = page(q, 11, 90)
     check('auto-de : page de progression affichee', ok)
     time.sleep(5)
-    cap(q, 'de-prog', 'auto-de-installation')
+    cap(q, 'de-prog', 'auto-de-texte-installation')
     ok = q.wait(r'K32SETUP: DONE', 300)
-    check('auto-de : installation terminee (manuel : ext3 + swap + /home)', ok)
+    check('auto-de : installation terminee (manuel : ext3 + swap + /home ext4)',
+          ok)
     time.sleep(1.5)
     for _ in range(40):
         if not q.alive():
@@ -330,33 +356,52 @@ reboot=halt
     q.quit()
     tab = read_table(disk)
     check('auto-de : table MBR : 83, 82, 83',
-          len(tab) == 4 and [t[0] for t in tab[:3]] == [0x83, 0x82, 0x83], str(tab))
+          len(tab) == 4 and [t[0] for t in tab[:3]] == [0x83, 0x82, 0x83],
+          str(tab))
     check('auto-de : e2fsck -fn propre (racine et /home)',
           fs_check(disk, [(tab[0][1], tab[0][2]), (tab[2][1], tab[2][2])]))
+    feats = []
+    for st, sz in ((tab[0][1], tab[0][2]), (tab[2][1], tab[2][2])):
+        img = disk + '.f'
+        subprocess.run(['dd', 'if=' + disk, 'of=' + img, 'bs=512',
+                        'skip=%d' % st, 'count=%d' % sz],
+                       stderr=subprocess.DEVNULL)
+        feats.append(subprocess.run(['dumpe2fs', '-h', img],
+                                    capture_output=True, text=True).stdout)
+        os.unlink(img)
+    check('auto-de : racine ext3 (journal, sans extents), /home ext4 (extents)',
+          'has_journal' in feats[0] and 'extent' not in feats[0] and
+          'extent' in feats[1])
     checks = [
         ('nom de machine', 'hostname', r'rechner-de'),
         ('langue (LANGUAGE=DE)', '. /etc/profile; echo L=$LANGUAGE', r'L=DE'),
         ('fuseau Europe/Berlin', 'cat /etc/timezone', r'Europe/Berlin'),
-        ('horloge materielle : heure locale (adjtime)', 'cat /etc/adjtime', r'LOCAL'),
-        ('heure locale (date) = heure de Berlin', 'date +%H:%M', local_hhmm('Europe/Berlin')),
+        ('horloge materielle : heure locale (adjtime)', 'cat /etc/adjtime',
+         r'LOCAL'),
+        ('heure locale (date) = heure de Berlin', 'date +%H:%M',
+         local_hhmm('Europe/Berlin')),
         ('utilisateur hans', 'id hans', r'uid=1000\(hans\)'),
-        ('nom complet en UTF-8', 'grep hans /etc/passwd', r'Hans M\xc3\xbcller|Hans M.*ller'),
+        ('nom complet en UTF-8', 'grep hans /etc/passwd',
+         r'Hans M\xc3\xbcller|Hans M.*ller'),
         ('clavier de', 'cat /etc/default/keyboard', r'de'),
         ('fstab : ext3 / + /home + swap', 'cat /etc/fstab',
-         r'hda1 / ext3(.|\n)*hda2 none swap(.|\n)*hda3 /home ext3'),
+         r'hda1 / ext3(.|\n)*hda2 none swap(.|\n)*hda3 /home ext4'),
         ('/home monte', 'df | grep hda3', r'/home'),
-        ('ext3 : blkid', 'blkid /dev/hda1; blkid /dev/hda3', r'ext3(.|\n)*ext3'),
+        ('blkid : racine ext3, /home ext4', 'blkid /dev/hda1; blkid /dev/hda3',
+         r'ext3(.|\n)*ext4'),
         ('dossier personnel de hans (sur /home)', 'ls /home', r'hans'),
         ('swap actif', 'cat /proc/swaps', r'hda2'),
     ]
-    boot_verify('auto-de', disk, 'geheim', checks, mem=128)
+    # horloge materielle declaree LOCALE : QEMU la regle sur l'heure de Berlin
+    boot_verify('auto-de', disk, 'geheim', checks, mem=128,
+                rtc_tz='Europe/Berlin')
 
 
 # --------------------------------------------------------------- ui-fr
 def t_ui_fr():
     iso = build_iso('ui-fr', 'console=tty0 console=ttyS0 fb=1024x768 rw '
                     'k32setup.verbose=/dev/ttyS0')
-    disk = new_disk('ui-fr', 500)
+    disk = new_disk('ui-fr', 700)
     q = qemu_cd('ui-fr', iso, disk)
     check('ui-fr : assistant lance au demarrage du CD (page 0)', page(q, 0, 90))
     q.key('up')                                  # English -> Francais
@@ -365,7 +410,8 @@ def t_ui_fr():
     q.key('ret')
     check('ui-fr : langue francaise -> page clavier', page(q, 1))
     q.key('tab')
-    for k in ['q', 'w', 'e', 'r', 't', 'y', 'm', 'comma', '1']:   # azerty,; apres AZERTY
+    # touches physiques q w e r t y m , 1 : donnent azerty,;& en AZERTY
+    for k in ['q', 'w', 'e', 'r', 't', 'y', 'm', 'comma', '1']:
         q.key(k)
     time.sleep(0.6)
     cap(q, 'b', 'fr-02-clavier')
@@ -383,13 +429,14 @@ def t_ui_fr():
     q.key('tab')
     q.type('secret')
     q.key('tab')
-    q.type('Jean Dupont')
+    # AZERTY actif : les touches a q z w m changent ; on tape des lettres sures
+    q.type('Luc Dubois')
     q.key('tab')
-    q.type('jean')
+    q.type('luc')
     q.key('tab')
-    q.type('motdepasse')
+    q.type('secret')
     q.key('tab')
-    q.type('motdepasse')
+    q.type('secret')
     time.sleep(0.5)
     cap(q, 'd', 'fr-05-comptes')
     q.key('ret')
@@ -423,7 +470,8 @@ def t_ui_fr():
     checks = [
         ('nom de machine par defaut', 'hostname', r'linux0'),
         ('langue FR', '. /etc/profile; echo L=$LANGUAGE', r'L=FR'),
-        ('utilisateur jean', 'id jean', r'uid=1000\(jean\)'),
+        ('utilisateur luc (saisi en AZERTY)', 'id luc', r'uid=1000\(luc\)'),
+        ('nom complet', 'grep luc /etc/passwd', r'Luc Dubois'),
         ('fuseau Europe/Paris', 'cat /etc/timezone', r'Europe/Paris'),
         ('clavier fr', 'cat /etc/default/keyboard', r'XKBLAYOUT="fr"'),
     ]
@@ -435,7 +483,7 @@ def t_ui_de():
     iso = build_iso('ui-de', 'console=tty0 console=ttyS0 fb=1024x768 rw '
                     'k32setup.verbose=/dev/ttyS0')
     disk = new_disk('ui-de', 700)
-    q = qemu_cd('ui-de', iso, disk)
+    q = qemu_cd('ui-de', iso, disk, mem=128)
     check('ui-de : assistant lance (page 0)', page(q, 0, 90))
     # souris : curseur en haut a gauche puis sur "Deutsch", clic, puis "Weiter"
     q.move(-2000, -2000)
@@ -448,7 +496,8 @@ def t_ui_de():
     q.move(630, 385)
     time.sleep(0.3)
     q.click()
-    check('ui-de : clic souris sur Deutsch puis Weiter -> page Tastatur', page(q, 1))
+    check('ui-de : clic souris Deutsch puis Weiter -> page Tastatur',
+          page(q, 1))
     q.key('tab')
     for k in ['y', 'z', 'x', 'slash', 'minus', 'shift-2']:
         q.key(k)
@@ -481,6 +530,8 @@ def t_ui_de():
     cap(q, 'f', 'de-06-editor')
     q.key('ret')
     check('ui-de : roles des partitions', page(q, 9))
+    q.key('tab'); q.key('tab'); q.key('ret')        # bouton Dateisystem
+    time.sleep(1.0)                                 # racine : ext4 -> ext3
     cap(q, 'g', 'de-07-rollen')
     q.key('ret')
     check('ui-de : zusammenfassung', page(q, 10))
@@ -495,12 +546,23 @@ def t_ui_de():
     time.sleep(1.5)
     cap(q, 'j', 'de-10-fertig')
     t = q.text().replace('\r', '')
-    check('ui-de : clavier QWERTZ (zyx-ß")', 'keytest=zyx-s" layout=de' in t)
+    check('ui-de : clavier QWERTZ (touches y z x / - 2 -> zyx-ss")',
+          'keytest=zyx-s" layout=de' in t)
     q.quit()
     tab = read_table(disk)
-    check('ui-de : table 83 (active) + 82', len(tab) == 4 and tab[0][0] == 0x83 and
-          tab[0][3] and tab[1][0] == 0x82, str(tab))
+    check('ui-de : table 83 (active) + 82',
+          len(tab) == 4 and tab[0][0] == 0x83 and tab[0][3] and
+          tab[1][0] == 0x82, str(tab))
     check('ui-de : e2fsck -fn propre', fs_check(disk, [(tab[0][1], tab[0][2])]))
+    img = disk + '.f'
+    subprocess.run(['dd', 'if=' + disk, 'of=' + img, 'bs=512',
+                    'skip=%d' % tab[0][1], 'count=%d' % tab[0][2]],
+                   stderr=subprocess.DEVNULL)
+    ft = subprocess.run(['dumpe2fs', '-h', img], capture_output=True,
+                        text=True).stdout
+    os.unlink(img)
+    check('ui-de : racine en ext3 (bouton Dateisystem : journal, sans extents)',
+          'has_journal' in ft and 'extent' not in ft)
     checks = [
         ('langue DE', '. /etc/profile; echo L=$LANGUAGE', r'L=DE'),
         ('utilisateur hans', 'id hans', r'uid=1000\(hans\)'),
@@ -508,6 +570,37 @@ def t_ui_de():
         ('invite de connexion en allemand', 'echo x', r'x'),
     ]
     boot_verify('ui-de', disk, 'geheim', checks)
+
+
+# -------------------------------------------------------------- refuse
+def t_refuse():
+    pre = """lang=en
+keyboard=us
+timezone=UTC
+hostname=x
+rootpw=x
+disk=/dev/hdc
+partitioning=guided
+swap=0
+endwait=1
+reboot=halt
+"""
+    iso = build_iso('refuse', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
+                    {'preseed.cfg': pre})
+    disk = new_disk('refuse', 100)
+    before = open(iso, 'rb').read()[:65536]
+    q = qemu_cd('refuse', iso, disk)
+    ok = q.wait(r'K32SETUP: .*(in use|utilis)', 120) or \
+        q.wait(r'K32SETUP: FAIL', 5)
+    check('refuse : disque monte (le CD) refuse par l\'assistant', ok)
+    time.sleep(1)
+    cap(q, 'a', 'refuse-erreur')
+    q.quit()
+    after = open(iso, 'rb').read()[:65536]
+    check('refuse : le CD est intact', before == after)
+    check('refuse : le disque vierge n\'a pas ete touche',
+          open(disk, 'rb').read(512) == b'\0' * 512)
 
 
 # ---------------------------------------------------------------- text
@@ -531,8 +624,9 @@ def t_text():
     q.quit()
 
 
-ALL = {'tz': t_tz, 'auto-fr': t_auto_fr, 'auto-de': t_auto_de, 'ui-fr': t_ui_fr,
-       'ui-de': t_ui_de, 'text': t_text}
+ALL = {'tz': t_tz, 'auto-fr': t_auto_fr, 'auto-de': t_auto_de,
+       'ui-fr': t_ui_fr, 'ui-de': t_ui_de, 'text': t_text,
+       'refuse': t_refuse}
 os.makedirs(WORK, exist_ok=True)
 for s in (SCEN or list(ALL)):
     print('=== ' + s, flush=True)

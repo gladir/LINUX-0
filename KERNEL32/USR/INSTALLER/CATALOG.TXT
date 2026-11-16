@@ -753,6 +753,14 @@ it: Ruolo
 es: Función
 pt: Função
 nl: Rol
+@ROLE_FSB
+fr: Système de fichiers
+en: File system
+de: Dateisystem
+it: File system
+es: Sist. de archivos
+pt: Sist. de ficheiros
+nl: Bestandssysteem
 @ROLE_NONE
 fr: inutilisée
 en: unused

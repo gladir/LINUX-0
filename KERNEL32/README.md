@@ -1194,3 +1194,151 @@ avec fuseaux, ed complet/nano, logrotate, rdate, strace,
 tcpdump, iptables, cron.daily, job control verifie sur pty, `bc`/`dc`
 complets, nouveaux appels de `L32API.PAS`.
 
+
+## CD-ROM d'installation (agent E5) : `USR/INSTALLER/`, `TOOLS/MKINSTALLCD.SH`
+
+`BUILD.SH cd` (ou `TOOLS/MKINSTALLCD.SH`) fabrique `IMAGE/KERNEL32-INSTALL.ISO`,
+un CD-ROM amorcable (El Torito, chargeur `BOOT/STAGE2CD.BIN`) qui lance un
+**assistant d'installation graphique** : langue, clavier, fuseau horaire, date et
+heure, nom de la machine, comptes, disque, partitionnement (assiste ou manuel),
+points de montage, recapitulatif, installation, fin et redemarrage. Il installe
+KERNEL32 (noyau, systeme complet, chargeur) sur un disque IDE/virtio.
+
+### Contenu du CD et fonctionnement
+
+| fichier du CD | role |
+|---|---|
+| `/boot/linux0`, `/boot/linux0.cfg` | noyau de production (`TOOLS/MKPROD.SH`), `console=tty0 console=ttyS0 fb=1024x768 rw` |
+| `/boot/initrd.img` | systeme "live" (cpio gzip) : meme racine que le systeme installe + `/sbin/k32-setup` ; `init` lance `k32-setup-run` sur tty1, `getty` sur tty2, tty3 et ttyS0 (shell de secours : `root`/`root`) |
+| `/system.tar` | archive tar GNU (modes, proprietaires, liens, `setuid`) de la racine du systeme a installer (rootfs de `BUILD.SH` + `/usr/share/zoneinfo`) |
+| `/README.TXT`, fichiers ajoutes par `-r` | par exemple `preseed.cfg` |
+
+`MKINSTALLCD.SH [-o ISO] [-R racine] [-k noyau.elf] [-r dossier] [-c cmdline]` : sans `-R`
+il appelle `BUILD.SH` (`ROOTONLY=1`) ; sans `-k` il compile le noyau de production
+de `KSRC` (defaut `KERNEL32.PAS`). `genisoimage` requis (voir `TOOLS/MKCD.SH`).
+Le live a besoin de 128 Mo de RAM au moins (racine de ~13 Mo en memoire + tampon
+d'image 3 Mo).
+
+### Interface (`GFX.INC`, `UIBASE.INC`, `WIDGETS.INC`, `INPUT.INC`)
+
+* **Bibliotheque graphique** (`GFX.INC`, utilisable par tout programme `-3X`) :
+  `GOpen(L, H)` ouvre `/dev/fb0` (ioctl `FBIOPUT_VSCREENINFO` 32 bits, `mmap`,
+  `KD_GRAPHICS`), un tampon hors ecran 0x00RRGGBB (`GBack`), primitives
+  `GPix GFillRect GHLine GVLine GFrame GLine GFillRound GFillCircle GGradV GGradH
+  GShade GMix`, texte `GFontSel GChar GText GTextScaled GTextW` (police bitmap
+  Windows-1252 : tout Latin-1, euro, oe/OE, tirets, guillemets, en 8x16, 12x24 et
+  16x32, generee par `MKFONT.PY` depuis DejaVu Sans Mono dans `FONTS.INC`),
+  `GClipSet`, curseur de souris dessine par le logiciel (`GCursorShow/Hide`),
+  `GFlush`/`GFlushRect` (copie du tampon vers la memoire video : pas de
+  scintillement), `GClose` (retour en `KD_TEXT`).
+* **Widgets** (`WIDGETS.INC`) : etiquette multi-lignes, bouton, case a cocher, boutons
+  radio, champ de texte et de mot de passe, liste a ascenseur et selection par la
+  premiere lettre, barre de progression, journal, boite de message modale, focus
+  clavier (Tab, Maj-Tab, Entree, Echap, fleches, Espace) et souris (clic, double
+  clic) ; `UiRun` rend l'identifiant du bouton active ou `1000 + id` pour un
+  widget qui notifie un changement.
+* **Grille de cellules** : la fenetre est decrite en cellules (police 12x24 sur
+  1024x768 : 85x32 ; 8x16 sous 1000 pixels de large ; 16x32 des 1500) ; la meme
+  description sert au **mode texte plein ecran ANSI** (80x25 mini). `F3` bascule
+  a chaud entre graphique et texte (mode "expert", ou repli automatique si
+  `/dev/fb0` est absent ou `text` figure sur la ligne de commande). Sur la console
+  VGA du noyau les accents sont convertis en CP437 ; sur un terminal serie, en ASCII
+  (ou UTF-8 avec `k32setup.utf8`).
+* **Clavier** : sur une console virtuelle l'assistant met `KDSKBMODE` en MEDIUMRAW
+  et un termios brut ; les codes de touche Linux sont traduits ICI par la
+  disposition choisie (`LAYOUTS.TXT` : us uk fr be de chde chfr it es pt nl, trois
+  plans normal / majuscule / AltGr, verrouillage des majuscules, Ctrl) : la
+  disposition est donc appliquee tout de suite, sans table du noyau. Sur un port
+  serie ou sans console virtuelle, les octets sont lus tels quels (UTF-8, fleches
+  ANSI). `F2` ouvre un shell de secours (l'assistant reprend a sa fermeture).
+  Pas de touches mortes (^ trema) : le caractere est insere seul.
+* **Textes** : `CATALOG.TXT` (UTF-8) contient 145 messages en francais, English,
+  Deutsch, Italiano, Espanol, Portugues, Nederlands ; `MKDATA.PY` genere
+  `MSGS.INC` et `LAYOUTS.INC` (ASCII ; octets Windows-1252). La langue change a
+  chaud sur la premiere page et sert au systeme installe. Les noms de
+  fuseaux (`Europe/Paris`) ne sont pas traduits ; les regions le sont.
+
+### Etapes de l'assistant
+
+1. Langue ; 2. clavier (champ de test) ; 3. fuseau horaire : region puis ville
+(`/usr/share/zoneinfo`, heure locale affichee avec le decalage) ; 4. date et heure
+(reglage du systeme avec `settimeofday`, horloge materielle UTC ou locale) ;
+5. nom de la machine ; 6. mot de passe root, utilisateur (nom, identifiant, mot
+de passe : hachage V7 comme `PASSWD`) ; 7. disque (`/proc/partitions` : le CD, les
+disques montes ou en swap ne sont pas proposes) ; 8. partitionnement : *assiste*
+(racine + swap optionnel, systeme de fichiers ext4/ext3/ext2) ou *manuel* ;
+9. (manuel) **editeur MBR** type cfdisk : liste des 4 partitions primaires et des
+espaces libres, creation (tailles `500M`, `2G`, vide = tout), suppression, type
+(Linux 83 / swap 82), indicateur d'amorce, tout effacer ; 10. (manuel) roles :
+`/` (racine, obligatoire), swap, `/home`, ou inutilisee ; systeme de fichiers
+(ext4/ext3/ext2) par defaut ou partition par partition (bouton) ;
+11. recapitulatif et **confirmation explicite** (case a cocher + boite Oui/Non) ;
+12. installation avec barre de progression reelle (octets du tar lus) et journal ;
+13. fin : retirer le CD, redemarrer. Aucune ecriture avant la confirmation ; en cas
+d'erreur une boite explique et l'assistant revient au recapitulatif (les montages
+sont demontes).
+
+Installation (`DoInstall`) : ecriture du MBR (code de `/usr/share/boot/MBR.BIN`,
+parametres du chargeur, table, signature) et du chargeur (stage2, secteurs 1..N ;
+les partitions commencent a 1 Mio) ; `BLKRRPART` ; `mkfs.ext4|ext3|ext2 -L ...`
+et `mkswap` (programmes d'`INSTALL.PAS`) ; montage sur `/target` ; extraction de
+`/cdrom/system.tar` ; ecriture de `/etc/fstab`, `hostname`, `hosts`, `passwd`,
+`shadow`, `group`, `sudoers`, `profile` (`LANGUAGE=XX`, `LANG=xx_XX.UTF-8`),
+`default/locale`, `default/keyboard`, `timezone`, `localtime` (copie TZif),
+`adjtime`, ajouts a `/etc/rc` (`hwclock -s`, `swapon -a`, `mount -a`) ;
+`/boot/linux0` copie du CD et `/boot/linux0.cfg` (`root=/dev/hdaN rw console=tty0
+console=ttyS0 keymap=XX`) ; `hwclock -w` ; copie de `/var/log/install.log`.
+
+### Installation automatique (preseed)
+
+Parametre du noyau `preseed=/cdrom/preseed.cfg` : fichier `cle=valeur` (commentaires
+`#`) : `lang` (fr en de it es pt nl), `keyboard` (us uk fr be de chde chfr it es pt
+nl), `timezone`, `clock` (utc|local), `date`/`time` (AAAA-MM-JJ, HH:MM:SS),
+`hostname`, `rootpw`, `user`, `fullname`, `userpw`, `disk` (defaut : premier disque
+libre), `partitioning` (guided|manual), `swap` (Mo, 0 = aucun), `fs` (ext4|ext3|ext2),
+`parts` (manuel : `ext3:/:250M,swap:swap:32M,ext4:/home:*`, systeme de fichiers par
+partition, tailles `M`/`G`/`*`),
+`ui` (gui|text|none), `endwait` (secondes d'affichage de la page finale), `reboot`
+(reboot|halt). Autres
+parametres du noyau : `lang=fr` (langue initiale de l'assistant interactif ; defaut
+English), `text` (mode texte), `k32setup.verbose=/dev/ttyS0` (marqueurs
+`K32SETUP: ...` sur le port serie, pour les essais), `k32setup.utf8`.
+
+### Fuseaux horaires (`L32API.PAS`)
+
+`LnxTzSelect(nom)`, `LnxTzAt(t)` (decalage en secondes a l'est de UTC pour l'instant
+UTC `t`), `LnxTzUtcOf(local)`, `LnxTzIsDst(t)` lisent des fichiers TZif v1 (transitions
+jusqu'en 2037, heure d'ete comprise) : variable `TZ` (`Europe/Paris`,
+`:Europe/Paris`, chemin absolu, ou l'ancienne forme `NOM[+-]hh[:mm]`), `/etc/TZ`,
+puis `/etc/localtime`. `GetLocalTime`, `SetLocalTime`, les dates de fichiers (`ls`),
+`date`, cron, `hwclock` les appliquent. `hwclock -w|-s` lit `/etc/adjtime` (`LOCAL`)
+ou `--localtime`/`--utc`. Test : `RUNINST.SH tz` (16 zones x 64 dates comparees a
+`date` de l'hote, dont les passages a l'heure d'ete).
+
+### Fabrication des donnees et de la police
+
+`USR/INSTALLER/MKFONT.PY` (FONTS.INC), `MKDATA.PY` (LAYOUTS.INC, MSGS.INC et
+`KEYMAPS.KRN` pour le noyau) : a relancer apres modification de `LAYOUTS.TXT`
+ou `CATALOG.TXT`. Compilation : `lpc -3X INSTALLER.PAS` (tous les `.INC` dans le
+dossier).
+
+### Tests (`TESTS/U/RUNINST.SH`)
+
+`RUNINST.SH [-r racine] [-k noyau] [-c captures] [tz auto-fr auto-de ui-fr ui-de text refuse]` :
+CD amorce sous QEMU (`-cdrom`, disque IDE vierge), installation, puis **amorcage du
+disque installe sans le CD** (connexion, nom de machine, langue, fuseau,
+utilisateur, clavier, fstab, noyau, `e2fsck -fn` de l'hote). `auto-de` installe
+en mode texte (`ui=text`) avec une horloge materielle declaree locale (QEMU
+`-rtc base=localtime`) ; `refuse` verifie qu'un disque monte (le CD) est refuse.
+`ui-fr`, `ui-de` et
+`text` pilotent l'interface par le moniteur QEMU (`sendkey`, `mouse_move`,
+`mouse_button`) et gardent des captures PNG dans `IMAGE/CAPTURES/`.
+
+### Limites
+
+Partitions primaires seulement (4) ; une racine ne depasse pas 30 Go en mode assiste
+(blocs de 4 Ko des 2 Go) ; `mkfs` formate au plus 2 Go avec des blocs de 1 Ko, 32 Go
+avec 4 Ko (`INSTALL.PAS` : `MAXBLK`) ; une seule partition `/home` ; pas de GPT, de
+LVM ni de chiffrement ; pas de reseau pendant l'installation ; dispositions de clavier
+autres que us et fr : voir `BUGS_NOYAU.md` [E5] (le noyau ne les connait pas) ; pas de
+touches mortes ; `F2` : shell sans controle de jobs.

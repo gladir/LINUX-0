@@ -1,12 +1,17 @@
-{ INPUT.INC : clavier et souris de l'assistant.
-  Clavier : sur une console virtuelle (/dev/ttyN) le mode MEDIUMRAW
-  (KDSKBMODE) donne les codes de touche Linux : la disposition (LAYOUTS.INC)
-  est appliquee ICI (majuscules, AltGr, verrouillage majuscules), donc
-  immediatement et sans table du noyau. Sur un port serie ou sans VT, les
-  octets sont lus tels quels (UTF-8 et sequences ANSI : fleches, Tab...).
-  Souris : /dev/input/mice (paquets PS/2 de trois octets), curseur logiciel.
-  Evenements : touche (EV_KEY), clic (EV_CLICK, B=1 : double clic),
-  deplacement (EV_MOVE). Inclure apres UIBASE.INC et LAYOUTS.INC. }
+{ @author: Sylvain Maltais (support@gladir.com)
+  @created: 2026
+  @website(https://www.gladir.com/linux-0)
+  @abstract(Target: LPC -3X)
+  @description: INPUT.INC : clavier et souris de l'assistant. Clavier : sur
+      une console virtuelle (/dev/ttyN) le mode MEDIUMRAW (KDSKBMODE) donne
+      les codes de touche Linux : la disposition (LAYOUTS.INC) est appliquee
+      ICI (majuscules, AltGr, verrouillage majuscules), donc immediatement et
+      sans table du noyau. Sur un port serie ou sans VT, les octets sont lus
+      tels quels (UTF-8 et sequences ANSI : fleches, Tab...). Souris :
+      /dev/input/mice (paquets PS/2 de trois octets), curseur logiciel.
+      Evenements : touche (EV_KEY), clic (EV_CLICK, B=1 : double clic),
+      deplacement (EV_MOVE). Inclure apres UIBASE.INC et LAYOUTS.INC.
+}
 
 Const
   K_ENTER = 13;  K_TAB = 9;  K_ESC = 27;  K_BS = 8;
@@ -309,7 +314,8 @@ Begin
     Begin
       R := SysRead(InTtyFd, InRaw, 256);
       If R > 0 Then
-        For B := 0 To R - 1 Do InKeyCode(InRaw[B] And $7F, (InRaw[B] And $80) <> 0);
+        For B := 0 To R - 1 Do
+          InKeyCode(InRaw[B] And $7F, (InRaw[B] And $80) <> 0);
     End
     Else
       InCooked;

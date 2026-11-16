@@ -1,9 +1,14 @@
-{ DISKS.INC : disques et table de partitions MBR de l'assistant.
-  Detection (/proc/partitions), lecture et ecriture du MBR (quatre partitions
-  primaires), calcul de l'espace libre, ecriture du chargeur (MBR + stage2),
-  relecture de la table par le noyau (BLKRRPART). Aucun peripherique n'est
-  modifie avant les appels explicites DkWriteTable / DkWriteBoot.
-  Inclure apres WIDGETS.INC. }
+{ @author: Sylvain Maltais (support@gladir.com)
+  @created: 2026
+  @website(https://www.gladir.com/linux-0)
+  @abstract(Target: LPC -3X)
+  @description: DISKS.INC : disques et table de partitions MBR de l'assistant.
+      Detection (/proc/partitions), lecture et ecriture du MBR (quatre
+      partitions primaires), calcul de l'espace libre, ecriture du chargeur
+      (MBR + stage2), relecture de la table par le noyau (BLKRRPART). Aucun
+      peripherique n'est modifie avant les appels explicites DkWriteTable /
+      DkWriteBoot. Inclure apres WIDGETS.INC.
+}
 
 Const
   PT_LINUX = $83;  PT_SWAP = $82;
@@ -14,7 +19,7 @@ Const
 Type
   TPart = Record
     Used, Active : Boolean;
-    Start, Size, Typ, Role : LongInt;
+    Start, Size, Typ, Role, Fs : LongInt;   { Fs : 2, 3, 4 ou 0 (defaut) }
   End;
 
 Var

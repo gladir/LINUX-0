@@ -1,12 +1,17 @@
-{ WIDGETS.INC : widgets et boucle d'evenements de l'assistant.
-  Etiquette multi-lignes, bouton, case a cocher, boutons radio, champ de
-  texte (et mot de passe), liste deroulante a selection, barre de progression,
-  journal ; boite de message modale ; focus clavier (Tab, Entree, Echap,
-  fleches, Espace) et souris (clic, double clic). Les coordonnees des
-  widgets sont relatives a la zone de contenu de la fenetre (UiOx, UiOy).
-  UiRun rend l'identifiant du bouton active, ou 1000 + identifiant d'un
-  widget "notifiant" dont la valeur a change.
-  Inclure apres INPUT.INC. }
+{ @author: Sylvain Maltais (support@gladir.com)
+  @created: 2026
+  @website(https://www.gladir.com/linux-0)
+  @abstract(Target: LPC -3X)
+  @description: WIDGETS.INC : widgets et boucle d'evenements de l'assistant.
+      Etiquette multi-lignes, bouton, case a cocher, boutons radio, champ de
+      texte (et mot de passe), liste deroulante a selection, barre de
+      progression, journal ; boite de message modale ; focus clavier (Tab,
+      Entree, Echap, fleches, Espace) et souris (clic, double clic). Les
+      coordonnees des widgets sont relatives a la zone de contenu de la
+      fenetre (UiOx, UiOy). UiRun rend l'identifiant du bouton active, ou 1000
+      + identifiant d'un widget "notifiant" dont la valeur a change. Inclure
+      apres INPUT.INC.
+}
 
 Const
   W_LABEL = 1;  W_BUTTON = 2;  W_CHECK = 3;  W_RADIO = 4;  W_EDIT = 5;

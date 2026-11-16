@@ -21,7 +21,8 @@
 #   Variables : LPC (compilateur), KSRC (source du noyau), W (dossier de
 #   travail, defaut /tmp/k32-installcd), ZONES (zoneinfo de l'hote).
 #   Les fichiers du CD : /boot/linux0 (noyau), /boot/initrd.img (live),
-#   /boot/linux0.cfg, /system.tar (systeme a installer), /README.TXT.
+#   /boot/linux0.cfg, /system.tar (systeme a installer), /README.TXT,
+#   /preseed.example (exemple de fichier de reponses).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 K32=$HERE/..
@@ -38,8 +39,8 @@ rm -rf "$W/live" "$W/sys" "$W/cd"; mkdir -p "$W"
 
 echo "== Racine du systeme"
 if [ -z "$ROOT" ]; then
-  ( cd "$K32" && ROOTONLY=1 LPC=$LPC W=$W/build ./BUILD.SH ) > "$W/build.log" 2>&1 \
-    || { tail -20 "$W/build.log"; exit 1; }
+  ( cd "$K32" && ROOTONLY=1 LPC=$LPC W=$W/build ./BUILD.SH ) \
+    > "$W/build.log" 2>&1 || { tail -20 "$W/build.log"; exit 1; }
   ROOT=$W/build/root
 fi
 [ -d "$ROOT/sbin" ] || { echo "racine invalide : $ROOT"; exit 1; }
@@ -57,20 +58,24 @@ if [ -d "$ZONES" ]; then
   done
   mkdir -p "$W/sys/usr/share/zoneinfo/Etc"
   for f in UTC GMT; do
-    [ -e "$ZONES/Etc/$f" ] && cp -a "$ZONES/Etc/$f" "$W/sys/usr/share/zoneinfo/Etc/" || true
+    [ -e "$ZONES/Etc/$f" ] &&
+      cp -a "$ZONES/Etc/$f" "$W/sys/usr/share/zoneinfo/Etc/" || true
   done
 fi
-echo "   $(du -sk "$W/sys/usr/share/zoneinfo" 2>/dev/null | cut -f1) Ko de fuseaux"
+ZK=$(du -sk "$W/sys/usr/share/zoneinfo" 2>/dev/null | cut -f1)
+echo "   $ZK Ko de fuseaux"
 
 echo "== Archive du systeme (system.tar)"
 mkdir -p "$W/cd"
-( cd "$W/sys" && tar --format=gnu --numeric-owner --sort=name -cf "$W/cd/system.tar" . )
+( cd "$W/sys" &&
+  tar --format=gnu --numeric-owner --sort=name -cf "$W/cd/system.tar" . )
 echo "   $(stat -c %s "$W/cd/system.tar") octets"
 
 echo "== Assistant (USR/INSTALLER)"
 mkdir -p "$W/inst"
 cp "$K32"/USR/INSTALLER/*.INC "$K32"/USR/INSTALLER/INSTALLER.PAS "$W/inst/"
-( cd "$W/inst" && "$LPC" -3X -q INSTALLER.PAS ) || { echo "echec de compilation de l'assistant"; exit 1; }
+( cd "$W/inst" && "$LPC" -3X -q INSTALLER.PAS ) ||
+  { echo "echec de compilation de l'assistant"; exit 1; }
 cp -a "$W/sys" "$W/live"
 install -m 755 "$W/inst/INSTALLER" "$W/live/sbin/k32-setup"
 install -m 755 "$K32/USR/INSTALLER/k32-setup-run" "$W/live/sbin/k32-setup-run"
@@ -104,6 +109,7 @@ de secours, F3 : mode texte). Fichiers : /boot/linux0 (noyau), /system.tar
 Installation automatique : ajouter preseed=/cdrom/preseed.cfg a la ligne de
 commande du noyau (voir KERNEL32/README.md, "CD-ROM d'installation").
 EOT
+cp "$K32/USR/INSTALLER/preseed.example" "$W/cd/preseed.example"
 if [ -n "$EXTRA" ]; then cp -a "$EXTRA"/. "$W/cd"/; fi
 "$HERE/MKCD.SH" -o "$OUT" -k "$KERN" -R "$W/live" -r "$W/cd" -c "$CMD" \
   -V K32INSTALL

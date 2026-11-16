@@ -121,7 +121,8 @@ def layouts():
     # dans KbdInitMaps de KERNEL32.PAS pour keymap=XX ; table 0 normale, 1
     # majuscule, 2 AltGr ; caracteres Latin-1 : sortie UTF-8 par KbdPutChar)
     K = ['{ KEYMAPS.KRN : genere par MKDATA.PY depuis LAYOUTS.TXT (E5).',
-         '  Procedure KbdLoadLayout(Const N : String) : remplit KbdMapLo/Hi/Alt',
+         '  Procedure KbdLoadLayout(Const N : String) : remplit',
+         '  KbdMapLo/Hi/Alt',
          '  pour keymap=N (us uk fr be de chde chfr it es pt nl). }',
          'Procedure KbdLoadLayout(Const N : String);',
          'Begin']
@@ -133,11 +134,13 @@ def layouts():
             vals = dict(zip(KEYORDER, planes[li][pl]))
             for st, n in runs:
                 seq = [vals[st + j] for j in range(n)]
-                seq = [0 if v == 0x80 else v for v in seq]   # euro : non Latin-1
+                # l'euro n'est pas Latin-1 : omis
+                seq = [0 if v == 0x80 else v for v in seq]
                 if all(v in (0, 1) for v in seq):
                     continue
                 parts = plit(''.join(chr(v) if v > 1 else '\x00' for v in seq))
-                K.append('    KbdRow(%d, %d, %s);' % (tbl, st, ' + '.join(parts)))
+                K.append('    KbdRow(%d, %d, %s);' %
+                         (tbl, st, ' + '.join(parts)))
         K.append('  End;')
     K.append('End;')
     open(os.path.join(HERE, 'KEYMAPS.KRN'), 'w').write('\n'.join(K) + '\n')

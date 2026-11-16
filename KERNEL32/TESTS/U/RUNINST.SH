@@ -22,22 +22,25 @@ LPC=${LPC:-/tmp/claude-0/work/k32/bin/lpc}
 W=${W:-/tmp/linux0-inst-tests}
 ROOT=; KERN=; CAP=$K32/IMAGE/CAPTURES
 while getopts "r:k:c:" o; do
-  case $o in r) ROOT=$OPTARG ;; k) KERN=$OPTARG ;; c) CAP=$OPTARG ;; *) exit 2 ;; esac
+  case $o in
+    r) ROOT=$OPTARG ;; k) KERN=$OPTARG ;; c) CAP=$OPTARG ;; *) exit 2 ;;
+  esac
 done
 shift $((OPTIND - 1))
 export LPC W
 mkdir -p "$W"
 if [ -z "$ROOT" ]; then
   echo "== racine du systeme (BUILD.SH)"
-  ( cd "$K32" && ROOTONLY=1 LPC=$LPC W=$W/build ./BUILD.SH ) > "$W/build.log" 2>&1 ||
+  ( cd "$K32" && ROOTONLY=1 LPC=$LPC W=$W/build ./BUILD.SH ) \
+    > "$W/build.log" 2>&1 ||
     { echo "ECHEC BUILD.SH (voir $W/build.log)"; exit 1; }
   ROOT=$W/build/root
 fi
 if [ -z "$KERN" ]; then
   echo "== noyau de production"
   KSRC=${KSRC:-$K32/KERNEL32.PAS}
-  "$K32/TOOLS/MKPROD.SH" -l "$LPC" -s "$KSRC" -o "$W/KERNEL32.ELF" > /dev/null ||
-    { echo "ECHEC MKPROD.SH"; exit 1; }
+  "$K32/TOOLS/MKPROD.SH" -l "$LPC" -s "$KSRC" -o "$W/KERNEL32.ELF" \
+    > /dev/null || { echo "ECHEC MKPROD.SH"; exit 1; }
   KERN=$W/KERNEL32.ELF
 fi
 python3 "$HERE/instest.py" "$W/run" "$ROOT" "$KERN" "$CAP" "$@"

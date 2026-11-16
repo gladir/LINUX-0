@@ -1,7 +1,13 @@
-{ INSTOPS.INC : operations d'installation : journal, lancement de
-  commandes (mkfs, mkswap), repertoires, ecriture de fichiers, extraction de
-  l'archive tar du systeme (/cdrom/system.tar) avec progression reelle.
-  Inclure apres DISKS.INC. Le programme principal definit OpUiHook. }
+{ @author: Sylvain Maltais (support@gladir.com)
+  @created: 2026
+  @website(https://www.gladir.com/linux-0)
+  @abstract(Target: LPC -3X)
+  @description: INSTOPS.INC : operations d'installation : journal, lancement
+      de commandes (mkfs, mkswap), repertoires, ecriture de fichiers,
+      extraction de l'archive tar du systeme (/cdrom/system.tar) avec
+      progression reelle. Inclure apres DISKS.INC. Le programme principal
+      definit OpUiHook.
+}
 
 Const
   LOGPATH = '/var/log/install.log';
@@ -85,8 +91,8 @@ Begin
 End;
 
 { ecrit (ou ajoute) un fichier de texte (octets tels quels) }
-Function OpWriteFile(Const Path, Data : String; Mode : LongInt; Append : Boolean)
-  : Boolean;
+Function OpWriteFile(Const Path, Data : String; Mode : LongInt;
+  Append : Boolean) : Boolean;
 Var Fd, Fl : LongInt;
 Begin
   OpWriteFile := False;

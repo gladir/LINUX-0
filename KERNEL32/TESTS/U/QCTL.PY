@@ -21,7 +21,7 @@ SHIFT = {'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6',
 
 
 class Q:
-    def __init__(self, work, args, serial_io=False):
+    def __init__(self, work, args, serial_io=False, env=None):
         self.work = work
         os.makedirs(work, exist_ok=True)
         self.out = os.path.join(work, 'serial.txt')
@@ -38,7 +38,8 @@ class Q:
                '-display', 'none', '-no-reboot'] + args
         self.sio = None
         self.p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL)
+                                  stderr=subprocess.DEVNULL,
+                                  env=dict(os.environ, **(env or {})))
         self.s = None
         for _ in range(100):
             try:

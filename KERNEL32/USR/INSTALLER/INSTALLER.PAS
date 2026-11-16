@@ -55,7 +55,7 @@ Const
 Var
   Lang, LayI, Step, ClkUtc, FsKind, DiskIx, PartMode, TzCont : LongInt;
   LayTouched, TzTouched, ClkTouched, UseSwap, Quitting, AutoMode, TextOnly,
-    NoUi, CdOk, TzLoaded : Boolean;
+    NoUi, CdOk, TzLoaded, SwapEdited : Boolean;
   TzName, ClkDate, ClkTime, Host, RootPw, UserFull, UserName, UserPw,
     SwapMb, TtyPath, PresPath, RebootMode, DiskPath : String;
   Cities : Array[0..699] Of String[40];
@@ -862,6 +862,14 @@ End;
 Function PageMeth : LongInt;
 Var R, Mb, E, Sz : LongInt;
 Begin
+  { taille de swap proposee : un quart du disque, 256 Mo au plus }
+  If Not SwapEdited Then
+  Begin
+    Mb := DkSectors(DiskPath) Div 2048 Div 4;
+    If Mb > 256 Then Mb := 256;
+    If Mb < 8 Then Mb := 8;
+    SwapMb := NumS(Mb);
+  End;
   Repeat
     BeginPage(S_METH, Msg(M_METH_T));
     UiLabel(0, 0, UiCw, 2, Fmt(M_METH_I, DiskPath, '', ''), 0);
@@ -880,6 +888,7 @@ Begin
       R := PageRun;
       If UiChecked(10) Then PartMode := 1 Else PartMode := 2;
       UseSwap := UiChecked(12);
+      If UiGetText(13) <> SwapMb Then SwapEdited := True;
       SwapMb := UiGetText(13);
       If UiChecked(14) Then FsKind := 4
       Else If UiChecked(15) Then FsKind := 3
@@ -1010,7 +1019,8 @@ Begin
   End;
 End;
 
-{ taille saisie ("500M", "2G", "1024", vide = tout) en secteurs ; -1 si invalide }
+{ taille saisie ("500M", "2G", "1024", vide = tout) en secteurs ; -1 si
+  invalide }
 Function ParseSize(Const S : String; Max : LongInt) : LongInt;
 Var T : String; Mult, V, E, N : LongInt;
 Begin
@@ -1180,6 +1190,13 @@ End;
 
 { ---- page : roles des partitions ---- }
 
+{ systeme de fichiers de la partition I : le sien, sinon le defaut }
+Function PartFs(I : LongInt) : LongInt;
+Begin
+  If (Pt[I].Fs >= 2) And (Pt[I].Fs <= 4) Then PartFs := Pt[I].Fs
+  Else PartFs := FsKind;
+End;
+
 Function RoleText(R : LongInt) : String;
 Begin
   Case R Of
@@ -1189,6 +1206,16 @@ Begin
   Else
     RoleText := Msg(M_ROLE_NONE);
   End;
+End;
+
+{ role et systeme de fichiers d'une partition }
+Function RoleLine(I : LongInt) : String;
+Var T : String;
+Begin
+  T := RoleText(Pt[I].Role);
+  If (Pt[I].Role = ROLE_ROOT) Or (Pt[I].Role = ROLE_HOME) Then
+    T := T + ' ' + FsName[PartFs(I)];
+  RoleLine := T;
 End;
 
 Procedure AutoRoles;
@@ -1238,29 +1265,46 @@ Begin
         Map[N] := I;
         UiListAdd(L, PadR(DkPartDev(I), 12) + PadL(NumS(DkMb(Pt[I].Size)), 8) +
           ' MB  ' + PadR(TypeName(Pt[I].Typ), 16) + ' ' +
-          RoleText(Pt[I].Role));
+          RoleLine(I));
         Inc(N);
       End;
     If Sel < N Then UiWd[L].Val := Sel;
     UiButton(20, 0, 11, 0, Msg(M_ROLE_B), 0);
+    UiButton(21, Length(Msg(M_ROLE_B)) + 6, 11, 0, Msg(M_ROLE_FSB), 0);
     UiLabel(0, 13, UiCw, 1, Msg(M_ROLE_FS), 0);
-    UiRadio(14, 2, 3, 14, 10, 'ext4', FsKind = 4, 0);
-    UiRadio(15, 2, 16, 14, 10, 'ext3', FsKind = 3, 0);
-    UiRadio(16, 2, 29, 14, 10, 'ext2', FsKind = 2, 0);
+    UiRadio(14, 2, 3, 14, 10, 'ext4', FsKind = 4, WF_NOTIFY);
+    UiRadio(15, 2, 16, 14, 10, 'ext3', FsKind = 3, WF_NOTIFY);
+    UiRadio(16, 2, 29, 14, 10, 'ext2', FsKind = 2, WF_NOTIFY);
     NavButtons(True, Msg(M_NEXT));
     UiSetFocusId(10);
     Repeat
       R := PageRun;
       Sel := UiSel(10);
-      If UiChecked(14) Then FsKind := 4
-      Else If UiChecked(15) Then FsKind := 3
-      Else FsKind := 2;
+      If R >= RES_NOTIFY Then
+      Begin
+        { nouveau systeme de fichiers par defaut pour toutes les partitions }
+        If UiChecked(14) Then FsKind := 4
+        Else If UiChecked(15) Then FsKind := 3
+        Else FsKind := 2;
+        For K := 1 To 4 Do Pt[K].Fs := 0;
+        R := RES_REBUILD;
+      End;
       If R = 20 Then
       Begin
         If (Sel >= 0) And (Sel < N) Then
         Begin
           K := Map[Sel];
           SetRole(K, (Pt[K].Role + 1) Mod 4);
+        End;
+        R := RES_REBUILD;
+      End
+      Else If R = 21 Then
+      Begin
+        If (Sel >= 0) And (Sel < N) Then
+        Begin
+          K := Map[Sel];
+          Pt[K].Fs := PartFs(K) - 1;
+          If Pt[K].Fs < 2 Then Pt[K].Fs := 4;
         End;
         R := RES_REBUILD;
       End
@@ -1322,7 +1366,7 @@ Begin
       Begin
         If N > 0 Then T := T + #10;
         T := T + Fmt(M_SUM_PART, DkPartDev(I), NumS(DkMb(Pt[I].Size)),
-                     RoleText(Pt[I].Role));
+                     RoleLine(I));
         Inc(N);
       End;
     UiLabel(0, 7, UiCw, 5, T, WF_DIM);
@@ -1385,10 +1429,6 @@ Begin
   OpLog(Msg(M_INST_1 + N - 1));
 End;
 
-Function FsOf(R : LongInt) : String;
-Begin
-  FsOf := FsName[FsKind];
-End;
 
 Function RootDev : String;
 Begin
@@ -1446,16 +1486,16 @@ Begin
   CfgAll := False;
   Swap := False;
   Home := False;
-  Fs := FsName[FsKind];
   { fstab }
   Pw := '# /etc/fstab : genere par l''installateur' + #10 +
-        RootDev + ' / ' + Fs + ' defaults 1 1' + #10;
+        RootDev + ' / ' + FsName[PartFs(RootPart)] + ' defaults 1 1' + #10;
   For I := 1 To 4 Do
     If Pt[I].Used Then
     Begin
       If Pt[I].Role = ROLE_HOME Then
       Begin
-        Pw := Pw + DkPartDev(I) + ' /home ' + Fs + ' defaults 1 2' + #10;
+        Pw := Pw + DkPartDev(I) + ' /home ' + FsName[PartFs(I)] +
+              ' defaults 1 2' + #10;
         Home := True;
       End
       Else If Pt[I].Role = ROLE_SWAP Then
@@ -1636,10 +1676,10 @@ Begin
       Else
       Begin
         If Pt[I].Role = ROLE_ROOT Then Lbl := 'root' Else Lbl := 'home';
-        OpLog(Fmt(M_L_FMT, Dev, FsName[FsKind], ''));
+        OpLog(Fmt(M_L_FMT, Dev, FsName[PartFs(I)], ''));
         Args := '-L ' + Lbl + ' ' + Dev;
         If Pt[I].Size > 2 * 1024 * 2048 Then Args := '-b 4096 ' + Args;
-        Rc := OpExec('/sbin/mkfs.' + FsName[FsKind], Args);
+        Rc := OpExec('/sbin/mkfs.' + FsName[PartFs(I)], Args);
       End;
       If Rc <> 0 Then
       Begin
@@ -1653,7 +1693,7 @@ Begin
   SysMkdir(TGT, 493);
   Dev := RootDev;
   OpLog(Fmt(M_L_MNT, Dev, TGT, ''));
-  If SysMount(Dev, TGT, FsName[FsKind], 0) < 0 Then
+  If SysMount(Dev, TGT, FsName[PartFs(RootPart)], 0) < 0 Then
   Begin
     OpErr := Fmt(M_E_MNT, Dev, '', '') + ' : ' + SysErrorText(SysErrno);
     Exit;
@@ -1663,7 +1703,7 @@ Begin
     Begin
       SysMkdir(TGT + '/home', 493);
       OpLog(Fmt(M_L_MNT, DkPartDev(I), TGT + '/home', ''));
-      If SysMount(DkPartDev(I), TGT + '/home', FsName[FsKind], 0) < 0 Then
+      If SysMount(DkPartDev(I), TGT + '/home', FsName[PartFs(I)], 0) < 0 Then
       Begin
         OpErr := Fmt(M_E_MNT, DkPartDev(I), '', '') + ' : ' +
                  SysErrorText(SysErrno);
@@ -1813,12 +1853,9 @@ Begin
     Else Slot := DkCreate(0, Sz, PT_LINUX);
     If Slot = 0 Then Exit;
     Pt[Slot].Role := Role;
-    If (Role = ROLE_ROOT) Then
-    Begin
-      If Fs = 'ext3' Then FsKind := 3
-      Else If Fs = 'ext2' Then FsKind := 2
-      Else FsKind := 4;
-    End;
+    If Fs = 'ext3' Then Pt[Slot].Fs := 3
+    Else If Fs = 'ext2' Then Pt[Slot].Fs := 2
+    Else If Fs = 'ext4' Then Pt[Slot].Fs := 4;
     Inc(N);
   End;
   PsParts := N > 0;
@@ -2023,6 +2060,7 @@ BEGIN
   If PresPath = '' Then PresPath := CmdGet('preseed');
   If CmdHas('text') Then TextOnly := True;
   Lang := 1;
+  If CmdGet('lang') <> '' Then Lang := LangFromCode(CmdGet('lang'));
   LayI := 0;
   LayTouched := False;
   TzTouched := False;

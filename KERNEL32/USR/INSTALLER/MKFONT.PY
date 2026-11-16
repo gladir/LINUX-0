@@ -35,12 +35,15 @@ def glyph(font, ch, cw, chh, oy):
     d.text((cw, chh + oy), ch, font=font, fill=1)
     return im.crop((cw, chh, cw + cw, chh + chh))
 
+PROBE = '\u00c9\u00dc\u00c7\u00c5\u00d1g j\u00f1pqy|\u00a1\u00bf\u00a7'
+
+
 def best_offset(font, cw, chh):
     # decale verticalement pour que les accents ET les jambages tiennent
     best = None
     for oy in range(-6, 7):
         bad = 0
-        for ch in 'ÉÜÇÅÑg jñpqy|¡¿§':
+        for ch in PROBE:
             big = Image.new('1', (cw * 3, chh * 3), 0)
             d = ImageDraw.Draw(big)
             d.fontmode = '1'
@@ -55,7 +58,8 @@ def best_offset(font, cw, chh):
     return best[1]
 
 lines = []
-lines.append('{ FONTS.INC : genere par MKFONT.PY (DejaVu Sans Mono, Windows-1252)')
+lines.append('{ FONTS.INC : genere par MKFONT.PY (DejaVu Sans Mono,')
+lines.append('  Windows-1252)')
 lines.append('  Glyphe i = code i + 32 (32..255) ; ligne = octets de gauche a')
 lines.append('  droite, bit 7 = pixel de gauche. Ne pas modifier a la main. }')
 sheet = None

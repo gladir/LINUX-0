@@ -237,8 +237,18 @@ reserve un octet pour le NUL des chaines.
 Langage : une procedure ou fonction de premier niveau definie deux fois est
 une erreur "identificateur deja declare". La concatenation de chaines (+) se
 fait par les longueurs : #0 est conserve (le resultat est une chaine Pascal).
-Heure locale : variable TZ (NOM[+-]hh[:mm], sans heure d'ete) ou fichier
-/etc/TZ ; GetLocalTime, dates de fichiers et SetLocalTime l'appliquent.
+Heure locale (lot E5) : variable TZ, fichier /etc/TZ ou /etc/localtime.
+Formes de TZ : NOM[+-]hh[:mm] (decalage fixe, sans heure d'ete) ou nom de zone
+("Europe/Paris", ":Europe/Paris", "UTC", chemin absolu) lu dans
+/usr/share/zoneinfo : fichier TZif version 1 (le format "fat" des paquets
+tzdata : transitions jusqu'en 2037, heure d'ete comprise). GetLocalTime,
+SetLocalTime, dates de fichiers (FindFirstFile, GetFileTime), date, ls, cron
+et hwclock l'appliquent. Fonctions de L32API.PAS : LnxTzSelect(nom) (choisit
+la zone ; '' = TZ, /etc/TZ, /etc/localtime), LnxTzAt(t) (decalage en secondes
+a l'est de UTC pour l'instant UTC t), LnxTzUtcOf(local) (instant UTC d'une heure
+locale), LnxTzIsDst(t), LnxTz (decalage maintenant). Test : TESTS/U/RUNINST.SH
+tz. Le TZif "slim" (sans transitions apres 2007, regle POSIX en pied de
+fichier) n'est pas interprete : utiliser des fichiers "fat" (zic -b fat).
 SysLLSeek (llseek) : decalages 64 bits.
 
 Pieges du langage connus (Pascal est insensible a la casse)
@@ -289,6 +299,12 @@ Pieges du langage connus (Pascal est insensible a la casse)
   masque cette fonction (corrige : une fonction `Cur` du programme faussait
   LnxGrow, le tas de la couche API).
 - {$I fichier.inc} : inclusion (relatif au dossier du source).
+- Lot E5 : un litteral qui alterne #nn et 'texte' ('...'#27'[0m'#27'[2J'#27'[H')
+  etait tronque apres le deuxieme #nn (LexScanCharLit) : corrige. Un TRES GRAND
+  tableau de PChar (Array[0..N] Of PChar = ('..', '..', ...), plusieurs
+  centaines d'elements) peut contenir des pointeurs nuls au milieu : pour de
+  gros catalogues de textes, utiliser un tableau d'octets (Array Of Byte) et
+  un tableau de decalages (voir USR/INSTALLER/MSGS.INC, genere par MKDATA.PY).
 - Un identificateur d'un programme peut entrer en collision avec un nom interne
   du compilateur : NPre, PwL (variables globales) faisaient echouer la
   compilation ou le programme ; les renommer.
