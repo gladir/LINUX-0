@@ -1,0 +1,14 @@
+.TH CRONTAB 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+crontab \- gere les tables de cron / maintain crontab files
+.SH SYNOPSIS
+.B crontab
+[-u user] (-l | -e | -r | file)
+.br
+.SH DESCRIPTION
+Installs, lists (-l), edits (-e, with $VISUAL, $EDITOR or vi) or removes (-r) the crontab of a user. The table is kept in /var/spool/cron/crontabs/USER. Each
+line has five fields (minute hour day-of-month month day-of-week) followed by the command; fields accept lists, ranges, steps (*/5), month and day names.
+@reboot @hourly @daily @weekly @monthly @yearly replace the five fields. NAME=value lines set the job environment. In the command, % ends the command and the
+rest becomes its standard input.
+.SH SEE ALSO
+crond(1), at(1)

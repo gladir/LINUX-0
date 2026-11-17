@@ -7,7 +7,7 @@
 Program TAC;
 
 Var
- Before:Boolean;
+ Before,FirstByte:Boolean;
  I:Integer;
  Handle:File;
  C:Char;
@@ -55,11 +55,28 @@ BEGIN
      If FS>0 Then Begin
       FilePos:=FS-1;
       CurrLine:='';
+      FirstByte:=True;
       While FilePos>=0 do Begin
        Seek(Handle,FilePos);
        BlockRead(Handle,C,1,ByteReaded);
        Dec(FilePos);
        If ByteReaded=0 Then Break;
+       {$IFDEF LINUX0}
+       Case C of
+        #10:Begin
+         If FirstByte Then FirstByte:=False
+          Else Begin
+           If(Before)Then WriteLn(CurrLine) Else WriteLn(CurrLine);
+           CurrLine:='';
+          End;
+        End;
+        #13:;
+        Else Begin
+         FirstByte:=False;
+         CurrLine:=C+CurrLine;
+        End;
+       End;
+       {$ELSE}
        Case C of
         #13:Begin
          If(Before)Then Write(#13,#10,CurrLine)
@@ -71,6 +88,7 @@ BEGIN
          CurrLine:=C+CurrLine;
         End;
        End;
+       {$ENDIF}
       End;
       WriteLn(CurrLine);
      End;

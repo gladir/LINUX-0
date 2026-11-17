@@ -97,7 +97,7 @@ BEGIN
     If Buffer[I]=10Then Begin
      Inc(NumLine);
      If NumLine>MaxLine Then Begin
-      Dec(EndPos,SizeOf(Buffer)-I);
+      EndPos:=CurrEndPos+I+1;
       FindEnd:=True;
       Break;
      End;
@@ -106,17 +106,26 @@ BEGIN
    If(FindEnd)Then Break;
    Dec(EndPos,ByteReaded);
   Until EndPos<=0;
+  If EndPos<0Then EndPos:=0;
   Seek(FileView,EndPos);
   While Not EOF(FileView)do Begin
    BlockRead(FileView,Buffer,SizeOf(Buffer),ByteReaded);
    If ByteReaded=0Then Break;
    For I:=0 to ByteReaded-1 do Begin
     Case Buffer[I]of
+{$IFDEF LINUX0}
+     10:Begin
+      Inc(CurrLinePos);
+      WriteLn;
+     End;
+     13:;
+{$ELSE}
      13:Begin
       Inc(CurrLinePos);
       WriteLn;
      End;
      10:;
+{$ENDIF}
      Else Write(Char(Buffer[I]));
     End;
    End;

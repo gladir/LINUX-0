@@ -8,6 +8,8 @@ Program MKTEMP;
 
 Uses DOS;
 
+Const PathSep={$IFDEF LINUX0}'/'{$ELSE}'\'{$ENDIF};
+
 Var
  CreateDirectory,DryRun,Quiet:Boolean;
  I:Integer;
@@ -37,11 +39,11 @@ Begin
  If Path=''Then Exit;
  FSplit(Path,D,N,E);
  If E=''Then Begin
-  If D[Length(D)]<>'\'Then D:=D+'\';
+  If D[Length(D)]<>PathSep Then D:=D+PathSep;
   D:=D+E;
  End;
  If D=''Then Path2Dir:='' Else
- If D[Length(D)]<>'\'Then D:=D+'\';
+ If D[Length(D)]<>PathSep Then D:=D+PathSep;
  Path2Dir:=D;
 End;
 
@@ -71,16 +73,16 @@ Begin
  If TmpDirManual<>''Then TmpDir:=TmpDirManual
                     Else TmpDir:=GetEnv('TMPDIR');
  If TmpDir=''Then Begin
-  {$IFDEF LINUX}
+  {$IFDEF LINUX0}
    TmpDir:='/tmp/';
   {$ELSE}
    TmpDir:='C:\TEMP\';
   {$ENDIF}
  End;
- {$IFDEF LINUX}
+ {$IFDEF LINUX0}
   If TmpDir[Length(TmpDir)]<>'/'Then TmpDir:=TmpDir+'/';
  {$ELSE}
-  If TmpDir[Length(TmpDir)]<>'\'Then TmpDir:=TmpDir+'\';
+  If TmpDir[Length(TmpDir)]<>PathSep Then TmpDir:=TmpDir+PathSep;
  {$ENDIF}
  GetTempDirectory:=TmpDir;
 End;

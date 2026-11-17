@@ -1,0 +1,59 @@
+# LAYOUTS.TXT (UTF-8) : dispositions de clavier de l'assistant.
+# Pour chaque disposition : identifiant, nom natif, puis trois plans (normal,
+# majuscule, AltGr) de 48 touches dans l'ordre des codes de touche Linux
+# 41, 2..13, 16..27, 30..40, 43, 44..53, 86 ; "nul" = rien.
+# MKDATA.PY convertit ce fichier en LAYOUTS.INC.
+layout us English (US)
+N: ` 1 2 3 4 5 6 7 8 9 0 - =  q w e r t y u i o p [ ]  a s d f g h j k l ; '  \  z x c v b n m , . /  <
+S: ~ ! @ # $ % ^ & * ( ) _ +  Q W E R T Y U I O P { }  A S D F G H J K L : "  |  Z X C V B N M < > ?  >
+A: nul nul nul nul nul nul nul nul nul nul nul nul nul  nul nul nul nul nul nul nul nul nul nul nul nul  nul nul nul nul nul nul nul nul nul nul nul  nul  nul nul nul nul nul nul nul nul nul nul  nul
+
+layout uk English (UK)
+N: ` 1 2 3 4 5 6 7 8 9 0 - =  q w e r t y u i o p [ ]  a s d f g h j k l ; '  #  z x c v b n m , . /  \
+S: ¬ ! " £ $ % ^ & * ( ) _ +  Q W E R T Y U I O P { }  A S D F G H J K L : @  ~  Z X C V B N M < > ?  |
+A: ¦ nul nul nul € nul nul nul nul nul nul nul nul  nul nul é nul nul nul ú í ó nul nul nul  á nul nul nul nul nul nul nul nul nul nul  nul  nul nul nul nul nul nul nul nul nul nul  nul
+
+layout fr Français (AZERTY)
+N: ² & é " ' ( - è _ ç à ) =  a z e r t y u i o p dcirc $  q s d f g h j k l m ù  *  w x c v b n , ; : !  <
+S: nul 1 2 3 4 5 6 7 8 9 0 ° +  A Z E R T Y U I O P ddiaer £  Q S D F G H J K L M %  µ  W X C V B N ? . / §  >
+A: nul nul ~ # { [ | ` \ ^ @ ] }  nul nul € nul nul nul nul nul nul nul nul ¤  nul nul nul nul nul nul nul nul nul nul nul  nul  nul nul nul nul nul nul nul nul nul nul  nul
+
+layout be Belgique (AZERTY)
+N: ² & é " ' ( § è ! ç à ) -  a z e r t y u i o p dcirc $  q s d f g h j k l m ù  µ  w x c v b n , ; : =  <
+S: ³ 1 2 3 4 5 6 7 8 9 0 ° _  A Z E R T Y U I O P ddiaer *  Q S D F G H J K L M %  £  W X C V B N ? . / +  >
+A: nul | @ # nul [ ^ nul nul { } nul nul  nul nul € nul nul nul nul nul nul nul [ ]  nul nul nul nul nul nul nul nul nul nul ´  `  nul nul nul nul nul nul nul nul nul ~  \
+
+layout de Deutsch (QWERTZ)
+N: dcirc 1 2 3 4 5 6 7 8 9 0 ß dacute  q w e r t z u i o p ü +  a s d f g h j k l ö ä  #  y x c v b n m , . -  <
+S: ° ! " § $ % & / ( ) = ? dgrave  Q W E R T Z U I O P Ü *  A S D F G H J K L Ö Ä  '  Y X C V B N M ; : _  >
+A: nul nul ² ³ nul nul nul { [ ] } \ nul  @ nul € nul nul nul nul nul nul nul nul ~  nul nul nul nul nul nul nul nul nul nul nul  nul  nul nul nul nul nul nul µ nul nul nul  |
+
+layout chde Schweiz (QWERTZ)
+N: § 1 2 3 4 5 6 7 8 9 0 ' dcirc  q w e r t z u i o p ü ddiaer  a s d f g h j k l ö ä  $  y x c v b n m , . -  <
+S: ° + " * ç % & / ( ) = ? dgrave  Q W E R T Z U I O P è !  A S D F G H J K L é à  £  Y X C V B N M ; : _  >
+A: nul ¦ @ # ° § ¬ | ¢ nul nul dacute ~  nul nul € nul nul nul nul nul nul nul [ ]  nul nul nul nul nul nul nul nul nul nul {  }  nul nul nul nul nul nul nul nul nul nul  \
+
+layout chfr Suisse romande (QWERTZ)
+N: § 1 2 3 4 5 6 7 8 9 0 ' dcirc  q w e r t z u i o p è ddiaer  a s d f g h j k l é à  $  y x c v b n m , . -  <
+S: ° + " * ç % & / ( ) = ? dgrave  Q W E R T Z U I O P ü !  A S D F G H J K L ö ä  £  Y X C V B N M ; : _  >
+A: nul ¦ @ # ° § ¬ | ¢ nul nul dacute ~  nul nul € nul nul nul nul nul nul nul [ ]  nul nul nul nul nul nul nul nul nul nul {  }  nul nul nul nul nul nul nul nul nul nul  \
+
+layout it Italiano
+N: \ 1 2 3 4 5 6 7 8 9 0 ' ì  q w e r t y u i o p è +  a s d f g h j k l ò à  ù  z x c v b n m , . -  <
+S: | ! " £ $ % & / ( ) = ? ^  Q W E R T Y U I O P é *  A S D F G H J K L ç °  §  Z X C V B N M ; : _  >
+A: nul nul nul nul nul nul nul nul nul nul nul nul nul  nul nul € nul nul nul nul nul nul nul [ ]  nul nul nul nul nul nul nul nul nul @ #  nul  nul nul nul nul nul nul nul nul nul nul  nul
+
+layout es Español
+N: º 1 2 3 4 5 6 7 8 9 0 ' ¡  q w e r t y u i o p dgrave +  a s d f g h j k l ñ dacute  ç  z x c v b n m , . -  <
+S: ª ! " · $ % & / ( ) = ? ¿  Q W E R T Y U I O P dcirc *  A S D F G H J K L Ñ ddiaer  Ç  Z X C V B N M ; : _  >
+A: \ | @ # ~ € ¬ nul nul nul nul nul nul  nul nul € nul nul nul nul nul nul nul [ ]  nul nul nul nul nul nul nul nul nul nul {  }  nul nul nul nul nul nul nul nul nul nul  nul
+
+layout pt Português
+N: \ 1 2 3 4 5 6 7 8 9 0 ' «  q w e r t y u i o p + dacute  a s d f g h j k l ç º  dtilde  z x c v b n m , . -  <
+S: | ! " # $ % & / ( ) = ? »  Q W E R T Y U I O P * dgrave  A S D F G H J K L Ç ª  dcirc  Z X C V B N M ; : _  >
+A: nul nul @ £ § € nul { [ ] } nul nul  nul nul € nul nul nul nul nul nul nul nul nul  nul nul nul nul nul nul nul nul nul nul nul  nul  nul nul nul nul nul nul nul nul nul nul  nul
+
+layout nl Nederlands (US int'l)
+N: ` 1 2 3 4 5 6 7 8 9 0 - =  q w e r t y u i o p [ ]  a s d f g h j k l ; '  \  z x c v b n m , . /  <
+S: ~ ! @ # $ % ^ & * ( ) _ +  Q W E R T Y U I O P { }  A S D F G H J K L : "  |  Z X C V B N M < > ?  >
+A: nul nul nul nul nul € nul nul nul nul nul nul nul  nul nul € nul nul nul nul nul nul nul nul nul  nul nul nul nul nul nul nul nul nul nul nul  nul  nul nul nul nul nul nul nul nul nul nul  nul

@@ -1,0 +1,26 @@
+.TH LESS 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+less \- pagineur / file pager
+.SH SYNOPSIS
+.B less
+[-NSi] [+/pattern] [file...]
+.br
+.SH DESCRIPTION
+Displays files (or standard input) one screen at a time. Keys: space f ^F next page, b ^B previous page, d u half page, j k Enter arrows by line, g G Ng top,
+bottom, line N, p N% percentage, / ? n N search (regular expressions, matches highlighted), -N toggle line numbers, -S toggle chopping of long lines, =
+position, v edit with vi, :n :p next and previous file, h help, q quit.
+.SH OPTIONS
+.TP
+.B -N
+Show line numbers.
+.TP
+.B -S
+Chop long lines instead of wrapping them.
+.TP
+.B -i
+Ignore case in searches.
+.TP
+.B +/pattern
+Start at the first line matching pattern.
+.SH SEE ALSO
+more(1), vi(1), man(1)

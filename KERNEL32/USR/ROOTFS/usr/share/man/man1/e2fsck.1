@@ -1,0 +1,23 @@
+.TH E2FSCK 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+e2fsck \- verifie un systeme de fichiers ext2/ext3/ext4 / check an ext2/ext3/ext4 file system
+.SH SYNOPSIS
+.B e2fsck
+[-fnpvy] device
+.br
+.B fsck
+[-t type] [-AN] [options] [device...]
+.br
+.SH DESCRIPTION
+Read-only checker (every answer is "no", like e2fsck -n): superblock and group descriptors, pass 1 (inodes, blocks, sizes, i_blocks, blocks claimed twice), pass
+2 (directories), pass 3 (connectivity), pass 4 (link counts), pass 5 (bitmaps and free counters). Output follows e2fsck. Exit status 0 when clean, 4 when errors
+are left. Block maps and extents are understood; no repair is done. fsck runs fsck.TYPE according to -t or /etc/fstab.
+.SH OPTIONS
+.TP
+.B -f
+Force a full check even if the file system is marked clean.
+.TP
+.B -n
+Read-only (always the case).
+.SH SEE ALSO
+mount(1)

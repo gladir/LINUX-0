@@ -18,7 +18,7 @@ Type
 Var
  Triplets:Array[1..15] of TTriplet;
  kwar:TKwartet;
- FileName:String[12];
+ FileName:String;
  i,j:Integer;
  f:File;
  g:Text;

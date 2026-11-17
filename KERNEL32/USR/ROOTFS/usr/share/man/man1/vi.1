@@ -1,0 +1,18 @@
+.TH VI 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+vi \- editeur de texte plein ecran / screen text editor
+.SH SYNOPSIS
+.B vi
+[+N] [file...]
+.br
+.SH DESCRIPTION
+Modal text editor. In normal mode, motions (h j k l w b e W B E 0 ^ $ f F t T ; , % { } G gg H M L, Ctrl-F Ctrl-B Ctrl-D Ctrl-U) move the cursor; operators d c
+y > < combine with motions (dw, c$, y}, dd, cc, yy, >>); x X D C s S r R J ~ p P u . edit; i a I A o O start insertion (Esc ends it).
+.PP
+Search with / and ? (regular expressions), n and N repeat. Ex commands start with a colon: :w :q :wq :x :q! :e :r :N :d :y :m :t :j :s/pat/rep/[g] :g/pat/cmd
+:v/pat/cmd :set (nu ai ic ws) :!cmd. Ranges: N,M % . $ 'a /pat/.
+.PP
+Undo (u) has one level and toggles between the two states. The dot command repeats the last change. There is a single unnamed register. Lines longer than 255
+bytes are split when loaded.
+.SH SEE ALSO
+less(1), sed(1), ed(1)

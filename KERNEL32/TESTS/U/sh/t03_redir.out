@@ -1,0 +1,17 @@
+one
+two
+2
+err
+out
+rc=2
+a /tmp/shtest.7227-not-expanded-here? no: expanded
+literal $HOME `pwd`
+tab stripped
+x=5 6 cmd
+three
+c
+got l1
+got l2
+got l3
+c b a
+rc=0

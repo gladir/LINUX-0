@@ -1,0 +1,76 @@
+KERNEL32/IMAGE : images produites par KERNEL32/BUILD.SH
+
+  LINUX32-HD.IMG   disque dur de 64 Mo (par defaut) : MBR, chargeur dans les
+                   secteurs 1 a N, partition 1 (type 83h, active, secteur 2048)
+                   formatee en ext2 (blocs de 1 Ko, inodes de 128 octets)
+                   avec /boot/linux0 (noyau ELF32) et la racine du systeme.
+
+Essai :
+  qemu-system-i386 -m 64 -drive file=IMAGE/LINUX32-HD.IMG,format=raw,if=ide
+  KERNEL32/TESTS/RUNQEMU.SH IMAGE/LINUX32-HD.IMG   (console serie sur stdout)
+
+Verification : KERNEL32/TESTS/E2CHECK.SH IMAGE/LINUX32-HD.IMG
+L'image n'est pas conservee dans le depot (fichier creux de 64 Mo) : la
+regenerer par BUILD.SH (TESTKERNEL=1 tant que le noyau KERNEL32.PAS n'existe
+pas : noyau de test TESTS/B/TESTK.ASM).
+
+KERNEL32-INSTALL.ISO : CD-ROM d'installation graphique (non conserve dans le
+depot : le regenerer par  KERNEL32/BUILD.SH cd  ou
+KERNEL32/TOOLS/MKINSTALLCD.SH -o KERNEL32-INSTALL.ISO).
+  Contenu : /boot/linux0 (noyau de production), /boot/initrd.img (systeme live
+  + assistant /sbin/k32-setup), /system.tar (systeme a installer), README.TXT.
+  Amorcage : qemu-system-i386 -m 256 -vga std \
+             -cdrom IMAGE/KERNEL32-INSTALL.ISO \
+             -boot d -drive file=disque.img,format=raw,if=ide,index=0
+  (disque.img : un fichier creux, par exemple  truncate -s 1G disque.img ;
+  le CD est /dev/hdc, le disque /dev/hda). Les 7 langues (francais, English,
+  Deutsch, Italiano, Espanol, Portugues, Nederlands), la disposition du clavier,
+  le fuseau horaire, le partitionnement (assiste ou manuel) et le formatage
+  se choisissent a l'ecran, a la souris ou au clavier (Tab, Entree, Echap,
+  F2 : shell de secours, F3 : mode texte). Rien n'est ecrit sur le disque
+  avant la confirmation du recapitulatif.
+  Installation sans intervention : ajouter  preseed=/cdrom/preseed.cfg  a la
+  ligne de commande du noyau (fichier cle=valeur, voir KERNEL32/README.md,
+  "CD-ROM d'installation"). Apres l'installation : retirer le CD, redemarrer.
+  Journal : /var/log/install.log (copie dans le systeme installe).
+
+CAPTURES/ : captures d'ecran PNG de l'assistant (francais : fr-*, allemand :
+  de-*, installations automatiques : auto-*, mode texte : text-*), prises par
+  KERNEL32/TESTS/U/RUNINST.SH sous QEMU (screendump).
+
+=== Essai dans VirtualBox (KERNEL32-INSTALL.ISO, 16 Mo) ===
+Machine virtuelle : type Linux / Other Linux (32-bit), 256 Mo de RAM
+(128 Mo minimum), BIOS (pas EFI), disque virtuel de 2 Go ou plus.
+- Stockage : controleur IDE (PIIX4) UNIQUEMENT, pour le CD et pour le disque.
+  Le noyau n'a pas de pilote AHCI/SATA, NVMe ni SCSI : sur un controleur SATA
+  le CD ne sera pas vu. Le CD doit etre le maitre du 2e canal IDE.
+- Ordre d'amorcage : optique en premier.
+- Affichage : l'interface graphique ne s'active que sur la carte Bochs/QEMU
+  (PCI 1234:1111). VirtualBox emule une autre carte (VBoxVGA/VMSVGA) : le
+  meme assistant demarre alors en MODE TEXTE VGA (meme ecrans, memes etapes).
+  Ce repli a ete teste sous QEMU avec une carte non-Bochs (-vga cirrus), pas
+  sous VirtualBox lui-meme.
+- Clavier et souris : PS/2 (par defaut). Reseau : sans importance (non utilise).
+- Apres l'installation : retirer le CD (Peripheriques > Lecteurs optiques) et
+  redemarrer ; le disque installe s'amorce par MBR + STAGE2 + /boot/linux0.
+- Shell de secours : F2 dans l'assistant, ou Alt+F2 / Alt+F3 (root / root).
+
+Lot E6 : accueil et aide (F1) en tete de l'assistant, touches mortes
+  (circonflexe, trema, grave, aigu, tilde) pour fr/de/es/pt/be/ch, partitions
+  etendue et logiques dans l'editeur et dans preseed (parts=...:l),
+  installation sur disque virtio (/dev/vda), detection d'un systeme deja
+  installe (avertissement en rouge avant l'effacement), loadkeys/dumpkeys
+  (necessitent KDSKBENT dans le noyau).
+  Guide pas a pas QEMU / VirtualBox : KERNEL32/README.md, "Guide
+  d'installation". VirtualBox (VBoxVGA, pas de /dev/fb0) : l'assistant passe
+  seul en mode texte ; controleur de disque IDE (pas encore AHCI).
+
+=== VirtualBox : version avec SATA/AHCI (D7) ===
+Le noyau gere maintenant le controleur SATA (AHCI) : le CD et le disque
+peuvent etre sur un controleur SATA ou IDE. Prouve sous QEMU
+(-device ich9-ahci) : demarrage de l'assistant depuis un CD AHCI, RUNAHCI.
+Carte e1000 (Intel PRO/1000 MT, defaut de VirtualBox) : prouvee sous QEMU.
+Arret et redemarrage par ACPI : prouves sous QEMU.
+Carte graphique VBoxVGA (PCI 80EE:BEEF) : detection ecrite mais NON testee
+(QEMU n'a pas cette carte) ; repli texte automatique si le mode est refuse.
+VMSVGA et PCnet : non pris en charge.

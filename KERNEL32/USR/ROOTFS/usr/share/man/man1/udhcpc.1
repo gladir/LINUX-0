@@ -1,0 +1,15 @@
+.TH UDHCPC 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+udhcpc \- client DHCP / DHCP client
+.SH SYNOPSIS
+.B udhcpc
+[-i interface] [-q] [-t tries] [-T seconds]
+.br
+.B dhclient
+
+.br
+.SH DESCRIPTION
+Minimal DHCP client over broadcast UDP: DISCOVER, OFFER, REQUEST, ACK, then configures the interface (ifconfig), the default route (route) and /etc/resolv.conf.
+A single negotiation is made: leases are not renewed.
+.SH SEE ALSO
+ip(1), ifconfig(1)

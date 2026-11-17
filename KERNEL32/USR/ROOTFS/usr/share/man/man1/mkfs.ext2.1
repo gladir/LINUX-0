@@ -1,0 +1,16 @@
+.TH MKFS.EXT2 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+mkfs.ext2 \- cree un systeme de fichiers ext2 / build an ext2 file system and install the system
+.SH SYNOPSIS
+.B mkfs.ext2
+[-b size] [-I inode-size] [-N inodes] [-s MB] device
+.br
+.B install
+[-d disk] [-l lang] [-s MB] [-r root] [-b size] [-I inode-size] [-N inodes] [-y] [-q]
+.br
+.SH DESCRIPTION
+mkfs.ext2 formats a whole device (or the first -s megabytes) with ext2 revision 1 (filetype, sparse_super): block size 1024 (default), 2048 or 4096, inode size
+128 (default) or 256, -N total inode count. install partitions the target disk (MBR, one Linux partition), makes the file system, copies / (or -r root), writes
+the language into /etc/profile and installs the boot loader. e2fsck -fn of the host reports no error for any combination.
+.SH SEE ALSO
+e2fsck(1), mount(1)

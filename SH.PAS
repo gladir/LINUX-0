@@ -1046,7 +1046,7 @@ Var
  ByteReaded:Integer;
  NumLine,Err:Word;
  FindEnd:Boolean;
- FileView:File{$IFDEF FPC}of Byte{$ENDIF};
+ FileView:File{$IFDEF FPC}of Byte{$ENDIF}{$IFDEF LINUX0}of Byte{$ENDIF};
  Buffer:Array[0..255]of Byte;
  FileName,CurrLine:String;
  CurrParam:String;

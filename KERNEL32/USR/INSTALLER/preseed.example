@@ -1,0 +1,24 @@
+# preseed.example : exemple de fichier de reponses de l'installation
+# automatique. Copier en preseed.cfg a la racine du CD (MKINSTALLCD.SH -r
+# dossier) et ajouter  preseed=/cdrom/preseed.cfg  a la ligne de commande du
+# noyau. ATTENTION : le disque designe est efface sans confirmation.
+lang=fr
+keyboard=fr
+timezone=Europe/Paris
+clock=utc
+hostname=poste1
+rootpw=changez-moi
+user=marie
+fullname=Marie Curie
+userpw=changez-moi-aussi
+# disque : defaut = premier disque libre (jamais le CD ni un disque monte)
+#disk=/dev/hda
+partitioning=guided
+swap=128
+fs=ext4
+# partitionnement manuel :
+#partitioning=manual
+#parts=ext4:/:2G,swap:swap:256M,ext4:/home:*
+# ui=gui (defaut), text ou none ; reboot=reboot ou halt
+reboot=reboot
+endwait=5

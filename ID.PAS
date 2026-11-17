@@ -8,6 +8,8 @@ Program ID;
 
 Uses DOS;
 
+Const PathSep={$IFDEF LINUX0}'/'{$ELSE}'\'{$ENDIF};
+
 Var
  Language:(_Albanian,_French,_English,_Germany,_Italian,_Spain);
  TmpLanguage:String;
@@ -45,11 +47,11 @@ Begin
  If Path=''Then Exit;
  FSplit(Path,D,N,E);
  If E=''Then Begin
-  If D[Length(D)]<>'\'Then D:=D+'\';
+  If D[Length(D)]<>PathSep Then D:=D+PathSep;
   D:=D+E;
  End;
  If D=''Then Path2Dir:='' Else
- If D[Length(D)]<>'\'Then D:=D+'\';
+ If D[Length(D)]<>PathSep Then D:=D+PathSep;
  Path2Dir:=D;
 End;
 

@@ -8,6 +8,8 @@ Program CHSH;
 
 Uses DOS;
 
+Const PathSep={$IFDEF LINUX0}'/'{$ELSE}'\'{$ENDIF};
+
 Var
  ModeParam:(_None,_Root,_Shell);
  I:Integer;
@@ -124,7 +126,7 @@ Begin
    { Les interpr‚teurs de commandes de Corail install‚ ? }
   Corail:=GetEnv('CORAIL');
   If Corail=''Then Corail:='\CORAIL';
-  If Corail[Length(Corail)]<>'\'Then Corail:=Corail+'\';
+  If Corail[Length(Corail)]<>PathSep Then Corail:=Corail+PathSep;
   For I:=Low(CorailCmds) to High(CorailCmds)do Begin
    If FileExist(Corail+CorailCmds[I])Then WriteLn(Corail,CorailCmds[I]);
   End;

@@ -1,0 +1,333 @@
+LPC de KERNEL32 : Linux Pascal Compiler, cibles 32 bits
+=======================================================
+
+LPC.PAS est une copie de KERNEL16UNIX/TOOLS/LPC.PAS (cibles 16 bits : -K,
+-X, inchangees et testees par TESTS/C/RUN16.SH) a laquelle s'ajoute le
+moteur 32 bits LPC32.PAS (unite Free Pascal, derivee de OS2PC.PAS du depot
+OS2-0, lui-meme derive de TPCW32.PAS de DEV-COOLS). LPC.PAS reste l'unique
+point d'entree : toute ligne de commande contenant -3K ou -3X est confiee a
+LPC32.
+
+Construction (dans KERNEL32/TOOLS) :   fpc -Mtp -O1 LPC.PAS
+Fichiers : LPC.PAS (point d'entree, cibles 16 bits), LPC32.PAS (moteur 32
+bits), L32SYS.PAS (chmod de l'hote), L32API.PAS (source Pascal de la couche
+systeme -3X, integre dans LPC32.PAS par MKAPI.PAS : fpc -Mtp MKAPI.PAS ;
+./MKAPI apres toute modification de L32API.PAS).
+
+Options
+-------
+ -3K        noyau Linux 32 bits : ELF32 ET_EXEC i386, mode protege ring 0,
+            sans runtime ni DOS. Sortie : fichier sans extension a cote de
+            la source (KERNEL32.PAS -> KERNEL32).
+ -3X        programme utilisateur Linux i386 : ELF32 statique lie a
+            08048000h, appels systeme INT 80h, runtime Pascal lie dans le
+            programme (WriteLn, ReadLn, fichiers, unites Dos et Crt...).
+ -3M        module du noyau : fichier .ko ELF32 ET_REL i386 (voir "Cible -3M")
+ -3B<hexa> adresse de liaison (defaut -3K : C0100000h ; -3X : 08048000h).
+ -asm       ecrit aussi le listing assembleur (fichier .asm)
+ -nogc      -3K/-3X : garde tout le code et les donnees (par defaut le
+            code mort est elimine, voir "Elimination du code mort")
+ -g         -3K/-3X : table des symboles complete (par defaut : procedures
+            et points d'entree seulement)
+ -v, -q     bavard / silencieux (par defaut : une ligne de resume)
+Les symboles conditionnels LPC, LINUX0, KERNEL32, VER70, CPU386 sont
+definis (pas FPC, WINDOWS ni WIN32 : les sources suivent la branche TP7),
+ainsi que LINUX0KERNEL (-3K) ou LINUX0USER (-3X).
+
+Cible -3K
+---------
+- Disposition : 2 PT_LOAD, p_vaddr = C0100000h, p_paddr = vaddr - C0000000h
+  (le noyau est charge a 1 Mo). Premier segment (R+X) : en-tetes ELF, en-tete
+  MULTIBOOT 1 (flags 3, a l'offset 80h, ecrit par le compilateur) et code
+  a partir de +1000h. Deuxieme segment (R+W) : table des thunks d'API puis
+  donnees ; les zeros de queue (variables non initialisees) ne sont pas dans
+  le fichier (p_memsz > p_filesz : le chargeur met a zero). Sections et table
+  des symboles presentes (objdump -d, gdb).
+- Point d'entree : adresse PHYSIQUE de la procedure marquee Boot ou nommee
+  KStart ; il n'y a aucun code avant elle. Ecrire ce code en asm (position
+  independante : construire les tables de pages, activer la pagination,
+  sauter en haute memoire, puis CALL Main = programme principal).
+- Directives de procedure (apres l'en-tete, avant le corps) :
+    Boot;           entree physique, sans prologue ni epilogue (Naked)
+    Naked;          sans prologue, epilogue, ni valeur de retour
+    Assembler;      identique a Naked en -3K/-3X
+    Interrupt;      PUSHAD, CLD ... POPAD, IRETD
+    InterruptErr;   idem, avec ADD ESP,4 (code d'erreur du CPU)
+  Trame d'une procedure Interrupt : [EBP+4..EBP+32] = EDI ESI EBP ESP EBX
+  EDX ECX EAX ; [EBP+36] = code d'erreur (InterruptErr) puis EIP, CS, EFLAGS.
+- Les procedures sont emises dans l'ordre de premiere declaration, avant le
+  programme principal et le runtime. Pas de runtime execute au demarrage.
+- Acces : Mem, MemW, MemL [0:adresse] (lecture et ecriture, adresses 32 bits
+  modulo 2^32), Port, PortW, PortL. Ptr(seg,ofs) = seg*16+ofs.
+- Le runtime Pascal (chaines, Str, Copy...) est emis mais n'appelle l'API
+  qu'a l'usage : GetMem/New appellent HeapAlloc, WriteLn appelle WriteFile...
+  Chaque API (noms de style Win32, voir OS2PC) est la procedure Pascal du
+  meme nom ecrite dans le noyau (parametres LongInt) ; sinon ApiMissing.
+
+Cible -3M (modules du noyau)
+----------------------------
+lpc -3M MODULE.PAS -> MODULE.ko, ELF32 ET_REL (readelf, objdump, nm, ld de
+l'hote le lisent). Le source est un Program compile comme -3K (symbole
+LINUX0MODULE en plus de LINUX0KERNEL). Directives apres l'en-tete d'une
+procedure : ModuleInit; (symbole global init_module), ModuleExit;
+(cleanup_module), Export; (symbole global _TPF_NOM). Les autres procedures et
+les variables sont des symboles locaux. Un appel au noyau se declare
+`Procedure printk(Const S : String); External;` : symbole non defini
+_TPF_PRINTK, relocation R_386_PC32 (addend -4). Les adresses de donnees et
+de procedures sont des R_386_32 contre .text/.data/.bss. Sections : .text
+.data .bss .rel.text .rel.data .modinfo .symtab .strtab .shstrtab. Le code
+mort est elimine (racines : procedures exportees) ; si le runtime appelle une
+API Win32 (WriteLn, GetMem, fichiers), c'est une erreur de compilation : un
+module appelle le noyau par des procedures External. Anneau de chaines
+temporaires : 32 tampons (8 Ko de .bss). Details de convention d'appel :
+DEMANDES_A.md ("[E] -3M"). Test : TESTS/C/TM1.PAS (RUN.SH : nm + ld).
+
+Assembleur natif (blocs asm...end, -3K/-3X)
+-------------------------------------------
+Syntaxe Intel, tout le jeu entier et systeme du 80386 : MOV (registres,
+CRn, DRn, segments), LGDT/LIDT/LLDT/LTR, SGDT/SIDT, INVLPG, IN/OUT/INS/OUTS,
+INT, IRETD, PUSHAD/POPAD, XCHG, CMPXCHG, XADD, BSWAP, BT*, BSF/BSR,
+SHLD/SHRD, SETcc, CMOVcc, MOVZX/MOVSX, IMUL 1/2/3 operandes, CPUID, RDTSC,
+RDMSR/WRMSR, LOCK/REP/REPE/REPNE, ENTER/LEAVE, FXSAVE, FNINIT..., sauts
+courts/longs (JMP 08h:@suite pour un saut lointain), LOOP, JECXZ, DB/DW/DD,
+ALIGN. Operandes : [base+index*echelle+deplacement], BYTE/WORD/DWORD PTR,
+fs:[..], OFFSET nom, expressions (+ - * div mod shl shr and or xor not),
+variables Pascal (locales, parametres, globales, constantes), noms de
+procedures, Main (programme principal), labels @nom locaux au bloc et
+nom: globaux. Un nom de variable Pascal egal a un nom de registre (Cr2...)
+designe le registre. Verifie contre GNU as (312 instructions).
+
+Types et langage
+----------------
+Turbo Pascal 7 sans objets. Integer = 16 bits (comme TP, SizeOf = 2), Word
+16 bits non signe, LongInt 32 bits, Byte 8 bits : utiliser LongInt pour les
+adresses. Controle des bornes desactive par defaut (comme TP, {$R+} l'active).
+Ajouts : champs de record jusqu'a 512, transtypage de type utilisateur
+(PType(x), PType(x)^.champ), appel par un champ ou une variable de type
+procedure (parametres VAR respectes), Set Of (a,b,c), constantes dans les
+bornes de types, procedures imbriquees avec acces aux variables englobantes
+(affichage : recursivite et appels entre soeurs corrects), PChar compare
+comme un pointeur. Un identificateur non declare est une erreur
+"fichier(ligne) : erreur : identificateur non declare : NOM" ; un symbole
+non defini l'est a l'edition de liens. String[n] (n < 255) a une taille
+reelle de n + 2 octets (longueur, n caracteres, NUL) : l'affectation,
+Read/ReadLn et Str tronquent a n comme Turbo Pascal ; String et String[255]
+restent a 256 octets. Insert dans une String[n], et un sous-programme qui
+ecrit dans un parametre Var S : String recu d'une String[n] plus courte, ne
+tronquent pas (depassement possible, comme Turbo Pascal sans {$V+}).
+
+Ajouts du lot E3 (non-regression : TESTS/C/UX5, UX6, ER1, ER2)
+---------------------------------------------------------------
+- Tableaux ouverts : `Function F(Const A : Array Of T) : ...`, `Var A :
+  Array Of T`, `A : Array Of T` (passage par adresse). Le parametre devient
+  deux parametres (adresse, HIGH$nom) ; Low(A) = 0, High(A), A[i], transmission
+  a un autre parametre ouvert, procedures imbriquees. Arguments admis : tableau
+  quelconque (High = Hi - Lo de son type), constructeur [a, b, c] (elements
+  de 1, 2 ou 4 octets, tableau temporaire sur la pile), parametre ouvert de
+  l'appelant. Tableaux ouverts de chaines : tableau de String.
+- Pointeurs de procedures et de fonctions : types `Procedure`, `Function(X :
+  T) : R`, variables, champs de record, tableaux (`T[i](args)`), parametres
+  (`Calc(Add, 5)` : le nom de fonction donne son adresse), comparaison a Nil,
+  Assigned, appel indirect avec conversion des arguments selon la signature
+  (chaines Const copiees, Double sur la pile, adresse pour Var) et resultat
+  reel renvoye dans ST(0).
+- Packed Record (taille sans alignement : SizeOf = somme des champs).
+- Reels : Write(x) sans largeur au format Turbo Pascal (` 1.2345678900E+02`,
+  10 decimales, exposant sur 2 chiffres, signe ou espace), Write(x:n) : n - 7
+  decimales (au moins 1), Write(x:n:m), Str(x:n:m), Val.
+- Insert(S, T, p) dans une String[n] tronque a n (le tampon de travail est
+  maintenant sur la pile : 255 caracteres au plus apres Insert).
+- Move('abc', B, 3) copie la chaine Pascal (octet de longueur en tete) comme
+  Move(S, ...) et comme Turbo Pascal ; Move(S[1], ...) copie les caracteres.
+- FillChar(B, n, '.') : le litteral caractere est un code (avant : octet
+  de poids faible de l'adresse du litteral).
+- -3M : `Procedure ... ModuleInit;` rend EAX = 0 (le noyau lit EAX comme code
+  d'erreur) ; le nom du module (.modinfo name=) est le nom du fichier en
+  minuscules (rmmod hello).
+
+Cible -3X
+---------
+- Entree : _start (L32API.PAS) lit argc/argv/envp sur la pile, appelle le
+  programme principal ; Halt/fin -> exit_group (252). Pas de bibliotheque C.
+- Chemins : \ est converti en / par la couche systeme. Fin de ligne : LF.
+- Appels systeme utilises (numeros i386 de Linux ; stat = 106/107/108 de
+  struct stat de 64 octets, getdents = 141) : exit 1, fork 2, read 3, write 4,
+  open 5, close 6, execve 11, chdir 12, time 13, chmod 15, lseek 19, getpid
+  20, getuid 24, kill 37, rename 38, mkdir 39, rmdir 40, dup 41, pipe 42,
+  brk 45, ioctl 54, dup2 63, getppid 64, sigaction 67, gettimeofday 78,
+  settimeofday 79, unlink 10, stat 106, lstat 107, fstat 108, wait4 114,
+  fsync 118, uname 122, getdents 141, nanosleep 162, getcwd 183, statfs 99,
+  ftruncate 93, utimensat 320, exit_group 252, reboot 88, signal 48, sync 36.
+  Ioctl : TCGETS/TCSETS (mode brut du clavier), TIOCGWINSZ, FIONREAD.
+- Couche Win32 -> Linux : fichiers, repertoires (FindFirstFile par getdents,
+  filtre ? et *), temps (SYSTEMTIME en UTC, FILETIME = date/heure DOS),
+  processus (CreateProcessA = fork + execve avec recherche dans PATH,
+  WaitForSingleObject, GetExitCodeProcess), environnement, ligne de
+  commande, tas (brk, blocs avec liste libre), console (Crt) par sequences
+  ANSI : curseur, couleurs DOS, effacement, defilement, clavier en mode
+  brut (fleches et touches de fonction). Non fournies (ApiMissing : message
+  et arret) : graphique (user32, gdi32), LoadLibrary.
+- Acces direct au systeme : Sys*(SysFork, SysWaitPid, SysPipe, SysDup2,
+  SysKill, SysExecve, SysRead, SysWrite, SysOpen, SysUname...) et
+  SysCall(n,a,b,c,d,e) (L32API.PAS) pour les programmes de type init, sh.
+- PrefixSeg/Ptr(PrefixSeg,80h) : queue de la ligne de commande (style PSP) ;
+  Lst (unite Printer) : variable Text declaree, non ouverte.
+- Commandes du depot (racine, Uses Dos/Crt) : 178 sur 180 compilent et leur
+  aide s'execute ; HALT et REBOOT (BIOS, Seg0040) ne sont pas portables.
+  Etat de chacune (hote et sous KERNEL32/QEMU) : TOOLS/COMMANDES.TXT.
+- Entree standard : la variable Text Input (ReadLn, Read, Eof, Eoln, SeekEof)
+  lit le descripteur 0 par blocs : tubes et redirections corrects. Input et
+  Output peuvent etre passes en parametre (Var F : Text). Ecrire #0 (Write de
+  Chr(0), ou d'une chaine) ecrit bien un octet nul.
+- Ligne de commande : jusqu'a 4096 parametres et 128 Ko (ParamStr, ParamCount).
+- Erreurs d'execution : "Runtime error N at 0x..." sur stderr (code 200+N).
+- Reels (Real, Double) : Write(x), Write(x:n), Write(x:n:m), Str, Val,
+  formats % de sprintf et strtod ecrits en Pascal (L32API.PAS), calculs par
+  le coprocesseur x87 (voir les ajouts du lot E3 pour le format de Write).
+- Fichiers : variables de type fichier dans des tableaux ou des champs
+  (Assign(T[i], ..), Reset(R.F), Eof(R.F), ReadLn(T[i], S)...), Read/ReadLn
+  vers un element de tableau, un champ ou un pointeur (Read(A[i]), ReadLn(P^)).
+- Le programme peut definir une procedure ou une fonction de meme nom qu'une
+  predefinie (NewStr, ReadKey...) ou qu'une procedure de la couche API
+  (Sprintf...) : elle est renommee en interne (suffixe _U), le programme
+  garde son sens.
+- Parametres Const de type chaine : copies dans le cadre de l'appele (un
+  temporaire de l'anneau de 256 tampons STRRING aurait pu etre ecrase).
+- Unite Unix (L32API.PAS, Sys*) : SysFork, SysExecve, SysWaitPid, SysPipe,
+  SysDup/Dup2/Fcntl, SysKill, SysSigAction/SysSignal/SysSigProcMask,
+  SysOpen/Creat/Close/Read/Write/LSeek/Ioctl, SysStat/LStat/FStat, SysMkdir,
+  SysRmdir, SysUnlink, SysLink/Symlink/Readlink, SysRename, SysChmod/Chown,
+  SysChdir/Chroot/GetCwd, SysOpenDir/ReadDir/CloseDir, SysMount/Umount,
+  SysSync/Reboot, SysTime, SysSleep/Alarm/Pause, SysGetUid/Gid/Pid/PPid,
+  SysSetSid/SetPgid/TcGetPgrp/TcSetPgrp, SysTcGetAttr/SetAttr/GetWinSize,
+  SysUname, SysGetEnv/Argv/Envp, SysArgReset/ArgAdd/ArgExec (execve avec
+  tableaux), SysGetPw/GetPwNam/GetPwUid (/etc/passwd), SysCrypt (hachage de
+  type V7), SysLang/SysLangOf/SysSetLang (FR EN GR SP IT), SysErrorText.
+  Les noms de constantes O_*, SIG*, TTY_*, S_IF*, MS_*, LINUX_REBOOT_* sont
+  predefinis.
+
+Reseau (L32API.PAS) : SysSocket, SysConnect, SysBind, SysListen, SysAccept,
+SysSendTo, SysRecvFrom, SysSetSockOpt, SysShutdown, SysPoll (appels directs
+359-373 et poll 168), type TSockAddrIn, SysIp/SysIpStr/SysParseIp/SysSockAddr/
+SysSwap16, SysServPort (/etc/services), SysResolve (adresse numerique,
+/etc/hosts, puis requete DNS A par UDP vers les nameserver de
+/etc/resolv.conf). Fuseau : TZ ; llseek : SysLLSeek.
+
+Elimination du code mort (-3K, -3X)
+-----------------------------------
+Apres la compilation, LPC32 decoupe le code en morceaux (un par label de
+code) et les donnees en blocs (un par label) ; il ne garde que ce qui est
+atteignable depuis le point d'entree et le programme principal (aretes :
+appels, adresses, procedures rangees dans les donnees, API importees). Les
+blocs de donnees nuls passent en fin de segment (BSS : absents du fichier),
+les imports et symboles sont renumerotes. Resultat : un programme minimal
+passe de 180 Ko a 13 Ko, une commande type fait 20 a 60 Ko (tout le depot :
+178 programmes, 7,3 Mo ; le shell, 6000 lignes : 220 Ko). Un label de fin de
+donnees (chaine vide...) reserve un mot propre. -nogc desactive l'elimination
+(utile pour localiser un defaut du compilateur).
+
+Autres correctifs du moteur -3X (non-regression : TESTS/C/RUN.SH)
+------------------------------------------------------------------
+FindFirst/FindNext gardent leur poignee dans le SearchRec (recherches
+imbriquees ou recursives : tree), Write(#0) et Write de chaine par la
+longueur (octets nuls : gzip), parametres PChar (Inc(P)), 'x' In ensemble,
+Include/Exclude de caracteres, WriteLn(S = T), ReadLn(A[i]), tas : le bloc
+reserve un octet pour le NUL des chaines.
+
+Langage : une procedure ou fonction de premier niveau definie deux fois est
+une erreur "identificateur deja declare". La concatenation de chaines (+) se
+fait par les longueurs : #0 est conserve (le resultat est une chaine Pascal).
+Heure locale (lot E5) : variable TZ, fichier /etc/TZ ou /etc/localtime.
+Formes de TZ : NOM[+-]hh[:mm] (decalage fixe, sans heure d'ete) ou nom de zone
+("Europe/Paris", ":Europe/Paris", "UTC", chemin absolu) lu dans
+/usr/share/zoneinfo : fichier TZif version 1 (le format "fat" des paquets
+tzdata : transitions jusqu'en 2037, heure d'ete comprise). GetLocalTime,
+SetLocalTime, dates de fichiers (FindFirstFile, GetFileTime), date, ls, cron
+et hwclock l'appliquent. Fonctions de L32API.PAS : LnxTzSelect(nom) (choisit
+la zone ; '' = TZ, /etc/TZ, /etc/localtime), LnxTzAt(t) (decalage en secondes
+a l'est de UTC pour l'instant UTC t), LnxTzUtcOf(local) (instant UTC d'une heure
+locale), LnxTzIsDst(t), LnxTz (decalage maintenant). Test : TESTS/U/RUNINST.SH
+tz. Le TZif "slim" (sans transitions apres 2007, regle POSIX en pied de
+fichier) n'est pas interprete : utiliser des fichiers "fat" (zic -b fat).
+SysLLSeek (llseek) : decalages 64 bits.
+
+Pieges du langage connus (Pascal est insensible a la casse)
+-----------------------------------------------------------
+- Non detectes par le compilateur (a surveiller) : Mem[0:adr] passe comme
+  parametre Var (utiliser SysCall ou un tableau), un cast PType(x)^.champ en
+  debut d'instruction ou en argument (le cast ne marche que dans une
+  expression : utiliser une variable pointeur typee ou des tableaux), des
+  noms de variables globales identiques (a la casse pres) a ceux d'une
+  procedure du programme sont maintenant une erreur (voir ci-dessous).
+- Detectes : affecter une chaine a un nombre (erreur "types incompatibles"),
+  passer le nom d'une fonction en parametre Var (erreur "une fonction ne peut
+  pas etre passee en parametre Var"), declarer une variable ou constante
+  globale du meme nom qu'une procedure ou fonction du programme (erreur
+  "identificateur deja declare" ; c'etait la cause des collisions Ev/EV et,
+  vraisemblablement, NPre/PwL : le symbole le plus recent masquait l'autre).
+- Auto-hebergement : (1) LPC32.PAS (unite FPC) ne peut pas etre compile par
+  LPC -3X : Uses/Unit non geres entre fichiers et des centaines de noms
+  communs avec LPC.PAS. (2) Le LPC 16 bits de KERNEL16UNIX/TOOLS/LPC.PAS (19700
+  lignes, un seul fichier) SE COMPILE avec `lpc -3X` sans erreur (binaire de
+  2 Mo, ELF32 statique, demarre et compile un programme trivial en .EXE DOS).
+  Obstacle : `Int64` y est un entier de 32 bits ; ReadNumber teste
+  `N > ($FFFFFFFF - Digit) Div 16` (litteral 4294967295 en 64 bits sous FPC,
+  -1 ici), d'ou "Constante hors limites" dans l'unite DOS integree. Avec une
+  copie ou N est un Double (N: Double; N:=N*Base+Digit; comparaisons avec
+  4294967295.0 et 2147483647.0 ; ReadNumber:=Trunc(N)) le compilateur
+  s'auto-heberge : LS, CAT, GREP, WC, SORT du depot se compilent. Limite : le
+  code produit est 25 % plus gros que celui du LPC compile par FPC (WC :
+  12764 octets de code au lieu de 10033 ; donnees identiques), les
+  executables ne sont pas identiques octet pour octet et n'ont pas ete
+  executes (pas de DOS sous cette machine). Correction durable a faire : un
+  vrai Int64 dans LPC32 (litteraux hexa > $7FFFFFFF, arithmetique 64 bits) ou
+  la modification de ReadNumber dans LPC.PAS (hors perimetre de l'agent E).
+  Sous KERNEL32, ce binaire s'appellerait lpc16 (non installe dans l'image :
+  2 Mo, aucune cible 32 bits).
+- Un type et une constante qui ne different que par la casse (TWord/tWord)
+  se confondent. Une variable locale du nom d'une fonction du programme la
+  masque (Num(X) n'est plus l'appel).
+- Un "}" dans un commentaire { } le termine ; Until n'est pas un nom de
+  parametre ; ne pas lire les parametres d'une procedure englobante depuis une
+  procedure imbriquee (preferer une procedure de premier niveau).
+- Comparer deux chaines temporaires (A + B = C + D) peut ecraser un tampon.
+- Integer fait 16 bits ; String[n] est tronquee a n caracteres (voir plus haut).
+- Segment de donnees (variables globales) : 32 Mo au plus (erreur sinon) ; au
+  dela de 8 Mo les anciennes versions tronquaient sans erreur.
+- Litteraux reels : toujours en double precision (100.0 / 3.0 est exact).
+- Une variable locale ou un parametre du meme nom qu'une fonction du programme
+  masque cette fonction (corrige : une fonction `Cur` du programme faussait
+  LnxGrow, le tas de la couche API).
+- {$I fichier.inc} : inclusion (relatif au dossier du source).
+- Lots E5/E6 : un litteral qui alterne #nn et 'texte' ('...'#27'[0m'#27'[2J'
+  #27'[H') etait tronque apres le deuxieme #nn (LexScanCharLit) : corrige.
+  C'etait aussi la cause des pointeurs NULS d'un grand Array Of PChar : un
+  litteral tronque decalait la suite de la table (129 entrees nulles sur 1022
+  dans le catalogue de l'installateur, segfault a l'usage). Non-regression :
+  TESTS/C/UX9 (litteraux) et UX10 (400 PChar de ce genre). Le catalogue
+  MSGS.INC reste un tableau d'octets (rapide a compiler, pas de pointeurs).
+- Un identificateur d'un programme peut entrer en collision avec un nom interne
+  du compilateur : NPre, PwL (variables globales) faisaient echouer la
+  compilation ou le programme ; les renommer.
+- Une boucle FOR garde sa limite dans le cadre de la procedure (recursivite
+  sure : rm -r, sort...).
+
+Tests : TESTS/C/RUN.SH (TK1-TK3 noyaux sous QEMU, UX1-UX3 programmes sur
+l'hote) et TESTS/C/RUN16.SH (non-regression des cibles 16 bits).
+Exemption de style : LPC32.PAS garde le formatage d'OS2PC (lignes de plus
+de 80 colonnes) ; seules les parties ajoutees sont marquees "LPC32 :".
+
+Ajouts du lot E4 (cible 32 bits : -3X, -3K, -3M)
+------------------------------------------------
+* Temporaires String : le resultat de l'operateur +, de Copy et de Concat
+  est copie dans le prochain des 256 tampons de l'anneau STRRING (32 pour
+  un module -3M) et non plus dans un tampon unique. On peut donc ecrire
+  F(A + B, N, C + D), G(Copy(A, 1, 2), Copy(B, 1, 2)), (A + B) < (C + D)
+  ou des appels imbriques. Un temporaire reste valable pendant 255 autres
+  creations de chaines.
+* Delete(S, Pos, Len) : Pos hors chaine = sans effet, Len est borne par la
+  longueur restante (comme Turbo Pascal).
+* {$I fichier} introuvable : erreur "impossible d'ouvrir le fichier include"
+  et arret (avant : plantage ou boucle).
+* Piege : le mot reserve Packed ne peut pas servir de nom de variable.
+* Pas de type Int64 en -3X (utiliser Double pour les grandes tailles).

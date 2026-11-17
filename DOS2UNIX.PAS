@@ -11,7 +11,7 @@ Const
 
 Var
  SourceText:Text;
- TargetData:File {$IFDEF FPC}of Byte{$ENDIF};
+ TargetData:File {$IFDEF FPC}of Byte{$ENDIF}{$IFDEF LINUX0}of Byte{$ENDIF};
  CurrLine:String;
 
 BEGIN

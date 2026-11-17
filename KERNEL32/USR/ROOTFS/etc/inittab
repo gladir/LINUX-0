@@ -1,0 +1,8 @@
+# /etc/inittab : id:niveaux:action:commande
+rc::sysinit:/bin/sh /etc/rc
+1::respawn:/sbin/getty tty1 linux
+2::respawn:/sbin/getty tty2 linux
+3::respawn:/sbin/getty tty3 linux
+4::respawn:/sbin/getty tty4 linux
+S0::respawn:TERM=vt100 /sbin/getty ttyS0
+ca::ctrlaltdel:/sbin/reboot

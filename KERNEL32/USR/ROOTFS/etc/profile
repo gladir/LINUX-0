@@ -1,0 +1,6 @@
+# /etc/profile : lu par les interpreteurs de connexion
+LANGUAGE=FR
+export LANGUAGE
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+umask 022

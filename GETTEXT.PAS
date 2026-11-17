@@ -8,6 +8,8 @@ Program GETTEXT;
 
 Uses DOS;
 
+Const PathSep={$IFDEF LINUX0}'/'{$ELSE}'\'{$ENDIF};
+
 Var
  I:Integer;
  TextDomainDir,FileName,MsgId,MsgStr:String;
@@ -94,7 +96,7 @@ BEGIN
   If Not FileExist(FileName)Then Begin
    TextDomainDir:=GetEnv('TEXTDOMAINDIR');
    If TextDomainDir<>''Then Begin
-    If TextDomainDir[Length(TextDomainDir)]<>'\'Then TextDomainDir:=TextDomainDir+'\';
+    If TextDomainDir[Length(TextDomainDir)]<>PathSep Then TextDomainDir:=TextDomainDir+PathSep;
     FileName:=TextDomainDir+FileName;
    End;
   End;

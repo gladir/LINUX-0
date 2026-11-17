@@ -1,0 +1,3 @@
+#!/bin/sh
+# ecrit les tampons sur le disque
+sync

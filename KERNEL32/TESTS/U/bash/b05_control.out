@@ -1,0 +1,37 @@
+rc=1
+rc=1 0 1 0
+rc=0
+0
+in:f
+g f main
+ERR line
+DBG
+one
+DBG
+body
+RET
+ok-orlist
+ok-neg
+1) a
+2) b
+3) c
+#? got b
+i=1
+ro=1
+1 2 x
+9 y
+EXP=1
+a|    b|c    |00042|ff|10|z|%
+1 2
+3 4
+007
+a\ b
+3.14   2.5
+a	b
+secs
+5
+/tmp
+/
+a|
+1
+bye

@@ -1,0 +1,47 @@
+wc a
+wc -l a b
+wc -lw < a
+wc -c a b c
+wc -L a b c
+wc -m b
+wc < c
+head a
+head -n 3 a b
+head -n 0 a
+head -n 100 c
+head -c 5 a
+head -n -3 a
+head -n -100 a
+head -c -4 c
+head -q a b
+head -v c
+head -2 a b
+tail a
+tail -n 3 a b
+tail -n 0 a
+tail -c 5 c
+tail -n +3 a
+tail -n +100 b
+tail -c +5 b
+tail -n 1 b
+tail -q -n 2 a b
+tail -v c
+cut -c1-3 b
+cut -b2,4 b
+cut -d: -f1 b
+cut -d: -f2- b
+cut -d: -f1,3 b
+cut -d: -f2 -s b
+cut -c3- b
+cut -c-3 c
+cut --complement -d: -f2 b
+cut -d: -f1,3 --output-delimiter=_ b
+paste a b
+paste -d, a b c
+paste -s a b
+paste -sd: b
+paste - - < a
+paste -d'+-' a a a
+cat a | wc
+cat b | tail -n 2
+cat a | head -n 2

@@ -1,0 +1,11 @@
+args=2 un deux
+env=bonjour
+lu: ligne un
+lu: ligne deux
+taille=20
+apres seek: un
+ n=3
+fichiers=2
+date ok
+disque ok
+/tmp/x

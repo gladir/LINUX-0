@@ -1,0 +1,7 @@
+        U _TPF_KMALLOC
+        U _TPF_PRINTK
+T _TPF_DOEXIT
+T _TPF_DOINIT
+T _TPF_HELPER
+T cleanup_module
+T init_module

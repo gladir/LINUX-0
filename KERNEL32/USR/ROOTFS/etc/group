@@ -1,0 +1,10 @@
+root:x:0:
+daemon:x:1:
+bin:x:2:
+sys:x:3:
+tty:x:5:
+disk:x:6:
+wheel:x:10:root
+users:x:100:linux
+nogroup:x:65534:
+linux:x:1000:

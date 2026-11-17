@@ -56,10 +56,11 @@ Begin
     If(LenWidth>=Width)Then Begin
      WriteLn(CurrWord);
      CurrWord:='';
+     LenWidth:=0;
     End;
    End;
   End;
-  WriteLn(CurrWord);
+  If Length(CurrWord)>0 Then WriteLn(CurrWord);
  End
   Else
  WriteLn(CurrLine);
@@ -155,11 +156,11 @@ BEGIN
     End;
     Close(SourceText);
    End;
-   If(ReadFromConsole)Then Begin
-    Repeat
-     ReadLn(Input,CurrLine);
-     ProcessLine;
-    Until EOF;
+  End;
+  If(ReadFromConsole)Then Begin
+   While Not EOF do Begin
+    ReadLn(Input,CurrLine);
+    ProcessLine;
    End;
   End;
  End

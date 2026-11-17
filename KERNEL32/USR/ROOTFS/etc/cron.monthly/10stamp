@@ -1,0 +1,4 @@
+#!/bin/sh
+# trace du passage mensuel de cron
+date >> /var/log/cron.monthly 2>/dev/null
+exit 0

@@ -1,0 +1,17 @@
+#!/bin/sh
+# /sbin/k32-setup-run : lance l'assistant d'installation sur un terminal ;
+# sous init (respawn). Code de sortie de l'assistant : 0 fin (reboot), 2
+# abandon -> shell de secours puis nouvel essai, autre : erreur -> remise
+# en etat du clavier et nouvel essai.
+TTY=${1:-/dev/tty1}
+while true; do
+  /sbin/k32-setup -t $TTY
+  RC=$?
+  /sbin/k32-setup --restore -t $TTY
+  case $RC in
+    0) exit 0 ;;
+    2) echo "LINUX-0 : shell de secours (exit : relancer l'assistant)" > $TTY
+       /bin/sh < $TTY > $TTY 2>&1 ;;
+    *) sleep 2 ;;
+  esac
+done

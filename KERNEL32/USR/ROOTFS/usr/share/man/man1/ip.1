@@ -1,0 +1,18 @@
+.TH IP 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+ip \- configuration reseau / show and manipulate routing and devices
+.SH SYNOPSIS
+.B ip
+[-4] [-s] addr [show [dev X] | add A/N dev X | del A/N dev X]
+.br
+.B ip
+link [show [X] | set X up|down [mtu N]]
+.br
+.B ip
+route [show | add default via G [dev X] | add R/N via G | del R/N]
+.br
+.SH DESCRIPTION
+Uses the SIOCGIF ioctls and /proc/net/route for display (no netlink) and runs ifconfig(8) and route(8) for changes. -s adds the counters of /proc/net/dev to
+link.
+.SH SEE ALSO
+ifconfig(1), route(1), netstat(1)

@@ -19,7 +19,7 @@ Var
  ByteWrited:Word;
  F:Text;
  G:File;
- FileName:String[12];
+ FileName:String;
  Buffer:String;
  Kwartets:Record
   Lengte:Byte;

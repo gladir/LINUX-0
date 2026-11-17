@@ -56,7 +56,8 @@ Begin
      Inc(CurrParam);
      If Length(ValueStr)>0 Then R:=R+ValueStr[1];
     End;
-    'd','f','g','i','l':Begin
+    '%':R:=R+'%';
+    'd','f','g','i','l','s','x','u':Begin
      T:=ParamStr(CurrParam);
      Inc(CurrParam);
      R:=R+T;

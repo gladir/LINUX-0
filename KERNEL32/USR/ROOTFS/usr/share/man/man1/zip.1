@@ -1,0 +1,37 @@
+.TH ZIP 1 "2026" "KERNEL32" "User Commands"
+.SH NAME
+zip \- archives ZIP / package and compress files
+.SH SYNOPSIS
+.B zip
+[-rjq0] archive.zip file...
+.br
+.B unzip
+[-ltpon] [-d dir] archive.zip [member...]
+.br
+.B zipinfo
+archive.zip
+.br
+.SH DESCRIPTION
+zip stores files in a ZIP archive (deflate when it shrinks the data). unzip lists (-l), tests (-t), prints (-p) or extracts members; stored and deflated
+entries, dynamic and fixed Huffman blocks, CRC-32 checked. Files up to 8 MB; no ZIP64.
+.SH OPTIONS
+.TP
+.B -r
+Recurse into directories.
+.TP
+.B -j
+Junk the paths.
+.TP
+.B -0
+Store only.
+.TP
+.B -d dir
+Extract into dir.
+.TP
+.B -o
+Overwrite without asking.
+.TP
+.B -n
+Never overwrite.
+.SH SEE ALSO
+gzip(1), tar(1)

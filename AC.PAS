@@ -10,6 +10,8 @@ Program AC;
 
 Uses DOS,Strings;
 
+Const PathSep={$IFDEF LINUX0}'/'{$ELSE}'\'{$ENDIF};
+
 Const
  EMPTY         = 0;  { Enregistrement vide }
  RUN_LVL       = 1;  { Changement de niveau d'ex‚cution }
@@ -129,11 +131,11 @@ Begin
  If Path=''Then Exit;
  FSplit(Path,D,N,E);
  If E=''Then Begin
-  If D[Length(D)]<>'\'Then D:=D+'\';
+  If D[Length(D)]<>PathSep Then D:=D+PathSep;
   D:=D+E;
  End;
  If D=''Then Path2Dir:='' Else
- If D[Length(D)]<>'\'Then D:=D+'\';
+ If D[Length(D)]<>PathSep Then D:=D+PathSep;
  Path2Dir:=D;
 End;
 

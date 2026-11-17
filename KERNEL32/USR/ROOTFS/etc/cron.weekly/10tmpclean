@@ -1,0 +1,4 @@
+#!/bin/sh
+# supprime de /var/tmp les fichiers non modifies depuis 7 jours
+[ -d /var/tmp ] && find /var/tmp -type f -mtime +7 -exec rm -f {} \; 2>/dev/null
+exit 0

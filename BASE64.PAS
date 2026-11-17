@@ -99,7 +99,7 @@ End;
 
 Var
  I:Integer;
- Handle:File {$IFDEF FPC}of Byte{$ENDIF};
+ Handle:File {$IFDEF FPC}of Byte{$ENDIF}{$IFDEF LINUX0}of Byte{$ENDIF};
  HandleBase64:Text;
  CurrLine:String;
  ByteReaded:Integer;
