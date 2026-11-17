@@ -1011,11 +1011,21 @@ traduction des reponses et recalcul des sommes de controle ; l'interface
 reste celle d'iptables (`setsockopt`/`getsockopt` SOL_IP sur un socket brut
 protocole 255). Tests (`nettest`, RUNNET.SH) : `tun.*` (14), `tap.*` (9),
 `nat.*` (12) : MASQUERADE d'un hote derriere tun0 vers l'hote QEMU et retour,
-DNAT en sortie avec adresse de reponse retablie, REJECT, LOG. **Non fait** :
-pont (bridge), suivi d'etat TCP (une connexion TCP traduite n'est pas
-verifiee par un test), fragmentation, `conntrack` dans /proc, selection de
-regles par etat (`-m state`), mangle, interfaces au-dela de deux tun/tap,
-`/proc/net/dev` et netlink pour tun/tap, IPv6.
+DNAT en sortie avec adresse de reponse retablie, REJECT, LOG. **Non fait** : voir la fin du paragraphe.
+
+Complements (D7-5) : la connexion TCP d'un hote derriere tun0, traduite par
+MASQUERADE (SYN, SYN-ACK, donnees, sommes recalculees) est testee
+(`nat.tcp_*`) ; **netlink** (`RTM_GETLINK/GETADDR/GETROUTE`, `RTM_NEWADDR/DELADDR`,
+`RTM_NEWLINK` pour l'activation) et `/proc/net/dev`, `/proc/net/route` voient
+les interfaces tun/tap ; **pont** (`SIOCBRADDBR/DELBR/ADDIF/DELIF`, ports tap,
+adresse IP possible sur le pont, table d'adresses de 16 entrees apprise sur les
+trames recues, diffusion des destinations inconnues et des diffusions,
+remise locale a la pile IP) ; 4 interfaces tun/tap/pont au plus. Tests :
+`nltest` (`nl.tap_*` 9, `br.*` 12, avec RUNK), `RUNNET.SH` utilise des ports
+aleatoires pour l'hote (`k32netp=`) afin que des essais simultanes ne se
+heurtent pas. **Non fait** : eth0 comme port de pont, STP, filtrage de pont,
+suivi d'etat TCP, fragmentation, `conntrack` dans /proc, `-m state`, mangle,
+fichiers /sys/class/net/tapN, IPv6.
 
 **Noyau de production** : `TOOLS/MKPROD.SH [-o NOYAU.ELF]` compile
 `KERNEL32.PAS` sans les programmes de test embarques (2,6 Mo contre 3,4 Mo ; le

@@ -55,7 +55,7 @@ chk 'strace -e trace=write' 2 "$(wc -l < st2.txt | tr -d ' ')"
 strace -c -o st3.txt /bin/echo hi > /dev/null
 has 'strace -c en-tete' st3.txt '^% time'
 has 'strace -c ligne write' st3.txt ' write$'
-strace -o st4.txt /bin/ls /nonexistent > /dev/null 2>&1
+strace -o st4.txt /bin/sh -c 'cat < /nonexistent' > /dev/null 2>&1
 has 'strace erreur ENOENT' st4.txt '= -1 ENOENT'
 strace -o st5.txt /bin/false; chk 'strace code de retour' 1 $?
 strace -f -o st6.txt /bin/sh -c '/bin/echo a; /bin/echo b' > /dev/null
@@ -65,7 +65,7 @@ strace -s 4 -o st7.txt /bin/echo abcdefghij > /dev/null
 has 'strace -s' st7.txt 'write(1, "abcd"..., 11)'
 sleep 3 &
 sleep 1
-SP=$(pgrep sleep | head -1)
+SP=$(pgrep sleep | tail -1)
 strace -o st8.txt -p $SP 2> /dev/null
 has 'strace -p' st8.txt '^+++ exited with 0 +++'
 # ---- tcpdump ----
@@ -101,7 +101,7 @@ has 'pty : ^C code 130' jc.txt 'rc=130'
 # ---- lsof / fuser ----
 sleep 30 &
 sleep 1
-SL=$(pgrep sleep | head -1)
+SL=$(pgrep sleep | tail -1)
 lsof > ls.txt 2>&1
 has 'lsof en-tete' ls.txt '^COMMAND'
 has 'lsof init console' ls.txt '^init .*/dev/console'

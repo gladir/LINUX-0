@@ -163,5 +163,52 @@ int main(void){
    close(s);}
   ktest("sock.eafnosupport",socket(10,1,0)==-97);
   ktest("sock.enotsock",({int r=getsockname(0,&sa,&l);r==-88||r==-9;}));
+  /* AF_INET6 : adresses ::1, :: et ::ffff:a.b.c.d sur la pile IPv4 */
+  {
+    struct s6{unsigned short fam,port;unsigned flow;unsigned char ad[16];unsigned scope;};
+    struct s6 a6,b6,f6;int u1,u2,l,n,t1,t2,t3,al;char bb[64];
+    struct sin a4;
+    memset(&a6,0,sizeof a6);a6.fam=10;a6.ad[15]=1;                 /* [::1]:0 */
+    u1=socket(10,2,0);u2=socket(10,2,0);
+    ktest("in6.socket_udp",u1>=0&&u2>=0);
+    ktest("in6.bind_loopback",bind(u1,&a6,sizeof a6)==0);
+    l=sizeof b6;memset(&b6,0,sizeof b6);
+    ktest("in6.getsockname",getsockname(u1,&b6,&l)==0&&l==28&&b6.fam==10&&b6.port!=0&&b6.ad[15]==1&&b6.ad[0]==0);
+    ktest("in6.sendto",sendto(u2,"hello6",6,0,&b6,sizeof b6)==6);
+    al=sizeof f6;memset(&f6,0,sizeof f6);n=recvfrom(u1,bb,64,0,&f6,&al);
+    ktest("in6.recvfrom",n==6&&memcmp_(bb,"hello6",6)==0&&al==28&&f6.fam==10&&f6.ad[15]==1&&f6.port!=0);
+    /* v4 -> v6 : une socket AF_INET envoie vers [::ffff:127.0.0.1] */
+    {int u3=socket(2,2,0);memset(&a4,0,sizeof a4);a4.fam=2;a4.port=b6.port;a4.addr=0x0100007f;
+     ktest("in6.from_ipv4",sendto(u3,"v4to6",5,0,&a4,16)==5);
+     al=sizeof f6;n=recvfrom(u1,bb,64,0,&f6,&al);
+     ktest("in6.from_ipv4_data",n==5&&memcmp_(bb,"v4to6",5)==0&&f6.fam==10);
+     close(u3);}
+    /* v6 -> v4 : adresse mappee */
+    {int u3=socket(2,2,0),r;struct s6 m6;memset(&a4,0,sizeof a4);a4.fam=2;a4.addr=0x0100007f;
+     bind(u3,&a4,16);{int ll=16;getsockname(u3,&a4,&ll);}
+     memset(&m6,0,sizeof m6);m6.fam=10;m6.port=a4.port;m6.ad[10]=0xff;m6.ad[11]=0xff;m6.ad[12]=127;m6.ad[15]=1;
+     r=sendto(u2,"map",3,0,&m6,sizeof m6);
+     n=recvfrom(u3,bb,64,0,0,0);
+     ktest("in6.v4_mapped",r==3&&n==3&&memcmp_(bb,"map",3)==0);
+     close(u3);}
+    /* autre adresse IPv6 : pas de route */
+    {struct s6 g6;memset(&g6,0,sizeof g6);g6.fam=10;g6.port=hs(9);g6.ad[0]=0x20;g6.ad[1]=0x01;g6.ad[2]=0x0d;g6.ad[3]=0xb8;g6.ad[15]=1;
+     ktest("in6.unreachable",sendto(u2,"x",1,0,&g6,sizeof g6)==-101);}
+    ktest("in6.family_mismatch",({struct sin w;memset(&w,0,sizeof w);w.fam=2;bind(u2,&w,16)==-97;}));
+    ktest("in6.raw_unsupported",socket(10,3,58)==-93);
+    close(u1);close(u2);
+    /* TCP sur ::1 */
+    memset(&a6,0,sizeof a6);a6.fam=10;a6.ad[15]=1;
+    t1=socket(10,1,0);bind(t1,&a6,sizeof a6);listen(t1,2);
+    l=sizeof b6;getsockname(t1,&b6,&l);
+    t2=socket(10,1,0);
+    ktest("in6.tcp_connect",connect(t2,&b6,sizeof b6)==0);
+    al=sizeof f6;t3=accept(t1,&f6,&al);
+    ktest("in6.tcp_accept",t3>=0&&al==28&&f6.fam==10&&f6.ad[15]==1);
+    ktest("in6.tcp_echo",write(t2,"ping6",5)==5&&read(t3,bb,64)==5&&memcmp_(bb,"ping6",5)==0
+          &&write(t3,"pong6",5)==5&&read(t2,bb,64)==5&&memcmp_(bb,"pong6",5)==0);
+    l=sizeof f6;ktest("in6.tcp_peername",getpeername(t2,&f6,&l)==0&&f6.fam==10&&f6.port==b6.port);
+    close(t3);close(t2);close(t1);
+  }
   return ku_fail?1:0;
 }

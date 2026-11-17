@@ -7,6 +7,7 @@
 static unsigned short hs(unsigned short v){return (v>>8)|(v<<8);}
 static void mksin(struct sin*a,unsigned ip,int port){memset(a,0,sizeof *a);a->fam=2;a->port=hs(port);a->addr=ip;}
 #define HOST 0x0202000a
+static int P1=9091,P2=9092,P3=9099;   /* ports de l'hote : k32netp=N (RUNNET.SH) */
 static unsigned short ipcs(const unsigned char*p,int n){unsigned s=0;while(n>1){s+=(p[0]<<8)|p[1];p+=2;n-=2;}if(n)s+=p[0]<<8;while(s>>16)s=(s&0xffff)+(s>>16);return (unsigned short)~s;}
 /* paquet IPv4 : proto, source, destination (octets), charge utile */
 static int mkip(unsigned char*pk,int proto,const unsigned char*src,const unsigned char*dst,const unsigned char*pl,int plen){
@@ -24,7 +25,7 @@ static int natbuild(unsigned char*tb,struct nr*pre,struct nr*out,struct nr*post)
       memset(e,0,168);
       if(r->hasd){memcpy(e+4,r->md,4);memset(e+12,255,4);}
       if(r->oif){memcpy(e+32,r->oif,5);memset(e+64,255,16);}
-      *(unsigned short*)(e+80)=17;*(unsigned short*)(e+88)=112;*(unsigned short*)(e+90)=168;
+      *(unsigned short*)(e+88)=112;*(unsigned short*)(e+90)=168;
       *(unsigned short*)(e+112)=56;memcpy(e+114,nm,strlen(nm)+1);
       *(unsigned*)(e+144)=1;*(unsigned*)(e+148)=(r->k=='M'?0:1)|(r->tp?2:0);
       memcpy(e+152,r->to,4);memcpy(e+156,r->to,4);
@@ -41,6 +42,17 @@ static int natbuild(unsigned char*tb,struct nr*pre,struct nr*out,struct nr*post)
 static unsigned short udpchk(const unsigned char*ip){
   unsigned char b[1600];int l=(ip[2]<<8)|ip[3],pl=l-20;memcpy(b,ip+12,8);b[8]=0;b[9]=17;b[10]=pl>>8;b[11]=pl&255;memcpy(b+12,ip+20,pl);
   return ipcs(b,12+pl);}
+/* somme de controle TCP d'un paquet IPv4 ; 0 si valide */
+static unsigned short tcpchk(const unsigned char*ip){
+  unsigned char b[1600];int l=(ip[2]<<8)|ip[3],pl=l-20;memcpy(b,ip+12,8);b[8]=0;b[9]=6;b[10]=pl>>8;b[11]=pl&255;memcpy(b+12,ip+20,pl);
+  return ipcs(b,12+pl);}
+static void tcpfix(unsigned char*ip){int c;ip[36]=0;ip[37]=0;c=tcpchk(ip);ip[36]=c>>8;ip[37]=c&255;}
+/* segment TCP minimal (20 octets d'en-tete) dans un paquet IPv4 */
+static int mktcp(unsigned char*pk,const unsigned char*src,const unsigned char*dst,int sp,int dp,unsigned seq,unsigned ack,int fl,const char*d,int dl){
+  unsigned char t[100];int i;memset(t,0,20);t[0]=sp>>8;t[1]=sp&255;t[2]=dp>>8;t[3]=dp&255;
+  for(i=0;i<4;i++){t[4+i]=seq>>(24-8*i);t[8+i]=ack>>(24-8*i);}
+  t[12]=0x50;t[13]=fl;t[14]=0x20;t[15]=0;memcpy(t+20,d,dl);
+  {int n=mkip(pk,6,src,dst,t,20+dl);tcpfix(pk);return n;}}
 /* ecrit la somme UDP dans le paquet */
 static void udpfix(unsigned char*ip){int c;ip[26]=0;ip[27]=0;c=udpchk(ip);if(c==0)c=0xffff;ip[26]=c>>8;ip[27]=c&255;}
 /* ifreq pour ioctl d'interface : nom, adresse IPv4 en octets */
@@ -51,6 +63,7 @@ int main(void){
   int s,n,i,l;char b[4096];struct sin a,f;
   if(fdc>=0){m=read(fdc,cl,sizeof cl-1);close(fdc);}
   for(k=0;k+6<=m;k++)if(memcmp_(cl+k,"k32net",6)==0)found=1;
+  for(k=0;k+8<m;k++)if(memcmp_(cl+k,"k32netp=",8)==0){int v=0,j=k+8;while(j<m&&cl[j]>='0'&&cl[j]<='9')v=v*10+cl[j++]-'0';if(v>1024){P1=v;P2=v+1;P3=v+2;}}
   if(!found){puts("  (reseau : essai ignore, voir RUNNET.SH)\n");return 0;}
   /* ICMP : ping de la passerelle */
   {unsigned char pk[16],rb[64];memset(pk,0,16);pk[0]=8;pk[4]=0x55;pk[5]=0x66;pk[7]=1;memcpy(pk+8,"pingdata",8);
@@ -102,10 +115,10 @@ int main(void){
     waitpid(p,&st,0);ktest("pkt.eperm_nonroot",st==0);}
    close(ps);close(pd);close(pa);(void)ok;(void)got;}
   /* UDP */
-  s=socket(2,2,0);mksin(&a,HOST,9092);
+  s=socket(2,2,0);mksin(&a,HOST,P2);
   ktest("net.udp_send",sendto(s,"udp-hello",9,0,&a,16)==9);
   n=0;for(i=0;i<300&&n<=0;i++){l=sizeof f;n=recvfrom(s,b,100,0x40,&f,&l);if(n<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
-  ktest("net.udp_echo",n==9&&memcmp_(b,"udp-hello",9)==0&&hs(f.port)==9092);
+  ktest("net.udp_echo",n==9&&memcmp_(b,"udp-hello",9)==0&&hs(f.port)==P2);
   close(s);
   /* netfilter : table filter par setsockopt(SOL_IP) sur une socket brute IPPROTO_RAW */
   {
@@ -134,7 +147,7 @@ int main(void){
     {unsigned char gi[84];int gl=84;memset(gi,0,84);memcpy(gi,"filter",7);
      nt=getsockopt(rs,0,64,gi,&gl);
      ktest("nf.get_info_default",nt==0&&*(unsigned*)(gi+32)==0xE&&*(unsigned*)(gi+76)==3);}
-    BUILD(0,1,0,65535,9092,9092);
+    BUILD(0,1,0,65535,P2,P2);
     ktest("nf.replace_output_drop",setsockopt(rs,0,64,tb,off)==0);
     {long ts[2]={0,0};(void)ts;}
     sendto(s=socket(2,2,0),"nf-out",6,0,&a,16);
@@ -146,7 +159,7 @@ int main(void){
      {unsigned long long pc=0;int po=36+ *(unsigned*)(tb+44+12)+ 0;pc=*(unsigned*)(ge+po+96);
       ktest("nf.get_entries_counter",nt==0&&pc>=1);}}
     close(s);
-    BUILD(1,0,9092,9092,0,65535);
+    BUILD(1,0,P2,P2,0,65535);
     ktest("nf.replace_input_drop",setsockopt(rs,0,64,tb,off)==0);
     sendto(s=socket(2,2,0),"nf-in",5,0,&a,16);
     n=0;for(i=0;i<60&&n<=0;i++){l=sizeof f;n=recvfrom(s,b,100,0x40,&f,&l);if(n<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
@@ -195,8 +208,8 @@ int main(void){
     got=-1;for(t=0;t<100&&got<0;t++){int n=read(tf,rb,sizeof rb);
       if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
     ktest("tun.icmp_reply",got==36&&rb[9]==1&&rb[20]==0&&rb[24]==0x12&&memcmp_(rb+12,me,4)==0&&memcmp_(rb+16,lan,4)==0&&ipcs(rb,20)==0);
-    /* paquet UDP vers l'hote 10.0.2.2:9092 a travers eth0, sans retransmission */
-    {unsigned char u[8+7];memset(u,0,sizeof u);u[0]=0x0f;u[1]=0xa0;u[2]=9092>>8;u[3]=9092&255;u[5]=15;memcpy(u+8,"tun-fwd",7);
+    /* paquet UDP vers l'hote 10.0.2.2:P2 a travers eth0, sans retransmission */
+    {unsigned char u[8+7];memset(u,0,sizeof u);u[0]=0x0f;u[1]=0xa0;u[2]=P2>>8;u[3]=P2&255;u[5]=15;memcpy(u+8,"tun-fwd",7);
      r=mkip(pk,17,lan,hostip,u,15);
      {int fd=open("/proc/sys/net/ipv4/ip_forward",O_RDWR,0),n;char v[4];
       n=read(fd,v,1);ktest("tun.ip_forward_default_off",n==1&&v[0]=='0');close(fd);}
@@ -244,7 +257,7 @@ int main(void){
     off=natbuild(tb,&pre,&out,&post);
     ktest("nat.masq_rule",setsockopt(rs,0,64,tb,off)==0);
     {unsigned char u[8+7];int ps=socket(17,3,hs(3)),seen=0,k3,c;
-     memset(u,0,sizeof u);u[0]=0x0f;u[1]=0xa0;u[2]=9092>>8;u[3]=9092&255;u[5]=15;memcpy(u+8,"tun-nat",7);
+     memset(u,0,sizeof u);u[0]=0x0f;u[1]=0xa0;u[2]=P2>>8;u[3]=P2&255;u[5]=15;memcpy(u+8,"tun-nat",7);
      r=mkip(pk,17,lan,hostip,u,15);udpfix(pk);
      ktest("nat.udp_sum_ok",udpchk(pk)==0);
      write(tf,pk,r);
@@ -257,18 +270,38 @@ int main(void){
      close(ps);
      got=-1;for(t=0;t<300&&got<0;t++){int n=read(tf,rb,sizeof rb);
        if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
-     ktest("nat.masq_reply_untranslated",got==35&&memcmp_(rb+12,hostip,4)==0&&memcmp_(rb+16,lan,4)==0&&rb[20]==9092>>8&&rb[21]==(9092&255)&&rb[22]==0x0f&&rb[23]==0xa0&&memcmp_(rb+28,"tun-nat",7)==0&&ipcs(rb,20)==0&&udpchk(rb)==0);
+     ktest("nat.masq_reply_untranslated",got==35&&memcmp_(rb+12,hostip,4)==0&&memcmp_(rb+16,lan,4)==0&&rb[20]==P2>>8&&rb[21]==(P2&255)&&rb[22]==0x0f&&rb[23]==0xa0&&memcmp_(rb+28,"tun-nat",7)==0&&ipcs(rb,20)==0&&udpchk(rb)==0);
      (void)c;}
+    /* TCP a travers MASQUERADE : SYN, SYN-ACK, ACK + donnees, echo de l'hote */
+    {unsigned char hp[4]={10,0,2,2};int n,sp=4001,ok1=0,ok2=0,ok3=0;unsigned hs0=0;
+     r=mktcp(pk,lan,hp,sp,P1,1000,0,0x02,"",0);
+     write(tf,pk,r);
+     got=-1;for(t=0;t<300&&got<0;t++){n=read(tf,rb,sizeof rb);
+       if(n>0)got=n;else{long ts[2]={0,10000000};nanosleep(ts,0);}}
+     if(got>=40&&rb[9]==6&&(rb[33]&0x12)==0x12&&memcmp_(rb+12,hp,4)==0&&memcmp_(rb+16,lan,4)==0&&rb[22]==(sp>>8)&&rb[23]==(sp&255)&&tcpchk(rb)==0&&ipcs(rb,20)==0){
+       ok1=1;hs0=((unsigned)rb[24]<<24)|(rb[25]<<16)|(rb[26]<<8)|rb[27];}
+     ktest("nat.tcp_synack_untranslated",ok1);
+     if(ok1){
+       r=mktcp(pk,lan,hp,sp,P1,1001,hs0+1,0x10,"",0);write(tf,pk,r);
+       r=mktcp(pk,lan,hp,sp,P1,1001,hs0+1,0x18,"nat-tcp\n",8);write(tf,pk,r);
+       got=-1;for(t=0;t<300&&got<0;t++){n=read(tf,rb,sizeof rb);
+         if(n>=20+20+8&&rb[9]==6&&memcmp_(rb+40,"nat-tcp\n",8)==0){got=n;}
+         else if(n<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+       ok2=got>0&&memcmp_(rb+16,lan,4)==0&&tcpchk(rb)==0;
+       ktest("nat.tcp_echo",ok2);
+       r=mktcp(pk,lan,hp,sp,P1,1009,hs0+9,0x04,"",0);write(tf,pk,r);ok3=1;}
+     else ktest("nat.tcp_echo",0);
+     (void)ok3;}
     /* DNAT en sortie : 10.0.2.99 -> 10.0.2.2, la reponse revient comme venant de 10.0.2.99 */
     memset(&post,0,sizeof post);
     out.k='D';out.hasd=1;out.md[0]=10;out.md[1]=0;out.md[2]=2;out.md[3]=99;memcpy(out.to,hostip,4);
     off=natbuild(tb,&pre,&out,&post);
     ktest("nat.dnat_rule",setsockopt(rs,0,64,tb,off)==0);
     {int us=socket(2,2,0);struct sin a2,f2;char b2[64];int n2=0,i2,l2;
-     mksin(&a2,0x6302000a,9092);
+     mksin(&a2,0x6302000a,P2);
      ktest("nat.dnat_send",sendto(us,"dnat-out",8,0,&a2,16)==8);
      for(i2=0;i2<300&&n2<=0;i2++){l2=sizeof f2;n2=recvfrom(us,b2,64,0x40,&f2,&l2);if(n2<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
-     ktest("nat.dnat_reply_source",n2==8&&memcmp_(b2,"dnat-out",8)==0&&f2.addr==0x6302000a&&hs(f2.port)==9092);
+     ktest("nat.dnat_reply_source",n2==8&&memcmp_(b2,"dnat-out",8)==0&&f2.addr==0x6302000a&&hs(f2.port)==P2);
      close(us);}
     /* retour a une table nat vide */
     memset(&out,0,sizeof out);off=natbuild(tb,&pre,&out,&post);
@@ -313,7 +346,7 @@ int main(void){
       off=o;}
      ktest("nat.log_rule",setsockopt(rs,0,64,tb,off)==0);
      {int us=socket(2,2,0);struct sin a2;static char km[16384];int kn,i3,seen=0;
-      mksin(&a2,HOST,9092);sendto(us,"logme",5,0,&a2,16);close(us);
+      mksin(&a2,HOST,P2);sendto(us,"logme",5,0,&a2,16);close(us);
       kn=sc3(103,3,(long)km,sizeof km-1);
       for(i3=0;i3+14<kn;i3++)if(memcmp_(km+i3,"K32LOG: IN= OUT=eth0",20)==0)seen=1;
       ktest("nat.log_journal",seen);}}
@@ -367,7 +400,7 @@ int main(void){
     {int sk2=socket(2,2,0);mkifr(ifr,"mytap",0);ktest("tap.gone_after_close",ioctl(sk2,0x8915,(long)ifr)==-19);close(sk2);}
   }
   /* TCP client */
-  s=socket(2,1,0);mksin(&a,HOST,9091);
+  s=socket(2,1,0);mksin(&a,HOST,P1);
   ktest("net.tcp_connect",connect(s,&a,16)==0);
   write(s,"tcp-hello\n",10);n=read(s,b,sizeof b);
   ktest("net.tcp_echo",n==10&&memcmp_(b,"tcp-hello\n",10)==0);
@@ -384,7 +417,7 @@ int main(void){
   shutdown(s,1);
   ktest("net.tcp_eof",read(s,b,10)==0);
   close(s);
-  s=socket(2,1,0);mksin(&a,HOST,9099);
+  s=socket(2,1,0);mksin(&a,HOST,P3);
   ktest("net.tcp_refused",connect(s,&a,16)==-111);
   close(s);
   /* TCP serveur : l'hote se connecte par la redirection */

@@ -138,6 +138,91 @@ int main(){
      if(recvfrom(f2,rb,sizeof rb,0,0,0)<20)_exit(3);
      _exit(*(int*)(rb+16)==-1?0:1);}
    waitpid(p,&st,0);ktest("nl.eperm_nonroot",st==0);}
+  /* tap dans netlink et /proc ; pont de trois ports */
+  {
+    int tf[3],tn,sk=socket(2,2,0),j,r;static unsigned char ifr[40];char nb[3][8]={"nlta","nltb","nltc"};
+    unsigned char hostmac[3][6]={{2,0,0,0,0,0x0a},{2,0,0,0,0,0x0b},{2,0,0,0,0,0x0c}},fr[128],rb[256];
+    unsigned char me[4]={192,168,66,1};
+    for(j=0;j<3;j++){tf[j]=open("/dev/net/tun",O_RDWR|0x800,0);
+      memset(ifr,0,40);memcpy(ifr,nb[j],5);*(unsigned short*)(ifr+16)=0x1002;
+      r=ioctl(tf[j],0x400454CA,(long)ifr);if(r!=0)break;}
+    ktest("nl.tap_create",j==3);
+    if(j==3){
+      /* netlink : adresse puis activation du premier tap */
+      {unsigned char am[16+8];int idx;memset(ifr,0,40);memcpy(ifr,"nlta",5);ioctl(sk,0x8933,(long)ifr);idx=*(int*)(ifr+16);
+       memset(am,0,sizeof am);am[0]=2;am[1]=24;*(int*)(am+4)=idx;
+       am[8]=8;am[9]=0;am[10]=2;am[11]=0;memcpy(am+12,me,4);
+       n=nlreq(fd,20,5,am,16,out,sizeof out);{const struct nlh*m=nth(out,n,2,0);ktest("nl.tap_newaddr",m&&*(const int*)((const char*)m+16)==0);}
+       {unsigned char lm[16];memset(lm,0,16);*(int*)(lm+4)=idx;*(unsigned*)(lm+8)=1;*(unsigned*)(lm+12)=1;
+        n=nlreq(fd,16,5,lm,16,out,sizeof out);{const struct nlh*m=nth(out,n,2,0);ktest("nl.tap_setup",m&&*(const int*)((const char*)m+16)==0);}}
+       memset(ifr,0,40);memcpy(ifr,"nlta",5);ioctl(sk,0x8915,(long)ifr);
+       ktest("nl.tap_addr_ioctl",memcmp_(ifr+20,me,4)==0);
+       {unsigned char gm[16];memset(gm,0,16);n=nlreq(fd,18,0x301,gm,16,out,sizeof out);
+        {int k2,found=0;for(k2=0;k2+5<n;k2++)if(memcmp_(out+k2,"nlta",5)==0)found=1;ktest("nl.tap_in_link_dump",found);}
+        n=nlreq(fd,22,0x301,gm,8,out,sizeof out);
+        {int k2,found=0;for(k2=0;k2+4<n;k2++)if(memcmp_((unsigned char*)out+k2,me,4)==0)found=1;ktest("nl.tap_in_addr_dump",found);}
+        n=nlreq(fd,26,0x301,gm,12,out,sizeof out);
+        {int k2,found=0;for(k2=0;k2+5<n;k2++)if(memcmp_(out+k2,"\xc0\xa8\x42\x00",4)==0)found=1;ktest("nl.tap_in_route_dump",found);}}
+       {static char pb[2048];int pn=0,z,f1=0,f2=0,fd2=open("/proc/net/dev",O_RDONLY,0),fr2=open("/proc/net/route",O_RDONLY,0);
+        if(fd2>=0){pn=read(fd2,pb,sizeof pb-1);close(fd2);}
+        for(z=0;z+5<pn;z++)if(memcmp_(pb+z,"nlta:",5)==0)f1=1;
+        ktest("nl.tap_proc_net_dev",f1);
+        pn=0;if(fr2>=0){pn=read(fr2,pb,sizeof pb-1);close(fr2);}
+        for(z=0;z+4<pn;z++)if(memcmp_(pb+z,"nlta",4)==0)f2=1;
+        ktest("nl.tap_proc_net_route",f2);}
+      }
+      /* pont br0 : nlta, nltb, nltc ; commutation et apprentissage des adresses */
+      {static unsigned char brn[16]="nlbr",rq[40];int got[3],k2;
+       r=ioctl(sk,0x89A0,(long)brn);ktest("br.addbr",r==0);
+       ktest("br.addbr_exists",ioctl(sk,0x89A0,(long)brn)==-17);
+       for(k2=0;k2<3;k2++){memset(rq,0,40);memcpy(rq,"nlbr",5);
+         {unsigned char q2[40];memset(q2,0,40);memcpy(q2,nb[k2],5);ioctl(sk,0x8933,(long)q2);*(int*)(rq+16)=*(int*)(q2+16);}
+         r=ioctl(sk,0x89A2,(long)rq);if(r!=0)break;
+         {unsigned char q3[40];memset(q3,0,40);memcpy(q3,nb[k2],5);*(unsigned short*)(q3+16)=1;ioctl(sk,0x8914,(long)q3);}}
+       ktest("br.addif_3",k2==3);
+       /* trame de a (adresse 0a) vers une adresse inconnue : diffusee sur b et c */
+       memset(fr,0,60);memcpy(fr,hostmac[1],6);memcpy(fr+6,hostmac[0],6);fr[12]=0x88;fr[13]=0xb5;memcpy(fr+14,"br-flood",8);
+       write(tf[0],fr,60);
+       for(k2=0;k2<3;k2++){got[k2]=read(tf[k2],rb,sizeof rb);}
+       ktest("br.flood_unknown",got[0]<=0&&got[1]==60&&got[2]==60&&memcmp_(rb+14,"br-flood",8)==0);
+       /* b repond : adresse 0b apprise sur le port b ; c ne voit rien d'une trame de a vers 0b */
+       memset(fr,0,60);memcpy(fr,hostmac[0],6);memcpy(fr+6,hostmac[1],6);fr[12]=0x88;fr[13]=0xb5;memcpy(fr+14,"br-reply",8);
+       write(tf[1],fr,60);
+       for(k2=0;k2<3;k2++)got[k2]=read(tf[k2],rb,sizeof rb);
+       ktest("br.unicast_learned_a",got[0]==60&&got[1]<=0&&got[2]<=0);
+       memset(fr,0,60);memcpy(fr,hostmac[1],6);memcpy(fr+6,hostmac[0],6);fr[12]=0x88;fr[13]=0xb5;memcpy(fr+14,"br-uni-b",8);
+       write(tf[0],fr,60);
+       for(k2=0;k2<3;k2++)got[k2]=read(tf[k2],rb,sizeof rb);
+       ktest("br.unicast_learned_b",got[0]<=0&&got[1]==60&&got[2]<=0&&memcmp_(rb+14,"br-uni-b",8)==0);
+       /* diffusion */
+       memset(fr,0,60);memset(fr,255,6);memcpy(fr+6,hostmac[2],6);fr[12]=0x88;fr[13]=0xb5;
+       write(tf[2],fr,60);
+       for(k2=0;k2<3;k2++)got[k2]=read(tf[k2],rb,sizeof rb);
+       ktest("br.broadcast",got[0]==60&&got[1]==60&&got[2]<=0);
+       /* adresse IP sur le pont : l'hote a envoie un ICMP echo vers le pont, la reponse revient sur le port a */
+       {unsigned char q4[40];static unsigned char pk[128],ic[16];unsigned char bi[4]={192,168,77,1},lanh[4]={192,168,77,9};int c,k3;
+        memset(q4,0,40);memcpy(q4,"nlbr",5);q4[16]=2;memcpy(q4+20,bi,4);ioctl(sk,0x8916,(long)q4);
+        memset(q4,0,40);memcpy(q4,"nlbr",5);q4[16]=2;q4[20]=255;q4[21]=255;q4[22]=255;ioctl(sk,0x891C,(long)q4);
+        memset(q4,0,40);memcpy(q4,"nlbr",5);*(unsigned short*)(q4+16)=1;ioctl(sk,0x8914,(long)q4);
+        memset(q4,0,40);memcpy(q4,"nlbr",5);ioctl(sk,0x8927,(long)q4);
+        memset(ic,0,16);ic[0]=8;ic[4]=0x31;ic[7]=1;memcpy(ic+8,"bridged!",8);{c=0;for(k3=0;k3<16;k3+=2)c+=(ic[k3]<<8)|ic[k3+1];while(c>>16)c=(c&0xffff)+(c>>16);c=~c&0xffff;ic[2]=c>>8;ic[3]=c&255;}
+        memset(pk,0,sizeof pk);memcpy(pk,q4+18,6);memcpy(pk+6,hostmac[0],6);pk[12]=8;pk[13]=0;
+        pk[14]=0x45;pk[16]=0;pk[17]=36;pk[20]=0x40;pk[22]=64;pk[23]=1;memcpy(pk+26,lanh,4);memcpy(pk+30,bi,4);
+        {int s2=0;for(k3=0;k3<20;k3+=2)s2+=(pk[14+k3]<<8)|pk[15+k3];while(s2>>16)s2=(s2&0xffff)+(s2>>16);s2=~s2&0xffff;pk[24]=s2>>8;pk[25]=s2&255;}
+        memcpy(pk+34,ic,16);
+        write(tf[0],pk,14+36);
+        for(k3=0;k3<3;k3++)got[k3]=read(tf[k3],rb,sizeof rb);
+        ktest("br.local_icmp_reply",got[0]==14+36&&rb[12]==8&&rb[13]==0&&rb[14+9]==1&&rb[14+20]==0&&memcmp_(rb+14+12,bi,4)==0&&memcmp_(rb,hostmac[0],6)==0);
+        ktest("br.reply_only_on_learned_port",got[1]<=0&&got[2]<=0);}
+       memset(rq,0,40);memcpy(rq,"nlbr",5);*(int*)(rq+16)=0;
+       ktest("br.delbr_busy",ioctl(sk,0x89A1,(long)brn)==-16);
+       {unsigned char q5[40];memset(q5,0,40);memcpy(q5,"nlbr",5);*(unsigned short*)(q5+16)=0;ioctl(sk,0x8914,(long)q5);}
+       ktest("br.delbr",ioctl(sk,0x89A1,(long)brn)==0);
+       ktest("br.delbr_gone",ioctl(sk,0x89A1,(long)brn)==-19);}
+    }
+    for(j=0;j<3;j++)if(tf[j]>=0)close(tf[j]);
+    close(sk);
+  }
   close(fd);
   puts("KTEST: nl DONE\n");
   return ku_fail?1:0;

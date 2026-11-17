@@ -2,7 +2,7 @@
 # @author: Sylvain Maltais (support@gladir.com)
 # @created: 2026
 # @website(https://www.gladir.com/linux-0)
-# @description: Essai du reseau reel : serveur hote (python, TCP 9091 + UDP 9092),
+# @description: Essai du reseau reel : serveur hote (python, ports aleatoires BP et BP+1 (k32netp=BP)),
 #   KERNEL32 sous QEMU avec une carte RTL8139 en reseau utilisateur (invite
 #   10.0.2.15, hote 10.0.2.2, redirection 127.0.0.1:5556 -> invite:7777),
 #   programme /bin/nettest (actif avec k32net) puis connexion de l'hote au
@@ -14,6 +14,8 @@ K32=$HERE/../..
 LPC=${LPC:-/tmp/claude-0/work/k32/bin/lpc}
 GEN=1; [ "$1" = -n ] && GEN=0
 W=$(mktemp -d)
+# ports de l'hote tires au hasard (essais simultanes : BP, BP+1 UDP, BP+3 redirection)
+BP=$(python3 -c 'import random;print(random.randint(20000,60000))')
 if [ $GEN = 1 ]; then
   "$HERE/build.sh" "$W/u" >/dev/null || exit 1
   python3 "$HERE/MKEMBED.PY" "$W/u" "$K32/KERNEL32.PAS" >/dev/null || exit 1
@@ -23,11 +25,11 @@ cp "$K32/KERNEL32.PAS" "$W/"
 cat > "$W/srv.py" <<'PY'
 import socket, threading, sys, time
 def udp():
-    s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(('127.0.0.1',9092))
+    s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(('127.0.0.1',int(sys.argv[2])+1))
     while True:
         d,a=s.recvfrom(2000); s.sendto(d,a)
 def tcp():
-    s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',9091)); s.listen(5)
+    s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',int(sys.argv[2]))); s.listen(5)
     while True:
         c,_=s.accept(); threading.Thread(target=handle,args=(c,),daemon=True).start()
 def handle(c):
@@ -67,7 +69,7 @@ for _ in range(1200):
     time.sleep(0.1)
 time.sleep(0.5)
 try:
-    c=socket.create_connection(('127.0.0.1',5556),timeout=10)
+    c=socket.create_connection(('127.0.0.1',int(sys.argv[2])+3),timeout=10)
     c.sendall(b'ping-in\n'); c.settimeout(10)
     r=c.recv(100); open(w+'/hostrecv.txt','w').write(repr(r))
     c.close()
@@ -75,12 +77,12 @@ except Exception as e:
     open(w+'/hostrecv.txt','w').write('ERR '+repr(e))
 time.sleep(60)
 PY
-python3 "$W/srv.py" "$W" > "$W/srv.log" 2>&1 &
+python3 "$W/srv.py" "$W" "$BP" > "$W/srv.log" 2>&1 &
 SP=$!
 sleep 1
 timeout 120 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.txt" -display none \
-  -m 64 -no-reboot -append "console=ttyS0 k32net k32power $KARGS" \
-  -nic user,model=${NICMODEL:-rtl8139},hostfwd=tcp:127.0.0.1:5556-:7777 2>/dev/null
+  -m 64 -no-reboot -append "console=ttyS0 k32net k32netp=$BP k32power $KARGS" \
+  -nic user,model=${NICMODEL:-rtl8139},hostfwd=tcp:127.0.0.1:$((BP+3))-:7777 2>/dev/null
 kill $SP 2>/dev/null
 tr -d '\r' < "$W/out.txt" | grep "KTEST: net\|KTEST: nf\|KTEST: tun\|KTEST: tap\|KTEST: nat\|NET-\|KPROG: /bin/nettest\|reseau"
 cat "$W/hostrecv.txt" 2>/dev/null; echo

@@ -61,7 +61,9 @@ Var
   Ws : TSysWinSize;
   Done : Boolean;
   EofSent : Boolean;
+  Waited : LongInt;
 Begin
+  Waited := 0;
   Quiet_ := False;
   Append_ := False;
   Retcode_ := False;
@@ -150,7 +152,13 @@ Begin
     Pf[2] := Master;
     Pf[3] := 1;
     If EofSent Then Pf[0] := -1;
-    R := SysPoll(LongInt(@Pf), 2, 1000);
+    R := SysPoll(LongInt(@Pf), 2, 500);
+    If EofSent Then
+    Begin
+      Inc(Waited);
+      If Waited = 6 Then SysKill(Child, 1);
+      If Waited = 12 Then SysKill(Child, 9);
+    End;
     If R < 0 Then
     Begin
       If SysErrno = 4 Then Continue;
