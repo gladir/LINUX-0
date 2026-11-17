@@ -989,6 +989,31 @@ Teste sous QEMU : `VGA=vmware ./RUNFB.SH -n` (captures d'ecran exactes en
 (Bochs) restent verts. **Non teste** : VirtualBox lui-meme (ni VMSVGA ni
 VBoxVGA : ports, taille de la FIFO et rafraichissement a verifier).
 
+**Correctif VirtualBox : formatage d'un disque de 8 Go (lot D7-8)** :
+l'installateur annoncait « le formatage plante a 3 % » sur un disque de 8 Go.
+Reproduit sous QEMU (`ich9-ahci`, disque creux de 8 Go, 1024 Mo) avec le vrai
+CD d'installation : `mkfs.ext4 -b 4096 /dev/sda1` rendait 1 en 3 s avec
+`Erreur : lseek`. **Cause : `USR/INSTALL.PAS` calculait les decalages d'ecriture
+sur 32 bits (`PartStart * 512 + Blk * BS`) et utilisait `lseek` 32 bits : toute
+partition de plus de 2 Gio echouait au premier bloc au-dela** ; ni le noyau ni
+le pilote AHCI n'etaient en cause (`bdtest` : ecriture/lecture a 2 Gio, 4 Gio et
+en fin de disque par `_llseek`, vert). Corrige dans `INSTALL.PAS`
+(`WriteAtS` : decalage de 64 bits par `SysLLSeek`). Installation complete
+verifiee (`TESTS/K/RUNINSTAHCI.SH` : CD, preseed, ext4 de 7935 Mo + swap de
+256 Mo sur AHCI, 1024 Mo, 1 CPU, `e2fsck -fn` propre ; `mkfs.ext4` seul : 14 s).
+Durcissement du pilote AHCI : delais en microsecondes (plus de boucles
+comptees), erreurs `PxIS` (TFES, HBFS, HBDS, IFS, INFS, OFS, IPMS) detectees,
+message `ahci: port N erreur is=.. tfd=.. serr=.. cmd=.. ci=.. ssts=..` puis
+la commande (code, LBA, nombre, tampon) dans le journal (dmesg), remise en
+etat du port (arret, effacement, CLO, COMRESET), nouvel essai, FLUSH CACHE EXT
+a `sync` et a l'arret ; `RUNAHCIERR.SH` (erreur injectee par blkdebug) :
+journal, reprise et donnees correctes. **Panique visible** : `KPanic`
+repasse l'ecran en mode texte VGA et affiche la console 0 (le framebuffer
+cachait le message ; `RUNPANIC.SH` verifie une capture 720x400 non noire apres
+une panique avec `fb=1024x768`). Non reproduit : tout comportement propre a
+VirtualBox/NEM (pas de KVM ici : seulement TCG), disques qcow2 (pas de
+`qemu-img`), NCQ.
+
 **cgroups v2 minimaux (lot D7-7)** : systemes de fichiers `cgroup2` (et
 `cgroup`, meme implementation) a monter par `mount -t cgroup2 none
 /sys/fs/cgroup` ; `mkdir` cree un groupe avec `cgroup.procs`,

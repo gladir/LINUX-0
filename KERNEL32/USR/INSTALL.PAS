@@ -218,9 +218,25 @@ Begin
   End;
 End;
 
+{ Ecriture a l'octet Rem du secteur Sect (512 octets) : decalage de 64 bits
+  par llseek, necessaire au-dela de 2 Gio (partitions de plus de 2 Go) }
+Procedure WriteAtS(Sect, Rem, Addr, Len : LongInt);
+Var R, Done : LongInt; Res : Array[0..1] Of LongInt;
+Begin
+  If SysLLSeek(Fd, (Sect Shr 23) And $1FF, (Sect Shl 9) Or Rem,
+     LongInt(@Res[0]), SEEK_SET) < 0 Then Die('lseek');
+  Done := 0;
+  While Done < Len Do
+  Begin
+    R := LnxSys3(4, Fd, Addr + Done, Len - Done);
+    If R <= 0 Then Die('write ' + SysErrorText(-R));
+    Done := Done + R;
+  End;
+End;
+
 Procedure WriteBlk(Blk : LongInt; Addr : LongInt);
 Begin
-  WriteAt(PartStart * 512 + Blk * BS, Addr, BS);
+  WriteAtS(PartStart + Blk * (BS Div 512), 0, Addr, BS);
 End;
 
 Procedure PutB(Addr, Off, V : LongInt);
@@ -531,8 +547,8 @@ Begin
   End;
   G := (Ino - 1) Div IPG;
   Idx := (Ino - 1) Mod IPG;
-  Off := PartStart * 512 + GrpITab[G] * BS + Idx * ISZ;
-  WriteAt(Off, A, ISZ);
+  WriteAtS(PartStart + GrpITab[G] * (BS Div 512) + (Idx * ISZ) Div 512,
+      (Idx * ISZ) Mod 512, A, ISZ);
 End;
 
 { ---------- ecriture de donnees : blocs directs et indirects ---------- }

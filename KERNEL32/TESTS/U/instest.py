@@ -68,6 +68,15 @@ def cap(q, name, tag):
     return p
 
 
+def drv_args(disk, iface='ide'):
+    """arguments QEMU du disque : ahci = controleur SATA ich9-ahci"""
+    if iface == 'ahci':
+        return ['-device', 'ich9-ahci,id=ahci', '-drive',
+                'file=%s,format=raw,if=none,id=d0' % disk, '-device',
+                'ide-hd,drive=d0,bus=ahci.0']
+    return ['-drive', drive(disk, iface)]
+
+
 def drive(disk, iface='ide'):
     if iface == 'ide':
         return 'file=%s,format=raw,if=ide,index=0' % disk
@@ -76,7 +85,7 @@ def drive(disk, iface='ide'):
 
 def qemu_cd(name, iso, disk, mem=256, iface='ide'):
     return Q(os.path.join(WORK, name), ['-cdrom', iso, '-boot', 'd', '-m',
-             str(mem), '-vga', 'std', '-drive', drive(disk, iface)],
+             str(mem), '-vga', 'std'] + drv_args(disk, iface),
              serial_io=True)
 
 
@@ -186,8 +195,8 @@ def boot_verify(tag, disk, rootpw, checks, mem=128, rtc_tz=None,
     if rtc_tz:
         extra = ['-rtc', 'base=localtime']
         env = {'TZ': rtc_tz}
-    q = Q(os.path.join(WORK, tag + '-boot'), extra + ['-m', str(mem), '-drive',
-          drive(disk, iface)], serial_io=True, env=env)
+    q = Q(os.path.join(WORK, tag + '-boot'), extra + ['-m', str(mem)] +
+          drv_args(disk, iface), serial_io=True, env=env)
     ok = q.wait(r'login:', 90)
     check(tag + ' : amorce du disque installe (login:)', ok)
     if not ok:
@@ -854,6 +863,86 @@ reboot=halt
           open(disk, 'rb').read(512) == b'\0' * 512)
 
 
+# ------------------------------------------------------------- sata8g
+def t_sata8g():
+    """installation de bout en bout sur un disque SATA (ich9-ahci) de 8 Go
+    avec 1 Gio de memoire : duree, e2fsck, amorce"""
+    pre = """lang=fr
+keyboard=fr
+timezone=Europe/Paris
+hostname=sata8g
+rootpw=secret
+partitioning=guided
+swap=256
+fs=ext4
+ui=text
+endwait=2
+reboot=halt
+"""
+    iso = build_iso('sata8g', 'console=tty0 console=ttyS0 rw '
+                    'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
+                    {'preseed.cfg': pre})
+    disk = new_disk('sata8g', 8192)
+    t0 = time.time()
+    q = qemu_cd('sata8g', iso, disk, mem=1024, iface='ahci')
+    ok = q.wait(r'K32SETUP: DONE', 1500)
+    dt = time.time() - t0
+    check('sata8g : installation sur SATA 8 Go avec 1 Gio de RAM (%d s)' % dt,
+          ok)
+    t = q.text()
+    print('   duree totale : %d s ; formatage : %s' % (dt,
+          re.findall(r'(?m)^.*(?:Formatage|mkfs).*$', t)[:3]))
+    for _ in range(60):
+        if not q.alive():
+            break
+        time.sleep(1)
+    q.quit()
+    tab = read_table(disk)
+    check('sata8g : e2fsck -fn propre',
+          fs_check(disk, [(tab[0][1], tab[0][2])]))
+    checks = [
+        ('hostname', 'hostname', r'sata8g'),
+        ('racine', 'cat /proc/mounts', r'/dev/(sda|hda)1 / '),
+        ('df', 'df /', r'/'),
+    ]
+    boot_verify('sata8g', disk, 'secret', checks, mem=1024, iface='ahci')
+
+
+# ---------------------------------------------------------------- fail
+def t_fail():
+    """ecran d'echec : mkfs qui ne repond plus (delai 4 s) -> message clair,
+    dernieres lignes du journal, Reessayer / Shell / Quitter"""
+    pre = """lang=fr
+keyboard=fr
+timezone=UTC
+hostname=x
+rootpw=x
+partitioning=guided
+swap=0
+fs=ext2
+timeout=4
+testmkfs=/bin/sleep 100
+"""
+    iso = build_iso('fail', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
+                    {'preseed.cfg': pre})
+    disk = new_disk('fail', 200)
+    q = qemu_cd('fail', iso, disk)
+    ok = q.wait(r'K32SETUP: .*ne r.pond plus depuis 4 s', 240)
+    check('fail : commande bloquee interrompue apres 4 s, message clair', ok)
+    time.sleep(1.5)
+    cap(q, 'a', 'fail-01-echec')
+    check('fail : ecran d\'echec (page installation affichee de nouveau)',
+          q.wait(r'K32SETUP: page 12', 5))
+    q.key('ret')
+    ok = q.wait(r'nouvel essai', 60)
+    check('fail : Reessayer relance l\'installation', ok)
+    ok = q.wait(r'(?s)nouvel essai.*ne r.pond plus depuis 4 s', 90)
+    check('fail : le second essai echoue proprement aussi', ok)
+    time.sleep(1.5)
+    cap(q, 'b', 'fail-02-second-echec')
+    q.quit()
+
 # ---------------------------------------------------------------- text
 def t_text():
     iso = build_iso('text', 'console=ttyS0 rw text k32setup.verbose=/dev/ttyS0')
@@ -911,9 +1000,10 @@ def t_text():
 ALL = {'tz': t_tz, 'auto-fr': t_auto_fr, 'auto-de': t_auto_de,
        'ui-fr': t_ui_fr, 'ui-de': t_ui_de, 'text': t_text,
        'refuse': t_refuse, 'virtio': t_virtio, 'exist': t_exist,
-       'auto-log': t_auto_log}
+       'auto-log': t_auto_log, 'sata8g': t_sata8g, 'fail': t_fail}
+DEFAULT = [k for k in ALL if k not in ('sata8g',)]
 os.makedirs(WORK, exist_ok=True)
-for s in (SCEN or list(ALL)):
+for s in (SCEN or DEFAULT):
     print('=== ' + s, flush=True)
     try:
         ALL[s]()
