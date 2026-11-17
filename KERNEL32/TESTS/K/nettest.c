@@ -399,6 +399,26 @@ int main(void){
     close(tf);close(sk);
     {int sk2=socket(2,2,0);mkifr(ifr,"mytap",0);ktest("tap.gone_after_close",ioctl(sk2,0x8915,(long)ifr)==-19);close(sk2);}
   }
+  /* IPv6 sur eth0 : ND et echo ICMPv6 vers la passerelle fec0::2 du reseau QEMU */
+  {
+    struct s6{unsigned short fam,port;unsigned flow;unsigned char ad[16];unsigned scope;}d6,f6;
+    int rs6=socket(10,3,58),got=0,k3,al;unsigned char ep[16],rb6[128];
+    ktest("ip6.raw_socket",rs6>=0);
+    memset(&d6,0,sizeof d6);d6.fam=10;d6.ad[0]=0xfe;d6.ad[1]=0xc0;d6.ad[15]=2;
+    memset(ep,0,16);ep[0]=128;ep[4]=0x61;ep[5]=0x62;ep[7]=1;memcpy(ep+8,"ipv6echo",8);
+    ktest("ip6.echo_send",sendto(rs6,ep,16,0,&d6,sizeof d6)==16);
+    for(k3=0;k3<300&&!got;k3++){int n2;al=sizeof f6;memset(&f6,0,sizeof f6);n2=recvfrom(rs6,rb6,sizeof rb6,0x40,&f6,&al);
+      if(n2>=16&&rb6[0]==129){got=(rb6[4]==0x61&&rb6[5]==0x62&&memcmp_(rb6+8,"ipv6echo",8)==0&&al==28&&f6.fam==10&&f6.ad[0]==0xfe&&f6.ad[1]==0xc0&&f6.ad[15]==2);if(!got)got=-1;}
+      else if(n2<=0){long ts[2]={0,10000000};nanosleep(ts,0);}}
+    ktest("ip6.echo_reply",got==1);
+    {static char pb[512];int pn=0,fd=open("/proc/net/if_inet6",O_RDONLY,0),z,hasll=0,haslo=0,hasg=0;
+     if(fd>=0){pn=read(fd,pb,sizeof pb-1);close(fd);}
+     for(z=0;z+8<pn;z++){if(memcmp_(pb+z,"fe80000000000000",16)==0)hasll=1;if(memcmp_(pb+z,"fec0000000000000",16)==0)hasg=1;
+       if(memcmp_(pb+z,"00000000000000000000000000000001 01 80 10 80",44)==0)haslo=1;}
+     ktest("ip6.proc_if_inet6",pn>0&&hasll&&hasg&&haslo);}
+    ktest("ip6.raw_nonroot_eperm",({int pp=fork(),st=0;if(pp==0){int r2;sc1(23,1000);r2=socket(10,3,58);_exit(r2==-1?0:1);}waitpid(pp,&st,0);st==0;}));
+    close(rs6);
+  }
   /* TCP client */
   s=socket(2,1,0);mksin(&a,HOST,P1);
   ktest("net.tcp_connect",connect(s,&a,16)==0);
