@@ -4,7 +4,7 @@
 #include "ku.h"
 static long long llseek_(int fd,unsigned long long off,int wh){unsigned long long res=0;long r=sc5(140,fd,(unsigned)(off>>32),(unsigned)off,(long)&res,wh);return r<0?r:(long long)res;}
 int main(void){
-  int fd=open("/dev/sda",O_RDWR,0),i,ok;static unsigned char b[4096],c[4096];
+  int fd=open(ku_cmdline_has("k32nvme")?"/dev/nvme0n1":"/dev/sda",O_RDWR,0),i,ok;static unsigned char b[4096],c[4096];
   unsigned long long offs[4]={0x7FFFF000ULL,0x80000000ULL,0x100000000ULL,0};
   long long sz;
   if(fd<0){puts("  (pas de /dev/sda)\n");return 0;}

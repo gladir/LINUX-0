@@ -38,7 +38,8 @@ t('division entiere', '10 3 / p\n', '3\n')
 t('division echelle', '5k 10 3 / p\n', '3.33333\n')
 t('modulo', '10 3 % p\n_7 3 % p\n', '1\n-1\n')
 t('divmod', '10 3 ~ f\n', '1\n3\n')
-t('puissance', '2 10 ^ p\n2 100 ^ p\n', '1024\n1267650600228229401496703205376\n')
+t('puissance', '2 10 ^ p\n2 100 ^ p\n',
+  '1024\n1267650600228229401496703205376\n')
 t('puissance negative', '3k 2 _2 ^ p\n', '.250\n')
 t('racine', '4 v p\n2k 2 v p\n0 v p\n', '2\n1.41\n0\n')
 t('modexp', '4 13 497 | p\n', '445\n')
@@ -112,7 +113,8 @@ bad = 0
 n = 0
 for i in range(250):
     sc = random.choice([0, 0, 2, 5, 10, 20])
-    a = random.choice(['', '-']) + str(random.randint(0, 10 ** random.randint(1, 25)))
+    a = random.choice(['', '-']) + str(random.randint(
+        0, 10 ** random.randint(1, 25)))
     b = str(random.randint(1, 10 ** random.randint(1, 18)))
     if random.random() < 0.4:
         a += '.' + str(random.randint(0, 10 ** random.randint(1, 8)))
@@ -163,12 +165,14 @@ for i in range(40):
         a += '.' + str(random.randint(1, 99))
     e = random.randint(-5, 30)
     x = dc('%dk %s %s ^ p\n' % (sc, a, str(e).replace('-', '_')))[0]
-    y = subprocess.run(['/usr/bin/bc'], input='scale=%d\n%s ^ %d\n' % (sc, a, e),
+    y = subprocess.run(['/usr/bin/bc'],
+                       input='scale=%d\n%s ^ %d\n' % (sc, a, e),
                        capture_output=True, text=True, env=ENV).stdout
     if x != y:
         bad += 1
         if bad <= 3:
-            print('   ecart puissance : %s^%d k=%d dc=%r bc=%r' % (a, e, sc, x, y))
+            print('   ecart puissance : %s^%d k=%d dc=%r bc=%r'
+                  % (a, e, sc, x, y))
 if bad == 0:
     ok += 1
     print('ok    recoupement puissances avec bc : 40')

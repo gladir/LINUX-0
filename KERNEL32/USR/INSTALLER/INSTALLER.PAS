@@ -1448,7 +1448,7 @@ Begin
   End
   Else If (T[N] = 'M') Or (T[N] = 'm') Then Delete(T, N, 1);
   Val(T, V, E);
-  If (E <> 0) Or (V < 1) Or (V > 4000000) Then Exit;
+  If (E <> 0) Or (V < 1) Or (V > 1000000) Then Exit;
   V := V * Mult;
   If V * 2048 > Max Then Exit;
   ParseSize := V * 2048;

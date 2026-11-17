@@ -73,4 +73,23 @@ Carte e1000 (Intel PRO/1000 MT, defaut de VirtualBox) : prouvee sous QEMU.
 Arret et redemarrage par ACPI : prouves sous QEMU.
 Carte graphique VBoxVGA (PCI 80EE:BEEF) : detection ecrite mais NON testee
 (QEMU n'a pas cette carte) ; repli texte automatique si le mode est refuse.
-VMSVGA et PCnet : non pris en charge.
+VMSVGA (VMware SVGA II, PCI 15AD:0405) : pilote ecrit, prouve sous QEMU
+(-vga vmware : interface graphique 1024x768), NON teste sous VirtualBox reel.
+PCnet : pris en charge (prouve sous QEMU).
+
+=== Correctifs apres essai VirtualBox (CD du 2026-11-17) ===
+- Formatage qui "plantait a 3 %" sur un disque de 8 Go : cause = mkfs.ext4
+  de l'assistant (decalages 32 bits, echec au-dela de 2 Go). Corrige
+  (llseek 64 bits) ; installation prouvee sous QEMU avec un disque SATA de
+  8 Go et de 40 Go, 1 Go de RAM, e2fsck propre. NON verifie sous VirtualBox.
+- Saisie invalide (comptes, nom de machine, heure, swap...) : le champ fautif
+  passe en rouge avec un message sous le champ ; Suivant reste grise.
+- Mode texte de repli : la RAISON est affichee en rouge sur la page de langue
+  (ex. /dev/fb0 absent). Si l'assistant reste en texte sous VirtualBox,
+  notez cette ligne (et la sortie de `dmesg | grep fb:` via F2).
+- En cas d'echec d'une etape : message clair, dernieres lignes du journal,
+  boutons Reessayer / Shell / Quitter ; journal /var/log/install.log.
+- Le noyau affiche l'ecran de panique en texte (au lieu d'un ecran fige) et
+  journalise les erreurs AHCI (dmesg).
+Dans VirtualBox : Configuration > Affichage > Controleur graphique :
+essayer VMSVGA (defaut), puis VBoxVGA.

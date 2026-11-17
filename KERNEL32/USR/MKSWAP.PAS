@@ -93,11 +93,15 @@ BEGIN
   End;
   If Kb > 0 Then SysTruncate(Dev, Kb * 1024);
   Size := SysLSeek(Fd, 0, SEEK_END);
-  If Size <= 0 Then
+  If Size > 0 Then Pages := Size Div 4096
+  Else
   Begin
-    If SysIoctl(Fd, $1260, Pages) = 0 Then Size := Pages * 512;
+    { peripherique de plus de 2 Gio : taille en secteurs par BLKGETSIZE
+      (pas de produit sur 32 bits) }
+    Pages := 0;
+    If SysIoctl(Fd, $1260, Pages) = 0 Then Pages := Pages Div 8
+    Else Pages := 0;
   End;
-  Pages := Size Div 4096;
   If Pages < 10 Then
   Begin
     SysPut(2, 'mkswap: ' + Dev + ': too small' + #10);

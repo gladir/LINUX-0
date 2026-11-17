@@ -113,19 +113,15 @@ def page(q, n, timeout=120, settle=0.8):
 
 
 def fs_check(disk, parts):
-    """e2fsck -fn de l'hote sur chaque partition (debut, nombre de secteurs)"""
+    """e2fsck -fn de l'hote sur chaque partition (debut, nombre de secteurs) ;
+    sans copie (disques creux de plusieurs Go) : syntaxe fichier?offset="""
     good = True
     for i, (start, size) in enumerate(parts):
-        img = disk + '.p%d' % i
-        subprocess.run(['dd', 'if=' + disk, 'of=' + img, 'bs=512',
-                        'skip=%d' % start, 'count=%d' % size],
-                       stderr=subprocess.DEVNULL)
-        r = subprocess.run(['e2fsck', '-fn', img], capture_output=True,
-                           text=True)
+        r = subprocess.run(['e2fsck', '-fn', '%s?offset=%d' % (disk,
+                            start * 512)], capture_output=True, text=True)
         if r.returncode != 0:
             print(r.stdout[-800:])
         good = good and r.returncode == 0
-        os.unlink(img)
     return good
 
 
@@ -864,13 +860,13 @@ reboot=halt
 
 
 # ------------------------------------------------------------- sata8g
-def t_sata8g():
+def t_sata8g(size=8192, tag='sata8g'):
     """installation de bout en bout sur un disque SATA (ich9-ahci) de 8 Go
     avec 1 Gio de memoire : duree, e2fsck, amorce"""
     pre = """lang=fr
 keyboard=fr
 timezone=Europe/Paris
-hostname=sata8g
+hostname=sata
 rootpw=secret
 partitioning=guided
 swap=256
@@ -879,15 +875,16 @@ ui=text
 endwait=2
 reboot=halt
 """
-    iso = build_iso('sata8g', 'console=tty0 console=ttyS0 rw '
+    iso = build_iso(tag, 'console=tty0 console=ttyS0 rw '
                     'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
                     {'preseed.cfg': pre})
-    disk = new_disk('sata8g', 8192)
+    disk = new_disk(tag, size)
     t0 = time.time()
-    q = qemu_cd('sata8g', iso, disk, mem=1024, iface='ahci')
+    q = qemu_cd(tag, iso, disk, mem=1024, iface='ahci')
     ok = q.wait(r'K32SETUP: DONE', 1500)
     dt = time.time() - t0
-    check('sata8g : installation sur SATA 8 Go avec 1 Gio de RAM (%d s)' % dt,
+    check(tag + ' : installation sur SATA %d Mo avec 1 Gio de RAM (%d s)'
+          % (size, dt),
           ok)
     t = q.text()
     print('   duree totale : %d s ; formatage : %s' % (dt,
@@ -898,14 +895,19 @@ reboot=halt
         time.sleep(1)
     q.quit()
     tab = read_table(disk)
-    check('sata8g : e2fsck -fn propre',
+    check(tag + ' : e2fsck -fn propre',
           fs_check(disk, [(tab[0][1], tab[0][2])]))
     checks = [
-        ('hostname', 'hostname', r'sata8g'),
+        ('hostname', 'hostname', r'sata'),
         ('racine', 'cat /proc/mounts', r'/dev/(sda|hda)1 / '),
         ('df', 'df /', r'/'),
     ]
-    boot_verify('sata8g', disk, 'secret', checks, mem=1024, iface='ahci')
+    boot_verify(tag, disk, 'secret', checks, mem=1024, iface='ahci')
+
+
+
+def t_sata40g():
+    t_sata8g(40960, 'sata40g')
 
 
 # ---------------------------------------------------------------- fail
@@ -1000,8 +1002,9 @@ def t_text():
 ALL = {'tz': t_tz, 'auto-fr': t_auto_fr, 'auto-de': t_auto_de,
        'ui-fr': t_ui_fr, 'ui-de': t_ui_de, 'text': t_text,
        'refuse': t_refuse, 'virtio': t_virtio, 'exist': t_exist,
-       'auto-log': t_auto_log, 'sata8g': t_sata8g, 'fail': t_fail}
-DEFAULT = [k for k in ALL if k not in ('sata8g',)]
+       'auto-log': t_auto_log, 'sata8g': t_sata8g, 'sata40g': t_sata40g,
+       'fail': t_fail}
+DEFAULT = [k for k in ALL if k not in ('sata8g', 'sata40g')]
 os.makedirs(WORK, exist_ok=True)
 for s in (SCEN or DEFAULT):
     print('=== ' + s, flush=True)

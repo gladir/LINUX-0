@@ -8,9 +8,9 @@ static unsigned char pat(unsigned i){return (unsigned char)(i*13+(i>>7)+1);}
 static unsigned char wb[4096];
 int main(void){
   if(ku_cmdline_has("bigtest"))return 0;
-  static const char*devs[6]={"/dev/hda1","/dev/hdb1","/dev/hdc1","/dev/hdd1","/dev/vda1","/dev/sda1"};
+  static const char*devs[7]={"/dev/hda1","/dev/hdb1","/dev/hdc1","/dev/hdd1","/dev/vda1","/dev/sda1","/dev/nvme0n1p1"};
   int d,n=0;
-  for(d=0;d<6;d++){
+  for(d=0;d<7;d++){
     int fd=open(devs[d],O_RDONLY,0),r,i,ok;
     char b[64],nm[32];
     if(fd<0)continue;
@@ -38,6 +38,13 @@ int main(void){
       if(fd>=0)close(fd);}
      strcpy_(t+k,".write");ktest(t,ok);
      sync();
+     if(d==6){char pb[2048];int pf=open("/proc/partitions",O_RDONLY,0),pn=0,q,f1=0,f2=0;
+       if(pf>=0){pn=read(pf,pb,sizeof pb-1);close(pf);}
+       for(q=0;q+8<pn;q++){if(memcmp_(pb+q," nvme0n1",8)==0&&pb[q+8]=='\n')f1=1;if(memcmp_(pb+q," nvme0n1p1",10)==0)f2=1;}
+       ktest("ide.nvme_proc_partitions",f1&&f2);
+       pf=open("/sys/block/nvme0n1/size",O_RDONLY,0);pn=pf>=0?read(pf,pb,20):0;if(pf>=0)close(pf);
+       ktest("ide.nvme_sysfs_size",pn>1&&pb[0]>='0'&&pb[0]<='9');
+       pf=open("/dev/nvme0n1",O_RDONLY,0);ktest("ide.nvme_whole_node",pf>=0);if(pf>=0)close(pf);}
      if(d==4||d==5){char pb[2048];int pf=open("/proc/partitions",O_RDONLY,0),pn=0,q,f1=0,f2=0;
        if(pf>=0){pn=read(pf,pb,sizeof pb-1);close(pf);}
        for(q=0;q+4<pn;q++){if(memcmp_(pb+q," vda",4)==0&&pb[q+4]=='\n')f1=1;if(memcmp_(pb+q," vda1",5)==0)f2=1;}
