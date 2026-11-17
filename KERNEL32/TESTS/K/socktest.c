@@ -161,7 +161,7 @@ int main(void){
    r=recvfrom(s,rb,64,0x40,0,0);
    ktest("sock.icmp_dgram_reply",r==16&&rb[0]==0&&rb[4]==0x12);
    close(s);}
-  ktest("sock.eafnosupport",socket(10,1,0)==-97);
+  ktest("sock.eafnosupport",socket(3,1,0)==-97);
   ktest("sock.enotsock",({int r=getsockname(0,&sa,&l);r==-88||r==-9;}));
   /* AF_INET6 : adresses ::1, :: et ::ffff:a.b.c.d sur la pile IPv4 */
   {
@@ -194,8 +194,8 @@ int main(void){
     /* autre adresse IPv6 : pas de route */
     {struct s6 g6;memset(&g6,0,sizeof g6);g6.fam=10;g6.port=hs(9);g6.ad[0]=0x20;g6.ad[1]=0x01;g6.ad[2]=0x0d;g6.ad[3]=0xb8;g6.ad[15]=1;
      ktest("in6.unreachable",sendto(u2,"x",1,0,&g6,sizeof g6)==-101);}
-    ktest("in6.family_mismatch",({struct sin w;memset(&w,0,sizeof w);w.fam=2;bind(u2,&w,16)==-97;}));
-    ktest("in6.raw_unsupported",socket(10,3,58)==-93);
+    ktest("in6.family_mismatch",({struct sin w;memset(&w,0,sizeof w);w.fam=2;bind(u2,&w,16)==-22;}));
+    ktest("in6.raw_unsupported",socket(10,3,6)==-93);
     close(u1);close(u2);
     /* TCP sur ::1 */
     memset(&a6,0,sizeof a6);a6.fam=10;a6.ad[15]=1;

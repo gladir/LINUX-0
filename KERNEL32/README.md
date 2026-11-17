@@ -989,6 +989,43 @@ Teste sous QEMU : `VGA=vmware ./RUNFB.SH -n` (captures d'ecran exactes en
 (Bochs) restent verts. **Non teste** : VirtualBox lui-meme (ni VMSVGA ni
 VBoxVGA : ports, taille de la FIFO et rafraichissement a verifier).
 
+**cgroups v2 minimaux (lot D7-7)** : systemes de fichiers `cgroup2` (et
+`cgroup`, meme implementation) a monter par `mount -t cgroup2 none
+/sys/fs/cgroup` ; `mkdir` cree un groupe avec `cgroup.procs`,
+`cgroup.controllers` (`cpu memory pids`), `cgroup.subtree_control`,
+`pids.max`, `pids.current`, `memory.max`, `memory.current`, `cpu.weight`
+(16 groupes au plus, hierarchie par `mkdir` imbriques, `rmdir` : `EBUSY` s'il
+reste des taches ou des sous-groupes). Ecrire un pid dans `cgroup.procs`
+deplace le processus (tous ses threads) ; l'enfant d'un processus du groupe en
+fait partie ; `/proc/PID/cgroup` donne `0::/chemin`. Application :
+`pids.max` (`fork`/`clone` : `EAGAIN` au-dela, comptage du sous-arbre),
+`memory.max` (nombre ou `max`, suffixes k m g : une page utilisateur de plus
+que le sous-arbre ne peut en avoir tue la tache fautive par SIGKILL avec le
+message `Memory cgroup out of memory`), `cpu.weight` (1 a 10000, 100 par defaut :
+la tranche de temps est proportionnelle, mesure 400 contre 100 : 4,3 fois plus de
+ticks sur un meme CPU). Ecriture reservee a root ; creation d'autres fichiers :
+`EPERM`. Test : `cgtest` (25 verifications, avec RUNK). **Non fait** :
+cgroups v1 (controleurs separes, `tasks`, `cpuacct`), `memory.high/low/swap`,
+`cpu.max`, `io.*`, `cgroup.events`, delegation, `cgroup.threads`, comptabilite
+d'utilisation cpu, `/proc/cgroups` a jour.
+
+**IPv6 de base (lot D7-6)** : (1) `AF_INET6` pour TCP et UDP sur la pile
+IPv4 : une socket `socket(AF_INET6, SOCK_STREAM|SOCK_DGRAM)` accepte les
+adresses `::1` (127.0.0.1), `::` et `::ffff:a.b.c.d` (adresse IPv4 mappee, donc
+joignable sur eth0 comme en IPv4) ; `getsockname`, `getpeername`, `accept`,
+`recvfrom` et `recvmsg` rendent des `sockaddr_in6` (127.0.0.1 est rendu `::1`) ;
+toute autre adresse IPv6 : `ENETUNREACH`. (2) Sur eth0, vraie pile IPv6
+minimale : adresses `fe80::` (lien) et `fec0::` (prefixe du reseau utilisateur
+de QEMU) en EUI-64, decouverte de voisins (NS/NA, cache de 4 entrees), echo
+ICMPv6 (reponse et requete), passerelle `fec0::2`, sockets brutes
+`socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6)` (root ; le noyau calcule la
+somme de controle), `/proc/net/if_inet6`. Tests : `socktest` (`in6.*`, 15,
+avec RUNK) et `nettest` (`ip6.*`, 5 : ND + echo vers fec0::2 de QEMU, avec
+RUNNET.SH sur les quatre cartes). **Non fait** : TCP et UDP sur le fil
+IPv6 (l'hote d'essai n'a pas d'IPv6), retransmission et routage IPv6,
+fragmentation, options d'extension, annonces de routeur, `/proc/net/ipv6_route`,
+`getaddrinfo` cote L32API, IPv6 sur tun/tap.
+
 **PCnet** (AMD 79C970A/973, PCI 1022:2000 : carte de VirtualBox, `-nic
 user,model=pcnet` sous QEMU) : mode 32 bits (DWIO, SWSTYLE 2), anneaux de 32
 descripteurs de reception et 8 d'emission, interruptions ; RUNNET.SH vert avec
