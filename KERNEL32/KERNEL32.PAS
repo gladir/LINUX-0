@@ -1425,12 +1425,15 @@ End;
 
 Procedure SmpStopOthers; Forward;
 
+Procedure PanicScreen; Forward;
+
 Procedure KPanic(Const Msg : String);
 Begin
   asm
     cli
   end;
   SmpStopOthers;
+  PanicScreen;
   LogToVc := True;
   KLog('');
   KLog('NOYAU : panique : ' + Msg);
@@ -5233,8 +5236,10 @@ Begin
 End;
 
 Function AhciProbe : LongInt; Forward;
+Procedure AhciFlushAll; Forward;
 Function AhciRW(D, Lba, Count, Buf : LongInt; Write : Boolean) : LongInt;
     Forward;
+Procedure AhciFlushAll; Forward;
 Function AhciPacket(D, Cdb, Buf, Len : LongInt) : LongInt; Forward;
 Function VblkRW(Lba, Count, Buf : LongInt; Write : Boolean) : LongInt; Forward;
 Function VblkProbe : Boolean; Forward;
@@ -8660,6 +8665,7 @@ Begin
     End;
   End;
   BSync(0);
+  AhciFlushAll;
 End;
 
 Procedure InitVfs;
@@ -21025,6 +21031,7 @@ Const
 
 Var
   AhHba, AhNr : LongInt;
+  AhFl : Array[0..8] Of LongInt;
   AhPort, AhMem, AhKind : Array[0..8] Of LongInt;
       { par emplacement 5..8 : numero de port, memoire, 1 sd / 2 sr, rang }
 
@@ -21038,29 +21045,109 @@ Begin
   MemL[0:AhHba + Off] := V;
 End;
 
+Procedure SmpDelayUs(Us : LongInt); Forward;
+
+{ Attente de Us microsecondes (ports d'E/S : independante des ticks, qui ne
+  tournent pas toujours quand le pilote est appele) }
+Procedure AhDelay(Us : LongInt);
+Begin
+  SmpDelayUs(Us);
+End;
+
 { Arrete le moteur de commandes du port (ST, FRE) }
 Procedure AhStop(Pb : LongInt);
 Var N : LongInt;
 Begin
   AhW(Pb + $18, AhR(Pb + $18) And Not 1);
   N := 0;
-  While ((AhR(Pb + $18) And $8000) <> 0) And (N < 500000) Do Inc(N);
+  While ((AhR(Pb + $18) And $8000) <> 0) And (N < 2000) Do
+  Begin
+    AhDelay(500);
+    Inc(N);
+  End;
   AhW(Pb + $18, AhR(Pb + $18) And Not $10);
   N := 0;
-  While ((AhR(Pb + $18) And $4000) <> 0) And (N < 500000) Do Inc(N);
+  While ((AhR(Pb + $18) And $4000) <> 0) And (N < 2000) Do
+  Begin
+    AhDelay(500);
+    Inc(N);
+  End;
+End;
+
+{ Messages de diagnostic (journal du noyau, donc dmesg et console) }
+Procedure AhReport(Sl : LongInt; Const Why : String);
+Var Pb : LongInt;
+Begin
+  Pb := $100 + AhPort[Sl] * $80;
+  KLog('ahci: port ' + IntStr(AhPort[Sl]) + ' ' + Why + ' is='
+      + HexStr(AhR(Pb + $10), 8) + ' tfd=' + HexStr(AhR(Pb + $20), 8)
+      + ' serr=' + HexStr(AhR(Pb + $30), 8) + ' cmd=' + HexStr(AhR(Pb + $18), 8)
+      + ' ci=' + HexStr(AhR(Pb + $38), 8) + ' ssts='
+      + HexStr(AhR(Pb + $28), 8));
+End;
+
+{ Remise en etat d'un port apres une erreur : arret du moteur, effacement
+  des erreurs, CLO si le peripherique est occupe, COMRESET en dernier
+  recours, redemarrage }
+Procedure AhRecover(Sl : LongInt);
+Var Pb, N : LongInt;
+Begin
+  Pb := $100 + AhPort[Sl] * $80;
+  AhStop(Pb);
+  AhW(Pb + $30, -1);
+  AhW(Pb + $10, -1);
+  If (AhR(Pb + $20) And $88) <> 0 Then
+  Begin
+    If (AhR(0) And $01000000) <> 0 Then         { CAP.SCLO }
+    Begin
+      AhW(Pb + $18, AhR(Pb + $18) Or 8);        { CLO }
+      N := 0;
+      While ((AhR(Pb + $18) And 8) <> 0) And (N < 2000) Do
+      Begin
+        AhDelay(500);
+        Inc(N);
+      End;
+    End;
+  End;
+  If (AhR(Pb + $20) And $88) <> 0 Then
+  Begin
+    AhW(Pb + $2C, 1);                           { COMRESET }
+    AhDelay(2000);
+    AhW(Pb + $2C, 0);
+    N := 0;
+    While ((AhR(Pb + $28) And $F) <> 3) And (N < 2000) Do
+    Begin
+      AhDelay(1000);
+      Inc(N);
+    End;
+    AhW(Pb + $30, -1);
+    AhW(Pb + $10, -1);
+  End;
+  AhW(Pb + $18, AhR(Pb + $18) Or $10);          { FRE }
+  AhW(Pb + $18, AhR(Pb + $18) Or 1);            { ST }
+  N := 0;
+  While ((AhR(Pb + $20) And $88) <> 0) And (N < 3000) Do
+  Begin
+    AhDelay(1000);
+    Inc(N);
+  End;
 End;
 
 { Execute une commande ; Fis : adresse de la FIS (20 octets), Cdb : paquet
   ATAPI (0 : aucun), Buf/Len : tampon de donnees (DMA) ; Wr : ecriture.
-  Retourne 0 ou -EIO }
+  Une seule entree de PRDT (4 Mo au plus). Attente par scrutation avec
+  delai de 30 s (mesure en microsecondes, pas en tours de boucle) ; sur
+  erreur (TFES, HBFS, ..., delai) : message, remise en etat du port,
+  -EIO. }
 Function AhCmd(Sl : LongInt; Fis, Cdb, Buf, Len : LongInt; Wr : Boolean)
     : LongInt;
-Var Pb, Cl, Ct, N, Tf : LongInt;
+Var Pb, Cl, Ct, N, Tf, Is : LongInt;
 Begin
   AhCmd := -EIO;
   Pb := $100 + AhPort[Sl] * $80;
   Cl := AhMem[Sl];
   Ct := Cl + 2048;
+  If Len > 4194304 Then Exit;
   MemFill(Ct, 0, 256);
   MemCopy(Ct, Fis, 20);
   If Cdb <> 0 Then MemCopy(Ct + $40, Cdb, 12);
@@ -21079,18 +21166,46 @@ Begin
   MemL[0:Cl + 8] := V2P(Ct);
   MemL[0:Cl + 12] := 0;
   N := 0;
-  While ((AhR(Pb + $20) And $88) <> 0) And (N < 2000000) Do Inc(N);
-  If N >= 2000000 Then Exit;
+  While ((AhR(Pb + $20) And $88) <> 0) And (N < 30000) Do
+  Begin
+    AhDelay(100);
+    Inc(N);
+  End;
+  If N >= 30000 Then
+  Begin
+    AhReport(Sl, 'occupe avant commande');
+    AhRecover(Sl);
+    Exit;
+  End;
   AhW(Pb + $10, -1);                     { acquitter PxIS }
   AhW(Pb + $30, -1);                     { PxSERR }
   AhW(Pb + $38, 1);                      { PxCI : emplacement 0 }
   N := 0;
-  While ((AhR(Pb + $38) And 1) <> 0) And ((AhR(Pb + $10) And $40000000) = 0)
-        And (N < 50000000) Do
+  Is := 0;
+  While ((AhR(Pb + $38) And 1) <> 0) And (N < 3000000) Do
+  Begin
+    Is := AhR(Pb + $10);
+    If (Is And $7D800000) <> 0 Then Break;
+    If (N And 255) = 255 Then AhDelay(10);
     Inc(N);
+  End;
+  Is := AhR(Pb + $10);
   Tf := AhR(Pb + $20);
-  If ((AhR(Pb + $10) And $40000000) <> 0) Or ((AhR(Pb + $38) And 1) <> 0)
-     Or ((Tf And $01) <> 0) Then Exit;
+  If ((Is And $7D800000) <> 0) Or ((AhR(Pb + $38) And 1) <> 0)
+     Or ((Tf And $21) <> 0) Then
+  Begin
+    If ((Is And $7D800000) = 0) And ((AhR(Pb + $38) And 1) <> 0) Then
+      AhReport(Sl, 'delai de commande')
+    Else AhReport(Sl, 'erreur');
+    KLog('ahci: commande ' + HexStr(Mem[0:Fis + 2], 2) + ' lba '
+        + HexStr(Mem[0:Fis + 4] Or (Mem[0:Fis + 5] Shl 8)
+        Or (Mem[0:Fis + 6] Shl 16) Or (Mem[0:Fis + 8] Shl 24), 8) + ' n '
+        + IntStr(Mem[0:Fis + 12] Or (Mem[0:Fis + 13] Shl 8)) + ' tampon '
+        + HexStr(V2P(Buf), 8) + ' ' + IntStr(Len) + ' octets');
+    AhRecover(Sl);
+    Exit;
+  End;
+  AhW(Pb + $10, Is);
   AhCmd := 0;
 End;
 
@@ -21122,12 +21237,31 @@ Begin
     R := AhCmd(D, LongInt(@Fis[0]), 0, Buf + Done * 512, Ch * 512, Write);
     If R <> 0 Then
     Begin
+      KLog('ahci: nouvel essai');
+      R := AhCmd(D, LongInt(@Fis[0]), 0, Buf + Done * 512, Ch * 512, Write);
+    End;
+    If R <> 0 Then
+    Begin
       AhciRW := R;
       Exit;
     End;
     Done := Done + Ch;
   End;
   AhciRW := 0;
+End;
+
+{ Vide le cache d'ecriture de chaque disque SATA (FLUSH CACHE EXT) : appele
+  par sync, l'arret et le redemarrage }
+Procedure AhciFlushAll;
+Var D : LongInt; Fis : Array[0..23] Of Byte;
+Begin
+  If AhNr = 0 Then Exit;
+  For D := 5 To 8 Do
+    If DiskPresent[D] And (AhKind[D] = 1) And (AhFl[D] <> 0) Then
+    Begin
+      AhFis(LongInt(@Fis[0]), $EA, 0, 0, 0);
+      AhCmd(D, LongInt(@Fis[0]), 0, 0, 0, False);
+    End;
 End;
 
 { Paquet ATAPI : retourne le nombre d'octets demandes ou -EIO }
@@ -21190,6 +21324,7 @@ Begin
   If (W <= 0) Or (((Id[83] And $400) <> 0) And ((Id[102] <> 0)
      Or (Id[103] <> 0))) Then W := $7FFFFFFF;
   DiskSectors[Sl] := W;
+  If (Id[83] And $2000) <> 0 Then AhFl[Sl] := 1 Else AhFl[Sl] := 0;
   For I := 0 To 19 Do
   Begin
     DiskModel[Sl * 40 + I * 2] := Id[27 + I] Shr 8;
@@ -25266,6 +25401,18 @@ Begin
   Begin
     FbTk := 0;
     VmUpdate(0, 0, FbW, FbH);
+  End;
+End;
+
+{ Panique : le message doit etre visible, donc retour au mode texte (le
+  framebuffer cache la console VGA) et affichage de la console 0 }
+Procedure PanicScreen;
+Begin
+  If FbOn And FbGfx Then FbTextMode;
+  If ActiveVc <> 0 Then
+  Begin
+    ActiveVc := 0;
+    VcShow(0);
   End;
 End;
 
@@ -31202,6 +31349,7 @@ End;
 Function SysSync : LongInt;
 Begin
   VfsSyncAll;
+  AhciFlushAll;
   SysSync := 0;
 End;
 
@@ -49120,8 +49268,8 @@ End;
   encodes en base64, ecrits dans le tmpfs racine au demarrage. }
 
 Const
-  EmbCount = 59;
-  EmbPath : Array[0..58] Of String[20] = (
+  EmbCount = 60;
+  EmbPath : Array[0..59] Of String[20] = (
     '/sbin/init',
     '/bin/hello',
     '/bin/forkwait',
@@ -49174,6 +49322,7 @@ Const
     '/bin/parttest',
     '/bin/pwrtest',
     '/bin/cgtest',
+    '/bin/bdtest',
     '/bin/effects',
     '/bin/modtest',
     '/bin/hello.ko',
@@ -49181,19 +49330,19 @@ Const
     '/bin/badinit.ko',
     '/bin/unkmod.ko',
     '/bin/irqmod.ko');
-  EmbSize : Array[0..58] Of LongInt = (
+  EmbSize : Array[0..59] Of LongInt = (
     3880, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
     2320, 1104, 12408, 6948, 3124, 2476, 3268, 10872, 2376, 2004, 5100, 3932,
     4588, 22088, 2812, 10804, 8460, 4256, 2196, 3468, 2552, 4028, 12328, 8776,
     6368, 7332, 11572, 7548, 7316, 5932, 9416, 11828, 5256, 3912, 6836, 9680,
-    2128, 4404, 1128, 5220, 4016, 9456, 3276, 1336, 980, 816, 2288);
-  EmbStart : Array[0..59] Of LongInt = (
+    2128, 4404, 1128, 5220, 2724, 4016, 9456, 3276, 1336, 980, 816, 2288);
+  EmbStart : Array[0..60] Of LongInt = (
     0, 87, 125, 169, 220, 271, 321, 409, 447, 484, 536, 637, 698, 750, 775,
     1051, 1206, 1276, 1332, 1405, 1647, 1700, 1745, 1859, 1947, 2049, 2540,
     2603, 2844, 3032, 3127, 3176, 3254, 3311, 3401, 3675, 3871, 4013, 4176,
     4434, 4602, 4765, 4897, 5107, 5370, 5487, 5574, 5726, 5942, 5990, 6088,
-    6114, 6230, 6320, 6531, 6604, 6634, 6656, 6675, 6726);
-  EmbData : Array[0..6725] Of String[60] = (
+    6114, 6230, 6291, 6381, 6592, 6665, 6695, 6717, 6736, 6787);
+  EmbData : Array[0..6786] Of String[60] = (
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAAAQDgAAAAAAADQAIAAC',
     'ACgABwAGAAEAAAAAAAAAAIAECACABAhQDAAAUAwAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuBQAAACJ5VdWU4Pk8IHskAUA',
@@ -55424,6 +55573,67 @@ Const
     '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',
+    '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',
+    'AQAAAM2AW13DVYnlVonGuGyGBAhTidPozf///4nw6Mb///+F27hlhgQIumCG',
+    'BAgPRcLosv///4XbdAj/BYS3BAjrBv8FgLcECFteXcNVieVTg+wIi0UIixCN',
+    'SASNRJAIUFFS6F/6//+Jw7gBAAAAzYCDxBDr/gAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAIE9LCgAgRkFJTAoAS1RFU1Q6IABiZC5yd19lbmQAL2Rl',
+    'di9zZGEAICAocGFzIGRlIC9kZXYvc2RhKQoAYmQubGxzZWVrX2VuZABiZC5s',
+    'c2VlazMyAC9wcm9jL2NtZGxpbmUAYWhlcnIAYmQuZXJyX3JldHJ5X2RhdGEA',
+    'YmQuYWZ0ZXJfZXJyb3JfaW8AS1RFU1Q6IGJkIERPTkUKAGJkLnJ3XzJnX21p',
+    'bnVzXzRrAGJkLnJ3XzJnAGJkLnJ3XzRnAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAA8P9/AAAAAAAAAIAAAAAAAAAAAAEAAAAAAAAAAAAAAP2G',
+    'BAgPhwQIGIcECEdDQzogKFVidW50dSAxMy4zLjAtNnVidW50dTJ+MjQuMDQu',
+    'MSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAEAPH/',
+    'CgAAAI+FBAgnAAAAAgABABIAAAC2hQQIIAAAAAIAAQAXAAAA1oUECEQAAAAC',
+    'AAEAHQAAAIS3BAgEAAAAAQADACUAAACAtwQIBAAAAAEAAwAtAAAAgKcECAAQ',
+    'AAABAAMAMQAAAICXBAgAEAAAAQADADUAAABghwQIDAAAAAEAAgA/AAAAGoYE',
+    'CCkAAAASAAEARQAAAFSFBAgAAAAAEAABAEwAAAB7hQQIAAAAABAAAQBeAAAA',
+    'goUECAAAAAAQAAEAWQAAAICXBAgAAAAAEAADAEAAAACUgAQIwAQAABIAAQBl',
+    'AAAAbJcECAAAAAAQAAMAbAAAAIi3BAgAAAAAEAADAABiZHRlc3QuYwBtZW1j',
+    'bXBfAHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGIuMQBjLjAAQ1NXVENI',
+    'LjQzAGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2Vk',
+    'YXRhAF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJv',
+    'ZGF0YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAAK8FAAAAAAAAAAAA',
+    'AAEAAAAAAAAAIQAAAAEAAAACAAAAYIYECGAGAAAMAQAAAAAAAAAAAAAgAAAA',
+    'AAAAACkAAAAIAAAAAwAAAICXBAiABwAACCAAAAAAAAAAAAAAIAAAAAAAAAAu',
+    'AAAAAQAAADAAAAAAAAAAbAcAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIA',
+    'AAAAAAAAAAAAAJwHAAAgAQAABgAAAAoAAAAEAAAAEAAAAAkAAAADAAAAAAAA',
+    'AAAAAAC8CAAAcQAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAA',
+    'LQkAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAI4cECDQAAABwDgAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAgsDAAALAwAAAUAAAAAEAAAAQAAAEAM',
     'AABAnAQIQJwECAAAAAAIAgAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',

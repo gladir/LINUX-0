@@ -55,7 +55,7 @@ chk 'strace -e trace=write' 2 "$(wc -l < st2.txt | tr -d ' ')"
 strace -c -o st3.txt /bin/echo hi > /dev/null
 has 'strace -c en-tete' st3.txt '^% time'
 has 'strace -c ligne write' st3.txt ' write$'
-strace -o st4.txt /bin/sh -c 'cat < /nonexistent' > /dev/null 2>&1
+strace -f -o st4.txt /bin/sh -c 'cat < /nonexistent' > /dev/null 2>&1
 has 'strace erreur ENOENT' st4.txt '= -1 ENOENT'
 strace -o st5.txt /bin/false; chk 'strace code de retour' 1 $?
 strace -f -o st6.txt /bin/sh -c '/bin/echo a; /bin/echo b' > /dev/null
@@ -107,8 +107,9 @@ has 'lsof en-tete' ls.txt '^COMMAND'
 has 'lsof init console' ls.txt '^init .*/dev/console'
 has 'lsof sleep' ls.txt "^sleep *$SL "
 lsof -p $SL > ls2.txt 2>&1
-chk 'lsof -p : un seul processus' 1 \
-  "$(awk 'NR>1{print $2}' ls2.txt | sort -u | wc -l | tr -d ' ')"
+has 'lsof -p : le processus demande' ls2.txt "^sleep *$SL "
+chk 'lsof -p : aucun autre processus' 0 \
+  "$(grep -v '^COMMAND' ls2.txt | grep -vc "^sleep *$SL ")"
 fuser /bin/sleep > fu.txt 2>&1
 has 'fuser /bin/sleep' fu.txt "$SL"
 kill $SL

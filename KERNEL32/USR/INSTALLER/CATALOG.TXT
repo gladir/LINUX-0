@@ -1481,3 +1481,43 @@ it: Mostra le password (F5).
 es: Mostrar contraseñas (F5).
 pt: Mostrar palavras-passe (F5).
 nl: Wachtwoorden tonen (F5).
+@NOGFX
+fr: Graphique indisponible : %1 (F3 pour réessayer).
+en: Graphics unavailable: %1 (F3 to retry).
+de: Grafik nicht verfügbar: %1 (F3: erneut versuchen).
+it: Grafica non disponibile: %1 (F3 per riprovare).
+es: Gráficos no disponibles: %1 (F3 para reintentar).
+pt: Gráficos indisponíveis: %1 (F3 para tentar de novo).
+nl: Grafisch scherm niet beschikbaar: %1 (F3: opnieuw proberen).
+@SHELLB
+fr: Shell (F2)
+en: Shell (F2)
+de: Shell (F2)
+it: Shell (F2)
+es: Shell (F2)
+pt: Shell (F2)
+nl: Shell (F2)
+@QUITB
+fr: Quitter
+en: Quit
+de: Beenden
+it: Esci
+es: Salir
+pt: Sair
+nl: Afsluiten
+@LASTLOG
+fr: Dernières lignes du journal (/tmp/install.log) :
+en: Last journal lines (/tmp/install.log):
+de: Letzte Zeilen des Protokolls (/tmp/install.log):
+it: Ultime righe del registro (/tmp/install.log):
+es: Últimas líneas del registro (/tmp/install.log):
+pt: Últimas linhas do registo (/tmp/install.log):
+nl: Laatste regels van het logboek (/tmp/install.log):
+@E_HUNG
+fr: La commande %1 ne répond plus depuis %2 s : interrompue.
+en: The command %1 has not responded for %2 s: it was stopped.
+de: Der Befehl %1 antwortet seit %2 s nicht mehr: abgebrochen.
+it: Il comando %1 non risponde da %2 s: interrotto.
+es: El comando %1 no responde desde hace %2 s: interrumpido.
+pt: O comando %1 não responde há %2 s: interrompido.
+nl: Het commando %1 reageert al %2 s niet meer: onderbroken.

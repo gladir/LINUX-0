@@ -396,17 +396,59 @@ End;
 
 { ouvre /dev/fb0, choisit LxH en 32 bits, projette la memoire video, alloue
   le tampon ; passe la console en mode graphique (KD_GRAPHICS) }
+Var GWhy : String;        { pourquoi le graphique est indisponible }
+
+Function NumToS(V : LongInt) : String;
+Var S : String;
+Begin
+  Str(V, S);
+  NumToS := S;
+End;
+
+Function ErrS(E : LongInt) : String;
+Var S : String;
+Begin
+  Str(E, S);
+  ErrS := 'errno ' + S;
+End;
+
+{ premiere ligne de /proc/fb (ex. "0 BGA") ou '' }
+Function GProcFb : String;
+Var Fd, N : LongInt; B : Array[0..63] Of Byte; S : String; I : LongInt;
+Begin
+  GProcFb := '';
+  Fd := SysOpen('/proc/fb', O_RDONLY, 0);
+  If Fd < 0 Then Exit;
+  N := SysRead(Fd, B, 63);
+  SysClose(Fd);
+  S := '';
+  For I := 0 To N - 1 Do
+  Begin
+    If (B[I] = 10) Or (B[I] = 13) Then Break;
+    S := S + Chr(B[I]);
+  End;
+  GProcFb := S;
+End;
+
 Function GOpen(WantW, WantH : LongInt) : Boolean;
 Var Vi : Array[0..39] Of LongInt; Fi : Array[0..15] Of LongInt; R : LongInt;
 Begin
   GOpen := False;
   GOk := False;
   GCurOn := False;
+  GWhy := '';
   GFbFd := SysOpen('/dev/fb0', O_RDWR, 0);
-  If GFbFd < 0 Then Exit;
+  If GFbFd < 0 Then
+  Begin
+    GWhy := '/dev/fb0 : ' + SysErrorText(SysErrno);
+    If GProcFb = '' Then GWhy := GWhy + ' ; /proc/fb vide'
+    Else GWhy := GWhy + ' ; /proc/fb : ' + GProcFb;
+    Exit;
+  End;
   FillChar(Vi, SizeOf(Vi), 0);
   If SysIoctl(GFbFd, $4600, Vi) < 0 Then
   Begin
+    GWhy := 'FBIOGET_VSCREENINFO : ' + ErrS(SysErrno);
     SysClose(GFbFd);
     Exit;
   End;
@@ -419,6 +461,7 @@ Begin
     FillChar(Vi, SizeOf(Vi), 0);
     If SysIoctl(GFbFd, $4600, Vi) < 0 Then
     Begin
+      GWhy := 'FBIOPUT_VSCREENINFO : ' + ErrS(SysErrno);
       SysClose(GFbFd);
       Exit;
     End;
@@ -427,11 +470,14 @@ Begin
   GW := Vi[0]; GH := Vi[1];
   If (Vi[6] <> 32) Or (GW < 640) Or (GH < 480) Then
   Begin
+    GWhy := 'mode ' + NumToS(GW) + 'x' + NumToS(GH) + 'x' + NumToS(Vi[6]) +
+            ' (32 bits et 640x480 au moins requis)';
     SysClose(GFbFd);
     Exit;
   End;
   If SysIoctl(GFbFd, $4602, Fi) < 0 Then
   Begin
+    GWhy := 'FBIOGET_FSCREENINFO : ' + ErrS(SysErrno);
     SysClose(GFbFd);
     Exit;
   End;
@@ -441,6 +487,7 @@ Begin
   R := LnxSys6(192, 0, GMapLen, 3, 1, GFbFd, 0);
   If (R < 0) And (R > -4096) Then
   Begin
+    GWhy := 'mmap /dev/fb0 : ' + ErrS(-R);
     SysClose(GFbFd);
     Exit;
   End;
@@ -451,7 +498,11 @@ Begin
     GBack := LongInt(GBackP);
     GBackSz := GW * GH * 4;
   End;
-  If GBack = 0 Then Exit;
+  If GBack = 0 Then
+  Begin
+    GWhy := 'memoire insuffisante pour le tampon graphique';
+    Exit;
+  End;
   GTtyFd := SysOpen('/dev/tty0', O_RDWR, 0);
   If GTtyFd >= 0 Then SysIoctlL(GTtyFd, $4B3A, 1);
   GClipAll;

@@ -339,6 +339,7 @@ Begin
   Else
   Begin
     TextOnly := True;
+    OpLog('graphique : ' + GWhy);
     UiTextOpen;
   End;
 End;
@@ -349,13 +350,15 @@ Begin
   Begin
     GClose;
     TextOnly := True;
+    GWhy := 'F3 : mode texte choisi';
     UiTextOpen;
   End
   Else If GOpen(1024, 768) Then
   Begin
     TextOnly := False;
     UiGfxGrid;
-  End;
+  End
+  Else OpLog('graphique : ' + GWhy);
 End;
 
 Procedure RescueShell;
@@ -638,6 +641,13 @@ End;
 
 { ---- page : langue ---- }
 
+{ mode texte : pourquoi le graphique est indisponible (diagnostic) }
+Procedure GfxNote(Y : LongInt);
+Begin
+  If (Not UiGfx) And (GWhy <> '') Then
+    UiLabel(0, Y, UiCw, 2, Fmt(M_NOGFX, GWhy, '', ''), WF_ERR);
+End;
+
 Procedure BuildLang;
 Var L, I, H : LongInt;
 Begin
@@ -648,6 +658,7 @@ Begin
   L := UiList(10, 0, 3, 32, H, WF_NOTIFY);
   For I := 0 To 6 Do UiListAdd(L, LangName[I]);
   UiWd[L].Val := Lang;
+  GfxNote(UiCh - 2);
   NavButtons(False, Msg(M_NEXT));
   UiSetFocusId(10);
 End;
@@ -685,6 +696,7 @@ Begin
     UiLabel(0, 8, UiCw, 1, Fmt(M_WEL_DISKS, NumS(DkCount), '', ''), WF_DIM);
     UiLabel(0, 10, UiCw, 5, Msg(M_WEL_KEYS), 0);
     If M < 100 Then UiLabel(0, 15, UiCw, 1, 'RAM < 100 MB', WF_ERR);
+    GfxNote(UiCh - 2);
     NavButtons(True, Msg(M_NEXT));
     UiSetFocusId(NAV_NEXT);
     R := PageRun;
@@ -1837,6 +1849,18 @@ Begin
     If S <> '' Then SysPut(2, UiAscii(S) + #10);
     Exit;
   End;
+  If Permille = -2 Then
+  Begin
+    { battement : etape en cours et temps ecoule }
+    UiSetText(42, OpStage + OpSub + ' (' + NumS(OpElapsed) + ' s)');
+    Now_ := GetTickCount;
+    If (Now_ - LastDraw > 500) Or (Now_ - LastDraw < 0) Then
+    Begin
+      LastDraw := Now_;
+      UiRedraw;
+    End;
+    Exit;
+  End;
   If S <> '' Then
   Begin
     UiLogAdd(InstLogW, S);
@@ -1858,7 +1882,9 @@ Begin
   StageSpan := Span;
   If Not NoUi Then
   Begin
-    UiSetText(42, Msg(M_INST_1 + N - 1));
+    OpStage := Msg(M_INST_1 + N - 1);
+    OpSub := '';
+    UiSetText(42, OpStage);
     UiSetProg(41, Base);
     UiRedraw;
   End;
@@ -2057,6 +2083,21 @@ Begin
   SysUmount(TGT);
 End;
 
+{ journal : copie dans /tmp/install.log et, si la racine cible est montee,
+  dans le systeme cible }
+Procedure SaveLog(OnTarget : Boolean);
+Begin
+  If OpLogFd >= 0 Then SysSync;
+  OpCopyFile(LOGPATH, '/tmp/install.log', 420);
+  If OnTarget Then OpCopyFile(LOGPATH, TGT + LOGPATH, 420);
+End;
+
+Procedure FailClean;
+Begin
+  SaveLog(True);
+  CleanMounts;
+End;
+
 { l'installation proprement dite ; False en cas d'echec (OpErr : detail) }
 Function DoInstall : Boolean;
 Var I, Rc : LongInt; Dev, Lbl, Args : String;
@@ -2113,6 +2154,7 @@ Begin
       If Pt[I].Role = ROLE_SWAP Then
       Begin
         OpLog(Fmt(M_L_SWAP, Dev, '', ''));
+        OpSub := ' : mkswap ' + Dev;
         Rc := OpExec('/sbin/mkswap', Dev);
       End
       Else
@@ -2121,11 +2163,19 @@ Begin
         OpLog(Fmt(M_L_FMT, Dev, FsName[PartFs(I)], ''));
         Args := '-L ' + Lbl + ' ' + Dev;
         If Pt[I].Size > 2 * 1024 * 2048 Then Args := '-b 4096 ' + Args;
-        Rc := OpExec('/sbin/mkfs.' + FsName[PartFs(I)], Args);
+        OpSub := ' : mkfs.' + FsName[PartFs(I)] + ' ' + Dev;
+        If TestMkfs <> '' Then
+          Rc := OpExec(Copy(TestMkfs, 1, Pos(' ', TestMkfs + ' ') - 1),
+                       Copy(TestMkfs, Pos(' ', TestMkfs + ' ') + 1, 200))
+        Else
+          Rc := OpExec('/sbin/mkfs.' + FsName[PartFs(I)], Args);
       End;
       If Rc <> 0 Then
       Begin
         OpErr := Fmt(M_E_FMT, Dev, '', '') + ' (' + NumS(Rc) + ')';
+        If OpHung Then
+          OpErr := Fmt(M_E_HUNG, OpHungProg, NumS(OpTimeout), '');
+        SaveLog(False);
         Exit;
       End;
       If Not NoUi Then UiSetProg(41, 30 + (100 * I) Div 4);
@@ -2138,6 +2188,7 @@ Begin
   If SysMount(Dev, TGT, FsName[PartFs(RootPart)], 0) < 0 Then
   Begin
     OpErr := Fmt(M_E_MNT, Dev, '', '') + ' : ' + SysErrorText(SysErrno);
+    SaveLog(False);
     Exit;
   End;
   For I := 1 To MAXPT Do
@@ -2149,7 +2200,7 @@ Begin
       Begin
         OpErr := Fmt(M_E_MNT, DkPartDev(I), '', '') + ' : ' +
                  SysErrorText(SysErrno);
-        CleanMounts;
+        FailClean;
         Exit;
       End;
     End;
@@ -2159,7 +2210,7 @@ Begin
   If Not OpExtract(CDMNT + '/system.tar', TGT) Then
   Begin
     OpErr := Fmt(M_E_COPY, OpErr, '', '');
-    CleanMounts;
+    FailClean;
     Exit;
   End;
   OpLog(Fmt(M_L_FILES, NumS(OpNFiles), '', ''));
@@ -2170,7 +2221,7 @@ Begin
   If Not CfgAll Then
   Begin
     OpErr := Fmt(M_E_CFG, OpErr, '', '');
-    CleanMounts;
+    FailClean;
     Exit;
   End;
   { 6 : noyau et chargeur }
@@ -2179,7 +2230,7 @@ Begin
   If Not BootAll Then
   Begin
     OpErr := Fmt(M_E_CFG, OpErr, '', '');
-    CleanMounts;
+    FailClean;
     Exit;
   End;
   { 7 : fin }
@@ -2195,29 +2246,85 @@ Begin
   DoInstall := True;
 End;
 
-Function PageInst : LongInt;
-Var R, W : LongInt; Ok : Boolean;
+{ echec de l'installation : message, dernieres lignes du journal, choix
+  Reessayer / Shell / Quitter ; rend 1 (reessayer) ou 2 (quitter) }
+Function PageInstFail : LongInt;
+Var R, W, I, X, Y, W1, W2, W3 : LongInt;
 Begin
-  BeginPage(S_INST, Msg(M_INST_T));
-  UiFoot := '';
-  W := UiLabel(0, 0, UiCw, 1, '', 0);
-  UiWd[W].Id := 42;
-  UiProg(41, 0, 1, UiCw);
-  InstLogW := UiLog(0, 3, UiCw, UiCh - 3);
-  InstProgW := 1;
-  UiFoc := -1;
-  UiRedraw;
-  InFlush;
-  Ok := DoInstall;
-  InFlush;
-  InstProgW := -1;
-  If Ok Then R := NAV_NEXT
-  Else
-  Begin
-    OpLog(OpErr);
-    UiMsgBox(Msg(M_ERR_T), OpErr + #10#10 + Msg(M_INST_FAIL), Msg(M_OK), '');
-    R := NAV_BACK;
-  End;
+  OpTailLog(10);
+  Repeat
+    BeginPage(S_INST, Msg(M_INST_T));
+    UiFoot := Msg(M_FOOT);
+    UiLabel(0, 0, UiCw, 3, OpErr + #10 + Msg(M_INST_FAIL), WF_ERR);
+    UiLabel(0, 4, UiCw, 1, Msg(M_LASTLOG), WF_DIM);
+    W := UiLog(0, 5, UiCw, UiCh - 6);
+    For I := 0 To OpTailN - 1 Do UiLogAdd(W, OpTailL[I]);
+    Y := UiWh - 4;
+    W3 := Length(Msg(M_QUITB)) + 4;
+    W2 := Length(Msg(M_SHELLB)) + 4;
+    W1 := Length(Msg(M_RETRY)) + 4;
+    X := UiCw - W3;
+    UiButton(13, X, Y, W3, Msg(M_QUITB), WF_CANCEL);
+    X := X - W2 - 1;
+    UiButton(12, X, Y, W2, Msg(M_SHELLB), 0);
+    X := X - W1 - 1;
+    UiButton(11, X, Y, W1, Msg(M_RETRY), WF_DEF);
+    UiSetFocusId(11);
+    Repeat
+      R := PageRun;
+      If R >= RES_NOTIFY Then R := 0;
+    Until R <> 0;
+    If R = 12 Then
+    Begin
+      RescueShell;
+      R := RES_REBUILD;
+    End;
+  Until R <> RES_REBUILD;
+  If R = 11 Then PageInstFail := 1 Else PageInstFail := 2;
+End;
+
+Function PageInst : LongInt;
+Var R, W : LongInt; Ok : Boolean; C : LongInt;
+Begin
+  R := NAV_BACK;
+  Repeat
+    BeginPage(S_INST, Msg(M_INST_T));
+    UiFoot := '';
+    W := UiLabel(0, 0, UiCw, 1, '', 0);
+    UiWd[W].Id := 42;
+    UiProg(41, 0, 1, UiCw);
+    InstLogW := UiLog(0, 3, UiCw, UiCh - 3);
+    InstProgW := 1;
+    UiFoc := -1;
+    UiRedraw;
+    InFlush;
+    Ok := DoInstall;
+    InFlush;
+    InstProgW := -1;
+    C := 0;
+    If Ok Then R := NAV_NEXT
+    Else
+    Begin
+      OpLog(OpErr);
+      SaveLog(False);
+      If NoUi Then
+      Begin
+        UiMsgBox(Msg(M_ERR_T), OpErr + #10#10 + Msg(M_INST_FAIL), Msg(M_OK),
+                 '');
+        R := NAV_BACK;
+      End
+      Else
+      Begin
+        C := PageInstFail;
+        If C = 1 Then OpLog('--- nouvel essai ---')
+        Else
+        Begin
+          Quitting := True;
+          R := NAV_CANCEL;
+        End;
+      End;
+    End;
+  Until C <> 1;
   PageInst := R;
 End;
 
@@ -2504,6 +2611,7 @@ Var
   I, Fd, N, Code : LongInt;
   A : String;
   Verbose : Boolean;
+  K0 : LongInt;
 
 BEGIN
   FsName[2] := 'ext2'; FsName[3] := 'ext3'; FsName[4] := 'ext4';
@@ -2552,7 +2660,11 @@ BEGIN
   SysClose(2);
   SysOpen('/dev/null', O_WRONLY, 0);
   If PresPath = '' Then PresPath := CmdGet('preseed');
-  If CmdHas('text') Then TextOnly := True;
+  If CmdHas('text') Then
+  Begin
+    TextOnly := True;
+    GWhy := 'option text (ligne de commande du noyau)';
+  End;
   Lang := 1;
   If CmdGet('lang') <> '' Then Lang := LangFromCode(CmdGet('lang'));
   LayI := 0;
@@ -2567,6 +2679,7 @@ BEGIN
   ClkUtc := 1;
   RebootMode := 'reboot';
   InstProgW := -1;
+  OpTimeout := 900;
   OpLogOpen;
   AutoMode := False;
   CdOk := MountCd;
@@ -2580,11 +2693,20 @@ BEGIN
     ApplyPreseed;
     If PsGet('ui', 'gui') = 'none' Then NoUi := True;
     If PsGet('ui', 'gui') = 'text' Then TextOnly := True;
+    { delai sans sortie avant interruption d'une commande ; commande de
+      formatage de remplacement (essais de l'ecran d'echec) }
+    Val(PsGet('timeout', '900'), OpTimeout, K0);
+    If K0 <> 0 Then OpTimeout := 900;
+    TestMkfs := PsGet('testmkfs', '');
   End;
   If Not NoUi Then
   Begin
     If Not TextOnly Then
-      If Not GOpen(1024, 768) Then TextOnly := True;
+      If Not GOpen(1024, 768) Then
+      Begin
+        TextOnly := True;
+        OpLog('graphique : ' + GWhy);
+      End;
     InOpen(TtyPath, Not TextOnly);
     InSetLayout(LayI);
     UiCp437 := InIsVt;

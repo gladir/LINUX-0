@@ -17,6 +17,14 @@ Var
   OpErr : String;
   OpBytes, OpTotalBytes, OpLastPm, OpNFiles : LongInt;
   OpTzEnv : String;           { TZ transmis aux programmes lances }
+  OpElapsed : LongInt;        { secondes ecoulees de la commande en cours }
+  OpTimeout : LongInt;        { secondes sans nouvelle sortie : commande tuee }
+  OpHung : Boolean;           { la derniere commande a ete interrompue }
+  OpHungProg : String;
+  OpTailL : Array[0..11] Of String[100];   { dernieres lignes du journal }
+  OpTailN : LongInt;
+  OpStage, OpSub : String;
+  TestMkfs : String;          { preseed testmkfs : remplace mkfs (essais) }
 
 { mise a jour de l'interface : message (ou '') et progression des fichiers
   (millieme, -1 : inchangee) ; definie par le programme principal }
@@ -175,7 +183,8 @@ End;
 { lance un programme (arguments separes par des espaces) ; sortie dans le
   journal ; rend le code de sortie (127 : lancement impossible) }
 Function OpExec(Const Prog, Args : String) : LongInt;
-Var Pid, St, I, S : LongInt; W : String;
+Var Pid, St, I, S, T0, LastGrow, LastSz, W2, Now_, Dm : LongInt; W : String;
+    Sta : TSysStat;
 Begin
   SysArgReset;
   W := Prog;
@@ -209,9 +218,84 @@ Begin
     Exit;
   End;
   St := 0;
-  SysWaitPid(Pid, St, 0);
+  T0 := SysTime;
+  LastGrow := T0;
+  LastSz := -1;
+  OpHung := False;
+  OpElapsed := 0;
+  While True Do
+  Begin
+    W2 := SysWaitPid(Pid, St, 1);
+    If (W2 = Pid) Or (W2 < 0) Then Break;
+    SysPoll(LongInt(@Dm), 0, 200);
+    Now_ := SysTime;
+    OpElapsed := Now_ - T0;
+    If OpLogFd >= 0 Then
+      If SysFStat(OpLogFd, Sta) = 0 Then
+        If Sta.Size <> LastSz Then
+        Begin
+          LastSz := Sta.Size;
+          LastGrow := Now_;
+        End;
+    OpUiHook('', -2);
+    If (OpTimeout > 0) And (Now_ - LastGrow > OpTimeout) Then
+    Begin
+      SysKill(Pid, 9);
+      SysWaitPid(Pid, St, 0);
+      OpHung := True;
+      OpHungProg := Prog;
+      OpExec := 125;
+      Exit;
+    End;
+  End;
   If SysWIfExited(St) Then OpExec := SysWExitStatus(St)
   Else OpExec := 126;
+End;
+
+{ les N dernieres lignes (au plus 12) du journal dans OpTailL }
+Procedure OpTailLog(N : LongInt);
+Var Fd, Sz, Rd, I : LongInt; B : Array[0..4095] Of Byte; L : String;
+    All : Array[0..63] Of String[100]; Cnt : LongInt; St : TSysStat;
+Begin
+  OpTailN := 0;
+  Fd := SysOpen(LOGPATH, O_RDONLY, 0);
+  If Fd < 0 Then Exit;
+  Sz := 0;
+  If SysFStat(Fd, St) = 0 Then Sz := St.Size;
+  If Sz > 4000 Then SysLSeek(Fd, Sz - 4000, 0);
+  Rd := SysRead(Fd, B, 4096);
+  SysClose(Fd);
+  If Rd < 0 Then Exit;
+  Cnt := 0;
+  L := '';
+  For I := 0 To Rd - 1 Do
+  Begin
+    If B[I] = 10 Then
+    Begin
+      If (Cnt < 64) And (L <> '') Then
+      Begin
+        All[Cnt] := L;
+        Inc(Cnt);
+      End;
+      L := '';
+    End
+    Else If B[I] <> 13 Then
+      If Length(L) < 100 Then L := L + Chr(B[I]);
+  End;
+  If (L <> '') And (Cnt < 64) Then
+  Begin
+    All[Cnt] := L;
+    Inc(Cnt);
+  End;
+  If N > 12 Then N := 12;
+  I := Cnt - N;
+  If I < 0 Then I := 0;
+  While I < Cnt Do
+  Begin
+    OpTailL[OpTailN] := All[I];
+    Inc(OpTailN);
+    Inc(I);
+  End;
 End;
 
 { ---- extraction du tar du systeme ---- }
