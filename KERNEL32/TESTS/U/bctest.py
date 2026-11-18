@@ -68,7 +68,8 @@ T.append(('bases sortie', 'obase=16\n255\n255.5\n.5\nobase=2\n10\n.5\n'
           'obase=100\n12345\nobase=1000\n123456789\n'))
 T.append(('bases mixtes', 'ibase=2\nobase=1010\n1010\nibase=A\nobase=2\n10\n'
           '1/3\nscale=10\n1/3\n'))
-T.append(('si sinon', 'x=3\nif (x>2) print "grand\\n"\nif (x>5) print "tres\\n" '
+T.append(('si sinon', 'x=3\nif (x>2) print "grand\\n"\n'
+          'if (x>5) print "tres\\n" '
           'else print "petit\\n"\nif (x==3) { print "trois\\n" }\n'))
 T.append(('tantque', 'i=0\nwhile (i<5) { i++; i }\n'
           'i=10\nwhile (i>7) i--\ni\n'))
@@ -137,7 +138,8 @@ LIB.append(('-l s(1)', 's(1)\ns(0)\ns(3)\ns(-2)\ns(100)\ns(.5)\n'))
 LIB.append(('-l c(1)', 'c(1)\nc(0)\nc(3)\nc(-2)\nc(100)\n'))
 LIB.append(('-l a(1)', 'a(1)\na(0)\na(.5)\na(-1)\na(10)\na(100)\n'))
 LIB.append(('-l pi', '4*a(1)\nscale=50\n4*a(1)\n'))
-LIB.append(('-l j', 'j(0,1)\nj(1,1)\nj(2,2.5)\nj(3,10)\nj(5,7.5)\nj(2,.3)\nj(0,2)\n'))
+LIB.append(('-l j', 'j(0,1)\nj(1,1)\nj(2,2.5)\nj(3,10)\nj(5,7.5)\n'
+            'j(2,.3)\nj(0,2)\n'))
 LIB.append(('-l echelle', 'scale=10\ne(1)\nl(5)\ns(2)\nc(2)\na(2)\n'
             'scale=40\ne(1)\n'))
 LIB.append(('-l sqrt', 'sqrt(2)\nsqrt(10)\n1/3\n'))

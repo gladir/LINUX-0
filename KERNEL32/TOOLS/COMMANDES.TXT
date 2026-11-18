@@ -21,7 +21,7 @@ QEMU : ok = meme resultat sous KERNEL32 ; KO = difference ; aide = seul l'essai
 pty, textutil contre coreutils, patch, e2fsck contre e2fsck -fn, zip contre
 Info-ZIP -- et RUNU.SH tools sous QEMU ; sess = verifie en session QEMU)
 
-Resume : 178 marchent, 0 avec reserves, 0 echouent (sur 178 programmes)
+Resume : 183 marchent, 0 avec reserves, 0 echouent (sur 183 programmes)
 
 COMMANDE     ETAT      QEMU  ESSAI                                        REMARQUE
 ----------   --------  ----  ------------------------------------------   --------------------
@@ -123,6 +123,7 @@ htpasswd     marche    aide  aide /?                                      demarr
 iconv        marche    aide  aide /?                                      demarre et affiche son aide
 id           marche    ok    id                                           
 ifconfig     marche    ok    aide /?                                      demarre et affiche son aide
+iptables     marche    aide  iptables -L                                  
 ispell       marche    aide  aide /?                                      demarre et affiche son aide
 join         marche    ok    join j1.txt j2.txt                           
 ksh          marche    aide  aide /?                                      demarre et affiche son aide
@@ -170,6 +171,7 @@ rev          marche    ok    rev in.txt
 rm           marche    ok    rm /tmp/linux0-cmdbench/mv.out               
 rmdir        marche    ok    rmdir /tmp/linux0-cmdbench/dd/ee             
 s2p          marche    aide  aide /?                                      demarre et affiche son aide
+script       marche    aide  script -q -c echo hi /tmp/linux0-cmdbench/ts .out
 sdiff        marche    ok    sdiff a.txt b.txt                            
 sed          marche    ok    sed s/a/A/g a.txt; sed -e s/a/A/ a.txt; sed  -n 2
 seq          marche    ok    seq 1 5; seq 3                               
@@ -178,10 +180,12 @@ sleep        marche    ok    sleep 0
 sort         marche    ok    sort in.txt                                  
 split        marche    ok    split -l 1 a.txt /tmp/linux0-cmdbench/sp_    
 stat         marche    ok    stat a.txt                                   
+strace       marche    aide  strace -o /tmp/linux0-cmdbench/st.out echo h i
 strings_     marche    aide  aide /?                                      demarre et affiche son aide
 sum          marche    ok    sum a.txt                                    
 tac          marche    ok    tac in.txt                                   
 tail         marche    ok    tail --lines 2 in.txt                        
+tcpdump      marche    aide  tcpdump -r /tmp/linux0-cmdbench/none.pcap    
 tee          marche    ok    tee /tmp/linux0-cmdbench/tee.out             
 todos        marche    aide  aide /?                                      demarre et affiche son aide
 touch        marche    ok    touch /tmp/linux0-cmdbench/touched           
@@ -203,6 +207,7 @@ which        marche    ok    which ls
 yes          marche    -     yes                                          boucle infinie par nature : essai par tube vers head
 zcat         marche    aide  aide /?                                      demarre et affiche son aide
 zforce       marche    aide  aide /?                                      demarre et affiche son aide
+df           marche    ok    df                                           
 
 
 PROGRAMMES DE USR/ (ecrits pour KERNEL32, installes par BUILD.SH)
@@ -210,13 +215,20 @@ QEMU : ok = essai fonctionnel dans run.sh ; sess = verifie par les sessions
        (init, getty, login, sh, installateur, RUNU power/install) ; aide = essai /?
 
 awk          ok
+bc           ok
+chmod        ok
 chown        ok
 cpio         suite
 cron         suite
+date         ok
+dc           ok
 dmesg        ok
 e2fsck       suite
+e2tools      aide
+ed           ok
 find         ok
 free         ok
+fsinfo       aide
 getty        sess
 grep         ok
 halt         sess
@@ -226,11 +238,14 @@ id           ok
 ifconfig     ok
 init         sess
 install      sess
+iptables     aide
 iptool       suite
 kill         sess
 less         suite
 ln           ok
+loadkeys     aide
 login        sess
+logrotate    aide
 lsmod        ok
 man          suite
 mkdir        ok
@@ -245,6 +260,8 @@ nice         ok
 nohup        aide
 nologin      aide
 nslookup     ok
+nstools      aide
+ntpdate      aide
 passwd       sess
 patch        suite
 pgrep        ok
@@ -259,21 +276,26 @@ renice       ok
 rm           ok
 rmdir        ok
 route        ok
+script       aide
 sed          ok
 sh           sess
 shuf         aide
+strace       aide
 su           ok
+sudo         aide
 swapon       aide
 sync         sess
 sysctl       aide
 syslogd      aide
 tar          ok
+tcpdump      aide
 telinit      aide
 test         ok
 textutil     suite
 time         ok
 timeout      ok
 top          aide
+tput         aide
 tty          aide
 udhcpc       aide
 umount       sess
@@ -285,4 +307,5 @@ watch        aide
 wget         aide
 who          ok
 xargs        ok
+xz           aide
 ziptool      suite

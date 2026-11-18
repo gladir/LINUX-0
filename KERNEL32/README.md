@@ -989,6 +989,22 @@ Teste sous QEMU : `VGA=vmware ./RUNFB.SH -n` (captures d'ecran exactes en
 (Bochs) restent verts. **Non teste** : VirtualBox lui-meme (ni VMSVGA ni
 VBoxVGA : ports, taille de la FIFO et rafraichissement a verifier).
 
+**NVMe (lot D7-9)** : controleur PCI 01:08:02 (QEMU `-device nvme`) :
+registres BAR 0 mappes en FB800000h, file d'administration et une paire de files
+d'E/S de 16 entrees creees par les commandes Create I/O CQ/SQ, Identify de
+l'espace de noms 1 (secteur logique de 512 octets seulement), lecture/ecriture
+par PRP1/PRP2 ou liste de PRP (128 Ko par commande), une commande a la fois en
+scrutation avec delai, Flush a `sync` et a l'arret. Disque `/dev/nvme0n1`
+(majeur 259, partitions `nvme0n1p1`..15 dans `/dev`, `/proc/partitions`,
+`/sys/block`), table de partitions MBR/GPT lue comme pour sdX ; option
+`nonvme`. `RUNNVME.SH` : ext2 monte, lu, ecrit (idetest), e2fsck et contenu
+relu par debugfs, racine `root=/dev/nvme0n1p1`, disque creux de 8 Go avec
+acces a 2 Gio, 4 Gio et en fin de disque (bdtest). Non fait : interruptions
+(MSI-X), plusieurs files ou commandes en vol, espaces de noms autres que le
+premier, plusieurs controleurs, secteurs de 4096 octets, TRIM, `nvme0n1p1`
+dynamique au-dela de 15 partitions ; les listes de PRP ne sont pas prouvees
+par un test dedie (le bloc n'emet peut-etre que de petits transferts).
+
 **Correctif VirtualBox : formatage d'un disque de 8 Go (lot D7-8)** :
 l'installateur annoncait « le formatage plante a 3 % » sur un disque de 8 Go.
 Reproduit sous QEMU (`ich9-ahci`, disque creux de 8 Go, 1024 Mo) avec le vrai
@@ -1648,6 +1664,27 @@ fond normal, Entree refusee) ; captures `fr-04b-heure-invalide`, `fr-04c-nom-inv
 `fr-05a-confirmation-rouge`, `fr-05b-majuscules-converties`,
 `fr-05c-identifiant-invalide`, `fr-05d-confirmation-utilisateur`,
 `text-04-confirmation-rouge`, `text-05-identifiant-invalide` dans `IMAGE/CAPTURES`.
+
+### Diagnostics et echecs de l'installateur
+
+* **Mode texte de repli** : la raison est affichee en rouge en bas de la page de langue
+  et de la page d'accueil (`Graphique indisponible : /dev/fb0 : ... ; /proc/fb : ...
+  (F3 pour reessayer)` ; ioctl refuses, mode non utilisable, mmap, memoire) et ecrite
+  dans le journal ; `F3` retente l'ouverture du graphique et rapporte la nouvelle raison.
+* **Progression** : la barre porte le nom de l'etape (partitions, formatage, montages,
+  copie, configuration, noyau et chargeur) et, pendant une commande, la sous-etape
+  (`: mkfs.ext4 /dev/sda1`) avec le temps ecoule en secondes.
+* **Echec** : une commande qui sort en erreur ou ne produit plus aucune sortie pendant
+  900 s (preseed `timeout=`) est interrompue ; page d'echec avec le message clair, les
+  dernieres lignes du journal et **Reessayer / Shell (F2) / Quitter**. Journal
+  `/var/log/install.log`, copie dans `/tmp/install.log` et, si la racine cible est
+  montee, sur le disque cible.
+* Audit des decalages 32 bits au-dela de 2 Gio : `INSTALL.PAS` (correctif llseek 64 bits
+  de D7), `mkswap` (taille par `BLKGETSIZE` sans produit sur 32 bits), `DkSectors` (repli
+  par llseek), `ParseSize` (bornee a 1 To) ; `e2fsck-lite` utilisait deja llseek ;
+  `FSPROBE`, `e2tools`, `INSTOPS` ne lisent que des offsets de moins de 2 Gio.
+* Essais : `RUNINST.SH fail` (mkfs remplace par `sleep` via la cle de preseed
+  `testmkfs=`, delai 4 s) et `RUNINST.SH sata8g` (disque creux 8 Go, ich9-ahci, 1 Gio).
 
 ### Lot E6 (suite 2) : strace, tcpdump, bc, dc, ed, script
 

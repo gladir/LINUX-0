@@ -144,7 +144,7 @@ End;
 
 { taille du disque en secteurs (BLKGETSIZE) }
 Function DkSectors(Const Dev : String) : LongInt;
-Var Fd, S, E : LongInt;
+Var Fd, S, E : LongInt; Rs : Array[0..1] Of LongInt;
 Begin
   DkSectors := 0;
   Fd := SysOpen(Dev, O_RDONLY, 0);
@@ -153,8 +153,9 @@ Begin
   If SysIoctl(Fd, $1260, S) < 0 Then S := 0;
   If S <= 0 Then
   Begin
-    E := SysLSeek(Fd, 0, SEEK_END);
-    If E > 0 Then S := E Div 512;
+    { repli : fin de fichier sur 64 bits (llseek) }
+    If SysLLSeek(Fd, 0, 0, LongInt(@Rs), 2) >= 0 Then
+      S := (Rs[1] Shl 23) Or (Rs[0] Shr 9);
   End;
   SysClose(Fd);
   DkSectors := S;

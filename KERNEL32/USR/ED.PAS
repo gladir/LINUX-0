@@ -869,7 +869,8 @@ End;
 { ---- global ---- }
 
 Procedure DoGlobal(A1, A2 : LongInt; Inverse, Interact : Boolean);
-Var Pat, Cmds, Line : String; Mk, K2 : LongInt; Ptrs, N, K, I, Hint, Found : LongInt;
+Var Pat, Cmds, Line : String; Mk, K2 : LongInt;
+    Ptrs, N, K, I, Hint, Found : LongInt;
     M : Boolean; D : Char; S2 : String; P : LongInt; More : Boolean;
 Begin
   D := Cc;
@@ -1415,7 +1416,8 @@ Begin
           T := 0;
           For K := A1 To A2 Do
           Begin
-            For I := 0 To LLen(LAt(K)) - 1 Do Mem[0:P + T + I] := Mem[0:LAt(K) + 8 + I];
+            For I := 0 To LLen(LAt(K)) - 1 Do
+              Mem[0:P + T + I] := Mem[0:LAt(K) + 8 + I];
             T := T + LLen(LAt(K));
           End;
           Q := LNew(P, T);
