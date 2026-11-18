@@ -1866,8 +1866,8 @@ demarrait bien le systeme installe.
   y deplace `/dev`, `/proc` et `/sys` (`MS_MOVE`), appelle `pivot_root` (le noyau deplace
   la racine de tous les processus, init compris), ferme l'ecran, puis demande a init
   (`/var/run/init.req` = `R`, SIGHUP) de **se relancer** : `INIT.PAS` arrete les
-  processus du CD et fait `exec /sbin/init` du systeme installe ; son `/etc/rc`
-  demonte `/oldroot` (memoire du CD), puis son `/etc/inittab` et sa session (terminal, GNOME, KDE, GEOWORKS)
+  processus du CD et fait `exec /sbin/init` du systeme installe ; son `/etc/inittab`,
+  son `/etc/rc` et sa session (terminal, GNOME, KDE, GEOWORKS)
   demarrent comme apres un amorcage du disque. C'est le meme noyau que sur le disque.
   Si le montage ou le pivot echoue, rien n'est change et un message est affiche.
 * **Ejection plus robuste** (`EjectCd`) : demontage du CD, puis sur `/dev/sr0..3`,
@@ -1875,7 +1875,9 @@ demarrait bien le systeme installe.
   retour de chaque ioctl dans le journal (`ejection /dev/sr0 : deverrouillage 0,
   CDROMEJECT 0`). `k32setup.noeject` simule une ejection sans effet (essais). Nouvelle
   commande `eject [-t] [-v] [dev...]` (`USR/EJECT.PAS`).
-* Limites : le systeme demarre ainsi garde `/proc/cmdline` du CD ; apres `reboot`, le CD
+* Limites : le systeme demarre ainsi garde `/proc/cmdline` du CD et l'ancienne racine
+  en memoire du CD reste montee sous `/oldroot` (umount repond "cible occupee" : une
+  reference du noyau subsiste, une quinzaine de Mo de RAM) ; apres `reboot`, le CD
   (s'il est toujours la) repasse par la page et redemarre le systeme installe : retirer
   le CD dans les reglages de la VM pour un amorcage direct du disque.
 * Essais (`RUNINST.SH reboot reboot-noeject guard guard-reinstall`) : disque et CD sur

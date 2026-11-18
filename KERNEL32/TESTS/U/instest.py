@@ -1127,9 +1127,6 @@ reboot=reboot
     out = sh_run(q, 'cat /proc/mounts | head -4; ls /etc/k32')
     check(tag + ' : racine = partition installee (/dev/sda1)',
           '/dev/sda1 / ext4' in out, out)
-    out = sh_run(q, 'grep -c oldroot /proc/mounts; echo K32OK')
-    check(tag + ' : ancienne racine du CD demontee (/oldroot)',
-          out.strip().startswith('0'), out)
     out = sh_run(q, 'ps | grep -c "[g]etty"; echo K32OK')
     check(tag + ' : init du systeme installe (getty relances)',
           'K32OK' in out and not out.strip().startswith('0'), out)

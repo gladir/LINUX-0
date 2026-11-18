@@ -467,7 +467,7 @@ End;
 { demande 'R' de telinit (/var/run/init.req) : la racine a ete changee par
   pivot_root (l'installateur du CD demarre le systeme installe) ; init arrete
   tous les processus de l'ancienne racine puis se re-execute : le /sbin/init
-  de la nouvelle racine, son /etc/inittab (/etc/rc demonte /oldroot). }
+  de la nouvelle racine et son /etc/inittab. }
 Procedure SwitchToNewRoot;
 Var K : LongInt;
 Begin
