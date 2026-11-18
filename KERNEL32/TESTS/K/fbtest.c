@@ -18,7 +18,7 @@ int main(void){
   ktest("fb.vscreeninfo",ioctl(fd,0x4600,(long)vi)==0);
   w=*(int*)vi;h=*(int*)(vi+4);
   ktest("fb.geometry",w>=320&&h>=200&&*(int*)(vi+24)==32&&*(int*)(vi+8)==w);
-  ktest("fb.fscreeninfo",ioctl(fd,0x4602,(long)fi)==0&&*(unsigned*)(fi+48)==(unsigned)w*4
+  ktest("fb.fscreeninfo",ioctl(fd,0x4602,(long)fi)==0&&*(unsigned*)(fi+44)==(unsigned)w*4&&*(unsigned*)(fi+48)==(unsigned)w*4
         &&*(unsigned*)(fi+20)==(unsigned)w*h*4&&(memcmp_(fi,"BOCHS",5)==0||memcmp_(fi,"VMWARE",6)==0));
   {static char pb[1024];int pn=slurp("/proc/fb",pb,sizeof pb-1),z,hasfb=0,haspci=0,hdr=0;
    if(pn>0){pb[pn]=0;for(z=0;z+4<pn;z++){if(memcmp_(pb+z,"# fb:",5)==0)hasfb=1;if(memcmp_(pb+z,"# pci 00:",9)==0)haspci=1;}
@@ -74,12 +74,12 @@ int main(void){
     #define PUT(x,y,vx,vy,b) (memset(v,0,160),v[0]=x,v[1]=y,v[2]=vx,v[3]=vy,v[6]=b,ioctl(fd,0x4601,(long)v))
     ktest("fb.put_800x600",PUT(800,600,800,600,32)==0&&v[0]==800&&v[1]==600&&v[6]==32);
     ioctl(fd,0x4600,(long)v);ktest("fb.get_after_put",v[0]==800&&v[1]==600&&v[2]==800&&v[6]==32);
-    ioctl(fd,0x4602,(long)fi);ktest("fb.fscreen_800",*(unsigned*)(fi+48)==3200&&*(unsigned*)(fi+20)==3200*600);
+    ioctl(fd,0x4602,(long)fi);ktest("fb.fscreen_800",*(unsigned*)(fi+44)==3200&&*(unsigned*)(fi+20)==3200*600);
     for(y=0;y<100;y++){for(i=0;i<800;i++)row[i]=i<266?0xFF0000:i<533?0x00FF00:0x0000FF;
       lseek(fd,y*3200,0);write(fd,row,3200);}
     SHOT(1);
     ktest("fb.put_1280x1024",PUT(1280,1024,1280,1024,32)==0);
-    ioctl(fd,0x4602,(long)fi);ktest("fb.fscreen_1280",*(unsigned*)(fi+48)==5120);
+    ioctl(fd,0x4602,(long)fi);ktest("fb.fscreen_1280",*(unsigned*)(fi+44)==5120);
     for(y=0;y<100;y++){for(i=0;i<1280;i++)row[i]=i<426?0xFF0000:i<853?0x00FF00:0x0000FF;
       lseek(fd,y*5120,0);write(fd,row,5120);}
     px=0xFFFF00;lseek(fd,(1000*1280+1200)*4,0);write(fd,&px,4);
@@ -91,7 +91,7 @@ int main(void){
       lseek(fd,y*1280,0);write(fd,r16,1280);}}
     SHOT(3);
     ktest("fb.put_800x600x24",PUT(800,600,800,600,24)==0&&v[6]==24);
-    {unsigned char r24[2400];ioctl(fd,0x4602,(long)fi);ktest("fb.fscreen_24",*(unsigned*)(fi+48)==2400);
+    {unsigned char r24[2400];ioctl(fd,0x4602,(long)fi);ktest("fb.fscreen_24",*(unsigned*)(fi+44)==2400);
      for(y=0;y<100;y++){for(i=0;i<800;i++){int c=i<266?0:i<533?1:2;r24[i*3]=c==2?255:0;r24[i*3+1]=c==1?255:0;r24[i*3+2]=c==0?255:0;}
       lseek(fd,y*2400,0);write(fd,r24,2400);}}
     SHOT(4);

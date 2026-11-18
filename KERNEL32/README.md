@@ -989,6 +989,36 @@ Teste sous QEMU : `VGA=vmware ./RUNFB.SH -n` (captures d'ecran exactes en
 (Bochs) restent verts. **Non teste** : VirtualBox lui-meme (ni VMSVGA ni
 VBoxVGA : ports, taille de la FIFO et rafraichissement a verifier).
 
+**VirtualBox : couts de VM-exit, VMMDev, inventaire (lot D7-11)** : sous
+Hyper-V/NEM chaque acces de port ou de registre d'un peripherique emule coute
+un VM-exit. Mesure sous QEMU (`-trace cpu_in,cpu_out,memory_region_ops_*`,
+`TESTS/K/RUNPERF.SH`) : le demarrage faisait **1 280 000 acces** (1 200 000
+lectures du port 80h) a cause de `AtapiCapacity` qui attendait 4 x 300 000
+lectures par lecteur de CD vide (celui que VirtualBox presente toujours) ; il
+n'en fait plus que **76 000** (-94 %) : REQUEST SENSE (« pas de support » =
+abandon immediat) et attente de 3 000 lectures. Au repos : ~0 acces par
+seconde (hors LAPIC, que QEMU ne trace pas). Souris : IRQ 12 draine tous les
+octets disponibles d'un coup (moins d'interruptions et d'EOI par paquet) ;
+`MemFill` ecrit par mots de 32 bits ; frequence des UPDATE VMware reglable
+(`fbupd=N` ticks, 5 par defaut). `/proc/k32perf` : totaux et taux par seconde
+des interruptions, EOI LAPIC/8259, acces 8042 clavier/souris, registres SVGA,
+UPDATE, Ko ecrits dans /dev/fb0, lectures CMOS, appels KLog, ticks (et
+compteurs VMMDev). **Pilote VMMDev** (PCI 80EE:CAFE : ES de requete BAR 0,
+memoire BAR 1, IRQ) : ReportGuestInfo/2, ReportGuestStatus, filtre d'evenements,
+SetMouseStatus (`GUEST_CAN_ABSOLUTE` ; `vboxcursor=1` ajoute
+`NEEDS_HOST_CURSOR`), GetMouseStatus et AcknowledgeEvents sur IRQ ou, par
+securite, a chaque tick ; positions rendues sur `/dev/input/event2`
+(« VirtualBox mouse integration », EV_ABS ABS_X/ABS_Y de 0 a 65535, boutons
+repris du PS/2, EVIOCGABS) ; `/dev/input/mice` et PS/2 intacts ; messages
+`vbox: ...` au demarrage ; option `novbox`. **Prouve seulement contre une
+simulation logicielle** (`k32vboxfake=1`, position par
+`/proc/sys/k32/vbox_sim_x|y`, `RUNVBOX.SH`) qui verifie la structure des
+requetes (taille, version 10001h, type, rc) comme je la connais des en-tetes de
+VirtualBox ; **jamais teste contre VirtualBox** (valeurs de types, taille des
+requetes et ordre des operations a verifier avec le journal `vbox:`).
+`FBIOGET_FSCREENINFO` : `line_length` est maintenant a l'offset 44 (Linux) et
+reste recopie a 48. `e2fsck-lite` : limite portee a 524288 inodes.
+
 **Bureau : CD, consoles, souris (lot D7-10)** : (1) `CDROMEJECT` (5309h),
 `CDROMCLOSETRAY` (5319h), `CDROM_LOCKDOOR` (5329h) et `CDROM_DRIVE_STATUS`
 (5326h) sur `/dev/hdc`, `/dev/sr0` (ATAPI IDE ou AHCI) : PREVENT/ALLOW MEDIUM

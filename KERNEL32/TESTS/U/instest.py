@@ -790,7 +790,7 @@ def t_exist():
     disk = os.path.join(WORK, 'exist.img')
     subprocess.run(['cp', '--sparse=always', old, disk], check=True)
     iso = build_iso('exist', 'console=tty0 console=ttyS0 fb=1024x768 rw '
-                    'k32setup.verbose=/dev/ttyS0')
+                    'k32setup.verbose=/dev/ttyS0 k32setup.reinstall')
     q = qemu_cd('exist', iso, disk)
     page(q, 0, 90)
     for _ in range(6):                  # langue ... nom de machine
@@ -1032,11 +1032,232 @@ def t_text():
     q.quit()
 
 
+# ----------------------------------------------- redemarrage / garde-fou
+def sh_run(q, cmd, wait=30):
+    """commande sur la console serie (session root ouverte) : sa sortie"""
+    mk = 'G%d' % int(time.time() * 1000 % 100000)
+    q.serial('echo %s-B; %s; echo %s-E\n' % (mk, cmd, mk))
+    q.wait(r'(?m)^%s-E' % mk, wait)
+    time.sleep(0.3)
+    m = re.findall(r'(?m)^' + mk + r'-B\n(.*?)^' + mk + '-E', q.text(), re.S)
+    return m[-1] if m else ''
+
+
+def qemu_ahci_cd(name, iso, disk, mem=256, vga='std'):
+    """au plus pres de VirtualBox : disque ET CD sur ich9-ahci, BIOS
+    SeaBIOS, ordre de boot CD puis disque, SANS -no-reboot (reset reel)"""
+    return Q(os.path.join(WORK, name), ['-m', str(mem), '-vga', vga,
+             '-device', 'ich9-ahci,id=ahci', '-drive',
+             'file=%s,format=raw,if=none,id=d0' % disk, '-device',
+             'ide-hd,drive=d0,bus=ahci.0,bootindex=1', '-drive',
+             'file=%s,format=raw,if=none,id=c0,media=cdrom,readonly=on' % iso,
+             '-device', 'ide-cd,drive=c0,bus=ahci.1,bootindex=0'],
+             serial_io=True, reboot=True)
+
+
+def serial_root(q, pw):
+    q.serial('root\n')
+    time.sleep(1.5)
+    q.serial(pw + '\n')
+    time.sleep(2.5)
+
+
+def t_reboot(tag='reboot', noeject=False, session='terminal'):
+    """de bout en bout, disque et CD sur AHCI, boot CD puis disque : preseed
+    jusqu'a 'Redemarrer', reset reel (sans -no-reboot) ; le CD redemarre
+    (QEMU referme le plateau, ou ejection simulee sans effet) : l'assistant
+    detecte le systeme installe et le demarre depuis le CD (pivot_root) """
+    pre = """lang=fr
+keyboard=fr
+timezone=Europe/Paris
+hostname=reboot
+rootpw=secret
+partitioning=guided
+swap=64
+fs=ext4
+session=%s
+endwait=2
+reboot=reboot
+""" % session
+    cmd = ('console=tty0 console=ttyS0 fb=1024x768 rw '
+           'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0')
+    if noeject:
+        cmd += ' k32setup.noeject'
+    iso = build_iso(tag, cmd, {'preseed.cfg': pre})
+    disk = new_disk(tag, 400)
+    q = qemu_ahci_cd(tag, iso, disk)
+    check(tag + ' : installation (preseed) sur disque AHCI', q.wait(
+          r'K32SETUP: DONE', 300))
+    ok = q.wait(r'K32SETUP: page installed', 150)
+    check(tag + ' : apres Redemarrer : le CD redemarre, page "systeme deja '
+          'installe" (pas de reinstallation)', ok)
+    t = q.text()
+    check(tag + ' : reset complet : apres "Redemarrage du systeme" le BIOS '
+          'et le chargeur du CD repartent de zero',
+          re.search(r'Redemarrage du systeme\.\n.*chargeur ext2', t, re.S)
+          is not None)
+    if noeject:
+        check(tag + ' : ejection simulee sans effet (journal)',
+              'ejection du CD : sautee' in t)
+    else:
+        check(tag + ' : ejection journalisee (CDROM_LOCKDOOR 0 puis '
+              'CDROMEJECT sur /dev/sr0)',
+              re.search(r'ejection /dev/sr0 : deverrouillage 0, CDROMEJECT 0',
+                        t) is not None, t[-600:])
+    time.sleep(2)
+    cap(q, 'g', tag + '-garde-fou')
+    ok = q.wait(r'init : demarrage du systeme installe', 60)
+    check(tag + ' : decompte puis demarrage du systeme installe', ok)
+    ok = q.wait(r'reboot login:', 90)
+    check(tag + ' : login: du systeme installe (hostname reboot)', ok)
+    time.sleep(6)
+    cap(q, 'h', tag + '-systeme-installe')
+    if session == 'gnome':
+        check(tag + ' : environnement GNOME sur tty1 (fond Adwaita)',
+              px(q, 'p1', (0x24, 0x5a, 0x91), 14) > 20000)
+    elif session == 'kde':
+        check(tag + ' : environnement KDE sur tty1 (panneau Breeze)',
+              px(q, 'p2', (0x23, 0x26, 0x29)) > 20000)
+    serial_root(q, 'secret')
+    out = sh_run(q, 'hostname; cat /etc/k32/session; '
+                 'ps | grep -c "[k]32-setup"')
+    check(tag + ' : hostname, session, aucun assistant k32-setup en cours '
+          '(%r)' % out.strip().replace('\n', ' '),
+          re.search(r'^reboot\n%s\n0\s*$' % session, out) is not None, out)
+    out = sh_run(q, 'cat /proc/mounts | head -4; ls /etc/k32')
+    check(tag + ' : racine = partition installee (/dev/sda1)',
+          '/dev/sda1 / ext4' in out, out)
+    out = sh_run(q, 'ps | grep -c "[g]etty"; echo K32OK')
+    check(tag + ' : init du systeme installe (getty relances)',
+          'K32OK' in out and not out.strip().startswith('0'), out)
+    cap(q, 'i', tag + '-fin')
+    q.quit()
+    return disk
+
+
+def t_reboot_noeject():
+    t_reboot('reboot-noeject', True, 'gnome')
+
+
+def guard_boot(tag, disk, session, mem=256):
+    """CD sans fichier de reponses, disque deja installe : decompte puis
+    demarrage du systeme installe dans la session SESSION (editee dans
+    /etc/k32/session du disque par debugfs)"""
+    img = os.path.join(WORK, tag + '.img')
+    subprocess.run(['cp', '--sparse=always', disk, img], check=True)
+    pf = os.path.join(WORK, tag + '.sess')
+    open(pf, 'w').write(session + '\n')
+    for c in ('rm /etc/k32/session', 'write %s /etc/k32/session' % pf):
+        subprocess.run(['debugfs', '-w', '-R', c, img + '?offset=1048576'],
+                       capture_output=True)
+    iso = build_iso(tag, 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'k32setup.verbose=/dev/ttyS0')
+    q = qemu_ahci_cd(tag, iso, img, mem)
+    ok = q.wait(r'K32SETUP: page installed', 150)
+    check(tag + ' : CD + disque installe : page "systeme deja installe"', ok)
+    time.sleep(1.5)
+    cap(q, 'g', tag + '-garde-fou')
+    check(tag + ' : decompte puis demarrage du systeme installe',
+          q.wait(r'init : demarrage du systeme installe', 60))
+    check(tag + ' : login: du systeme installe',
+          q.wait(r'reboot login:', 90))
+    time.sleep(8)
+    return q
+
+
+def t_guard():
+    """garde-fou : le systeme installe demarre depuis le CD dans chacun des
+    environnements (terminal, GNOME, KDE, GEOWORKS)"""
+    disk = os.path.join(WORK, 'reboot.img')
+    if not os.path.exists(disk):
+        t_reboot()
+    for mode, fn in (('terminal', None), ('gnome', (0x24, 0x5a, 0x91)),
+                     ('kde', (0x23, 0x26, 0x29)), ('geoworks', None)):
+        tag = 'guard-' + mode
+        q = guard_boot(tag, disk, mode)
+        cap(q, 'h', tag + '-bureau')
+        if mode == 'gnome':
+            check(tag + ' : bureau GNOME (fond Adwaita)',
+                  px(q, 'p1', fn, 14) > 20000)
+        elif mode == 'kde':
+            check(tag + ' : bureau KDE (panneau Breeze)',
+                  px(q, 'p2', fn) > 20000)
+        serial_root(q, 'secret')
+        if mode in ('gnome', 'kde'):
+            out = sh_run(q, 'ps | grep -c "[k]32-%s"' % mode)
+            check(tag + ' : processus k32-%s' % mode,
+                  out.strip() not in ('', '0'), out)
+        elif mode == 'geoworks':
+            out = sh_run(q, 'ps | grep -c "[g]eoworks"')
+            check(tag + ' : processus geoworks', out.strip() not in
+                  ('', '0'), out)
+        else:
+            sz = shot_size(q, 'v1')
+            check(tag + ' : console texte sur tty1 (720 de large)',
+                  sz[0] == 720, sz)
+        q.quit()
+
+
+def shot_size(q, name):
+    q.shot(name)
+    from PIL import Image
+    return Image.open(os.path.join(q.work, name + '.ppm')).size
+
+
+def t_guard_reinstall():
+    """garde-fou : 'Reinstaller' lance l'assistant (page de la langue) ;
+    cle preseed reinstall=yes et k32setup.reinstall : pas de garde-fou"""
+    disk = os.path.join(WORK, 'reboot.img')
+    if not os.path.exists(disk):
+        t_reboot()
+    img = os.path.join(WORK, 'greinst.img')
+    subprocess.run(['cp', '--sparse=always', disk, img], check=True)
+    iso = build_iso('greinst', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'k32setup.verbose=/dev/ttyS0')
+    q = qemu_ahci_cd('greinst', iso, img)
+    check('greinst : page "systeme deja installe"',
+          q.wait(r'K32SETUP: page installed', 150))
+    time.sleep(1)
+    q.key('tab')
+    time.sleep(0.5)
+    q.key('ret')
+    check('greinst : Reinstaller : l\'assistant demarre (page de la langue)',
+          q.wait(r'K32SETUP: page 0\b', 30))
+    time.sleep(1)
+    cap(q, 'a', 'garde-fou-reinstaller')
+    q.quit()
+    pre = """lang=fr
+keyboard=fr
+timezone=Europe/Paris
+hostname=forced
+rootpw=secret
+partitioning=guided
+swap=64
+fs=ext4
+ui=text
+reinstall=yes
+endwait=1
+reboot=halt
+"""
+    img2 = os.path.join(WORK, 'gforce.img')
+    subprocess.run(['cp', '--sparse=always', disk, img2], check=True)
+    iso = build_iso('gforce', 'console=tty0 console=ttyS0 rw '
+                    'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
+                    {'preseed.cfg': pre})
+    q = qemu_ahci_cd('gforce', iso, img2)
+    ok = q.wait(r'K32SETUP: DONE', 300)
+    check('gforce : reinstall=yes : reinstallation sans garde-fou', ok)
+    check('gforce : la page "systeme deja installe" n\'est pas apparue',
+          'page installed' not in q.text())
+    q.quit()
+
+
 ALL = {'tz': t_tz, 'auto-fr': t_auto_fr, 'auto-de': t_auto_de,
        'ui-fr': t_ui_fr, 'ui-de': t_ui_de, 'text': t_text,
        'refuse': t_refuse, 'virtio': t_virtio, 'exist': t_exist,
        'auto-log': t_auto_log, 'sata8g': t_sata8g, 'sata40g': t_sata40g,
-       'fail': t_fail}
+       'fail': t_fail, 'reboot': t_reboot, 'reboot-noeject': t_reboot_noeject,
+       'guard': t_guard, 'guard-reinstall': t_guard_reinstall}
 DEFAULT = [k for k in ALL if k not in ('sata8g', 'sata40g')]
 os.makedirs(WORK, exist_ok=True)
 for s in (SCEN or DEFAULT):

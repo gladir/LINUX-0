@@ -34,7 +34,7 @@ Const
   aSysinit = 1; aWait = 2; aOnce = 3; aRespawn = 4; aCtrlAltDel = 5;
   aShutdown = 6; aInitDef = 7;
   { messages : colonnes FR, EN, GR (allemand), SP, IT }
-  M : Array[1..5, 1..5] Of PChar = (
+  M : Array[1..6, 1..5] Of PChar = (
     ('init : demarrage de LINUX-0', 'init: starting LINUX-0',
      'init: LINUX-0 wird gestartet', 'init: arrancando LINUX-0',
      'init: avvio di LINUX-0'),
@@ -50,7 +50,11 @@ Const
      'init: kann nicht ausgefuehrt werden: ',
      'init: no se puede ejecutar ', 'init: impossibile eseguire '),
     ('init : redemarrage', 'init: restarting', 'init: Neustart',
-     'init: reiniciando', 'init: riavvio'));
+     'init: reiniciando', 'init: riavvio'),
+    ('init : demarrage du systeme installe', 'init: starting installed system',
+     'init: installiertes System wird gestartet',
+     'init: arrancando el sistema instalado',
+     'init: avvio del sistema installato'));
 
 Type
   TEntry = Record
@@ -463,6 +467,32 @@ Begin
   WriteRunLevel;
 End;
 
+{ demande 'R' de telinit (/var/run/init.req) : la racine a ete changee par
+  pivot_root (l'installateur du CD demarre le systeme installe) ; init arrete
+  tous les processus de l'ancienne racine, demonte /oldroot puis se
+  re-execute : le /sbin/init de la nouvelle racine, son /etc/inittab. }
+Procedure SwitchToNewRoot;
+Var K : LongInt;
+Begin
+  Say(Msg(6));
+  For K := 1 To NE Do
+    If E[K].Action = aRespawn Then E[K].Action := 0;
+  KillAll(SIGTERM);
+  Reap(2);
+  KillAll(SIGKILL);
+  Reap(1);
+  SysSync;
+  SysUmount('/oldroot');
+  SysArgReset;
+  SysArgAdd('/sbin/init');
+  SysArgExec('/sbin/init');
+  { echec : on garde l'ancien init, les sessions sont relancees }
+  Say(Msg(4) + '/sbin/init : ' + SysErrorText(SysErrno));
+  ReadInittab;
+  For K := 1 To NE Do
+    If (E[K].Action = aRespawn) And InLevel(K) Then StartRespawn(K);
+End;
+
 Procedure HandleSignal;
 Var S, K : LongInt; Fd : LongInt; B : Array[0..7] Of Char; L : Char;
 Begin
@@ -493,6 +523,11 @@ Begin
           If SysRead(Fd, B, 1) = 1 Then L := B[0];
           SysClose(Fd);
           SysUnlink('/var/run/init.req');
+        End;
+        If L = 'R' Then
+        Begin
+          SwitchToNewRoot;
+          Exit;
         End;
         If (L = 'q') Or (L = 'Q') Then L := RunLevel;
         If (L = 's') Or (L = 'S') Then L := '1';

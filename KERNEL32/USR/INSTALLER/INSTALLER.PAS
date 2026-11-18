@@ -73,6 +73,10 @@ Var
   InstFailed : Boolean;
   ExistNote : String;          { contenu detecte sur le disque choisi }
   ExistSys : Boolean;
+  { systeme LINUX-0 deja installe sur un disque (garde-fou du demarrage) }
+  InstDev, InstFsT, InstSessN : String;
+  BootInst : Boolean;          { demarrer le systeme installe }
+  SwErr : String;              { motif d'echec de SwitchRoot }
 
 { ---- textes ---- }
 
@@ -479,11 +483,11 @@ End;
 
 { boucle d'une page : gere F2, F3 et l'annulation ; rend un identifiant de
   bouton, une notification (>= 1000) ou RES_REBUILD }
-Function PageRun : LongInt;
+Function PageRunMs(Ms : LongInt) : LongInt;
 Var R : LongInt;
 Begin
   Repeat
-    R := UiRun(-1);
+    R := UiRun(Ms);
     If R = 2002 Then
     Begin
       RescueShell;
@@ -506,7 +510,12 @@ Begin
       If ConfirmQuit Then Quitting := True Else R := 0;
     End;
   Until R <> 0;
-  PageRun := R;
+  PageRunMs := R;
+End;
+
+Function PageRun : LongInt;
+Begin
+  PageRun := PageRunMs(-1);
 End;
 
 Procedure ErrBox(Const S : String);
@@ -2434,20 +2443,33 @@ End;
 
 { ---- page : fin ---- }
 
-{ ejecte le CD-ROM d'installation (CDROMEJECT) pour que le BIOS ne
-  relance pas l'assistant depuis le CD apres le redemarrage }
+{ ejecte le CD-ROM d'installation pour que le BIOS ne relance pas
+  l'assistant depuis le CD apres le redemarrage : demonte le CD, puis sur
+  chaque lecteur optique possible CDROM_LOCKDOOR 0 (PREVENT ALLOW MEDIUM
+  REMOVAL) et CDROMEJECT ; le resultat de chaque ioctl est journalise.
+  k32setup.noeject (essais) saute l'ejection. Le garde-fou de demarrage
+  (FindInstalled) couvre le cas ou l'ejection est sans effet. }
 Procedure EjectCd;
-Const Devs : Array[0..3] Of String[10] = ('/dev/hdc', '/dev/hdd', '/dev/hdb',
-  '/dev/sr0');
-Var I, Fd : LongInt;
+Const Devs : Array[0..8] Of String[10] = ('/dev/sr0', '/dev/sr1', '/dev/sr2',
+  '/dev/sr3', '/dev/hdc', '/dev/hdd', '/dev/hdb', '/dev/scd0', '/dev/cdrom');
+Var I, Fd, R1, R2 : LongInt;
 Begin
-  SysUmount(CDMNT);
-  For I := 0 To 3 Do
+  If CmdHas('k32setup.noeject') Then
+  Begin
+    OpLog('ejection du CD : sautee (k32setup.noeject)');
+    Exit;
+  End;
+  R1 := SysUmount(CDMNT);
+  OpLog('demontage du CD : ' + NumS(R1));
+  For I := 0 To 8 Do
   Begin
     Fd := SysOpen(Devs[I], O_RDONLY Or $800, 0);
     If Fd >= 0 Then
     Begin
-      SysIoctlL(Fd, $5309, 0);
+      R1 := SysIoctlL(Fd, $5329, 0);
+      R2 := SysIoctlL(Fd, $5309, 0);
+      OpLog('ejection ' + Devs[I] + ' : deverrouillage ' + NumS(R1) +
+            ', CDROMEJECT ' + NumS(R2));
       SysClose(Fd);
     End;
   End;
@@ -2461,6 +2483,195 @@ Begin
     SysReboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_POWER_OFF)
   Else
     SysReboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_RESTART);
+End;
+
+{ ---- systeme deja installe : garde-fou du demarrage ---- }
+
+{ le disque contient-il un systeme LINUX-0 installe (/etc/k32/installed et
+  /sbin/init sur une partition ext2/3/4) ? remplit InstDev, InstFsT (type du
+  systeme de fichiers) et InstSessN (mode de demarrage choisi) ; prend la
+  langue du systeme installe si ni la ligne de commande ni le fichier de
+  reponses n'en fixent une }
+Function FindInstalled : Boolean;
+Var F : LongInt; L, N, Typ, Lbl, Uu, Lc : String;
+Begin
+  FindInstalled := False;
+  F := SysOpen('/proc/partitions', O_RDONLY, 0);
+  If F < 0 Then Exit;
+  SysMkdir('/probe', 493);
+  While SysReadLine(F, L) Do
+  Begin
+    N := DkField(L, 4);
+    If (Copy(N, 1, 2) = 'hd') Or (Copy(N, 1, 2) = 'sd') Or
+       (Copy(N, 1, 2) = 'vd') Or (Copy(N, 1, 4) = 'nvme') Then
+    Begin
+      Typ := ''; Lbl := ''; Uu := '';
+      Probe('/dev/' + N, Typ, Lbl, Uu);
+      If (Typ = 'ext2') Or (Typ = 'ext3') Or (Typ = 'ext4') Then
+        If SysMount('/dev/' + N, '/probe', Typ, MS_RDONLY) = 0 Then
+        Begin
+          If OpFileExists('/probe/etc/k32/installed') And
+             OpFileExists('/probe/sbin/init') Then
+          Begin
+            InstDev := '/dev/' + N;
+            InstFsT := Typ;
+            InstSessN := OpReadSmall('/probe/etc/k32/session');
+            While (InstSessN <> '') And (InstSessN[Length(InstSessN)] < ' ') Do
+              Delete(InstSessN, Length(InstSessN), 1);
+            If InstSessN = '' Then InstSessN := 'terminal';
+            Lc := OpReadSmall('/probe/etc/default/locale');
+            If Pos('LANGUAGE=', Lc) > 0 Then
+            Begin
+              Delete(Lc, 1, Pos('LANGUAGE=', Lc) + 8);
+              If Pos(#10, Lc) > 0 Then Lc := Copy(Lc, 1, Pos(#10, Lc) - 1);
+              If (PresPath = '') And (CmdGet('lang') = '') Then
+                Lang := LangFromCode(TrimR(Lc));
+            End;
+            FindInstalled := True;
+          End;
+          SysUmount('/probe');
+          If InstDev <> '' Then Break;
+        End;
+    End;
+  End;
+  SysClose(F);
+End;
+
+{ monte le systeme installe, y deplace /dev /proc /sys puis en fait la
+  racine (pivot_root : tous les processus, init compris, y passent ; l'ancienne
+  racine en memoire est visible sous /oldroot). Rend '' ou le motif de
+  l'echec (alors rien n'est change). }
+Function SwitchRoot : Boolean;
+Const Mv : Array[0..2] Of String[6] = ('/dev', '/proc', '/sys');
+Var I, J, R : LongInt;
+Begin
+  SwErr := '';
+  SwitchRoot := False;
+  SysSync;
+  SysUmount('/probe');
+  SysUmount(CDMNT);
+  SysMkdir('/newroot', 493);
+  R := SysMount(InstDev, '/newroot', InstFsT, 0);
+  OpLog('montage du systeme installe ' + InstDev + ' : ' + NumS(R));
+  If R < 0 Then
+  Begin
+    SwErr := InstDev + ' : ' + NumS(SysErrno);
+    Exit;
+  End;
+  If Not OpFileExists('/newroot/sbin/init') Then
+  Begin
+    SysUmount('/newroot');
+    SwErr := '/sbin/init';
+    Exit;
+  End;
+  SysMkdir('/newroot/oldroot', 493);
+  For I := 0 To 2 Do
+  Begin
+    SysMkdir('/newroot' + Mv[I], 493);
+    R := SysMount(Mv[I], '/newroot' + Mv[I], '', 8192);
+    OpLog('deplacement de ' + Mv[I] + ' : ' + NumS(R));
+    If (R < 0) And (I < 2) Then
+    Begin
+      For J := I - 1 DownTo 0 Do
+        SysMount('/newroot' + Mv[J], Mv[J], '', 8192);
+      SysUmount('/newroot');
+      SwErr := Mv[I] + ' : ' + NumS(SysErrno);
+      Exit;
+    End;
+  End;
+  OpMkdirP('/newroot/var/log', 493);
+  OpCopyFile(LOGPATH, '/newroot/var/log/install-cd.log', 420);
+  R := LnxRes(LnxSys3(217, LnxZ('/newroot'), LnxZ('/newroot/oldroot'), 0));
+  OpLog('pivot_root : ' + NumS(R));
+  If R < 0 Then
+  Begin
+    R := SysErrno;
+    For J := 2 DownTo 0 Do
+      SysMount('/newroot' + Mv[J], Mv[J], '', 8192);
+    SysUmount('/newroot');
+    SwErr := 'pivot_root : ' + NumS(R);
+    Exit;
+  End;
+  SysChdir('/');
+  SwitchRoot := True;
+End;
+
+{ apres SwitchRoot (et la fermeture de l'ecran) : demande a init (processus 1)
+  de se relancer dans la nouvelle racine : /sbin/init du systeme installe,
+  sa table /etc/inittab et sa session ; init arrete tous les processus du CD }
+Procedure LaunchInit;
+Var I : LongInt;
+Begin
+  OpMkdirP('/var/run', 493);
+  OpWriteFile('/var/run/init.req', 'R', 420, False);
+  OpLog('demarrage du systeme installe : init relance');
+  SysKill(1, SIGHUP);
+  For I := 1 To 40 Do SysSleep(1);
+  OpLog('init n''a pas repondu');
+End;
+
+{ page : systeme deja installe. Decompte de Secs secondes (0 : sans decompte,
+  toute touche relance la seconde en cours) puis choix par defaut : demarrer.
+  Rend 1 (demarrer), 2 (reinstaller) }
+Function PageInstalled(Secs : LongInt) : LongInt;
+Var R, X, Y, W1, W2, W3, Left : LongInt;
+Begin
+  Left := Secs;
+  Repeat
+    UiClear;
+    UiHead := Msg(M_TITLE);
+    UiTitle := Msg(M_INSD_T);
+    UiFoot := Msg(M_FOOT);
+    PageF5 := False;
+    HelpExtra := '';
+    OpMark('page installed');
+    UiLabel(0, 0, UiCw, 6, Fmt(M_INSD_I, InstDev, InstSessN, ''), 0);
+    UiLabel(0, 7, UiCw, 2, Msg(M_INSD_I2), 0);
+    UiLabelId(50, 0, 10, UiCw, 1, '', WF_DIM);
+    If Left > 0 Then
+      UiSetText(50, Fmt(M_INSD_CNT, NumS(Left), '', ''));
+    Y := UiWh - 4;
+    W3 := Length(Msg(M_SHELLB)) + 4;
+    W2 := Length(Msg(M_INSD_REINST)) + 4;
+    W1 := Length(Msg(M_INSD_BOOT)) + 4;
+    { ordre de creation = ordre de Tab : Demarrer, Reinstaller, Shell }
+    X := UiCw - W3 - W2 - W1 - 2;
+    UiButton(11, X, Y, W1, Msg(M_INSD_BOOT), WF_DEF);
+    UiButton(12, X + W1 + 1, Y, W2, Msg(M_INSD_REINST), 0);
+    UiButton(13, X + W1 + W2 + 2, Y, W3, Msg(M_SHELLB), 0);
+    UiSetFocusId(11);
+    Repeat
+      If Left > 0 Then R := PageRunMs(1000) Else R := PageRunMs(-1);
+      If R = RES_TIMEOUT Then
+      Begin
+        { le decompte s'arrete des que le focus quitte "Demarrer" }
+        If (Left > 0) And (UiWd[UiFoc].Id <> 11) Then
+        Begin
+          Left := 0;
+          UiSetText(50, '');
+        End;
+        If Left > 0 Then
+        Begin
+          Dec(Left);
+          If Left <= 0 Then R := 11
+          Else
+          Begin
+            UiSetText(50, Fmt(M_INSD_CNT, NumS(Left), '', ''));
+            R := 0;
+          End;
+        End
+        Else R := 0;
+      End
+      Else If R = 13 Then
+      Begin
+        RescueShell;
+        Left := 0;
+        R := RES_REBUILD;
+      End
+      Else If (R <> 11) And (R <> 12) And (R <> RES_REBUILD) Then R := 0;
+    Until R <> 0;
+  Until R <> RES_REBUILD;
+  If R = 11 Then PageInstalled := 1 Else PageInstalled := 2;
 End;
 
 Function PageEnd(WaitSecs : LongInt) : LongInt;
@@ -2851,7 +3062,40 @@ BEGIN
     UiUtf8 := CmdHas('k32setup.utf8') And Not InIsVt;
     If TextOnly Then UiTextOpen Else UiGfxGrid;
   End;
-  If AutoMode Then
+  { garde-fou : un systeme LINUX-0 est deja installe sur un disque (le CD
+    a ete redemarre : BIOS, ejection sans effet, ...) : on propose de
+    demarrer ce systeme (decompte, defaut) ; k32setup.reinstall ou la cle
+    reinstall=yes du fichier de reponses force l'assistant }
+  BootInst := False;
+  InstDev := '';
+  If Not CmdHas('k32setup.reinstall') And
+     (Not AutoMode Or (PsGet('reinstall', 'no') <> 'yes')) Then
+    If FindInstalled Then
+    Begin
+      OpLog('systeme deja installe sur ' + InstDev + ' (' + InstSessN + ')');
+      Repeat
+        If NoUi Then K0 := 1 Else
+        Begin
+          Val(PsGet('installedwait', '5'), N, I);
+          If I <> 0 Then N := 5;
+          K0 := PageInstalled(N);
+        End;
+        If K0 = 1 Then
+        Begin
+          If SwitchRoot Then BootInst := True
+          Else
+          Begin
+            OpLog('echec : ' + SwErr);
+            If NoUi Then K0 := 2
+            Else UiMsgBox(Msg(M_ERR_T), Fmt(M_INSD_FAIL, SwErr, '', ''),
+                          Msg(M_OK), '');
+          End;
+        End;
+      Until BootInst Or (K0 = 2);
+    End;
+  If BootInst Then
+    { rien : fermeture de l'ecran puis relance de init (plus bas) }
+  Else If AutoMode Then
   Begin
     { disque : le premier disque libre si non precise }
     DkScan;
@@ -2904,6 +3148,12 @@ BEGIN
   Begin
     If UiGfx Then GClose Else UiTextClose;
     InClose;
+  End;
+  If BootInst Then
+  Begin
+    SysPut(1, #27'[0m'#27'[2J'#27'[H' + UiAscii(Msg(M_INSD_GO)) + #10);
+    LaunchInit;
+    Code := 5;
   End;
   SysExit(Code);
 END.

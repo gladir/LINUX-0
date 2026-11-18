@@ -3,7 +3,7 @@
 cd "$(dirname "$0")"
 OUT="${1:-out}"
 mkdir -p "$OUT"
-for f in hello forkwait pipetest sigtest mmaptest dirtest ttytest schedtest blktest misctest proctest stress kbdtest ext2test ext4test jrntest ptytest mounttest socktest shmtest limtest evttest devtest mousetest nettest isotest fattest fbtest swaptest killtest idetest preempttest pstress syscalltest sigrttest ipctest mqfutextest ptracetest seccomptest xattrtest nstest bigtest proc2test looptest loopmnt smptest nltest oomtest parttest pwrtest cgtest bdtest vttest effects modtest init; do
+for f in hello forkwait pipetest sigtest mmaptest dirtest ttytest schedtest blktest misctest proctest stress kbdtest ext2test ext4test jrntest ptytest mounttest socktest shmtest limtest evttest devtest mousetest nettest isotest fattest fbtest swaptest killtest idetest preempttest pstress syscalltest sigrttest ipctest mqfutextest ptracetest seccomptest xattrtest nstest bigtest proc2test looptest loopmnt smptest nltest oomtest parttest pwrtest cgtest bdtest vttest idler vboxtest effects modtest init; do
   gcc -m32 -static -nostdlib -ffreestanding -fno-pic -fno-pie -no-pie -Os -fno-stack-protector \
       -fno-asynchronous-unwind-tables -fno-builtin -Wall -Wno-unused-function -Wl,--build-id=none \
       -Wl,-z,noseparate-code -Wl,-z,norelro -o "$OUT/$f" "$f.c" || exit 1
