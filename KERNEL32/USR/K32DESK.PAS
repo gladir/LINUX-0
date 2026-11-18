@@ -73,7 +73,8 @@ Begin
       Inc(I);
       Cmd := SysArgStr(I);
     End
-    Else If (SysArgStr(I) = '--help') Or (SysArgStr(I) = '-h') Then
+    Else If (SysArgStr(I) = '--help') Or (SysArgStr(I) = '-h') Or
+            (SysArgStr(I) = '/?') Then
     Begin
       SysPut(1, 'Usage: ' + Nm + ' [-e commande]' + #10);
       SysExit(0);
