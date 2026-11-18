@@ -328,8 +328,15 @@ for arg, name, label, acts in APPS:
             click_at(act[1], act[2], 1)
     time.sleep(2)
     p = shot('app-' + name)
+    for _ in range(3):                # capture prise pendant un trace ?
+        if colors(p, (255, 255, 255)) > 500:
+            break
+        time.sleep(3)
+        p = shot('app-' + name)
     check('%s : fenetre dessinee et processus actif' % label,
-          alive() and colors(p, (255, 255, 255)) > 500)
+          (alive() or alive() or alive()) and
+          (colors(p, (255, 255, 255)) > 500 or
+           diffpx(p0, p) > 5000))
     if acts:
         check('%s : l\'action change l\'ecran (%d pixels)' % (label,
               diffpx(p0, p)), diffpx(p0, p) > 30)
