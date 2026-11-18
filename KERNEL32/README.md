@@ -1866,8 +1866,8 @@ demarrait bien le systeme installe.
   y deplace `/dev`, `/proc` et `/sys` (`MS_MOVE`), appelle `pivot_root` (le noyau deplace
   la racine de tous les processus, init compris), ferme l'ecran, puis demande a init
   (`/var/run/init.req` = `R`, SIGHUP) de **se relancer** : `INIT.PAS` arrete les
-  processus du CD, demonte `/oldroot` et fait `exec /sbin/init` du systeme installe ;
-  son `/etc/inittab`, son `/etc/rc` et sa session (terminal, GNOME, KDE, GEOWORKS)
+  processus du CD et fait `exec /sbin/init` du systeme installe ; son `/etc/rc`
+  demonte `/oldroot` (memoire du CD), puis son `/etc/inittab` et sa session (terminal, GNOME, KDE, GEOWORKS)
   demarrent comme apres un amorcage du disque. C'est le meme noyau que sur le disque.
   Si le montage ou le pivot echoue, rien n'est change et un message est affiche.
 * **Ejection plus robuste** (`EjectCd`) : demontage du CD, puis sur `/dev/sr0..3`,

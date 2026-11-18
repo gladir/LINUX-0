@@ -1106,7 +1106,7 @@ reboot=reboot
                         t) is not None, t[-600:])
     time.sleep(2)
     cap(q, 'g', tag + '-garde-fou')
-    ok = q.wait(r'init : demarrage du systeme installe', 60)
+    ok = q.wait(r'demarrage du systeme installe : init relance', 60)
     check(tag + ' : decompte puis demarrage du systeme installe', ok)
     ok = q.wait(r'reboot login:', 90)
     check(tag + ' : login: du systeme installe (hostname reboot)', ok)
@@ -1127,6 +1127,9 @@ reboot=reboot
     out = sh_run(q, 'cat /proc/mounts | head -4; ls /etc/k32')
     check(tag + ' : racine = partition installee (/dev/sda1)',
           '/dev/sda1 / ext4' in out, out)
+    out = sh_run(q, 'grep -c oldroot /proc/mounts; echo K32OK')
+    check(tag + ' : ancienne racine du CD demontee (/oldroot)',
+          out.strip().startswith('0'), out)
     out = sh_run(q, 'ps | grep -c "[g]etty"; echo K32OK')
     check(tag + ' : init du systeme installe (getty relances)',
           'K32OK' in out and not out.strip().startswith('0'), out)
@@ -1180,7 +1183,7 @@ def guard_boot(tag, disk, session, mem=256):
     time.sleep(1.5)
     cap(q, 'g', tag + '-garde-fou')
     check(tag + ' : decompte puis demarrage du systeme installe',
-          q.wait(r'init : demarrage du systeme installe', 60))
+          q.wait(r'demarrage du systeme installe : init relance', 60))
     check(tag + ' : login: du systeme installe',
           q.wait(r'reboot login:', 90))
     time.sleep(8)
@@ -1244,7 +1247,7 @@ def t_guard_reinstall():
     time.sleep(8)
     check('greinst : Tab vers Reinstaller : le decompte est arrete (pas de '
           'demarrage apres 8 s)',
-          'init : demarrage du systeme installe' not in q.text())
+          'demarrage du systeme installe : init relance' not in q.text())
     q.key('ret')
     check('greinst : Reinstaller : l\'assistant demarre (page de la langue)',
           q.wait(r'K32SETUP: page 0\b', 30))
@@ -1260,7 +1263,7 @@ def t_guard_reinstall():
                     {'preseed.cfg': pre0})
     q = qemu_ahci_cd('gnoui', iso, img3)
     check('gnoui : ui=none : demarrage direct du systeme installe',
-          q.wait(r'init : demarrage du systeme installe', 150))
+          q.wait(r'demarrage du systeme installe : init relance', 150))
     check('gnoui : login: du systeme installe', q.wait(r'reboot login:', 90))
     q.quit()
     pre = """lang=fr

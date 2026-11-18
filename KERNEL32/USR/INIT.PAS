@@ -13,7 +13,8 @@
    Format de /etc/ttys (compatible KERNEL16UNIX) : 1 caractere actif (1) ou
    0, 1 caractere de vitesse (ignore), puis le nom du terminal de /dev.
    Signaux (comme busybox) : SIGUSR1 arret, SIGUSR2 extinction, SIGTERM
-   redemarrage, SIGINT Ctrl-Alt-Suppr, SIGHUP relecture de /etc/inittab.
+   redemarrage, SIGINT Ctrl-Alt-Suppr, SIGHUP relecture de /etc/inittab
+   (init.req = R : init se re-execute apres un pivot_root, installateur du CD).
    Arret : entrees shutdown, SIGTERM puis SIGKILL a tous les processus,
    sync, appel systeme reboot.
    Langue : init cherche LANGUAGE=XX dans /etc/profile puis dans
