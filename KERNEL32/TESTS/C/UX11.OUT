@@ -1,0 +1,39 @@
+ok   InitGraph
+ok   taille 640x480
+ok   couleur 15, fond 0
+ok   GetMaxColor
+ok   ClearDevice
+ok   Bar 10x10
+ok   GetPixel coins
+ok   PutPixel
+ok   Line H et V
+ok   Line diagonale
+ok   MoveTo LineTo LineRel
+ok   XOR trace
+ok   XOR efface
+ok   ImageSize
+ok   image effacee
+ok   PutImage copie
+ok   PutImage XOR
+ok   PutImage OR
+ok   PutImage NOT
+ok   PutImage AND
+ok   GetViewSettings
+ok   viewport ecrete
+ok   Bar ecretee
+ok   ClearViewPort
+ok   texte A
+ok   texte x2
+ok   SetTextJustify
+ok   FloodFill
+ok   FloodFill borne
+ok   FillPoly carre
+ok   FillEllipse aire
+ok   FillEllipse symetrie
+ok   Circle
+ok   GetPalette
+ok   SetPalette
+ok   SetActivePage sans page
+ok   GraphErrorMsg
+sum  scene -2128461796
+fin

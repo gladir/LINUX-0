@@ -99,6 +99,26 @@ class Q:
         time.sleep(wait)
         self._drain()
 
+    def info(self, c, wait=0.6):
+        """commande du moniteur QEMU avec sa reponse (texte)"""
+        self._drain()
+        try:
+            self.s.send((c + '\n').encode())
+        except OSError:
+            return ''
+        time.sleep(wait)
+        out = b''
+        try:
+            self.s.settimeout(0.5)
+            while True:
+                d = self.s.recv(65536)
+                if not d:
+                    break
+                out += d
+        except Exception:
+            pass
+        return out.decode('latin-1', 'replace')
+
     def text(self):
         try:
             return open(self.out, errors='replace').read().replace('\r', '')

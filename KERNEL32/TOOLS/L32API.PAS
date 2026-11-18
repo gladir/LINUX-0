@@ -172,8 +172,14 @@ End;
 
 Procedure LnxRawOff; Forward;
 
+Type
+  LnxHookProc = Procedure;
+Var
+  LnxExitHook : LnxHookProc;      { appele a la fin du programme (unite Graph) }
+
 Procedure ExitProcess(Code : LongInt);
 Begin
+  If LnxExitHook <> Nil Then LnxExitHook;
   LnxRawOff;
   LnxSys3(252, Code, 0, 0);
   LnxSys3(1, Code, 0, 0);
@@ -3973,4 +3979,15 @@ Begin
     K := Pos(Old, R);
   End;
   StringReplace := Acc + R;
+End;
+
+{ FPC / Delphi : fixe la longueur d'une chaine courte }
+Procedure SetLength(Var S : String; Len : LongInt);
+Var A : LongInt;
+Begin
+  If Len < 0 Then Len := 0;
+  If Len > 255 Then Len := 255;
+  A := LongInt(@S);
+  Mem[0:A] := Len;
+  If Len < 255 Then Mem[0:A + Len + 1] := 0;
 End;

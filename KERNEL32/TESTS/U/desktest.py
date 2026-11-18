@@ -149,9 +149,12 @@ def run_boot(mode, tag, bar, panel):
     out = serial_run(q, 'ps | grep -c "k32-%s"' % mode)
     cnt = out.strip()
     check(tag + ' : Deconnexion : le bureau se termine', cnt in ('1', '0'), out)
-    out = serial_run(q, 'ps | grep "getty tty1\\|k32-session" | head -3')
-    check(tag + ' : retour au login sur tty1 (getty relance)',
-          'getty' in out, out)
+    time.sleep(2)
+    sz = shot_size(q, 'v3')
+    out = serial_run(q, 'ps | grep -c getty')
+    check(tag + ' : retour au login texte sur tty1 (ecran %s, getty %s)' %
+          (sz, out.strip()), sz[0] == 720 and out.strip() not in ('', '0'),
+          (sz, out))
     cap(q, 'h', tag + '-boot-04-login')
     q.quit()
 
@@ -161,12 +164,12 @@ def main():
     run_boot('kde', 'bkde', None, (0x23, 0x26, 0x29))
 def main_old():
     q = run_env('gnome', 'k32-gnome', 'gnome', (0, 0, 0), None)
-    out = serial_run(q, 'ps | grep k32-gnome | head -3')
-    check('gnome : le bureau tourne', 'k32-gnome' in out, out)
+    out = serial_run(q, 'ps | grep -c k32-gnome')
+    check('gnome : le bureau tourne', out.strip() not in ('', '0'), out)
     q.quit()
     q = run_env('kde', 'k32-kde', 'kde', None, (0x23, 0x26, 0x29))
-    out = serial_run(q, 'ps | grep k32-kde | head -3')
-    check('kde : le bureau tourne', 'k32-kde' in out, out)
+    out = serial_run(q, 'ps | grep -c k32-kde')
+    check('kde : le bureau tourne', out.strip() not in ('', '0'), out)
     q.quit()
 
 main()

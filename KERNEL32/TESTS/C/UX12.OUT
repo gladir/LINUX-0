@@ -1,0 +1,16 @@
+ok   fonction 00h
+ok   position initiale
+ok   deplacement +10 -5
+ok   deplacement negatif
+ok   bouton gauche
+ok   trois boutons
+ok   fonction 05h
+ok   fonction 06h
+ok   compteur remis a zero
+ok   fonction 0Bh
+ok   plage X (07h)
+ok   plage Y (08h)
+ok   butee basse
+ok   fonction 04h
+ok   GetMouseState
+fin

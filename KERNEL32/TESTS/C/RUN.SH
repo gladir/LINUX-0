@@ -105,7 +105,13 @@ if cp "$HERE/UX1.PAS" "$W/UXPROBE.PAS" && "$LPC" -3X -q "$W/UXPROBE.PAS" >/dev/n
     fi
     ARGS=""
     [ -f "$HERE/$N.ARG" ] && ARGS=$(cat "$HERE/$N.ARG")
-    (cd "$W" && LINUX0TEST=bonjour "./$N" $ARGS </dev/null >"$W/$N.sortie" 2>&1)
+    # entree standard : $N.IN s'il existe ; GFXMEM=1 : unite Graph sans
+    # /dev/fb0 ; MOUSEDEV : fichier qui tient lieu de /dev/input/mice
+    IN=/dev/null
+    [ -f "$HERE/$N.IN" ] && IN=$HERE/$N.IN
+    : > "$W/$N.ms"
+    (cd "$W" && GFXMEM=1 MOUSEDEV="$W/$N.ms" LINUX0TEST=bonjour "./$N" $ARGS \
+       <"$IN" >"$W/$N.sortie" 2>&1)
     if cmp -s "$W/$N.sortie" "$HERE/$N.OUT"; then
       echo "ok    $N"; PASS=$((PASS+1))
     else

@@ -83,9 +83,9 @@ def drive(disk, iface='ide'):
     return 'file=%s,format=raw,if=%s' % (disk, iface)
 
 
-def qemu_cd(name, iso, disk, mem=256, iface='ide'):
+def qemu_cd(name, iso, disk, mem=256, iface='ide', extra=()):
     return Q(os.path.join(WORK, name), ['-cdrom', iso, '-boot', 'd', '-m',
-             str(mem), '-vga', 'std'] + drv_args(disk, iface),
+             str(mem), '-vga', 'std'] + list(extra) + drv_args(disk, iface),
              serial_io=True)
 
 
@@ -319,7 +319,7 @@ reboot=halt
                     'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
                     {'preseed.cfg': pre})
     disk = new_disk('auto-fr', 400)
-    q = qemu_cd('auto-fr', iso, disk)
+    q = qemu_cd('auto-fr', iso, disk, extra=['-no-shutdown'])
     ok = page(q, 12, 90)
     check('auto-fr : page de progression affichee', ok)
     time.sleep(6)
@@ -330,11 +330,15 @@ reboot=halt
     cap(q, 'fr-fin', 'auto-fr-fin')
     ended = False
     for _ in range(40):
-        if not q.alive():
+        if 'shutdown' in q.info('info status') or not q.alive():
             ended = True
             break
         time.sleep(1)
     check('auto-fr : arret apres installation (reboot=halt)', ended)
+    blk = q.info('info block')
+    check('auto-fr : le CD d\'installation a ete ejecte avant l\'arret',
+          'tray open' in blk or 'ejected' in blk or 'empty' in blk.lower(),
+          blk[-300:])
     q.quit()
     tab = read_table(disk)
     check('auto-fr : table MBR : Linux 83 active + swap 82',
@@ -611,14 +615,15 @@ def t_ui_fr():
         ('clavier fr', 'cat /etc/default/keyboard', r'XKBLAYOUT="fr"'),
         ('mode de demarrage GNOME ecrit', 'cat /etc/k32/session', r'gnome'),
         ('k32-session get', 'k32-session get', r'gnome'),
-        ('k32-session status : environnement absent -> repli',
-         'k32-session status', r'k32-gnome \(absent\)'),
+        ('k32-session status : environnement GNOME installe',
+         'k32-session status', r'programme: /(usr/)?bin/k32-gnome'),
+        ('commandes compatibles GNOME/KDE installees',
+         'ls /bin/gnome-session /bin/gnome-terminal /bin/startplasma-x11 '
+         '/bin/konsole /usr/share/xsessions/gnome.desktop', r'konsole'),
         ('systeme installe : marque et pas d assistant',
          'cat /etc/k32/installed; ls /sbin/k32-setup 2>&1',
          r'installed by k32-setup(?s:.*)(introuvable|inexistant|not found|'
-         r'No such|impossible)'),
-        ('session lancee : repli terminal sur absence de /dev/fb0 ou programme',
-         'k32-session run; echo rc=$?', r'rc=1[01]'),
+         r'No such|impossible|Aucune)'),
     ]
     boot_verify('ui-fr', disk, 'secret', checks)
 

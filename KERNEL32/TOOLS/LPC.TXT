@@ -11,8 +11,9 @@ LPC32.
 Construction (dans KERNEL32/TOOLS) :   fpc -Mtp -O1 LPC.PAS
 Fichiers : LPC.PAS (point d'entree, cibles 16 bits), LPC32.PAS (moteur 32
 bits), L32SYS.PAS (chmod de l'hote), L32API.PAS (source Pascal de la couche
-systeme -3X, integre dans LPC32.PAS par MKAPI.PAS : fpc -Mtp MKAPI.PAS ;
-./MKAPI apres toute modification de L32API.PAS).
+systeme -3X) et L32GFX.PAS (unite Graph, souris, clavier graphique : voir
+"Unite Graph"), integres dans LPC32.PAS par MKAPI.PAS : fpc -Mtp MKAPI.PAS ;
+./MKAPI apres toute modification de L32API.PAS ou de L32GFX.PAS.
 
 Options
 -------
@@ -331,3 +332,111 @@ Ajouts du lot E4 (cible 32 bits : -3X, -3K, -3M)
   et arret (avant : plantage ou boucle).
 * Piege : le mot reserve Packed ne peut pas servir de nom de variable.
 * Pas de type Int64 en -3X (utiliser Double pour les grandes tailles).
+
+Unite Graph, souris, clavier graphique (L32GFX.PAS, lot C1)
+-----------------------------------------------------------
+Un programme -3X qui contient `Uses ... Graph` (ou PtcGraph, nom de l'unite
+BGI de Free Pascal) recoit l'unite L32GFX.PAS, injectee apres la couche API :
+les autres programmes ne sont pas modifies (ni plus gros ni plus lents a
+compiler). Les noms d'unites inconnues (PtcCrt, PtcMouse, cthreads) sont
+ignores. Essai : GEOWORKS.PAS de DEV-COOLS (30089 lignes, non modifie) se
+compile en 2,5 s (binaire de 1,4 Mo) avec
+
+    lpc -3X -DFPC,UNIX GEOWORKS.PAS
+
+La branche Turbo Pascal 7 du source (sans -D) ne compile pas : l'emulateur
+de geodes est dans {$IFDEF FPC} mais RtObjects, FpuSelfTest... (hors du
+bloc) l'utilisent (bogue du source, "identificateur non declare : SEGPARA").
+-DFPC,UNIX choisit la branche de l'auteur : Exec('/bin/sh','-c "..."'), DirSep
+'/', emulateur CPU des geodes conserve.
+
+Sous-ensemble BGI : InitGraph, CloseGraph, DetectGraph, GraphResult,
+GraphErrorMsg, GraphDefaults, RestoreCrtMode, SetGraphMode, GetGraphMode,
+GetModeRange, GetMaxMode, GetDriverName, GetModeName, GetMaxX, GetMaxY,
+GetMaxColor, SetColor, GetColor, SetBkColor, GetBkColor, SetWriteMode (Copy,
+XOR, OR, AND, NOT), SetLineStyle, GetLineSettings (plein, pointille, axe,
+tirets, motif utilisateur ; epaisseur 1 ou 3), SetFillStyle, SetFillPattern,
+GetFillSettings, GetFillPattern (les 12 motifs BGI + utilisateur),
+SetViewPort, GetViewSettings, ClearViewPort, ClearDevice, PutPixel,
+GetPixel, Line, LineTo, LineRel, MoveTo, MoveRel, GetX, GetY, Rectangle,
+Bar, Bar3D, DrawPoly, FillPoly, Ellipse, Circle, Arc, FillEllipse,
+PieSlice, Sector, GetArcCoords, FloodFill, GetImage, PutImage, ImageSize,
+SetTextStyle, SetTextJustify, GetTextSettings, OutText, OutTextXY,
+TextWidth, TextHeight, GetPalette, GetDefaultPalette, SetPalette,
+SetAllPalette, SetRGBPalette (composantes 0..63, registre DAC),
+GetPaletteSize, SetActivePage, SetVisualPage, GetAspectRatio,
+SetAspectRatio, SetUserCharSize et de petites fonctions sans effet
+(InstallUserFont, RegisterBGIfont, SetGraphBufSize...). Constantes et types
+BGI (PointType, PaletteType, ViewPortType...), NormalPut, D4bit... m1280x1024
+de Free Pascal. Ajouts : FillEllipse, GetFPCHeapStatus.CurrHeapFree,
+SetLength (L32API).
+- Pilote : VGA 16 couleurs. Detect donne VGA/VGAHi = 640x480 ; VGALo 640x200 ;
+  VGAMed 640x350 ; D4bit : modes m320x200..m1600x1200 (GetModeRange 0..6),
+  repli sur un mode plus petit si /dev/fb0 refuse. GFXMODE=LxH (variable
+  d'environnement) impose la resolution (320x200 a 2560x1600).
+- Tampon : une page en memoire, un octet par pixel (indice 0..15 : les modes
+  XOR/OR/AND de SetWriteMode et de PutImage ont le sens exact de BGI ; GetImage
+  et PutImage : 4 octets d'en-tete + 1 octet par pixel, ImageSize rend un
+  LongInt). Palette BGI par defaut (EGA : 0 1 2 3 4 5 20 7 56..63), couleurs
+  RVB 0/85/170/255. Jusqu'a 4 pages (SetActivePage/SetVisualPage).
+- Ecran : /dev/fb0 en mmap, 32, 24, 16 ou 15 bits par pixel (32 puis 16
+  demandes au noyau). Le tampon est recopie (zone modifiee seulement) par
+  BgFlush, appele quand le programme attend : KeyPressed, ReadKey, Delay,
+  GetMouseState, Intr 33h, CloseGraph. Si le mode du noyau est plus grand
+  que l'ecran logique, l'image est centree sur fond noir. La console passe en
+  KD_GRAPHICS (ioctl 4B3Ah sur l'entree standard, sinon /dev/tty0) a
+  InitGraph et revient en KD_TEXT a CloseGraph, RestoreCrtMode, Halt, fin
+  normale (hook LnxExitHook de L32API) ; l'etat du terminal est restaure.
+  Carte VMware SVGA : 640x480 devient 800x600 (QEMU n'affiche pas 640x480 :
+  "Guest has not initialized the display").
+- Police par defaut : 8x8 CP437 (256 caracteres, TextWidth = 8 x taille,
+  CharSize 1..10, VertDir tourne). Les polices vectorielles (Triplex, Small,
+  SansSerif, Gothic) sont remplacees par la police 8x8.
+- Noms : les sous-programmes de L32GFX dont le nom est un nom predefini du
+  compilateur (Bar, Line, ReadKey, Delay, Intr...) sont definis NOM_G ; LPC32
+  renomme toutes les occurrences de NOM en NOM_G dans le programme (variables
+  et champs de meme nom compris : renommage coherent) ; un sous-programme du
+  programme qui porte ce nom garde la priorite (NOM_U, voir plus haut).
+- Outils de test (extensions) : GfxFlush, GfxWhy (raison de l'echec
+  d'InitGraph), GfxSum (somme de controle de la page affichee), GfxDump(nom)
+  (PPM P6) ; GFXMEM=1 : pas de /dev/fb0 (tampon seul), GFXDUMP=nom.ppm (avec
+  GFXMEM : la page est ecrite ~1 fois par seconde).
+
+Souris (Intr 33h, MouseDriverFound, GetMouseState)
+--------------------------------------------------
+/dev/input/mice (paquets PS/2, deplacement relatif ; MOUSEDEV=chemin pour un
+autre fichier, replis /dev/psaux), lu sans bloquer a chaque appel. Intr 33h :
+00h/21h (reinitialisation : AX = FFFFh, BX = 3), 01h/02h (curseur logiciel en
+fleche, dessine dans la memoire video par-dessus l'image, jamais dans le
+tampon), 03h (BX boutons, CX, DX position), 04h, 05h/06h (compteurs et
+position des appuis/relachements), 07h/08h (plages), 0Bh (mickeys), 1Fh, 20h,
+24h. Position initiale au centre. MouseDriverFound : Boolean ;
+GetMouseState(Var X, Y, Boutons : LongInt) (comme PtcMouse). Les autres
+interruptions de Intr ne font rien. Limite : pas de tablette absolue (le
+noyau n'a pas d'USB), pas de gestionnaire utilisateur (fonction 0Ch).
+
+Clavier (Crt.ReadKey, Crt.KeyPressed dans un programme Graph)
+-------------------------------------------------------------
+Lecture de l'entree standard en mode brut (ni ECHO, ni ICANON, ni ISIG, ni
+IXON : Ctrl-C, Ctrl-S, Ctrl-V arrivent au programme). Les touches sont celles
+du noyau (disposition chargee par loadkeys, touches mortes) : caracteres UTF-8
+convertis en CP437, DEL = 8, fleches, Debut, Fin, PgPrec, PgSuiv, Inser, Suppr,
+F1..F12 rendus comme Turbo Pascal : #0 puis le code de balayage (72 80 75 77
+71 79 73 81 82 83, 59..68, 133 134) ; Alt + lettre ou chiffre : #0 puis le code
+Alt de TP (Alt-X = 45). Alt+F1..Fn change de console (noyau) : Alt-F4 n'arrive
+pas au programme. GetShiftState : octet du BIOS (bit 0 Maj droite, 1 Maj
+gauche, 2 Ctrl, 3 Alt, 6 Verr Maj) lu sur /dev/input/event0. Delay(Ms) :
+nanosleep ; Sound et NoSound ne font rien. Intr 33h et Crt gardent le sens
+DOS ; sans InitGraph, ReadKey/KeyPressed fonctionnent aussi.
+
+Corrections du compilateur du lot C1
+------------------------------------
+- PType(expr)^.champ comme destination (PType(P)^.F := 1), argument var
+  (Pr(PType(P)^.F)) ou debut d'instruction, et @PType(P)^ (type pointeur).
+- Un champ du WITH en cours masque un sous-programme predefini du meme nom
+  (champ Val, Name... : WriteLn(Val) dans With R Do).
+- SetLength(Var S : String; N) (FPC) dans L32API.
+Tests : TESTS/C/UX11 (Graph : 38 verifications analytiques et sommes de
+controle), UX12 (souris : fichier MOUSEDEV de paquets PS/2), UX13 (clavier :
+sequences du noyau dans UX13.IN) ; RUN.SH exporte GFXMEM=1 et MOUSEDEV pour les
+programmes UX. Essais QEMU : TESTS/U/RUNGFX.SH (GFXT.PY).

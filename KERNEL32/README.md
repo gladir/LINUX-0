@@ -1689,6 +1689,57 @@ fond normal, Entree refusee) ; captures `fr-04b-heure-invalide`, `fr-04c-nom-inv
 `fr-05c-identifiant-invalide`, `fr-05d-confirmation-utilisateur`,
 `text-04-confirmation-rouge`, `text-05-identifiant-invalide` dans `IMAGE/CAPTURES`.
 
+### Modes de demarrage et environnements de bureau (contrat du 2026-11-18)
+
+**Assistant d'installation** : nouvelle etape "Mode de demarrage" apres les comptes
+(7 langues, aide F1, cle de preseed `session=terminal|kde|gnome|geoworks`, ligne du
+recapitulatif). Quatre choix : demarrer automatiquement en terminal (defaut), dans un
+environnement KDE, GNOME ou GEOWORKS. Des remarques rouges avertissent si GEOWORKS n'est
+pas present sur le CD (le systeme demarrera en terminal) ou si le graphique est
+indisponible dans l'installateur. Le choix est ecrit dans `/etc/k32/session` (et
+`session-user` si un utilisateur est cree) sur le disque cible.
+
+**Apres l'installation** (diagnostic du retour "il relance l'installation") : le systeme
+installe ne contient ni `/sbin/k32-setup` ni entree d'assistant dans `inittab`, et
+`k32-setup` refuse de tourner si `/etc/k32/installed` existe ; la cause reelle etait le CD
+reste dans le lecteur (BIOS : optique en premier). L'assistant ejecte maintenant le CD
+(demonte, `CDROMEJECT` 0x5309 sur `/dev/hdc`, `/dev/hdd`, `/dev/hdb`, `/dev/sr0`) avant
+de redemarrer ou d'eteindre, et l'ecran final demande de le retirer s'il reste.
+Test : `RUNINST.SH auto-fr` verifie "tray open" dans le moniteur QEMU.
+
+**`k32-session get | set MODE | run | tty TTY | status`** (`USR/K32SESS.PAS`, `/bin`) :
+`inittab` lance `k32-session tty tty1` : session graphique selon `/etc/k32/session`, puis
+`getty` (retour au login a la sortie). Replis automatiques avec message et journal
+`/var/log/k32-session.log` : `/dev/fb0` absent (code 10), programme absent (11),
+environnement qui echoue en moins de 8 s (12) ; jamais d'ecran noir (la console est remise
+en texte). Programmes : `k32-kde`, `k32-gnome`, `geoworks` (fourni par G1 : tant qu'il
+est absent, le mode geoworks retombe sur le terminal). Codes de sortie de l'environnement :
+100 redemarrer, 101 eteindre. Alt+F2 a Alt+F4 : autres terminaux texte (le bureau
+demande `VT_PROCESS` et se redessine au retour).
+
+**Terminal** (`VTCORE.INC` : coeur VT100/ANSI sans dependance, 16 couleurs, defilement,
+ecran alternatif, UTF-8 vers Latin-1, DSR/DA ; `VTVIEW.INC` : pty `/dev/ptmx`, dessin
+GFX, historique Maj+PgHaut/PgBas ; essais `TESTS/U/vtermtest.py` par `VTDRV.PAS` :
+39 cas).
+
+**Environnements compatibles** (`USR/DESKTOP.INC`, un seul programme `K32DESK.PAS` dont
+le nom choisit l'environnement ; PAS de serveur X : phase 2) :
+* GNOME (`gnome-session`, `k32-gnome`) : apparence Adwaita, barre superieure Activites +
+  horloge + menu systeme (Se deconnecter / Redemarrer / Eteindre / A propos), fenetres a
+  titre centre, vue Activites (grille d'applications), `XDG_CURRENT_DESKTOP=GNOME`.
+* KDE (`startplasma-x11`, `startkde`, `k32-kde`) : apparence Breeze, panneau en bas,
+  lanceur d'applications, gestionnaire de taches, zone de notification + horloge,
+  `XDG_CURRENT_DESKTOP=KDE`.
+* `gnome-terminal`, `konsole`, `dolphin` : une seule fenetre Terminal (`-e commande`).
+* Fenetre Terminal fonctionnelle (shell `sh -l` sous l'utilisateur de la session, deplacer,
+  redimensionner par le coin, agrandir, fermer), applications lues dans
+  `/usr/share/applications/*.desktop` (Name, Name[fr], Exec, Terminal, NoDisplay), sessions
+  `/usr/share/xsessions/{gnome,plasma,geoworks}.desktop`, variables XDG_*. Clavier : Alt+F1
+  menu/Activites, Alt+F4 ferme, Ctrl+Alt+Suppr menu de session, Alt+F2.. consoles texte.
+* Essais : `RUNU.SH vterm lot4 desk` (`lot4.sh` : k32-session et replis ; `desktest.py` :
+  bureau lance par init, captures, frappe dans le Terminal, Alt+F2/Alt+F1, deconnexion).
+  Captures `IMAGE/CAPTURES/{gnome,kde,bgnome,bkde}-*.png`.
+
 ### Diagnostics et echecs de l'installateur
 
 * **Mode texte de repli** : la raison est affichee en rouge en bas de la page de langue

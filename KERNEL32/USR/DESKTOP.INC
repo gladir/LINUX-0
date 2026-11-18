@@ -51,6 +51,7 @@ Var
   TbH, Pad : LongInt;                           { hauteur du titre, marge }
   BcX, BcY, BcR, MxX, MiX : LongInt;            { boutons }
   BarH, PanH : LongInt;                         { barre / panneau }
+  VtBack : Boolean;                             { console reprise : redessiner }
 
 Const
   DayFr : Array[0..6] Of String[9] = ('dim.', 'lun.', 'mar.', 'mer.', 'jeu.',
@@ -625,6 +626,16 @@ Begin
         DateStr, $BDC3C7, -1);
 End;
 
+Function HostName_ : String;
+Var Fd : LongInt; L : String;
+Begin
+  HostName_ := '';
+  Fd := SysOpen('/etc/hostname', O_RDONLY, 0);
+  If Fd < 0 Then Exit;
+  If SysReadLine(Fd, L) Then HostName_ := L;
+  SysClose(Fd);
+End;
+
 Procedure DrawLauncherKde;
 Var I, Y, W, H, X : LongInt;
 Begin
@@ -635,7 +646,7 @@ Begin
   GFillRect(X, Y, W, H, $31363B);
   GFrame(X, Y, W, H, $3DAEE9);
   GFillRect(X, Y, W, 44, $232629);
-  GText(X + 14, Y + 14, UserName_ + '@' + SysGetEnv('HOSTNAME'), $FCFCFC, -1);
+  GText(X + 14, Y + 14, UserName_ + '@' + HostName_, $FCFCFC, -1);
   For I := 0 To NApps - 1 Do
   Begin
     If I = MenuSel Then GFillRect(X + 4, Y + 50 + I * 28, W - 8, 26, $3DAEE9);
@@ -933,6 +944,26 @@ Begin
   End;
 End;
 
+{ VT_SETMODE (VT_PROCESS) : acqsig (SIGUSR1) quand la console reprend
+  l'ecran (effacee : il faut se redessiner), relsig (SIGUSR2) quand elle le
+  cede ; le noyau n'attend pas VT_RELDISP }
+Procedure OnVtSig(Sig : LongInt);
+Begin
+  If Sig = 10 Then VtBack := True;
+End;
+
+Procedure VtProcess;
+Var M : Array[0..1] Of LongInt;
+Begin
+  If GTtyFd < 0 Then Exit;
+  SysSigAction(10, LongInt(@OnVtSig), 0);
+  SysSigAction(12, LongInt(@OnVtSig), 0);
+  { struct vt_mode : mode, waitv (1 octet chacun), relsig, acqsig (mots) }
+  M[0] := 1 Or (12 Shl 16);
+  M[1] := 10;
+  SysIoctl(GTtyFd, $5602, M);
+End;
+
 Procedure SwitchVt(N : LongInt);
 Begin
   If GTtyFd >= 0 Then
@@ -1094,6 +1125,8 @@ Begin
     Exit;
   End;
   NeedDraw := True;
+  VtBack := False;
+  VtProcess;
   LastMin := -1;
   While Running Do
   Begin
@@ -1121,6 +1154,11 @@ Begin
           End;
       End;
       If DragW >= 0 Then HandleMove(InMx, InMy);
+    End;
+    If VtBack Then
+    Begin
+      VtBack := False;
+      NeedDraw := True;
     End;
     If NeedDraw Then DrawAll;
     I := Ord(ClockStr[5]);
