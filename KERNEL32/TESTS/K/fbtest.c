@@ -8,6 +8,7 @@ static int slurp(const char*p,char*s,int max){int fd=open(p,O_RDONLY,0),n;if(fd<
 #define PROT_READ 1
 #define PROT_WRITE 2
 #define MAP_SHARED 1
+static int pnum(const char*s){int n=0;while(*s>='0'&&*s<='9')n=n*10+*s++-'0';return n;}
 static unsigned row[2560];
 static unsigned char vi[160],fi[68];
 int main(void){
@@ -132,6 +133,38 @@ int main(void){
     {unsigned a[40];memset(a,0,160);a[0]=800;a[1]=600;a[2]=800;a[3]=600;a[6]=32;a[21]=2;   /* FB_ACTIVATE_TEST */
      k=ioctl(fd,0x4601,(long)a);ioctl(fd,0x4600,(long)v);
      ktest("fb.activate_test",k==0&&v[0]==(vmw?1280:640)&&v[1]==(vmw?1024:480));}
+    /* ioctl du noyau pour Graph : UPDATE d'un rectangle, curseur materiel */
+    {unsigned rc[4]={0,0,64,64},cd[5],cm[3]={10,20,1},px64[64*64];
+     static char pf[1024];int pn,z,cf0=0,cr0=0,cf1=0,cr1=0;
+     if(!vmw){
+       ktest("fb.k32_enotty",ioctl(fd,0x46F0,(long)rc)==-25&&ioctl(fd,0x46F2,(long)cm)==-25);
+     }else{
+       for(i=0;i<64*64;i++)px64[i]=(i&1)?0xFF00FF00:0x80FF0000;
+       cd[0]=16;cd[1]=16;cd[2]=1;cd[3]=2;cd[4]=(unsigned)(long)px64;
+       ktest("fb.k32_update_probe",ioctl(fd,0x46F0,(long)rc)==0);
+       rc[2]=0;ktest("fb.k32_update_empty",ioctl(fd,0x46F0,(long)rc)==0);
+       rc[2]=64;rc[0]=1270;ktest("fb.k32_update_clip",ioctl(fd,0x46F0,(long)rc)==0);
+       ktest("fb.k32_curdef",ioctl(fd,0x46F1,(long)cd)==0);
+       cd[0]=65;ktest("fb.k32_curdef_big",ioctl(fd,0x46F1,(long)cd)==-22);
+       cd[0]=16;cd[4]=0;ktest("fb.k32_curdef_fault",ioctl(fd,0x46F1,(long)cd)==-14);
+       pn=slurp("/proc/k32perf",pf,sizeof pf-1);
+       for(z=0;z<pn;z++){if(memcmp_(pf+z,"cursor_reg_moves ",17)==0){cr0=pnum(pf+z+17);break;}}
+       ktest("fb.k32_curmove",ioctl(fd,0x46F2,(long)cm)==0);
+       cm[0]=300;cm[1]=200;ioctl(fd,0x46F2,(long)cm);
+       pn=slurp("/proc/k32perf",pf,sizeof pf-1);
+       for(z=0;z<pn;z++){if(memcmp_(pf+z,"cursor_reg_moves ",17)==0){cr1=pnum(pf+z+17);break;}}
+       for(z=0;z<pn;z++){if(memcmp_(pf+z,"cursor_fifo_moves ",18)==0){cf1=pnum(pf+z+18);break;}}
+       /* QEMU n'offre pas CURSOR_BYPASS_3 : voie registres (2 deplacements) */
+       ktest("fb.k32_curmove_counted",cr1-cr0==2||(cf1>=2&&cr1==cr0));
+       {int u0=0,u1=0;long rq[2]={1,0};
+        pn=slurp("/proc/k32perf",pf,sizeof pf-1);
+        for(z=0;z<pn;z++){if(memcmp_(pf+z,"svga_updates ",13)==0){u0=pnum(pf+z+13);break;}}
+        nanosleep(rq,0);
+        pn=slurp("/proc/k32perf",pf,sizeof pf-1);
+        for(z=0;z<pn;z++){if(memcmp_(pf+z,"svga_updates ",13)==0){u1=pnum(pf+z+13);break;}}
+        ktest("fb.k32_manual_no_periodic_update",u0>0&&u1==u0);}
+       (void)cf0;
+     }}
     /* KD_GRAPHICS / KD_TEXT : retour au texte (ecran VGA 720x400 apres KD_TEXT) */
     ktest("fb.kd_graphics",ioctl(0,0x4B3A,1)==0||1);
     {int m=-1;if(ioctl(0,0x4B3B,(long)&m)==0)ktest("fb.kd_getmode",m==1);}
