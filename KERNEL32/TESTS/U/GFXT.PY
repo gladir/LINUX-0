@@ -24,7 +24,7 @@ from PIL import Image
 HERE = os.path.dirname(os.path.abspath(__file__))
 K32 = os.path.abspath(os.path.join(HERE, '..', '..'))
 WORK, LPC, KERN, CAPDIR, VGA = sys.argv[1:6]
-SCEN = sys.argv[6:] or ['prim', 'mouse', 'geo']
+SCEN = sys.argv[6:] or ['prim', 'mouse', 'geo', 'dos', 'bench']
 GEO = os.environ.get('GEOWORKS', '/home/user/dev-cools/GEOWORKS.PAS')
 RES = []
 
@@ -53,9 +53,10 @@ def build():
     sh('cp %s/USR/*.INC %s/USR/INSTALLER/LAYOUTS.INC %s' % (K32, K32, b))
     for f in ('UX11', 'UX12', 'UX13'):
         sh('cp %s/TESTS/C/%s.PAS %s' % (K32, f, b))
-    sh('cp %s/GFXMS.PAS %s' % (HERE, b))
+    sh('cp %s/GFXMS.PAS %s/GFXBENCH.PAS %s' % (HERE, HERE, b))
     sh('cp %s %s/GEOWORKS.PAS' % (GEO, b))
     for p, extra in (('INIT', ''), ('SH', ''), ('UX11', ''), ('GFXMS', ''),
+                     ('GFXBENCH', ''),
                      ('GEOWORKS', '-DFPC,UNIX')):
         r = sh('cd %s && %s -3X -q %s %s.PAS' % (b, LPC, extra, p))
         if r.returncode:
@@ -63,8 +64,8 @@ def build():
                   (p, r.stdout + r.stderr))
             sys.exit(1)
     sh('cp %s/INIT %s/sbin/init; cp %s/SH %s/bin/sh; cp %s/UX11 %s/bin/ux11; '
-       'cp %s/GFXMS %s/bin/gfxms; cp %s/GEOWORKS %s/bin/geoworks' %
-       ((b, root) * 5))
+       'cp %s/GFXMS %s/bin/gfxms; cp %s/GEOWORKS %s/bin/geoworks; '
+       'cp %s/GFXBENCH %s/bin/gfxbench' % ((b, root) * 6))
     return root
 
 
@@ -231,10 +232,50 @@ def scen_dos(root):
     q.quit()
 
 
+def parse_stat(t, tag='stat'):
+    for l in t.split('\n'):
+        if l.startswith(tag):
+            d = dict(p.split('=') for p in l.split()[1:])
+            return {k: int(v) for k, v in d.items()}
+    return None
+
+
+def scen_bench(root):
+    """cout d'un deplacement de souris : appels noyau et pixels (GfxStat)"""
+    for mode in ('SW', 'HW'):
+        rd = initrd(root, '/bin/gfxbench ' + mode)
+        q = start('q-bench-' + mode, rd)
+        q.wait('ready', 60)
+        time.sleep(0.5)
+        for i in range(120):
+            q.s.send(b'mouse_move 2 1\n')
+            time.sleep(0.03)
+            if i % 20 == 0:
+                q._drain()
+        q.wait('fin', 30)
+        st = parse_stat(q.text())
+        q.quit()
+        if not check('bench %s %s : compteurs lus' % (VGA, mode), st):
+            continue
+        mv, lp = max(st['moves'], 1), max(st['loops'], 1)
+        sys_ = st['s0'] + st['s1'] + st['s2'] + st['s3'] + st['s4']
+        print('      %s %s : %d deplacements, %d tours, appels noyau %d '
+              '(%.1f par tour, %.1f par deplacement), ioctl %d, pixels %d '
+              '(%d par deplacement), recopies %d' %
+              (VGA, mode, mv, lp, sys_, sys_ / lp, sys_ / mv, st['s9'],
+               st['s7'], st['s7'] // mv, st['s5']))
+        check('bench %s %s : au plus 2 appels noyau par tour' % (VGA, mode),
+              sys_ <= 2 * lp + 2 * mv)
+        check('bench %s %s : moins de 600 pixels par deplacement' %
+              (VGA, mode), st['s7'] // mv < 600)
+        check('bench %s %s : au plus une recopie par deplacement' %
+              (VGA, mode), st['s5'] <= mv + 2)
+
+
 root = build()
 for s in SCEN:
     {'prim': scen_prim, 'mouse': scen_mouse, 'geo': scen_geo,
-     'dos': scen_dos}[s](root)
+     'dos': scen_dos, 'bench': scen_bench}[s](root)
 bad = [n for n, ok in RES if not ok]
 print('%d verification(s), %d echec(s)' % (len(RES), len(bad)))
 sys.exit(1 if bad else 0)
