@@ -1521,3 +1521,123 @@ it: Il comando %1 non risponde da %2 s: interrotto.
 es: El comando %1 no responde desde hace %2 s: interrumpido.
 pt: O comando %1 não responde há %2 s: interrompido.
 nl: Het commando %1 reageert al %2 s niet meer: onderbroken.
+@SESS_T
+fr: Mode de démarrage
+en: Start-up mode
+de: Startmodus
+it: Modalità di avvio
+es: Modo de arranque
+pt: Modo de arranque
+nl: Opstartmodus
+@SESS_I
+fr: Choisissez ce qui démarre automatiquement sur la console 1 après le démarrage du système. Dans tous les modes, un terminal reste accessible.
+en: Choose what starts automatically on console 1 once the system has booted. In every mode a terminal remains available.
+de: Wählen Sie, was nach dem Systemstart automatisch auf Konsole 1 startet. In jedem Modus bleibt ein Terminal verfügbar.
+it: Scegliete che cosa parte automaticamente sulla console 1 dopo l'avvio del sistema. In ogni modalità resta disponibile un terminale.
+es: Elija qué arranca automáticamente en la consola 1 al iniciar el sistema. En todos los modos hay un terminal disponible.
+pt: Escolha o que arranca automaticamente na consola 1 após o arranque do sistema. Em todos os modos há um terminal disponível.
+nl: Kies wat automatisch start op console 1 na het opstarten. In elke modus blijft een terminal beschikbaar.
+@SESS_N0
+fr: Démarrer automatiquement en terminal
+en: Start automatically in a terminal
+de: Automatisch im Terminal starten
+it: Avviare automaticamente nel terminale
+es: Arrancar automáticamente en terminal
+pt: Arrancar automaticamente em terminal
+nl: Automatisch in een terminal starten
+@SESS_N1
+fr: Démarrer dans un environnement KDE
+en: Start in a KDE environment
+de: In einer KDE-Umgebung starten
+it: Avviare in un ambiente KDE
+es: Arrancar en un entorno KDE
+pt: Arrancar num ambiente KDE
+nl: Starten in een KDE-omgeving
+@SESS_N2
+fr: Démarrer dans un environnement GNOME
+en: Start in a GNOME environment
+de: In einer GNOME-Umgebung starten
+it: Avviare in un ambiente GNOME
+es: Arrancar en un entorno GNOME
+pt: Arrancar num ambiente GNOME
+nl: Starten in een GNOME-omgeving
+@SESS_N3
+fr: Démarrer dans un environnement GEOWORKS
+en: Start in a GEOWORKS environment
+de: In einer GEOWORKS-Umgebung starten
+it: Avviare in un ambiente GEOWORKS
+es: Arrancar en un entorno GEOWORKS
+pt: Arrancar num ambiente GEOWORKS
+nl: Starten in een GEOWORKS-omgeving
+@SESS_D0
+fr: Console texte avec ouverture de session (par défaut).
+en: Text console with login (default).
+de: Textkonsole mit Anmeldung (Standard).
+it: Console testuale con accesso (predefinito).
+es: Consola de texto con inicio de sesión (predeterminado).
+pt: Consola de texto com início de sessão (predefinido).
+nl: Tekstconsole met aanmelding (standaard).
+@SESS_D1
+fr: Bureau compatible KDE (Breeze) : panneau, lanceur, fenêtre Terminal.
+en: KDE-compatible desktop (Breeze): panel, launcher, Terminal window.
+de: KDE-kompatibler Desktop (Breeze): Leiste, Starter, Terminalfenster.
+it: Desktop compatibile KDE (Breeze): pannello, lanciatore, finestra Terminale.
+es: Escritorio compatible con KDE (Breeze): panel, lanzador, ventana Terminal.
+pt: Ambiente compatível com KDE (Breeze): painel, lançador, janela Terminal.
+nl: KDE-compatibele bureaublad (Breeze): paneel, starter, Terminalvenster.
+@SESS_D2
+fr: Bureau compatible GNOME (Adwaita) : barre Activités, fenêtre Terminal.
+en: GNOME-compatible desktop (Adwaita): Activities bar, Terminal window.
+de: GNOME-kompatibler Desktop (Adwaita): Aktivitäten, Terminalfenster.
+it: Desktop compatibile GNOME (Adwaita): barra Attività, finestra Terminale.
+es: Escritorio compatible con GNOME (Adwaita): Actividades, ventana Terminal.
+pt: Ambiente compatível com GNOME (Adwaita): Atividades, janela Terminal.
+nl: GNOME-compatibele bureaublad (Adwaita): Activiteiten, Terminalvenster.
+@SESS_D3
+fr: GeoWorks : interface graphique et applications (retour vers Linux).
+en: GeoWorks: graphical interface and applications (exit back to Linux).
+de: GeoWorks: grafische Oberfläche und Anwendungen (zurück zu Linux).
+it: GeoWorks: interfaccia grafica e applicazioni (ritorno a Linux).
+es: GeoWorks: interfaz gráfica y aplicaciones (volver a Linux).
+pt: GeoWorks: interface gráfica e aplicações (regresso ao Linux).
+nl: GeoWorks: grafische interface en toepassingen (terug naar Linux).
+@SESS_NOTE
+fr: Alt+F2 à Alt+F4 donnent d'autres terminaux texte. Sans /dev/fb0 ou si l'environnement échoue, le système démarre en terminal texte.
+en: Alt+F2 to Alt+F4 give other text terminals. Without /dev/fb0, or if the environment fails, the system starts in a text terminal.
+de: Alt+F2 bis Alt+F4 öffnen weitere Textterminals. Ohne /dev/fb0 oder bei einem Fehler startet das System im Textterminal.
+it: Alt+F2 - Alt+F4 aprono altri terminali testuali. Senza /dev/fb0 o in caso di errore il sistema parte nel terminale testuale.
+es: Alt+F2 a Alt+F4 dan otros terminales de texto. Sin /dev/fb0 o si el entorno falla, el sistema arranca en terminal de texto.
+pt: Alt+F2 a Alt+F4 dão outros terminais de texto. Sem /dev/fb0 ou se o ambiente falhar, o sistema arranca em terminal de texto.
+nl: Alt+F2 t/m Alt+F4 geven andere tekstterminals. Zonder /dev/fb0 of bij een fout start het systeem in een tekstterminal.
+@SESS_NOGEO
+fr: GEOWORKS n'est pas encore présent dans ce système : il démarrera en terminal.
+en: GEOWORKS is not present in this system yet: it will start in a terminal.
+de: GEOWORKS ist in diesem System noch nicht vorhanden: Start im Terminal.
+it: GEOWORKS non è ancora presente in questo sistema: partirà nel terminale.
+es: GEOWORKS aún no está en este sistema: arrancará en terminal.
+pt: O GEOWORKS ainda não está neste sistema: arrancará em terminal.
+nl: GEOWORKS is nog niet aanwezig in dit systeem: start in een terminal.
+@SESS_NOFB
+fr: Graphique indisponible dans l'installateur (voir plus bas) : le choix sera appliqué si /dev/fb0 existe au démarrage.
+en: Graphics unavailable in the installer: the choice applies if /dev/fb0 exists at boot.
+de: Grafik im Installer nicht verfügbar: die Wahl gilt, wenn /dev/fb0 beim Start vorhanden ist.
+it: Grafica non disponibile nell'installatore: la scelta vale se /dev/fb0 esiste all'avvio.
+es: Gráficos no disponibles en el instalador: la elección se aplica si /dev/fb0 existe al arrancar.
+pt: Gráficos indisponíveis no instalador: a escolha aplica-se se /dev/fb0 existir no arranque.
+nl: Grafisch scherm niet beschikbaar in het installatieprogramma: de keuze geldt als /dev/fb0 bij het opstarten bestaat.
+@SESS_HELP
+fr: Mode de démarrage : « terminal » ouvre la console texte ; « KDE » et « GNOME » lancent un bureau compatible (panneau, menu, horloge, fenêtre Terminal) ; « GEOWORKS » lance GeoWorks. Le choix est écrit dans /etc/k32/session ; la commande k32-session get|set permet de le changer plus tard.
+en: Start-up mode: "terminal" opens the text console; "KDE" and "GNOME" start a compatible desktop (panel, menu, clock, Terminal window); "GEOWORKS" starts GeoWorks. The choice is stored in /etc/k32/session; k32-session get|set changes it later.
+de: Startmodus: "Terminal" öffnet die Textkonsole; "KDE" und "GNOME" starten einen kompatiblen Desktop (Leiste, Menü, Uhr, Terminalfenster); "GEOWORKS" startet GeoWorks. Die Wahl steht in /etc/k32/session; k32-session get|set ändert sie später.
+it: Modalità di avvio: "terminale" apre la console testuale; "KDE" e "GNOME" avviano un desktop compatibile (pannello, menu, orologio, finestra Terminale); "GEOWORKS" avvia GeoWorks. La scelta è in /etc/k32/session; k32-session get|set la cambia in seguito.
+es: Modo de arranque: «terminal» abre la consola de texto; «KDE» y «GNOME» inician un escritorio compatible (panel, menú, reloj, ventana Terminal); «GEOWORKS» inicia GeoWorks. La elección se guarda en /etc/k32/session; k32-session get|set la cambia después.
+pt: Modo de arranque: «terminal» abre a consola de texto; «KDE» e «GNOME» iniciam um ambiente compatível (painel, menu, relógio, janela Terminal); «GEOWORKS» inicia o GeoWorks. A escolha fica em /etc/k32/session; k32-session get|set altera-a depois.
+nl: Opstartmodus: "terminal" opent de tekstconsole; "KDE" en "GNOME" starten een compatibele bureaublad (paneel, menu, klok, Terminalvenster); "GEOWORKS" start GeoWorks. De keuze staat in /etc/k32/session; k32-session get|set wijzigt ze later.
+@SUM_SESS
+fr: Démarrage : %1
+en: Start-up: %1
+de: Start: %1
+it: Avvio: %1
+es: Arranque: %1
+pt: Arranque: %1
+nl: Opstarten: %1

@@ -111,6 +111,20 @@ int main(void){
      ktest("kbd.dead_twice_sign",ng==4&&got[3]=='^');
      v=0|(30u<<8);ioctl(tf,0x4B46,(long)&v);ktest("kbd.kdskbent_restored",(v>>16)==old);}
   }
+  /* /dev/input/mice : protocole ImPS/2 (sequence d'activation, acquittements,
+     identifiant, paquets de 4 octets avec molette) */
+  {int mf=open("/dev/input/mice",O_RDWR,0),k,na=0,tt;unsigned char ac[16],pk[8];
+   static const unsigned char knock[7]={0xF3,200,0xF3,100,0xF3,80,0xF2};
+   ktest("mice.open",mf>=0);
+   if(mf>=0){
+     ktest("mice.knock_write",write(mf,knock,7)==7);
+     for(k=0;k<30&&na<8;k++){int q=read(mf,ac+na,8-na);if(q>0)na+=q;else break;}
+     ktest("mice.acks_and_id",na==8&&ac[0]==0xFA&&ac[6]==0xFA&&ac[7]==3);
+     puts("IMPS-READY\n");
+     tt=0;{int got=0;for(k=0;k<100&&!got;k++){struct pfd p={mf,1,0};
+       if(sc3(SYS_poll,(long)&p,1,100)>0){int q=read(mf,pk,4);if(q==4&&(pk[0]&8)&&pk[3]!=0){got=1;tt=pk[3];}}}
+       ktest("mice.imps2_packet",got&&tt!=0);}
+     close(mf);}}
   puts("MOUSE-DONE\n");
   return ku_fail?1:0;
 }

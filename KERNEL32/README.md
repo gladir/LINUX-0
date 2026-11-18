@@ -989,6 +989,30 @@ Teste sous QEMU : `VGA=vmware ./RUNFB.SH -n` (captures d'ecran exactes en
 (Bochs) restent verts. **Non teste** : VirtualBox lui-meme (ni VMSVGA ni
 VBoxVGA : ports, taille de la FIFO et rafraichissement a verifier).
 
+**Bureau : CD, consoles, souris (lot D7-10)** : (1) `CDROMEJECT` (5309h),
+`CDROMCLOSETRAY` (5319h), `CDROM_LOCKDOOR` (5329h) et `CDROM_DRIVE_STATUS`
+(5326h) sur `/dev/hdc`, `/dev/sr0` (ATAPI IDE ou AHCI) : PREVENT/ALLOW MEDIUM
+REMOVAL puis START STOP UNIT (LoEj) ; `RUNCD.SH` (trois montages) verifie par
+le moniteur QEMU que le plateau est ouvert apres l'ejection. (2) Consoles :
+`KDSETMODE` est maintenant propre a chaque console, `VT_SETMODE`/`VT_GETMODE`
+(`VT_PROCESS` : signal de liberation `relsig` quand la console graphique
+cede l'ecran, `acqsig` quand elle le reprend ; le noyau n'attend pas
+`VT_RELDISP`), `Alt+F1..F4` et `VT_ACTIVATE` depuis une console en
+`KD_GRAPHICS` : retour au texte VGA (720x400) puis, au retour, mode graphique
+retabli (l'ecran est efface : le programme se redessine sur `acqsig`) ; la
+fermeture du dernier descripteur d'une console graphique rend le texte (pas
+d'ecran noir sans issue) ; la console texte n'ecrase pas le framebuffer (verifie
+par capture). `/dev/input/mice` : protocole ImPS/2 (sequence F3 C8 F3 64 F3 50
+ecrite sur le fichier, acquittements FA, identifiant F2, paquets de 4 octets
+avec molette), PS/2 de 3 octets par defaut. `poll`/`select` marchent sur evdev,
+`/dev/input/mice`, `ptmx` et ttys (attente par pas de 10 ms, sans boucle
+active) ; `FIONREAD` du maitre pty, `TIOCSWINSZ`/`TIOCGWINSZ` pty, `TIOCSCTTY`,
+`TIOCNOTTY` existent. Tests : `RUNVT.SH` (`vttest`, std et `VGA=vmware`, captures),
+`RUNMOUSE.SH` (`mice.*`), `RUNCD.SH`. **Non fait** : tablette/pointeur absolu
+(il faudrait USB ou vmmouse), attente de `VT_RELDISP`, mmap de /dev/fb0 non
+essaye sous Hyper-V/VirtualBox (attributs de cache des pages), 4 consoles
+seulement.
+
 **NVMe (lot D7-9)** : controleur PCI 01:08:02 (QEMU `-device nvme`) :
 registres BAR 0 mappes en FB800000h, file d'administration et une paire de files
 d'E/S de 16 entrees creees par les commandes Create I/O CQ/SQ, Identify de

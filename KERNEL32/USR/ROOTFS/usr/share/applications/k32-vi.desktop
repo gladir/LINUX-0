@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Vi
+Name[fr]=Vi
+Exec=vi
+Terminal=true
+Categories=Utility;TextEditor;

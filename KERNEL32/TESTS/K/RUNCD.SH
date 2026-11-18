@@ -30,18 +30,50 @@ for SET in "cd" "cd-smp" "cd-ahci"; do
   X=; [ "$SET" = cd-smp ] && X="-smp 2"
   CDARGS=(-cdrom "$W/k32.iso")
   [ "$SET" = cd-ahci ] && CDARGS=(-device ich9-ahci,id=ahci -drive "file=$W/k32.iso,if=none,id=c0,media=cdrom,format=raw,readonly=on" -device ide-cd,drive=c0,bus=ahci.0)
+  rm -f "$W/mon"
   timeout "$TMO" qemu-system-i386 "${CDARGS[@]}" -boot d -serial "file:$W/out.txt" \
+      -monitor "unix:$W/mon,server,nowait" \
       -display none -m 64 -no-reboot $X $QX 2>/dev/null &
   QP=$!
+  # apres CD-EJECTED : "info block" doit montrer le plateau ouvert
+  python3 - "$W" "$SET" <<'PY' &
+import socket, sys, time
+w, tag = sys.argv[1], sys.argv[2]
+for _ in range(600):
+    try:
+        if 'CD-EJECTED' in open(w + '/out.txt', errors='replace').read(): break
+    except OSError: pass
+    time.sleep(0.1)
+s = socket.socket(socket.AF_UNIX)
+for _ in range(50):
+    try: s.connect(w + '/mon'); break
+    except OSError: time.sleep(0.1)
+time.sleep(0.3)
+try: s.recv(4096)
+except Exception: pass
+s.send(b'info block\n'); time.sleep(1)
+s.settimeout(1)
+d = b''
+try:
+    while True:
+        x = s.recv(4096)
+        if not x: break
+        d += x
+except Exception: pass
+open(w + '/block_' + tag + '.txt', 'wb').write(d)
+PY
+  MP=$!
   for i in $(seq 1 "$TMO"); do
     grep -q "KTEST: cd DONE" "$W/out.txt" 2>/dev/null && break
     kill -0 $QP 2>/dev/null || break
     sleep 1
   done
+  wait $MP 2>/dev/null
   kill $QP 2>/dev/null; wait $QP 2>/dev/null
+  grep -aqi "tray open\|not inserted" "$W/block_$SET.txt" 2>/dev/null || { echo "$SET : plateau non ouvert (info block)"; RC=1; }
   tr -d '\r' < "$W/out.txt" > "$W/o_$SET.txt"
   grep -a "Noyau :\|initrd :\|ISO 9660\|Ligne de commande\|CD-LIVE-OK\|KTEST: cd\|ERREUR\|Oops\|panique" "$W/o_$SET.txt"
-  for t in init_pid1 cmdline mount readme kernel_on_cd kernel_elf; do
+  for t in init_pid1 cmdline mount readme kernel_on_cd kernel_elf lockdoor eject; do
     grep -q "KTEST: cd.$t OK" "$W/o_$SET.txt" || { echo "cd.$t : ECHEC"; RC=1; }
   done
   grep -q "KTEST: cd DONE" "$W/o_$SET.txt" || { echo "cd DONE absent"; RC=1; }

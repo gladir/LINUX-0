@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=GEOWORKS
+Comment=GeoWorks (return to Linux)
+Exec=/usr/bin/geoworks
+TryExec=/usr/bin/geoworks
+Type=Application
+DesktopNames=GEOWORKS

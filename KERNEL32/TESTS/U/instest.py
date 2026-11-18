@@ -559,6 +559,19 @@ def t_ui_fr():
           px(q, 'p6g', PINK) == 0)
     cap(q, 'd', 'fr-05-comptes')
     q.key('ret')
+    check('ui-fr : mode de demarrage', page(q, 14))
+    cap(q, 'd4', 'fr-05e-mode-demarrage')
+    q.key('down'); q.key('down'); q.key('down')           # GEOWORKS
+    time.sleep(0.4)
+    check('ui-fr : GEOWORKS absent : remarque en rouge',
+          px(q, 'p14a', (179, 38, 30), 14) > 100)
+    cap(q, 'd5', 'fr-05f-geoworks-absent')
+    q.key('up')                                           # GNOME
+    time.sleep(0.4)
+    check('ui-fr : GNOME : plus de remarque rouge',
+          px(q, 'p14b', (179, 38, 30), 14) == 0)
+    cap(q, 'd6', 'fr-05g-gnome')
+    q.key('ret')
     check('ui-fr : disque', page(q, 7))
     cap(q, 'e', 'fr-06-disque')
     q.key('ret')
@@ -596,6 +609,16 @@ def t_ui_fr():
         ('nom complet', 'grep luc /etc/passwd', r'Luc Dubois'),
         ('fuseau Europe/Paris', 'cat /etc/timezone', r'Europe/Paris'),
         ('clavier fr', 'cat /etc/default/keyboard', r'XKBLAYOUT="fr"'),
+        ('mode de demarrage GNOME ecrit', 'cat /etc/k32/session', r'gnome'),
+        ('k32-session get', 'k32-session get', r'gnome'),
+        ('k32-session status : environnement absent -> repli',
+         'k32-session status', r'k32-gnome \(absent\)'),
+        ('systeme installe : marque et pas d assistant',
+         'cat /etc/k32/installed; ls /sbin/k32-setup 2>&1',
+         r'installed by k32-setup(?s:.*)(introuvable|inexistant|not found|'
+         r'No such|impossible)'),
+        ('session lancee : repli terminal sur absence de /dev/fb0 ou programme',
+         'k32-session run; echo rc=$?', r'rc=1[01]'),
     ]
     boot_verify('ui-fr', disk, 'secret', checks)
 
@@ -641,6 +664,7 @@ def t_ui_de():
     q.type('geheim'); q.key('tab'); q.type('geheim'); q.key('tab')
     q.type('Hans Mueller'); q.key('tab'); q.type('hans'); q.key('tab')
     q.type('passwort'); q.key('tab'); q.type('passwort')
+    q.key('ret'); page(q, 14)
     q.key('ret'); page(q, 7)
     q.key('ret'); page(q, 8)
     q.key('down')                               # manuell
@@ -770,6 +794,8 @@ def t_exist():
     page(q, 6)
     q.type('x'); q.key('tab'); q.type('x')
     q.key('ret')
+    page(q, 14)
+    q.key('ret')
     check('exist : page du disque', page(q, 7))
     cap(q, 'a', 'exist-disque')
     t = q.text().replace('\r', '')
@@ -790,6 +816,7 @@ def t_virtio():
 keyboard=es
 timezone=Europe/Madrid
 hostname=virtio-es
+session=kde
 rootpw=clave
 user=ana
 userpw=clave2
@@ -820,6 +847,7 @@ reboot=halt
           fs_check(disk, [(tab[0][1], tab[0][2])]))
     checks = [
         ('hostname', 'hostname', r'virtio-es'),
+        ('session=kde du preseed ecrite', 'cat /etc/k32/session', r'kde'),
         ('racine sur /dev/vda1', 'cat /proc/mounts', r'/dev/vda1 / '),
         ('fstab vda', 'cat /etc/fstab', r'/dev/vda1 / ext4'),
         ('cfg du chargeur', 'cat /boot/linux0.cfg', r'root=/dev/vda1'),

@@ -99,8 +99,10 @@ build_one() {
   local f=$1 dst=$2 n
   n=$(basename "$f" .PAS)
   cp "$f" "$W/usr/"
-  cp "$HERE"/USR/*.INC "$HERE"/USR/INSTALLER/LAYOUTS.INC "$W/usr/" \
-    2>/dev/null || true
+  cp "$HERE"/USR/*.INC "$HERE"/USR/INSTALLER/LAYOUTS.INC \
+    "$HERE"/USR/INSTALLER/GFX.INC "$HERE"/USR/INSTALLER/FONTS.INC \
+    "$HERE"/USR/INSTALLER/UIBASE.INC "$HERE"/USR/INSTALLER/INPUT.INC \
+    "$W/usr/" 2>/dev/null || true
   if ( cd "$W/usr" && "$LPC" -3X -q "$n.PAS" ) > "$W/log/$n.log" 2>&1; then
     install -m 755 "$W/usr/$n" "$W/root/$dst"
     N=$((N + 1))
@@ -187,7 +189,11 @@ for l in "chgrp chown bin" "realpath readlink bin" "pkill pgrep bin" \
          "rdate ntpdate sbin" "dumpe2fs e2tools sbin" \
          "tune2fs e2tools sbin" "e2label e2tools sbin" \
          "resize2fs e2tools sbin" "iptables-save iptables sbin" \
-         "iptables-restore iptables sbin"; do
+         "iptables-restore iptables sbin" "k32-session k32sess bin" \
+         "k32-gnome k32desk bin" "gnome-session k32desk bin" \
+         "gnome-terminal k32desk bin" "k32-kde k32desk bin" \
+         "startplasma-x11 k32desk bin" "startkde k32desk bin" \
+         "konsole k32desk bin" "dolphin k32desk bin"; do
   set -- $l
   [ -f "$W/root/$3/$2" ] && ln -sf "$2" "$W/root/$3/$1" 2>/dev/null || true
 done

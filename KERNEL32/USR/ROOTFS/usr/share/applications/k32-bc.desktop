@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Calculator
+Name[fr]=Calculatrice
+Exec=bc -l
+Terminal=true
+Categories=Utility;Calculator;

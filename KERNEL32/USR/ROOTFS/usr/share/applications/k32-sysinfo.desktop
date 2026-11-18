@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=System Information
+Name[fr]=Informations systeme
+Exec=sh -c 'uname -a; echo; free; echo; uptime; echo; df'
+Terminal=true
+Categories=System;
