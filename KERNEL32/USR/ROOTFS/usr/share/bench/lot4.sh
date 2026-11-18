@@ -24,9 +24,15 @@ rm -f /etc/k32/session
 chk 'fichier absent -> terminal' terminal "$(k32-session get)"
 # ---- run ----
 k32-session set terminal; k32-session run; chk 'run terminal : code 0' 0 $?
+mv /usr/bin/geoworks /usr/bin/geoworks.x 2>/dev/null
+mv /bin/geoworks /bin/geoworks.x 2>/dev/null
 k32-session set geoworks
 k32-session run > run1.txt 2>&1; chk 'run geoworks absent : code 11' 11 $?
 has 'run geoworks absent : message' run1.txt 'absent'
+mv /usr/bin/geoworks.x /usr/bin/geoworks 2>/dev/null
+mv /bin/geoworks.x /bin/geoworks 2>/dev/null
+[ -x /usr/bin/geoworks ] && ok 'geoworks installe (/usr/bin/geoworks)' ||
+  ko 'geoworks installe' 'absent'
 mv /dev/fb0 /dev/fb0.x 2>/dev/null
 k32-session set gnome
 k32-session run > run2.txt 2>&1; chk 'run sans /dev/fb0 : code 10' 10 $?

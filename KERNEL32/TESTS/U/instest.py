@@ -567,9 +567,9 @@ def t_ui_fr():
     cap(q, 'd4', 'fr-05e-mode-demarrage')
     q.key('down'); q.key('down'); q.key('down')           # GEOWORKS
     time.sleep(0.4)
-    check('ui-fr : GEOWORKS absent : remarque en rouge',
-          px(q, 'p14a', (179, 38, 30), 14) > 100)
-    cap(q, 'd5', 'fr-05f-geoworks-absent')
+    check('ui-fr : GEOWORKS present : aucune remarque rouge',
+          px(q, 'p14a', (179, 38, 30), 14) == 0)
+    cap(q, 'd5', 'fr-05f-geoworks')
     q.key('up')                                           # GNOME
     time.sleep(0.4)
     check('ui-fr : GNOME : plus de remarque rouge',

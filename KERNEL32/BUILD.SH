@@ -123,6 +123,11 @@ for f in "$HERE"/USR/*.PAS; do
     *) build_one "$f" bin/$l ;;
   esac
 done
+# GeoWorks (USR/GEOWORKS : sous-dossier, non parcouru par la boucle ci-dessus)
+if [ -f "$HERE/USR/GEOWORKS/INSTALL.SH" ]; then
+  "$HERE/USR/GEOWORKS/INSTALL.SH" -l "$LPC" "$W/root" ||
+    echo "   avertissement : GEOWORKS non installe"
+fi
 # egrep et fgrep : meme programme que grep (nom lu dans argv[0])
 for n in egrep fgrep; do
   [ -f "$W/root/bin/grep" ] && ln -sf grep "$W/root/bin/$n" 2>/dev/null || true

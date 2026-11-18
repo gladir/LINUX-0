@@ -162,17 +162,7 @@ def run_boot(mode, tag, bar, panel):
 def main():
     run_boot('gnome', 'bgnome', (0, 0, 0), None)
     run_boot('kde', 'bkde', None, (0x23, 0x26, 0x29))
-def main_old():
-    q = run_env('gnome', 'k32-gnome', 'gnome', (0, 0, 0), None)
-    out = serial_run(q, 'ps | grep -c k32-gnome')
-    check('gnome : le bureau tourne', out.strip() not in ('', '0'), out)
-    q.quit()
-    q = run_env('kde', 'k32-kde', 'kde', None, (0x23, 0x26, 0x29))
-    out = serial_run(q, 'ps | grep -c k32-kde')
-    check('kde : le bureau tourne', out.strip() not in ('', '0'), out)
-    q.quit()
 
 main()
-main_old()
 print('DESK-FIN ok=%d ko=%d' % (ok, ko))
 sys.exit(1 if ko else 0)
