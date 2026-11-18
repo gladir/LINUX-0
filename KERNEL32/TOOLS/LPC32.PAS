@@ -65795,7 +65795,7 @@ Const
 
 { BEGIN L32GFX : genere par MKAPI.PAS depuis L32GFX.PAS (ne pas editer) }
 Const
-  L32GFX_N = 3110;
+  L32GFX_N = 3115;
   L32GFX : Array[1..L32GFX_N] Of String[120] = (
     '{ @author: Sylvain Maltais (support@gladir.com)',
     '  @created: 2026',
@@ -67436,7 +67436,7 @@ Const
     '  BgAbsFd, BgAbsX, BgAbsY, BgAbsMinX, BgAbsMaxX, BgAbsMinY, BgAbsMaxY : LongInt;',
     '  BgAbsSyn, BgAbsOk, BgAbsPoll : Boolean;',
     '  { pilote : commandes de mise a jour et curseur materiel (ioctl 46F0h...) }',
-    '  BgHwUpd, BgHwCur, BgHwTried, BgHwOn : Boolean;',
+    '  BgHwUpd, BgHwCur, BgHwTried, BgHwOn, BgHwWant : Boolean;',
     '  BgHwX, BgHwY : LongInt;',
     '  { horloge du processeur (RDTSC) : cycles par milliseconde }',
     '  BgTscV, BgTscMs, BgLastPoll, BgLastFl : LongInt;',
@@ -67589,7 +67589,10 @@ Const
     'Var Y, Wid, I, Ux1, Uy1, Ux2, Uy2, Rows : LongInt; Any : Boolean;',
     'Begin',
     '  If Not BgOk Then Exit;',
-    '  If (BgCurVis >= 1) And (Not BgHwTried) Then BgHwDefine;',
+    '  If (BgCurVis >= 1) And (Not BgHwTried) Then',
+    '  Begin',
+    '    If BgHwWant Then BgHwDefine Else BgHwTried := True;',
+    '  End;',
     '  Any := False;',
     '  Ux1 := 0; Uy1 := 0; Ux2 := -1; Uy2 := -1;',
     '  If BgHwCur Then',
@@ -68198,6 +68201,8 @@ Const
     '  End;',
     '  BgCalib;',
     '  BgHwUpd := False; BgHwCur := False; BgHwTried := False; BgHwOn := False;',
+    '  { curseur materiel (ioctl 46F1h/46F2h) : seulement si GFXHWCUR=1 }',
+    '  BgHwWant := GetEnv(''GFXHWCUR'') = ''1'';',
     '  If Not BgMem Then',
     '  Begin',
     '    FillChar(HwA, SizeOf(HwA), 0);',

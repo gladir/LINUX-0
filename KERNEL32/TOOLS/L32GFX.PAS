@@ -1637,7 +1637,7 @@ Var
   BgAbsFd, BgAbsX, BgAbsY, BgAbsMinX, BgAbsMaxX, BgAbsMinY, BgAbsMaxY : LongInt;
   BgAbsSyn, BgAbsOk, BgAbsPoll : Boolean;
   { pilote : commandes de mise a jour et curseur materiel (ioctl 46F0h...) }
-  BgHwUpd, BgHwCur, BgHwTried, BgHwOn : Boolean;
+  BgHwUpd, BgHwCur, BgHwTried, BgHwOn, BgHwWant : Boolean;
   BgHwX, BgHwY : LongInt;
   { horloge du processeur (RDTSC) : cycles par milliseconde }
   BgTscV, BgTscMs, BgLastPoll, BgLastFl : LongInt;
@@ -1790,7 +1790,10 @@ Procedure BgFlush;
 Var Y, Wid, I, Ux1, Uy1, Ux2, Uy2, Rows : LongInt; Any : Boolean;
 Begin
   If Not BgOk Then Exit;
-  If (BgCurVis >= 1) And (Not BgHwTried) Then BgHwDefine;
+  If (BgCurVis >= 1) And (Not BgHwTried) Then
+  Begin
+    If BgHwWant Then BgHwDefine Else BgHwTried := True;
+  End;
   Any := False;
   Ux1 := 0; Uy1 := 0; Ux2 := -1; Uy2 := -1;
   If BgHwCur Then
@@ -2399,6 +2402,8 @@ Begin
   End;
   BgCalib;
   BgHwUpd := False; BgHwCur := False; BgHwTried := False; BgHwOn := False;
+  { curseur materiel (ioctl 46F1h/46F2h) : seulement si GFXHWCUR=1 }
+  BgHwWant := GetEnv('GFXHWCUR') = '1';
   If Not BgMem Then
   Begin
     FillChar(HwA, SizeOf(HwA), 0);

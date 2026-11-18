@@ -242,8 +242,12 @@ def parse_stat(t, tag='stat'):
 
 def scen_bench(root):
     """cout d'un deplacement de souris : appels noyau et pixels (GfxStat)"""
-    for mode in ('SW', 'HW'):
-        rd = initrd(root, '/bin/gfxbench ' + mode)
+    modes = ['SW', 'HW'] + (['HWC'] if VGA == 'vmware' else [])
+    for mode in modes:
+        # HWC : curseur materiel du noyau (opt-in GFXHWCUR=1, VMware seul)
+        prog = ('export GFXHWCUR=1; /bin/gfxbench HW' if mode == 'HWC'
+                else '/bin/gfxbench ' + mode)
+        rd = initrd(root, prog)
         q = start('q-bench-' + mode, rd)
         q.wait('ready', 60)
         time.sleep(0.5)
@@ -252,6 +256,16 @@ def scen_bench(root):
             time.sleep(0.03)
             if i % 20 == 0:
                 q._drain()
+        if mode == 'HW':
+            # curseur logiciel de l'unite (Intr 33h AX=1) visible a l'ecran
+            time.sleep(0.4)
+            a = load(cap(q, 'cur', 'bench-curseur'))
+            cx, cy = (560, 360) if VGA == 'std' else (640, 420)
+            check('bench %s HW : curseur de l unite visible (pointe blanche, '
+                  'corps noir)' % VGA,
+                  px(a, cx, cy) == (255, 255, 255) and
+                  px(a, cx + 1, cy + 2) == (0, 0, 0),
+                  (px(a, cx, cy), px(a, cx + 1, cy + 2)))
         q.wait('fin', 30)
         st = parse_stat(q.text())
         q.quit()
@@ -268,6 +282,16 @@ def scen_bench(root):
               sys_ <= 2 * lp + 2 * mv)
         check('bench %s %s : moins de 600 pixels par deplacement' %
               (VGA, mode), st['s7'] // mv < 600)
+        if VGA == 'vmware':
+            check('bench vmware %s : commandes UPDATE / curseur du noyau '
+                  '(ioctl %d)' % (mode, st['s9']), st['s9'] >= 1)
+        if mode == 'HWC':
+            check('bench vmware HWC : curseur materiel, aucun pixel ecrit '
+                  'par deplacement (%d)' % (st['s7'] // mv),
+                  st['s7'] // mv == 0 and st['s9'] >= mv - 2)
+        elif VGA == 'vmware' and mode == 'HW':
+            check('bench vmware HW : curseur logiciel par defaut '
+                  '(pixels %d)' % (st['s7'] // mv), st['s7'] // mv > 100)
         check('bench %s %s : au plus une recopie par deplacement' %
               (VGA, mode), st['s5'] <= mv + 2)
 

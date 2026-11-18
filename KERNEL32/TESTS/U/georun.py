@@ -125,12 +125,16 @@ def goto(x, y):
     time.sleep(0.3)
 
 
-def diffpx(p1, p2):
+def diffpx(p1, p2, mask=()):
+    """pixels differents ; mask = rectangles (x1, y1, x2, y2) ignores"""
     from PIL import Image
     import numpy
     a = numpy.asarray(Image.open(p1).convert('RGB')).astype(int)
     b = numpy.asarray(Image.open(p2).convert('RGB')).astype(int)
-    return int((numpy.abs(a - b).max(axis=2) > 8).sum())
+    d = numpy.abs(a - b).max(axis=2) > 8
+    for x1, y1, x2, y2 in mask:
+        d[y1:y2 + 1, x1:x2 + 1] = False
+    return int(d.sum())
 
 
 def shot_np(name):
@@ -138,6 +142,7 @@ def shot_np(name):
     return os.path.join(WORK, name + TAG + '.ppm')
 
 
+CLOCK = ((520, 220, 600, 260),)           # horloge de l'ecran d'accueil
 HWCUR = bool(os.environ.get('GEOHW'))       # curseur materiel : hors capture
 
 
@@ -160,7 +165,7 @@ def cur_check(label, trail=True):
         q.cmd('mouse_move -60 -40', 0.2)
         time.sleep(1.5)
         pc = shot_np('curc')
-        t = diffpx(pa, pc)
+        t = diffpx(pa, pc, CLOCK)       # la minute de l'horloge change
         ok = ok and t == 0
         extra = ', trainee %d px' % t
     check('curseur visible : %s (%d px changes%s)' % (label, d, extra), ok)
