@@ -5241,18 +5241,18 @@ Begin
 End;
 
 { Boucle de menu : Sys = menu systeme (bouton de gauche de la barre de titre) }
-Function RunMenus(W: PWindow; StartM: Integer; Sys: Boolean): Integer;
+Function RunMenus(Wn: PWindow; StartM: Integer; Sys: Boolean): Integer;
 Var M,Hi,H,T,DX1,DY1,DX2,DY2,I: Integer; E: TEvent; Done,Pick,Entered: Boolean;
     Sv: TSave; Res: Integer; BarY,TX: Integer; Moved: Boolean; PX,PY: LongInt;
 
  Procedure Place;
  Begin
   If Sys Then Begin
-   DX1:=W^.WinX+BORDER;DY1:=W^.WinY+BORDER+TITLE_H;
+   DX1:=Wn^.WinX+BORDER;DY1:=Wn^.WinY+BORDER+TITLE_H;
    DropGeom(SysDef,DX1,DY1,DX1,DY1,DX2,DY2);
   End Else Begin
-   TX:=MenuTitleX(W,M);
-   DropGeom(W^.Menus[M],TX,BarY+MENU_H,DX1,DY1,DX2,DY2);
+   TX:=MenuTitleX(Wn,M);
+   DropGeom(Wn^.Menus[M],TX,BarY+MENU_H,DX1,DY1,DX2,DY2);
   End;
  End;
 
@@ -5266,22 +5266,22 @@ Var M,Hi,H,T,DX1,DY1,DX2,DY2,I: Integer; E: TEvent; Done,Pick,Entered: Boolean;
   Else SaveBack(Sv,Min2(DX1,TX)-2,BarY,DX2+4,DY2+4);
   ClipFull;
   If Not Sys Then Begin
-   GBar(TX,BarY,TX+MenuTitleW(W,M)-1,BarY+MENU_H-2,cLGr);
-   Bevel1(TX,BarY,TX+MenuTitleW(W,M)-1,BarY+MENU_H-2,cDGr,cWht);
-   GText(TX+8,BarY+5,TL(W^.Menus[M].Title),cBlk);
+   GBar(TX,BarY,TX+MenuTitleW(Wn,M)-1,BarY+MENU_H-2,cLGr);
+   Bevel1(TX,BarY,TX+MenuTitleW(Wn,M)-1,BarY+MENU_H-2,cDGr,cWht);
+   GText(TX+8,BarY+5,TL(Wn^.Menus[M].Title),cBlk);
   End;
   GBar(DX1+4,DY2+1,DX2+4,DY2+4,cBlk);
   GBar(DX2+1,DY1+4,DX2+4,DY2+4,cBlk);
   If Sys Then DrawDrop(SysDef,DX1,DY1,DX2,DY2,Hi)
-  Else DrawDrop(W^.Menus[M],DX1,DY1,DX2,DY2,Hi);
+  Else DrawDrop(Wn^.Menus[M],DX1,DY1,DX2,DY2,Hi);
   ShowMouse;
  End;
 
 Begin
  Res:=0;
  Sv.P:=Nil;
- BarY:=W^.WinY+BORDER+TITLE_H;
- If Sys Then BuildSysMenu(W) Else WinPrepare(W);
+ BarY:=Wn^.WinY+BORDER+TITLE_H;
+ If Sys Then BuildSysMenu(Wn) Else WinPrepare(Wn);
  M:=StartM;
  If Sys Then M:=1;
  Hi:=0;
@@ -5294,16 +5294,16 @@ Begin
      PX:=E.X;PY:=E.Y;
      T:=0;
      If Not Sys Then
-      For I:=1 To W^.NMenu Do
-       If InBox(PX,PY,MenuTitleX(W,I),BarY,MenuTitleX(W,I)+MenuTitleW(W,I)-1,
+      For I:=1 To Wn^.NMenu Do
+       If InBox(PX,PY,MenuTitleX(Wn,I),BarY,MenuTitleX(Wn,I)+MenuTitleW(Wn,I)-1,
            BarY+MENU_H-1) Then T:=I;
      If Sys Then H:=DropHit(SysDef,DX1,DY1,DX2,DY2,PX,PY)
-     Else H:=DropHit(W^.Menus[M],DX1,DY1,DX2,DY2,PX,PY);
+     Else H:=DropHit(Wn^.Menus[M],DX1,DY1,DX2,DY2,PX,PY);
      If H<>0 Then Begin
       If Sys Then Begin
        If (SysDef.It[H].Txt='-') Or ((SysDef.It[H].Flag And 1)<>0) Then H:=0;
       End Else Begin
-       If (W^.Menus[M].It[H].Txt='-') Or ((W^.Menus[M].It[H].Flag And 1)<>0)
+       If (Wn^.Menus[M].It[H].Txt='-') Or ((Wn^.Menus[M].It[H].Flag And 1)<>0)
            Then H:=0;
       End;
      End;
@@ -5323,12 +5323,12 @@ Begin
    EV_KEY: If Not Sys Then Begin
      Case E.Key Of
       K_ESC: Done:=True;
-      K_LEFT: Begin Dec(M);If M<1 Then M:=W^.NMenu;
-      Show(NextItem(W^.Menus[M],0,1));End;
-      K_RIGHT: Begin Inc(M);If M>W^.NMenu Then M:=1;
-      Show(NextItem(W^.Menus[M],0,1));End;
-      K_UP: Show(NextItem(W^.Menus[M],Hi,-1));
-      K_DOWN: Show(NextItem(W^.Menus[M],Hi,1));
+      K_LEFT: Begin Dec(M);If M<1 Then M:=Wn^.NMenu;
+      Show(NextItem(Wn^.Menus[M],0,1));End;
+      K_RIGHT: Begin Inc(M);If M>Wn^.NMenu Then M:=1;
+      Show(NextItem(Wn^.Menus[M],0,1));End;
+      K_UP: Show(NextItem(Wn^.Menus[M],Hi,-1));
+      K_DOWN: Show(NextItem(Wn^.Menus[M],Hi,1));
       K_ENTER: If Hi<>0 Then Begin Pick:=True;Done:=True;End;
      End;
     End Else Begin
@@ -5345,7 +5345,7 @@ Begin
  RestoreBack(Sv);
  ShowMouse;
  If Pick And (Hi>0) Then Begin
-  If Sys Then Res:=SysDef.It[Hi].Cmd Else Res:=W^.Menus[M].It[Hi].Cmd;
+  If Sys Then Res:=SysDef.It[Hi].Cmd Else Res:=Wn^.Menus[M].It[Hi].Cmd;
  End;
  RunMenus:=Res;
 End;

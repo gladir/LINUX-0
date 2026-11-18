@@ -273,24 +273,66 @@ check('retour au graphique apres le programme', alive() and
       colors(p, (170, 170, 170)) > 50000)
 
 # ---- 4. applications de chaque famille --------------------------------
-APPS = [('CALC', 'calculator', '12*3=', 'Calculatrice'),
-        ('WRITE', 'geowrite', 'Bonjour depuis Linux', 'GeoWrite'),
-        ('DRAW', 'geodraw', '', 'GeoDraw'),
-        ('TETRIS', 'tetris', '', 'Tetris'),
-        ('CLOCK', 'clock', '', 'Horloge'),
-        ('MANAGER', 'geomanager', '', 'GeoManager')]
-for arg, name, keys, label in APPS:
+def diffpx(p1, p2):
+    from PIL import Image
+    import numpy
+    a = numpy.asarray(Image.open(p1).convert('RGB')).astype(int)
+    b = numpy.asarray(Image.open(p2).convert('RGB')).astype(int)
+    return int((numpy.abs(a - b).max(axis=2) > 8).sum())
+
+
+def wait_ready(name, timeout=60):
+    """attend que la fenetre de l'application soit dessinee (des pixels
+    blancs) : le demarrage depend de la charge de la machine"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        q.shot(name + '-pre' + TAG)
+        p = os.path.join(WORK, name + '-pre' + TAG + '.ppm')
+        if colors(p, (255, 255, 255)) > 500:
+            return p
+        time.sleep(2)
+    return p
+
+
+# (argument /R:, nom, etiquette, actions) ; action : ('type', texte),
+# ('key', touche), ('click', x, y) ; 'effet' = l'ecran doit changer
+APPS = [('CALC', 'calculator', 'Calculatrice', [('type', '12*3=')]),
+        ('WRITE', 'geowrite', 'GeoWrite', [('type', 'Bonjour depuis Linux')]),
+        ('DRAW', 'geodraw', 'GeoDraw', []),
+        ('TETRIS', 'tetris', 'Tetris', [('key', 'left'), ('key', 'left'),
+                                        ('key', 'spc')]),
+        ('CLOCK', 'clock', 'Horloge', []),
+        ('NOTEPAD', 'notepad', 'Notepad (menus)', [('key', 'f10'),
+                                                   ('key', 'down')]),
+        ('MANAGER', 'geomanager', 'GeoManager', []),
+        ('SOLITAIRE', 'solitaire', 'Solitaire', [('click', 90, 120)]),
+        ('GEOCALC', 'geocalc', 'GeoCalc', [('type', '5\n7\n')]),
+        ('PLANNER', 'geoplanner', 'GeoPlanner', [('key', 'pgdn'),
+                                                 ('key', 'pgdn')]),
+        ('GEODEX', 'geodex', 'GeoDex', [('type', 'Linux')]),
+        ('BANNER', 'geobanner', 'GeoBanner', [('type', 'Hello')]),
+        ('SCRAP', 'scrapbook', 'Scrapbook', [('click', 176, 378)]),
+        ('PREFS', 'preferences', 'Preferences', [('key', 'down'),
+                                                 ('key', 'ret')]),
+        ('GEOBASIC', 'geobasic', 'GeoBasic', [('key', 'f10')]),
+        ('GEOPOINT', 'geopoint', 'GeoPoint', [('key', 'pgdn')])]
+for arg, name, label, acts in APPS:
     start('/NOWELCOME /R:%s' % arg)
-    if keys:
-        q.type(keys, 0.12)
-        time.sleep(1)
-    elif arg == 'TETRIS':
-        for k in ('left', 'left', 'spc'):
-            q.key(k, 0.3)
-        time.sleep(1.5)
+    p0 = wait_ready('app-' + name)
+    for act in acts:
+        if act[0] == 'type':
+            q.type(act[1], 0.12)
+        elif act[0] == 'key':
+            q.key(act[1], 0.4)
+        else:
+            click_at(act[1], act[2], 1)
+    time.sleep(2)
     p = shot('app-' + name)
     check('%s : fenetre dessinee et processus actif' % label,
-          alive() and colors(p, (255, 255, 255)) > 3000)
+          alive() and colors(p, (255, 255, 255)) > 500)
+    if acts:
+        check('%s : l\'action change l\'ecran (%d pixels)' % (label,
+              diffpx(p0, p)), diffpx(p0, p) > 30)
 if True:
     start('/NOWELCOME')
     q.key('f11', 0.5)
