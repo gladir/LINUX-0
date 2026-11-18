@@ -3899,8 +3899,18 @@ Var
  End;
 {$ELSE}
  Function MouseDriverFound: Boolean;
+ {$IFDEF LPC}
+ Var
+  Regs: Registers;
+ {$ENDIF}
  Begin
+  {$IFDEF LPC}
+  Regs.AX := 0;
+  Intr($33, Regs);
+  MouseDriverFound := Regs.AX = $FFFF;
+  {$ELSE}
   MouseDriverFound := True;
+  {$ENDIF}
  End;
 {$ENDIF}
 
@@ -3920,18 +3930,28 @@ Begin
  SetClip(0,0,SCR_W-1,SCR_H-1);
 End;
 
+{ Sous LPC (Graph integre) le curseur est celui de l'unite (Intr 33h AX=1) :
+  il n'est jamais dans le tampon, donc plus aucune sauvegarde de fond, plus
+  de PutPixel ni de HideMouse/ShowMouse couteux autour des peintures }
 Procedure CursorErase;
 Begin
+ {$IFNDEF LPC}
  If CurSaved Then Begin
   ClipFull;
   PutImage(CurX,CurY,CurBuf^,NormalPut);
   CurSaved:=False;
  End;
+ {$ENDIF}
 End;
 
 Procedure CursorDraw(X,Y: LongInt);
+{$IFNDEF LPC}
 Var I,J: Integer; C: Char;
+{$ENDIF}
 Begin
+ {$IFDEF LPC}
+ CurX:=X;CurY:=Y;
+ {$ELSE}
  If X>SCR_W-CUR_W Then X:=SCR_W-CUR_W;
  If Y>SCR_H-CUR_H Then Y:=SCR_H-CUR_H;
  If X<0 Then X:=0;
@@ -3946,26 +3966,62 @@ Begin
    If C='#' Then PutPixel(X+I-1,Y+J,cBlk)
    Else If C='.' Then PutPixel(X+I-1,Y+J,cWht);
   End;
+ {$ENDIF}
 End;
+
+{$IFDEF LPC}
+Var
+ UnitCur : Boolean;                { curseur de l'unite affiche }
+
+Procedure UnitCursor(On_: Boolean);
+Var Regs: Registers;
+Begin
+ If On_ Then Regs.AX:=1 Else Regs.AX:=2;
+ Intr($33,Regs);
+ UnitCur:=On_;
+End;
+{$ENDIF}
 
 { Pour l'application : le curseur n'est (re)dessine que hors peinture }
 Procedure ShowMouse;
 Begin
  CurShown:=True;
+ {$IFDEF LPC}
+ If Not UnitCur Then UnitCursor(True);
+ {$ELSE}
  CursorDraw(MX,MY);
+ {$ENDIF}
 End;
 
 Procedure HideMouse;
 Begin
+ {$IFNDEF LPC}
  CursorErase;
  CurShown:=False;
+ {$ENDIF}
+End;
+
+{ Cache vraiment le curseur (ecran noir de la veille) }
+Procedure HideMouseHard;
+Begin
+ {$IFDEF LPC}
+ If UnitCur Then UnitCursor(False);
+ CurShown:=False;
+ {$ELSE}
+ HideMouse;
+ {$ENDIF}
 End;
 
 Procedure InitCursor;
 Begin
+ {$IFDEF LPC}
+ UnitCur:=False;
+ {$ELSE}
  CurSz:=ImageSize(0,0,CUR_W-1,CUR_H-1);
  GetMem(CurBuf,CurSz);
- CurSaved:=False;CurShown:=False;
+ CurSaved:=False;
+ {$ENDIF}
+ CurShown:=False;
 End;
 
 { ====================================================================== }
@@ -4660,8 +4716,10 @@ Begin
  Else If ((MB And 2)<>0) And ((LastB And 2)=0) Then E.Kind:=EV_RDOWN
  Else If ((MB And 3)=0) And ((LastB And 3)<>0) Then E.Kind:=EV_UP
  Else If (MX<>PrevMX) Or (MY<>PrevMY) Then E.Kind:=EV_MOVE;
+ {$IFNDEF LPC}
  If (E.Kind<>EV_NONE) And CurShown And ((MX<>CurX) Or (MY<>CurY)) Then
   CursorDraw(MX,MY);
+ {$ENDIF}
  If E.Kind=EV_NONE Then Delay(4);
 End;
 
@@ -5083,6 +5141,13 @@ Begin
  If W^.Iconic Then Exit;
  WinClientRect(W,X1,Y1,X2,Y2);
  HideMouse;
+ {$IFDEF LPC}
+ If W=TopWin Then Begin
+  SetClip(X1,Y1,X2,Y2);
+  WinDraw(W);
+  ClipFull;
+ End Else
+ {$ENDIF}
  PaintRect(X1,Y1,X2,Y2);
  ShowMouse;
 End;
@@ -5152,14 +5217,9 @@ Begin
  End;
 End;
 
-Procedure DrawDrop(Const MD: TMenuDef; X1,Y1,X2,Y2,Hi: Integer);
-Var I,Y: Integer; S: String; En,Sel: Boolean;
+Procedure DrawDropItem(Const MD: TMenuDef; X1,Y1,X2,I,Hi: Integer);
+Var Y: Integer; S: String; En,Sel: Boolean;
 Begin
- ClipFull;
- GBar(X1,Y1,X2,Y2,cLGr);
- GRect(X1,Y1,X2,Y2,cBlk);
- Bevel1(X1+1,Y1+1,X2-1,Y2-1,cWht,cDGr);
- For I:=1 To MD.N Do Begin
   Y:=DropItemY(MD,Y1,I);
   S:=TL(MD.It[I].Txt);
   If MD.It[I].Txt='-' Then Begin
@@ -5181,7 +5241,25 @@ Begin
     Else GText(X2-8-TextW(MD.It[I].Key),Y+4,MD.It[I].Key,cBlk);
    End;
   End;
- End;
+End;
+
+Procedure DrawDrop(Const MD: TMenuDef; X1,Y1,X2,Y2,Hi: Integer);
+Var I: Integer;
+Begin
+ ClipFull;
+ GBar(X1,Y1,X2,Y2,cLGr);
+ GRect(X1,Y1,X2,Y2,cBlk);
+ Bevel1(X1+1,Y1+1,X2-1,Y2-1,cWht,cDGr);
+ For I:=1 To MD.N Do DrawDropItem(MD,X1,Y1,X2,I,Hi);
+End;
+
+{ Repeint une seule entree (fond puis texte) }
+Procedure RedrawDropItem(Const MD: TMenuDef; X1,Y1,X2,I,Hi: Integer);
+Begin
+ If (I<1) Or (I>MD.N) Then Exit;
+ ClipFull;
+ GBar(X1+2,DropItemY(MD,Y1,I),X2-2,DropItemY(MD,Y1,I)+ItemH(MD.It[I])-1,cLGr);
+ DrawDropItem(MD,X1,Y1,X2,I,Hi);
 End;
 
 Function NextItem(Const MD: TMenuDef; From,Dir: Integer): Integer;
@@ -5242,7 +5320,8 @@ End;
 
 { Boucle de menu : Sys = menu systeme (bouton de gauche de la barre de titre) }
 Function RunMenus(Wn: PWindow; StartM: Integer; Sys: Boolean): Integer;
-Var M,Hi,H,T,DX1,DY1,DX2,DY2,I: Integer; E: TEvent; Done,Pick,Entered: Boolean;
+Var M,Hi,H,T,DX1,DY1,DX2,DY2,I,ShM,OHi: Integer; E: TEvent;
+    Done,Pick,Entered: Boolean;
     Sv: TSave; Res: Integer; BarY,TX: Integer; Moved: Boolean; PX,PY: LongInt;
 
  Procedure Place;
@@ -5259,6 +5338,20 @@ Var M,Hi,H,T,DX1,DY1,DX2,DY2,I: Integer; E: TEvent; Done,Pick,Entered: Boolean;
  Procedure Show(NewHi: Integer);
  Begin
   HideMouse;
+  {$IFDEF LPC}
+  If (Sv.P<>Nil) And (ShM=M) Then Begin
+   OHi:=Hi;Hi:=NewHi;
+   If Sys Then Begin
+    RedrawDropItem(SysDef,DX1,DY1,DX2,OHi,Hi);
+    If Hi<>OHi Then RedrawDropItem(SysDef,DX1,DY1,DX2,Hi,Hi);
+   End Else Begin
+    RedrawDropItem(Wn^.Menus[M],DX1,DY1,DX2,OHi,Hi);
+    If Hi<>OHi Then RedrawDropItem(Wn^.Menus[M],DX1,DY1,DX2,Hi,Hi);
+   End;
+   ShowMouse;
+   Exit;
+  End;
+  {$ENDIF}
   If Sv.P<>Nil Then RestoreBack(Sv);
   Hi:=NewHi;
   Place;
@@ -5274,12 +5367,13 @@ Var M,Hi,H,T,DX1,DY1,DX2,DY2,I: Integer; E: TEvent; Done,Pick,Entered: Boolean;
   GBar(DX2+1,DY1+4,DX2+4,DY2+4,cBlk);
   If Sys Then DrawDrop(SysDef,DX1,DY1,DX2,DY2,Hi)
   Else DrawDrop(Wn^.Menus[M],DX1,DY1,DX2,DY2,Hi);
+  ShM:=M;
   ShowMouse;
  End;
 
 Begin
  Res:=0;
- Sv.P:=Nil;
+ Sv.P:=Nil;ShM:=-1;OHi:=0;
  BarY:=Wn^.WinY+BORDER+TITLE_H;
  If Sys Then BuildSysMenu(Wn) Else WinPrepare(Wn);
  M:=StartM;
@@ -6200,16 +6294,41 @@ Begin
 End;
 
 Procedure RubberRect(X1,Y1,X2,Y2: Integer);
+{$IFDEF LPC}
+Var K: Integer;
+{$ENDIF}
 Begin
  ClipFull;
  SetWriteMode(XORPut);
  SetColor(15);
  SetLineStyle(SolidLn,0,NormWidth);
+ {$IFDEF LPC}
+ { quatre bandes de 3 pixels separees aux coins (16 pixels, car l'unite Graph
+   recopie 4 petits rectangles au lieu du rectangle englobant }
+ For K:=0 To 2 Do Begin
+  Line(X1+16,Y1+K,X2-16,Y1+K);
+  Line(X1+16,Y2-K,X2-16,Y2-K);
+  Line(X1+K,Y1+16,X1+K,Y2-16);
+  Line(X2-K,Y1+16,X2-K,Y2-16);
+ End;
+ {$ELSE}
  Rectangle(X1,Y1,X2,Y2);
  Rectangle(X1+1,Y1+1,X2-1,Y2-1);
  Rectangle(X1+2,Y1+2,X2-2,Y2-2);
+ {$ENDIF}
  SetWriteMode(NormalPut);
 End;
+
+{$IFDEF LPC}
+{ Au moins 2 centiemes depuis le dernier trace du cadre ? }
+Function RubberDue(Var Last: LongInt): Boolean;
+Var Nw: LongInt;
+Begin
+ Nw:=NowCs;
+ If (Nw<Last) Or (Nw-Last>=2) Then Begin Last:=Nw;RubberDue:=True;End
+ Else RubberDue:=False;
+End;
+{$ENDIF}
 
 Procedure SetWinRect(W: PWindow; NX,NY,NW,NH: Integer);
 Begin
@@ -6222,27 +6341,41 @@ Begin
 End;
 
 Procedure DragWindow(W: PWindow; SX0,SY0: LongInt);
-Var NX,NY,OX,OY: Integer; E: TEvent; Done: Boolean;
+Var NX,NY,OX,OY,PX,PY: Integer; E: TEvent; Done: Boolean; Last: LongInt;
 Begin
  HideMouse;
- OX:=W^.WinX;OY:=W^.WinY;NX:=OX;NY:=OY;
+ OX:=W^.WinX;OY:=W^.WinY;NX:=OX;NY:=OY;PX:=NX;PY:=NY;Last:=0;
  RubberRect(NX,NY,NX+W^.WinW-1,NY+W^.WinH-1);
  Done:=False;
  Repeat
   PollEvent(E);
   If E.Kind=EV_MOVE Then Begin
+   {$IFNDEF LPC}
    RubberRect(NX,NY,NX+W^.WinW-1,NY+W^.WinH-1);
+   {$ENDIF}
    NX:=OX+(E.X-SX0);NY:=OY+(E.Y-SY0);
    If NY<0 Then NY:=0;
    If NY>SCR_H-24 Then NY:=SCR_H-24;
    If NX>SCR_W-40 Then NX:=SCR_W-40;
    If NX<-W^.WinW+60 Then NX:=-W^.WinW+60;
+   {$IFNDEF LPC}
    RubberRect(NX,NY,NX+W^.WinW-1,NY+W^.WinH-1);
+   PX:=NX;PY:=NY;
+   {$ENDIF}
   End Else If E.Kind=EV_UP Then Done:=True
   Else If (E.Kind=EV_KEY) And (E.Key=K_ESC) Then Begin NX:=OX;NY:=OY;Done:=True;
   End;
+  {$IFDEF LPC}
+  { le cadre suit la souris au plus 50 fois par seconde (apres un
+    deplacement et aussi quand la souris s'arrete) }
+  If (Not Done) And ((NX<>PX) Or (NY<>PY)) And RubberDue(Last) Then Begin
+   RubberRect(PX,PY,PX+W^.WinW-1,PY+W^.WinH-1);
+   RubberRect(NX,NY,NX+W^.WinW-1,NY+W^.WinH-1);
+   PX:=NX;PY:=NY;
+  End;
+  {$ENDIF}
  Until Done;
- RubberRect(NX,NY,NX+W^.WinW-1,NY+W^.WinH-1);
+ RubberRect(PX,PY,PX+W^.WinW-1,PY+W^.WinH-1);
  SetWinRect(W,NX,NY,W^.WinW,W^.WinH);
  W^.Maxim:=False;
  ShowMouse;
@@ -6502,7 +6635,7 @@ End;
 Procedure LightsOut;
 Var Ch: Char; X,Y,B,X0,Y0: LongInt;
 Begin
- HideMouse;ClipFull;
+ HideMouseHard;ClipFull;
  GBar(0,0,SCR_W-1,SCR_H-1,cBlk);
  X0:=MX;Y0:=MY;
  GetMouseState(X,Y,B);X0:=X;Y0:=Y;
@@ -6518,13 +6651,21 @@ End;
 Procedure DeskMenu(X,Y: Integer); Forward;
 Procedure TermPumpAll; Forward;
 
+{ Quelque chose a repeindre ? }
+Function PaintPending: Boolean;
+Var I: Integer;
+Begin
+ PaintPending:=NeedFull;
+ For I:=1 To NWins Do If Wins[I]^.Dirty Then PaintPending:=True;
+End;
+
 Function DesktopLoop: Integer;
-Var E: TEvent; Tick,Nw: LongInt; I: Integer; W: PWindow; Cmd: Integer;
+Var E: TEvent; Tick,Nw,LastPaint: LongInt; I: Integer; W: PWindow; Cmd: Integer;
 Begin
  ExitDesk:=0;Capture:=Nil;LastActCs:=NowCs;LightsOk:=True;
  NeedFull:=True;
  FlushPaint;
- Tick:=NowCs;
+ Tick:=NowCs;LastPaint:=Tick;
  Repeat
   PollEvent(E);
   If LightsOk And (LightsMin>0) And (NowCs>=LastActCs)
@@ -6571,7 +6712,17 @@ Begin
   TermPumpAll;
   PurgeDead;
   If NWins=0 Then ExitDesk:=1;
+  {$IFDEF LPC}
+  { pendant un glissement (clic maintenu, defilement, selection) chaque
+    deplacement invaliderait la fenetre : on repeint au plus toutes les
+    3 centiemes ; l'etat final est toujours peint (la fenetre reste sale) }
+  If PaintPending Then
+   If (Nw<LastPaint) Or (Nw-LastPaint>=3) Or (ExitDesk<>0) Then Begin
+    FlushPaint;LastPaint:=Nw;
+   End;
+  {$ELSE}
   FlushPaint;
+  {$ENDIF}
  Until ExitDesk<>0;
  LightsOk:=False;
  DesktopLoop:=ExitDesk;
@@ -30283,6 +30434,8 @@ Type
   LastHist  : Integer;
   Poll      : Integer;
   CurShown  : Boolean;
+  LastDraw  : LongInt;                 { dernier dessin (centiemes) }
+  Pending   : Boolean;                 { dessin differe }
  End;
 
 Var
@@ -31283,6 +31436,18 @@ Begin
  End;
 End;
 
+{ Redessine au plus toutes les 3 centiemes : la sortie abondante (cat d'un
+  gros fichier) est lue en entier mais peinte une seule fois par tranche }
+Procedure TmRefreshSoon(Wd_: PWindow; T: PTerm);
+Var Nw: LongInt;
+Begin
+ Nw:=NowCs;
+ If (Nw<T^.LastDraw) Or (Nw-T^.LastDraw>=3) Then Begin
+  T^.LastDraw:=Nw;T^.Pending:=False;
+  TmRefresh(Wd_);
+ End Else T^.Pending:=True;
+End;
+
 { Lit le pty (sans bloquer) et met l'ecran a jour }
 Procedure TermPump(Wd_: PWindow);
 Var T: PTerm; N,Rounds,I: LongInt; Code,OldY: Integer; Any: Boolean;
@@ -31312,7 +31477,7 @@ Begin
    TmEnded(Wd_,T);Exit;
   End;
  End;
- If Any Then TmRefresh(Wd_);
+ If Any Or T^.Pending Then TmRefreshSoon(Wd_,T);
 End;
 
 Procedure TermPumpAll;

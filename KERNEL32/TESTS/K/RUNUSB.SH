@@ -82,6 +82,11 @@ for step in script.split(','):
         ev(rel('x', 10), rel('y', 5)); time.sleep(0.3); ev(rel('x', 3), rel('y', 3)); time.sleep(0.3)
         ev(btn('left', True)); time.sleep(0.3); ev(btn('left', False)); time.sleep(0.3)
         ev(btn('wheel-up', True)); time.sleep(0.2); ev(btn('wheel-up', False)); time.sleep(0.3)
+    elif step == 'HOT':
+        wait('USB-READY-HOT'); wait('usb: tablette active', 20); time.sleep(1)
+        cmd("device_add", driver="usb-mouse", id="hm"); time.sleep(3)
+        cmd("device_del", id="hm"); time.sleep(3)
+        cmd("device_add", driver="usb-kbd", id="hk"); time.sleep(3)
     elif step == 'WAIT':
         time.sleep(1)
 PY
@@ -95,5 +100,9 @@ PY
 run abs "-device pci-ohci,id=ohci -device usb-tablet -device usb-kbd" "usbmode=abs" "ABS,MOVE2,BTN,WHEEL,KEY,REPEAT"
 run rel "-device pci-ohci,id=ohci -device usb-mouse" "usbmode=rel" "REL"
 run prio "-device pci-ohci,id=ohci -device usb-tablet" "usbmode=prio k32vboxfake=1" "ABS,MOVE2"
+run hot "-device pci-ohci,id=ohci -device usb-tablet" "usbmode=hot" "HOT"
+for pat in "usb: souris QEMU USB Mouse" "usb: port [0-9] : peripherique retire" "usb: clavier"; do
+  if ! tr -d '\r' < "$W/out.txt" | grep -aq "$pat"; then echo "ECHEC hotplug : '$pat' absent"; FAIL=1; fi
+done
 if [ $FAIL = 0 ]; then echo "RESULTAT : SUCCES (QEMU seulement)"; rm -rf "$W"; exit 0
 else echo "RESULTAT : ECHEC (traces dans $W)"; exit 1; fi

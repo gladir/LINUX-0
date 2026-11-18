@@ -109,6 +109,13 @@ int main(void){
      ktest("usb.key_repeat",rep>=3);
      close(e0);}
   }
+  else if(mode_is("usbmode=hot")){
+    /* branchement et retrait a chaud : RUNUSB.SH regarde le journal */
+    int k;
+    puts("USB-READY-HOT\n");
+    for(k=0;k<14;k++)nap(1,0);
+    ktest("usb.hot_waited",1);
+  }
   else if(mode_is("usbmode=rel")){
     int fm=open("/dev/input/mice",O_RDONLY|O_NONBLOCK,0),e1=open("/dev/input/event1",O_RDONLY|O_NONBLOCK,0);
     int rx=0,ry=0,wh=0,bl=0,blup=0,k,got=0,sx=0,sy=0;struct ev e;unsigned char pk[3];

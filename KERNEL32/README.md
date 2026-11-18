@@ -1022,6 +1022,51 @@ En mode graphique le noyau n'ecrit plus dans la memoire VGA texte (B8000h,
 MMIO : un VM-exit par ecriture ; `VgaHidden`) : la console texte vit dans
 `VcBuf` et est redessinee au retour en KD_TEXT ou en panique.
 
+**USB OHCI + HID, curseur materiel VMSVGA (lot D7-12)** : VirtualBox
+presente par defaut un controleur OHCI et une *tablette USB* comme pointeur.
+`UsbInit` detecte le controleur par sa classe PCI (0C0310), mappe ses
+registres (BAR 0, FC000000h), prend la main sur le BIOS, le reinitialise
+(HCR) et le met en USBRESET ; le fil noyau `kusbd` laisse 60 ms de
+reinitialisation du bus, passe en operationnel (liste de controle + liste
+periodique, IRQ WDH/RHSC/UE), alimente les ports, puis enumere chaque
+peripherique (reinitialisation du port, SET_ADDRESS, descripteurs, chaine du
+produit, SET_CONFIGURATION, interfaces HID). Branchement/retrait a chaud
+(interruption RHSC, repli par un balayage toutes les 20 s). Hub externe,
+stockage, UHCI/EHCI/xHCI : non geres (journal `usb: ... non gere`). Entrees :
+clavier de boot (usages HID -> codes de balayage de l'ensemble 1 -> `KbdScan`,
+le meme chemin que le PS/2 : consoles, Alt+Fn, KbMode ; repetition par le tick,
+500 ms puis 33 Hz) ; souris relative (descripteur de rapport analyse ->
+`MousePacket` : `/dev/input/event1` et `/dev/input/mice` comme le PS/2) ;
+tablette absolue (axes X/Y absolus, boutons, molette) sur `/dev/input/event2`
+(EV_ABS ABS_X/ABS_Y ramenes a 0..65535, BTN_LEFT/RIGHT/MIDDLE, REL_WHEEL ;
+nom lu dans le descripteur de chaine, ex. « QEMU USB Tablet » ; bustype USB).
+**Priorite** documentee : tablette USB > VMMDev > PS/2 : une seule source
+alimente event2 (`AbsSrc`) ; quand la tablette est active VMMDev recoit
+SetMouseStatus sans GUEST_CAN_ABSOLUTE (l'hote n'envoie plus l'absolu par deux
+voies) ; le PS/2 relatif reste sur `/dev/input/mice`. Les rapports arrivent par
+la file des TD termines du HCCA (en memoire) : au repos aucun acces de registre
+hors le balayage des ports ; ~2 acces de registre par rapport (lecture de
+`HcInterruptStatus` quand l'IRQ est redoublee + acquittement) contre ~16 pour
+une souris PS/2 (mesure QEMU : 3,0 puis 2 apres l'optimisation du cas courant).
+`/proc/k32perf` : `ohci_reg_access`, `usb_reports`. Journal `usb: ...`
+(controleur, ports, descripteurs, interfaces, champs HID, trois premiers
+rapports de chaque tuyau en hexadecimal) : a me rapporter depuis VirtualBox.
+Option `nousb`. `TESTS/K/RUNUSB.SH` (QEMU, `-device pci-ohci` avec usb-tablet,
+usb-kbd, usb-mouse ; evenements par QMP) verifie l'enumeration, la tablette
+(position, coins, boutons, molette, EVIOCGABS/EVIOCGNAME/EVIOCGID), le clavier
+(event0, tty, repetition), la souris (event1, mice), la priorite sur VMMDev
+(simulation) et le branchement/retrait a chaud. **Non teste sur VirtualBox**
+(descripteurs de la tablette VirtualBox analyses « sur le papier » : rapport de
+7 octets, X/Y 0..7FFFh). Curseur materiel VMSVGA pour Graph (ioctl de
+`/dev/fb0`) : `FBIO_K32_UPDATE` 46F0 (rectangle ; le premier appel passe en
+mode manuel : plus d'UPDATE periodique tant que le fichier est ouvert),
+`FBIO_K32_CURDEF` 46F1 (curseur ARGB jusqu'a 64x64, SVGA_CMD_DEFINE_ALPHA_CURSOR),
+`FBIO_K32_CURMOVE` 46F2 (position : FIFO CURSOR_BYPASS_3 sans VM-exit si
+l'hote l'annonce, sinon registres CURSOR_*) ; -ENOTTY hors VMware SVGA ; la voie
+CURSOR_BYPASS_3 n'est pas prouvable sous QEMU (compteurs `cursor_fifo_moves` /
+`cursor_reg_moves`). `poll()`/`select()` sur les evenements d'entree sont
+reveilles directement par l'IRQ (plus d'attente complete d'un tick de 10 ms).
+
 **Bureau : CD, consoles, souris (lot D7-10)** : (1) `CDROMEJECT` (5309h),
 `CDROMCLOSETRAY` (5319h), `CDROM_LOCKDOOR` (5329h) et `CDROM_DRIVE_STATUS`
 (5326h) sur `/dev/hdc`, `/dev/sr0` (ATAPI IDE ou AHCI) : PREVENT/ALLOW MEDIUM
