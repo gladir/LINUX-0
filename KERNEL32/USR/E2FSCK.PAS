@@ -10,14 +10,14 @@
       de liens), 5 (bitmaps et compteurs libres). Aucune correction n'est
       faite (reponse toujours "no"). Blocs mappes et extents. Code de sortie
       0 sain, 4 erreurs. fsck [-t type] [-N] [-A] [options] [dispositif...]
-      choisit fsck.<type> d'apres /etc/fstab ou -t. Limites : 262144 inodes,
+      choisit fsck.<type> d'apres /etc/fstab ou -t. Limites : 524288 inodes,
       33554432 blocs, 4096 groupes.
 }
 
 Program E2FSCK;
 
 Const
-  MaxIno = 262144;
+  MaxIno = 524288;
   MaxBlkBits = 33554432;
   MaxGrp = 4096;
   Usage : Array[1..5] Of PChar = (

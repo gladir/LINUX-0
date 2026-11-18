@@ -21,7 +21,7 @@ SHIFT = {'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6',
 
 
 class Q:
-    def __init__(self, work, args, serial_io=False, env=None):
+    def __init__(self, work, args, serial_io=False, env=None, reboot=False):
         self.work = work
         os.makedirs(work, exist_ok=True)
         self.out = os.path.join(work, 'serial.txt')
@@ -35,7 +35,7 @@ class Q:
             else 'file:' + self.out
         cmd = ['qemu-system-i386', '-serial', sdev,
                '-monitor', 'unix:%s,server,nowait' % self.mon,
-               '-display', 'none', '-no-reboot'] + args
+               '-display', 'none'] + ([] if reboot else ['-no-reboot']) + args
         self.sio = None
         self.p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL,

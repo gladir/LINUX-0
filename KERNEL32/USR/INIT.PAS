@@ -13,7 +13,8 @@
    Format de /etc/ttys (compatible KERNEL16UNIX) : 1 caractere actif (1) ou
    0, 1 caractere de vitesse (ignore), puis le nom du terminal de /dev.
    Signaux (comme busybox) : SIGUSR1 arret, SIGUSR2 extinction, SIGTERM
-   redemarrage, SIGINT Ctrl-Alt-Suppr, SIGHUP relecture de /etc/inittab.
+   redemarrage, SIGINT Ctrl-Alt-Suppr, SIGHUP relecture de /etc/inittab
+   (init.req = R : init se re-execute apres un pivot_root, installateur du CD).
    Arret : entrees shutdown, SIGTERM puis SIGKILL a tous les processus,
    sync, appel systeme reboot.
    Langue : init cherche LANGUAGE=XX dans /etc/profile puis dans
@@ -463,6 +464,29 @@ Begin
   WriteRunLevel;
 End;
 
+{ demande 'R' de telinit (/var/run/init.req) : la racine a ete changee par
+  pivot_root (l'installateur du CD demarre le systeme installe) ; init arrete
+  tous les processus de l'ancienne racine puis se re-execute : le /sbin/init
+  de la nouvelle racine et son /etc/inittab. }
+Procedure SwitchToNewRoot;
+Var K : LongInt;
+Begin
+  For K := 1 To NE Do
+    If E[K].Action = aRespawn Then E[K].Action := 0;
+  KillAll(SIGTERM);
+  Reap(2);
+  KillAll(SIGKILL);
+  Reap(1);
+  SysSync;
+  SysArgReset;
+  SysArgAdd('/sbin/init');
+  SysArgExec('/sbin/init');
+  { echec : on garde l'ancien init, les sessions sont relancees }
+  ReadInittab;
+  For K := 1 To NE Do
+    If (E[K].Action = aRespawn) And InLevel(K) Then StartRespawn(K);
+End;
+
 Procedure HandleSignal;
 Var S, K : LongInt; Fd : LongInt; B : Array[0..7] Of Char; L : Char;
 Begin
@@ -493,6 +517,11 @@ Begin
           If SysRead(Fd, B, 1) = 1 Then L := B[0];
           SysClose(Fd);
           SysUnlink('/var/run/init.req');
+        End;
+        If L = 'R' Then
+        Begin
+          SwitchToNewRoot;
+          Exit;
         End;
         If (L = 'q') Or (L = 'Q') Then L := RunLevel;
         If (L = 's') Or (L = 'S') Then L := '1';

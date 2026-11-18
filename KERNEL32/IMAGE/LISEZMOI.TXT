@@ -33,6 +33,11 @@ KERNEL32/TOOLS/MKINSTALLCD.SH -o KERNEL32-INSTALL.ISO).
   ligne de commande du noyau (fichier cle=valeur, voir KERNEL32/README.md,
   "CD-ROM d'installation"). Apres l'installation : retirer le CD, redemarrer.
   Journal : /var/log/install.log (copie dans le systeme installe).
+  Si le BIOS redemarre quand meme le CD apres l'installation (VirtualBox :
+  l'ejection est annulee par la reinitialisation), l'assistant detecte le
+  systeme deja installe, ne reinstalle pas et le demarre apres 5 secondes
+  (boutons : Demarrer / Reinstaller / Shell) ; retirer le CD dans les
+  reglages de la machine pour un amorcage direct du disque.
 
 CAPTURES/ : captures d'ecran PNG de l'assistant (francais : fr-*, allemand :
   de-*, installations automatiques : auto-*, mode texte : text-*), prises par

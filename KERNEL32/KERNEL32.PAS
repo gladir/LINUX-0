@@ -395,7 +395,17 @@ Begin
     mov edi,Dst
     mov ecx,N
     mov eax,B
+    and eax,255
     cld
+    cmp ecx,16
+    jb @bytes
+    imul eax,eax,01010101h
+    mov edx,ecx
+    shr ecx,2
+    rep stosd
+    mov ecx,edx
+    and ecx,3
+  @bytes:
     rep stosb
     pop edi
   end;
@@ -754,11 +764,15 @@ Begin
   Port[$3D4] := $0E; Port[$3D5] := (P Shr 8) And $FF;
 End;
 
+Var
+  VgaHidden : Boolean;     { mode graphique : pas d'ecriture dans la memoire
+                             VGA texte (chaque ecriture est un VM-exit) }
+
 { Ecrire une cellule (caractere + attribut) dans la console Vc }
 Procedure VcCell(Vc, Idx, W : LongInt);
 Begin
   VcBuf[Vc * 2000 + Idx] := W;
-  If Vc = ActiveVc Then MemW[0:VideoBase + Idx * 2] := W;
+  If (Vc = ActiveVc) And (Not VgaHidden) Then MemW[0:VideoBase + Idx * 2] := W;
 End;
 
 Procedure VcClearRange(Vc, A, B : LongInt);
@@ -774,7 +788,7 @@ Begin
     VcBuf[Vc * 2000 + I] := VcBuf[Vc * 2000 + I + ScrCols];
   For I := 2000 - ScrCols To 1999 Do
     VcBuf[Vc * 2000 + I] := (DefAttr Shl 8) Or $20;
-  If Vc = ActiveVc Then
+  If (Vc = ActiveVc) And (Not VgaHidden) Then
     MemCopy(VideoBase, LongInt(@VcBuf[Vc * 2000]), 4000);
 End;
 
@@ -782,6 +796,7 @@ End;
 Procedure VcShow(Vc : LongInt);
 Begin
   ActiveVc := Vc;
+  If VgaHidden Then Exit;
   MemCopy(VideoBase, LongInt(@VcBuf[Vc * 2000]), 4000);
   VgaCursor;
 End;
@@ -1053,8 +1068,24 @@ Begin
   For I := 1 To Length(S) Do KPutc(Ord(S[I]));
 End;
 
+{ Compteurs de couts d'un hyperviseur (un acces de port ou de registre
+  d'un peripherique emule coute un VM-exit : dizaines de microsecondes sous
+  Hyper-V/NEM) ; /proc/k32perf donne les totaux et les taux par seconde.
+  0 interruptions, 1 EOI du LAPIC, 2 acces 8259 (EOI), 3 acces 8042
+  (clavier), 4 acces 8042 (souris), 5 registres SVGA, 6 commandes UPDATE,
+  7 Ko ecrits dans /dev/fb0, 8 lectures CMOS, 9 appels KLog, 10 ticks,
+  11 curseur materiel par la FIFO, 12 curseur par registres, 13 acces aux
+  registres OHCI (USB), 14 rapports HID recus }
+Const
+  PfN = 16;
+
+Var
+  PerfC, PerfPrev, PerfRate : Array[0..PfN - 1] Of LongInt;
+  PerfAt : LongInt;
+
 Procedure KLog(Const S : String);
 Begin
+  Inc(PerfC[9]);
   KPrint(S);
   KPutc(10);
 End;
@@ -1295,13 +1326,16 @@ End;
 
 Procedure IrqAck(N : LongInt);
 Begin
+  Inc(PerfC[0]);
   If ApicMode Then
   Begin
+    Inc(PerfC[1]);
     MemL[0:LapicVirt + $B0] := 0;          { EOI du LAPIC }
     Exit;
   End;
   If N >= 8 Then Port[$A0] := $20;
   Port[$20] := $20;
+  PerfC[2] := PerfC[2] + 1 + Ord(N >= 8);
 End;
 
 Procedure InitIdt;
@@ -1463,6 +1497,7 @@ End;
 
 Function CmosRead(R : LongInt) : LongInt;
 Begin
+  Inc(PerfC[8], 2);
   Port[$70] := R;
   CmosRead := Port[$71];
 End;
@@ -3165,6 +3200,8 @@ Procedure SendSigPgrp(Pgrp, Sig : LongInt); Forward;
 Procedure TtyDisassociate(T : PTask); Forward;
 Procedure TimerSignals; Forward;
 Procedure NetTick; Forward;
+Procedure VbTick; Forward;
+Procedure UsbTick; Forward;
 Function CgPidsFull : Boolean; Forward;
 Function CgMemOver : Boolean; Forward;
 Procedure ProcTunDev; Forward;
@@ -3954,11 +3991,27 @@ Begin
   PosixTimersTick;
   NetTick;
   FbTick;
+  VbTick;
+  UsbTick;
+  PerfTick;
+End;
+
+Procedure PerfTick;
+Var I : LongInt;
+Begin
+  If Jiffies - PerfAt < HZ Then Exit;
+  PerfAt := Jiffies;
+  For I := 0 To PfN - 1 Do
+  Begin
+    PerfRate[I] := PerfC[I] - PerfPrev[I];
+    PerfPrev[I] := PerfC[I];
+  End;
 End;
 
 Procedure TimerTick(FromUser : Boolean);
 Begin
   Inc(Jiffies);
+  Inc(PerfC[10]);
   TickUser := FromUser;
   TimerBottom;
   TimerAccount(FromUser, False);
@@ -5378,7 +5431,7 @@ End;
 { Capacite en blocs de 2048 octets ; 0 si pas de disque }
 Function AtapiCapacity(D : LongInt) : LongInt;
 Var Cdb : Array[0..11] Of Byte; Tmp : Array[0..7] Of Byte;
-    R, Try_, Dly : LongInt;
+    Sn : Array[0..17] Of Byte; R, Try_, Dly : LongInt;
 Begin
   AtapiCapacity := 0;
   For Try_ := 1 To 4 Do
@@ -5392,8 +5445,20 @@ Begin
           Or Tmp[3]) + 1;
       Exit;
     End;
-    { attente et nouvel essai (attention d'unite) }
-    For R := 1 To 300000 Do Dly := Port[$80];
+    { REQUEST SENSE : pas de support dans le lecteur (cle 2, ASC 3Ah) :
+      inutile d'attendre (sous un hyperviseur chaque lecture de port coute
+      des dizaines de microsecondes : 300000 lectures par essai = des
+      secondes de demarrage avec un lecteur vide) }
+    MemFill(LongInt(@Cdb[0]), 0, 12);
+    MemFill(LongInt(@Sn[0]), 0, 18);
+    Cdb[0] := $03; Cdb[4] := 18;
+    If AtapiCmd(D, LongInt(@Cdb[0]), LongInt(@Sn[0]), 18) >= 14 Then
+    Begin
+      If ((Sn[2] And 15) = 2) And (Sn[12] = $3A) Then Exit;
+      If (Sn[2] And 15) = 6 Then Continue;          { attention d'unite }
+    End;
+    { attente breve et nouvel essai }
+    For R := 1 To 3000 Do Dly := Port[$80];
   End;
 End;
 
@@ -17072,11 +17137,19 @@ Const
   EvQSz = 256;                    { evenements par peripherique }
 
 Var
-  EvBuf : Array[0..2 * EvQSz * 4 - 1] Of LongInt;   { 2 files de 256 x 16 o }
-  EvHead, EvLen : Array[0..1] Of LongInt;
-  EvWchan : Array[0..1] Of LongInt;
+  EvBuf : Array[0..3 * EvQSz * 4 - 1] Of LongInt;   { 3 files de 256 x 16 o }
+  EvHead, EvLen : Array[0..2] Of LongInt;
+  EvWchan : Array[0..2] Of LongInt;
+  PollWchan : LongInt;             { reveil de poll()/select() : entree }
   EvKeyDown : Array[0..127] Of Byte;
   EvBtn : LongInt;                 { boutons de la souris (etat precedent) }
+  VbBtnMirror : Boolean;           { event2 (VMMDev) existe }
+  VbAbsX, VbAbsY : LongInt;        { position absolue de l'hote (VMMDev) ou
+                                      de la tablette USB (0..65535) }
+  AbsSrc : LongInt;                { source de event2 : 0 aucune, 1 VMMDev,
+                                      2 tablette USB (prioritaire) }
+  AbsName : String[47];            { nom de event2 pour une tablette USB }
+  AbsBus, AbsVid, AbsPid : LongInt;
   MouseId : LongInt;               { 0 : PS/2, 3 : IntelliMouse (molette) }
 
 Procedure EvPush(Dev, Typ, Code, Val : LongInt);
@@ -17099,6 +17172,7 @@ Procedure EvSync(Dev : LongInt);
 Begin
   EvPush(Dev, 0, 0, 0);
   WakeUp(LongInt(@EvWchan[Dev]));
+  WakeUp(LongInt(@PollWchan));
 End;
 
 { Touche du clavier : Code = code de balayage, Ext = prefixe E0 }
@@ -17147,6 +17221,30 @@ Begin
   If (Ch And 4) <> 0 Then EvPush(1, 1, $112, (B0 Shr 2) And 1);
   EvBtn := B0 And 7;
   EvSync(1);
+  { boutons repris pour la souris absolue (VMMDev) }
+  If (Ch <> 0) And VbBtnMirror And (AbsSrc <> 2) Then
+  Begin
+    If (Ch And 1) <> 0 Then EvPush(2, 1, $110, B0 And 1);
+    If (Ch And 2) <> 0 Then EvPush(2, 1, $111, (B0 Shr 1) And 1);
+    If (Ch And 4) <> 0 Then EvPush(2, 1, $112, (B0 Shr 2) And 1);
+    EvSync(2);
+  End;
+End;
+
+{ Un paquet de souris complet (PS/2 ou USB) : evdev event1 et file de
+  /dev/input/mice. B0 : boutons (bits 0-2), signes (bits 4-5, Dx Dy deja
+  bornes a -256..255 pour la file) ; Dy > 0 vers le haut }
+Procedure MousePacket(B0, Dx, Dy, Dz : LongInt);
+Begin
+  EvMouse(B0, Dx, Dy, Dz);
+  If MLen + 4 > MouseBufSz Then Exit;
+  MouseBuf[(MHead + MLen) Mod MouseBufSz] := B0 Or 8;
+  MouseBuf[(MHead + MLen + 1) Mod MouseBufSz] := Dx And $FF;
+  MouseBuf[(MHead + MLen + 2) Mod MouseBufSz] := Dy And $FF;
+  MouseBuf[(MHead + MLen + 3) Mod MouseBufSz] := Dz And $FF;
+  Inc(MLen, 4);
+  WakeUp(LongInt(@MouseWchan));
+  WakeUp(LongInt(@PollWchan));
 End;
 
 { Un octet venu de la souris : assemble des paquets de 3 octets (4 avec
@@ -17169,18 +17267,24 @@ Begin
     Dz := MPkt[3] And 15;
     If Dz > 7 Then Dz := Dz - 16;
   End;
-  EvMouse(MPkt[0], Dx, Dy, Dz);
-  If MLen + 4 > MouseBufSz Then Exit;
-  For I := 0 To 2 Do
-    MouseBuf[(MHead + MLen + I) Mod MouseBufSz] := MPkt[I];
-  MouseBuf[(MHead + MLen + 3) Mod MouseBufSz] := Dz And $FF;
-  Inc(MLen, 4);
-  WakeUp(LongInt(@MouseWchan));
+  MousePacket(MPkt[0], Dx, Dy, Dz);
 End;
 
+{ IRQ 12 : tous les octets de souris deja disponibles sont lus d'un coup
+  (un paquet de 3 ou 4 octets = une interruption au lieu de 3 ou 4 : chaque
+  interruption et chaque acces de port est un VM-exit sous un hyperviseur) }
 Procedure MouseIrq;
+Var N : LongInt;
 Begin
-  If (Port[$64] And $21) = $21 Then MouseByte(Port[$60]);
+  N := 0;
+  While N < 8 Do
+  Begin
+    Inc(PerfC[4]);
+    If (Port[$64] And $21) <> $21 Then Break;
+    Inc(PerfC[4]);
+    MouseByte(Port[$60]);
+    Inc(N);
+  End;
 End;
 
 Procedure MouseInit;
@@ -17301,6 +17405,15 @@ Begin
     End;
     MemW[0:Arg] := $11; MemW[0:Arg + 2] := 1; MemW[0:Arg + 4] := 1 + Dev;
     MemW[0:Arg + 6] := $AB41;
+    If Dev = 2 Then
+    Begin
+      MemW[0:Arg] := 6; MemW[0:Arg + 2] := $80EE; MemW[0:Arg + 4] := $CAFE;
+      If AbsSrc = 2 Then
+      Begin
+        MemW[0:Arg] := AbsBus; MemW[0:Arg + 2] := AbsVid;
+        MemW[0:Arg + 4] := AbsPid;
+      End;
+    End;
     EvIoctl := 0;
     Exit;
   End;
@@ -17308,6 +17421,8 @@ Begin
   Begin
     If Nr = 7 Then Nm := 'isa0060/serio0/input0'
     Else If Dev = 0 Then Nm := 'AT Translated Set 2 keyboard'
+    Else If (Dev = 2) And (AbsSrc = 2) Then Nm := AbsName
+    Else If Dev = 2 Then Nm := 'VirtualBox mouse integration'
     Else If MouseId = 3 Then Nm := 'ImPS/2 Generic Wheel Mouse'
     Else Nm := 'PS/2 Generic Mouse';
     N := Length(Nm) + 1;
@@ -17342,6 +17457,11 @@ Begin
     Begin
       EvSetBit(Arg, Len, 0); EvSetBit(Arg, Len, 1);
       If Dev = 1 Then EvSetBit(Arg, Len, 2);
+      If Dev = 2 Then
+      Begin
+        EvSetBit(Arg, Len, 2);                   { REL_WHEEL (tablette USB) }
+        EvSetBit(Arg, Len, 3);
+      End;
     End
     Else If Nr = $21 Then                        { EV_KEY }
     Begin
@@ -17350,12 +17470,30 @@ Begin
       Else
         For I := $110 To $112 Do EvSetBit(Arg, Len, I);
     End
+    Else If (Nr = $23) And (Dev = 2) Then        { EV_ABS }
+    Begin
+      EvSetBit(Arg, Len, 0); EvSetBit(Arg, Len, 1);
+    End
     Else If (Nr = $22) And (Dev = 1) Then        { EV_REL }
     Begin
       EvSetBit(Arg, Len, 0); EvSetBit(Arg, Len, 1);
       If MouseId = 3 Then EvSetBit(Arg, Len, 8);
-    End;
+    End
+    Else If (Nr = $22) And (Dev = 2) Then EvSetBit(Arg, Len, 8);
     EvIoctl := Len;
+    Exit;
+  End;
+  If (Nr >= $40) And (Nr < $42) And (Dev = 2) Then   { EVIOCGABS(x|y) }
+  Begin
+    If Not EnsureUser(Arg, 24, True) Then
+    Begin
+      EvIoctl := -EFAULT;
+      Exit;
+    End;
+    MemFill(Arg, 0, 24);
+    If Nr = $40 Then MemL[0:Arg] := VbAbsX Else MemL[0:Arg] := VbAbsY;
+    MemL[0:Arg + 8] := 65535;
+    EvIoctl := 0;
     Exit;
   End;
   If (Nr = $90) Or (Nr = $A0) Then EvIoctl := 0;   { EVIOCGRAB, CLOCKID }
@@ -17621,15 +17759,11 @@ Begin
     If Ord(Base[I]) = C Then KbdCompose := Ord(Res[I]);
 End;
 
-Procedure KbdIrq;
-Var Sc, Code, C, I, Rf : LongInt; Rel : Boolean;
+{ Un octet de balayage (ensemble 1, prefixe E0 compris) : clavier PS/2 ou
+  clavier USB (le pilote USB convertit les usages HID) }
+Procedure KbdScan(Sc : LongInt);
+Var Code, C, I, Rf : LongInt; Rel : Boolean;
 Begin
-  If (Port[$64] And $20) <> 0 Then
-  Begin
-    MouseByte(Port[$60]);
-    Exit;
-  End;
-  Sc := Port[$60];
   If Ttys[ActiveVc].KbMode = 0 Then
   Begin
     { RAW : octets de balayage bruts (y compris prefixes E0/E1) }
@@ -17802,6 +17936,17 @@ Begin
   End;
   If KbdAlt Then KbdPutByte(27);
   If (C = 0) And KbdCtrl Then KbdPutByte(0) Else KbdPutChar(C);
+End;
+
+Procedure KbdIrq;
+Begin
+  PerfC[3] := PerfC[3] + 2;
+  If (Port[$64] And $20) <> 0 Then
+  Begin
+    MouseByte(Port[$60]);
+    Exit;
+  End;
+  KbdScan(Port[$60]);
 End;
 
 { ---- Port serie ttyS0 (IRQ 4) ---- }
@@ -21406,14 +21551,17 @@ Begin
   If ((Is And $7D800000) <> 0) Or ((AhR(Pb + $38) And 1) <> 0)
      Or ((Tf And $21) <> 0) Then
   Begin
-    If ((Is And $7D800000) = 0) And ((AhR(Pb + $38) And 1) <> 0) Then
-      AhReport(Sl, 'delai de commande')
-    Else AhReport(Sl, 'erreur');
-    KLog('ahci: commande ' + HexStr(Mem[0:Fis + 2], 2) + ' lba '
-        + HexStr(Mem[0:Fis + 4] Or (Mem[0:Fis + 5] Shl 8)
-        Or (Mem[0:Fis + 6] Shl 16) Or (Mem[0:Fis + 8] Shl 24), 8) + ' n '
-        + IntStr(Mem[0:Fis + 12] Or (Mem[0:Fis + 13] Shl 8)) + ' tampon '
-        + HexStr(V2P(Buf), 8) + ' ' + IntStr(Len) + ' octets');
+    If (Cdb = 0) Or ((AhR(Pb + $38) And 1) <> 0) Then
+    Begin
+      If ((Is And $7D800000) = 0) And ((AhR(Pb + $38) And 1) <> 0) Then
+        AhReport(Sl, 'delai de commande')
+      Else AhReport(Sl, 'erreur');
+      KLog('ahci: commande ' + HexStr(Mem[0:Fis + 2], 2) + ' lba '
+          + HexStr(Mem[0:Fis + 4] Or (Mem[0:Fis + 5] Shl 8)
+          Or (Mem[0:Fis + 6] Shl 16) Or (Mem[0:Fis + 8] Shl 24), 8) + ' n '
+          + IntStr(Mem[0:Fis + 12] Or (Mem[0:Fis + 13] Shl 8)) + ' tampon '
+          + HexStr(V2P(Buf), 8) + ' ' + IntStr(Len) + ' octets');
+    End;
     AhRecover(Sl);
     Exit;
   End;
@@ -21838,6 +21986,1379 @@ Begin
     NvmeProbe := 1;
     Exit;
   End;
+End;
+
+{ ---- VirtualBox VMMDev (Guest Additions, protocole natif) : integration de
+  la souris (position absolue 0..FFFFh), PCI 80EE:CAFE ----
+  BAR 0 : port d'E/S de requete (on y ecrit l'adresse PHYSIQUE d'une
+  VMMDevRequestHeader : taille, version 10001h, type, rc), BAR 1 : memoire
+  VMMDevMemory (octet de presence d'evenements), IRQ du PCI. Requetes : 50
+  ReportGuestInfo, 58 ReportGuestInfo2, 59 ReportGuestStatus, 42
+  CtlGuestFilterMask, 2 SetMouseStatus, 1 GetMouseStatus, 41
+  AcknowledgeEvents. Les positions sont rendues sur /dev/input/event2
+  ("VirtualBox mouse integration", EV_ABS ABS_X / ABS_Y de 0 a 65535, boutons
+  repris de la souris PS/2). /dev/input/mice et le PS/2 restent intacts.
+  k32vboxfake=1 : peripherique logiciel de simulation derriere le meme code
+  (verifie le format des requetes ; position par /proc/sys/k32/vbox_sim_x et
+  vbox_sim_y) car QEMU n'emule pas VMMDev. }
+
+Const
+  VbPde = 1007;                    { FBC00000h }
+  VbVer = $10001;
+
+Var
+  VbOn, VbSim, VbWantAbs : Boolean;
+  VbIo, VbMem, VbReq, VbIrq, VbFeat : LongInt;
+  VbNReq, VbNErr, VbNEv : LongInt;
+  { simulation }
+  VbSimPg, VbSimEv, VbSimCaps, VbSimMask, VbSimOs, VbSimNBad : LongInt;
+  VbSimX, VbSimY, VbSimLX, VbSimLY, VbSimFeat : LongInt;
+  VbSimNOk : Array[0..63] Of LongInt;
+
+{ Cote "hote" de la simulation : traite la requete a l'adresse physique Ph }
+Procedure VbSimCall(Ph : LongInt);
+Var Rq, Sz, Typ, Need, Rc : LongInt;
+Begin
+  Rq := P2V(Ph);
+  Sz := MemL[0:Rq];
+  Typ := MemL[0:Rq + 8];
+  Rc := 0;
+  Case Typ Of
+    1 : Need := 36;
+    2 : Need := 28;
+    41 : Need := 28;
+    42 : Need := 32;
+    50 : Need := 32;
+    58 : Need := 24 + 12 + 128;
+    59 : Need := 36;
+  Else
+    Need := -1;
+  End;
+  If (Need < 0) Or (Sz < Need) Or (MemL[0:Rq + 4] <> VbVer) Then
+  Begin
+    Rc := -2;                                   { VERR_INVALID_PARAMETER }
+    Inc(VbSimNBad);
+  End
+  Else
+  Begin
+    Inc(VbSimNOk[Typ And 63]);
+    Case Typ Of
+      50 : If MemL[0:Rq + 24] <> $10004 Then
+           Begin
+             Rc := -2;
+             Inc(VbSimNBad);
+           End
+           Else VbSimOs := MemL[0:Rq + 28];
+      42 : VbSimMask := (VbSimMask Or MemL[0:Rq + 24]) And Not MemL[0:Rq + 28];
+      2 : VbSimCaps := MemL[0:Rq + 24];
+      1 :
+        Begin
+          MemL[0:Rq + 24] := VbSimFeat Or (VbSimCaps And 1);
+          MemL[0:Rq + 28] := VbSimX;
+          MemL[0:Rq + 32] := VbSimY;
+        End;
+      41 :
+        Begin
+          MemL[0:Rq + 24] := VbSimEv And VbSimMask;
+          VbSimEv := 0;
+          MemL[0:VbSimPg + 8] := 0;
+        End;
+    End;
+  End;
+  MemL[0:Rq + 12] := Rc;
+End;
+
+{ Envoie la requete VbReq (deja remplie) ; vrai si rc >= 0 }
+Function VbCall : Boolean;
+Begin
+  Inc(VbNReq);
+  MemL[0:VbReq + 12] := -1;
+  If VbSim Then VbSimCall(V2P(VbReq))
+  Else OutL(VbIo, V2P(VbReq));
+  VbCall := MemL[0:VbReq + 12] >= 0;
+  If MemL[0:VbReq + 12] < 0 Then
+  Begin
+    Inc(VbNErr);
+    KLog('vbox: requete ' + IntStr(MemL[0:VbReq + 8]) + ' refusee, rc '
+        + IntStr(MemL[0:VbReq + 12]));
+  End;
+End;
+
+Procedure VbHdr(Size, Typ : LongInt);
+Begin
+  MemFill(VbReq, 0, 256);
+  MemL[0:VbReq] := Size;
+  MemL[0:VbReq + 4] := VbVer;
+  MemL[0:VbReq + 8] := Typ;
+  MemL[0:VbReq + 12] := -1;
+End;
+
+{ GetMouseStatus : met a jour VbFeat, VbAbsX, VbAbsY }
+Function VbGetMouse : Boolean;
+Begin
+  VbHdr(36, 1);
+  VbGetMouse := False;
+  If Not VbCall Then Exit;
+  VbFeat := MemL[0:VbReq + 24];
+  VbAbsX := MemL[0:VbReq + 28];
+  VbAbsY := MemL[0:VbReq + 32];
+  VbGetMouse := True;
+End;
+
+Procedure VbPushAbs;
+Begin
+  If AbsSrc = 2 Then Exit;                      { la tablette USB a priorite }
+  EvPush(2, 3, 0, VbAbsX And $FFFF);
+  EvPush(2, 3, 1, VbAbsY And $FFFF);
+  EvSync(2);
+End;
+
+{ Evenements du peripherique : acquitter, lire la position }
+Procedure VbHandle;
+Var Ev : LongInt;
+Begin
+  If Not VbOn Then Exit;
+  If MemL[0:VbMem + 8] = 0 Then Exit;
+  VbHdr(28, 41);
+  If Not VbCall Then Exit;
+  Ev := MemL[0:VbReq + 24];
+  Inc(VbNEv);
+  If (Ev And 1) <> 0 Then VbGetMouse;            { capacites de la souris }
+  If (Ev And $200) <> 0 Then
+    If VbGetMouse Then
+    Begin
+      VbWantAbs := (VbFeat And 2) <> 0;
+      If VbWantAbs Then VbPushAbs;
+    End;
+End;
+
+Procedure VbIrqHandler;
+Begin
+  VbHandle;
+End;
+
+{ A chaque tick : evenements non vus (IRQ perdue) et, en simulation, position
+  imposee par /proc/sys/k32/vbox_sim_x|y }
+Procedure VbTick;
+Begin
+  If Not VbOn Then Exit;
+  If VbSim Then
+    If (VbSimX <> VbSimLX) Or (VbSimY <> VbSimLY) Then
+    Begin
+      VbSimLX := VbSimX; VbSimLY := VbSimY;
+      VbSimEv := VbSimEv Or $200;
+      MemL[0:VbSimPg + 8] := 1;
+    End;
+  If MemL[0:VbMem + 8] <> 0 Then VbHandle;
+End;
+
+Procedure VbSendInfo;
+Begin
+  VbHdr(32, 50);                                { ReportGuestInfo }
+  MemL[0:VbReq + 24] := $10004;
+  MemL[0:VbReq + 28] := $50000;                 { Linux }
+  VbCall;
+  VbHdr(24 + 12 + 128, 58);                     { ReportGuestInfo2 }
+  MemW[0:VbReq + 24] := 1;                      { version 1.0 }
+  MemW[0:VbReq + 26] := 0;
+  MemL[0:VbReq + 28] := 0;
+  MemL[0:VbReq + 32] := 0;
+  MemL[0:VbReq + 36] := 0;
+  Mem[0:VbReq + 40] := 75; Mem[0:VbReq + 41] := 51; Mem[0:VbReq + 42] := 50;
+  VbCall;
+  VbHdr(36, 59);                                { ReportGuestStatus }
+  MemL[0:VbReq + 24] := 20;                     { VBoxGuest }
+  MemL[0:VbReq + 28] := 50;                     { actif }
+  MemL[0:VbReq + 32] := 0;
+  VbCall;
+End;
+
+Procedure VbInit;
+Var Dev, Bar0, Bar1, Cmd, Pt, Feat : LongInt; Fake : Boolean;
+Begin
+  VbOn := False;
+  VbSim := False;
+  If Pos(' novbox', ' ' + CmdLine) > 0 Then Exit;
+  Fake := Pos(' k32vboxfake=1', ' ' + CmdLine) > 0;
+  VbReq := AllocZeroPage;
+  If VbReq = 0 Then Exit;
+  If Fake Then
+  Begin
+    VbSimPg := AllocZeroPage;
+    If VbSimPg = 0 Then Exit;
+    MemL[0:VbSimPg] := 4096;
+    MemL[0:VbSimPg + 4] := $10003;
+    VbSimFeat := 2;                             { l'hote veut l'absolu }
+    VbSimX := 0; VbSimY := 0; VbSimLX := 0; VbSimLY := 0;
+    VbMem := VbSimPg;
+    VbSim := True;
+    KLog('vbox: SIMULATION (k32vboxfake=1) : peripherique logiciel');
+  End
+  Else
+  Begin
+    Dev := -1;
+    For Pt := 0 To 31 Do
+      If PciRead(0, Pt, 0, 0) = LongInt($CAFE80EE) Then Dev := Pt;
+    If Dev < 0 Then Exit;
+    Bar0 := PciRead(0, Dev, 0, $10);
+    Bar1 := PciRead(0, Dev, 0, $14) And LongInt($FFFFFFF0);
+    If ((Bar0 And 1) = 0) Or (Bar1 = 0) Then
+    Begin
+      KLog('vbox: VMMDev 80EE:CAFE trouve mais BAR invalides (BAR0 '
+          + HexStr(Bar0, 8) + ', BAR1 ' + HexStr(Bar1, 8) + ')');
+      Exit;
+    End;
+    VbIo := Bar0 And $FFFC;
+    Cmd := PciRead(0, Dev, 0, 4);
+    PciWrite(0, Dev, 0, 4, (Cmd And $FFFF) Or 7);
+    VbIrq := PciRead(0, Dev, 0, $3C) And $FF;
+    Pt := AllocZeroPage;
+    If Pt = 0 Then Exit;
+    MemL[0:Pt] := (Bar1 And LongInt($FFFFF000)) Or $13;
+    MemL[0:MasterPd + VbPde * 4] := V2P(Pt) Or $13;
+    FlushTlb;
+    VbMem := LongInt(VbPde Shl 22) + (Bar1 And $FFF);
+    KLog('vbox: VMMDev 80EE:CAFE ES ' + HexStr(VbIo, 4) + ' memoire '
+        + HexStr(Bar1, 8) + ' IRQ ' + IntStr(VbIrq) + ' taille '
+        + IntStr(MemL[0:VbMem]) + ' version ' + HexStr(MemL[0:VbMem + 4], 8));
+  End;
+  VbOn := True;
+  VbBtnMirror := True;
+  VbSendInfo;
+  VbHdr(32, 42);                                { filtre d'evenements }
+  MemL[0:VbReq + 24] := $201;                   { capacites + position }
+  MemL[0:VbReq + 28] := 0;
+  VbCall;
+  Feat := 1;                                    { GUEST_CAN_ABSOLUTE }
+  If CmdGet('vboxcursor') = '1' Then Feat := Feat Or 4;
+  VbHdr(28, 2);                                 { SetMouseStatus }
+  MemL[0:VbReq + 24] := Feat;
+  VbCall;
+  If VbGetMouse Then
+  Begin
+    VbWantAbs := (VbFeat And 2) <> 0;
+    If AbsSrc = 0 Then AbsSrc := 1;
+    KLog('vbox: souris : fonctions hote ' + HexStr(VbFeat, 8) + ', position '
+        + IntStr(VbAbsX) + ',' + IntStr(VbAbsY));
+  End
+  Else KLog('vbox: GetMouseStatus refuse');
+  If (VbIrq > 0) And (VbIrq < 16) Then IrqEnable(VbIrq);
+  If VbNErr > 0 Then
+    KLog('vbox: ' + IntStr(VbNErr) + ' requete(s) refusee(s) sur '
+        + IntStr(VbNReq));
+  KLog('vbox: integration de la souris activee (/dev/input/event2)');
+End;
+
+{ ---- USB : controleur OHCI (USB 1.1) et peripheriques HID (lot D7-12) ---- }
+{ VirtualBox presente par defaut un controleur OHCI et une TABLETTE USB comme
+  pointeur ; le clavier et la souris USB existent aussi. Le pilote detecte le
+  controleur par sa classe PCI (0C03, interface 10h), mappe ses registres
+  (BAR 0, FC000000h), prend la main sur le BIOS, demarre la liste de controle
+  et la liste periodique, puis un fil noyau (kusbd) enumere les ports de la
+  racine : reinitialisation du port, adresse, descripteurs, configuration,
+  interfaces HID. Pas de hub externe, pas de stockage. Entrees :
+    - clavier (protocole de boot) : usages HID convertis en codes de balayage
+      de l'ensemble 1 et rendus a KbdScan (meme chemin que le clavier PS/2),
+      repetition par le tick ;
+    - souris relative : MousePacket (event1 et /dev/input/mice) ;
+    - tablette absolue : descripteur de rapport HID analyse (axes X/Y absolus,
+      boutons, molette) ; position ramenee a 0..65535 sur /dev/input/event2
+      (EV_ABS ABS_X/ABS_Y, BTN_LEFT/RIGHT/MIDDLE, REL_WHEEL), prioritaire
+      sur VMMDev (VMMDev cesse alors d'annoncer GUEST_CAN_ABSOLUTE).
+  Les rapports arrivent par l'IRQ du controleur (file des TD termines dans
+  le HCCA, en memoire : aucune lecture de registre) ; le tick surveille la
+  meme file si une IRQ se perd. Option cmdline : nousb. Les messages
+  commencent par "usb:". Prouve sous QEMU (pci-ohci + usb-tablet / usb-mouse
+  / usb-kbd), jamais teste sur VirtualBox. }
+
+Const
+  UsbPde = 1008;                   { FC000000h }
+  UsbMaxDev = 8;                   { tuyaux d'interruption (interfaces HID) }
+  OhCtl = $04; OhCmd = $08; OhIntSt = $0C; OhIntEn = $10; OhIntDis = $14;
+  OhHcca = $18; OhCtlHead = $20; OhBulkHead = $28; OhFmInt = $34;
+  OhPerStart = $40; OhLsThr = $44; OhRhA = $48; OhRhSt = $50;
+  OhRhPort = $54;
+  OhEd = 256;                      { ED : 16 de 16 octets dans la page 1 }
+  OhTd = 512;                      { TD : 64 de 16 octets dans la page 1 }
+
+Type
+  TUsbDev = Record
+    Used, Kind, Addr, Ep, Len, Port, Dead, EdI, TdCur, TdDum, BufOfs : LongInt;
+    NF, HasId, Btn, Nrep, PrevX, PrevY : LongInt;
+    FK, FA, FB, FS, FMin, FMax, FRel, FSg, FId : Array[0..11] Of LongInt;
+    PrevKeys : Array[0..7] Of Byte;
+  End;
+
+Const
+  { usage HID du clavier -> code de balayage (bit 8 : prefixe E0) }
+  UsbKeySc : Array[0..101] Of Word = (0, 0, 0, 0,
+    $1E, $30, $2E, $20, $12, $21, $22, $23, $17, $24, $25, $26, $32, $31,
+    $18, $19, $10, $13, $1F, $14, $16, $2F, $11, $2D, $15, $2C,
+    $02, $03, $04, $05, $06, $07, $08, $09, $0A, $0B,
+    $1C, $01, $0E, $0F, $39, $0C, $0D, $1A, $1B, $2B, $2B, $27, $28, $29,
+    $33, $34, $35, $3A,
+    $3B, $3C, $3D, $3E, $3F, $40, $41, $42, $43, $44, $57, $58,
+    $137, $46, 0, $152, $147, $149, $153, $14F, $151, $14D, $14B, $150,
+    $148, $45, $135, $37, $4A, $4E, $11C,
+    $4F, $50, $51, $4B, $4C, $4D, $47, $48, $49, $52, $53, $56, $15D);
+  { modificateurs : LCtrl LShift LAlt LGui RCtrl RShift RAlt RGui }
+  UsbModSc : Array[0..7] Of Word = ($1D, $2A, $38, $15B, $11D, $36, $138,
+    $15C);
+
+Var
+  UsbOn : Boolean;
+  UsbRegs, UsbPg, UsbPg2, UsbPhys1, UsbIrq, UsbNPorts, UsbBusy, UsbWchan,
+    UsbNext, UsbIntHead, UsbIntTail, UsbRepSc, UsbRepAt, UsbVid, UsbPid,
+    UsbEv2, UsbPortWchan, UsbCtlBusy : LongInt;
+  UsbDev : Array[0..UsbMaxDev - 1] Of TUsbDev;
+  UsbCfg : Array[0..511] Of Byte;
+  UsbRepD : Array[0..511] Of Byte;
+  UsbTried : Array[0..15] Of Boolean;
+
+Function OhR(Off : LongInt) : LongInt;
+Begin
+  Inc(PerfC[13]);
+  OhR := MemL[0:UsbRegs + Off];
+End;
+
+Procedure OhW(Off, V : LongInt);
+Begin
+  Inc(PerfC[13]);
+  MemL[0:UsbRegs + Off] := V;
+End;
+
+Function EdA(I : LongInt) : LongInt;
+Begin
+  EdA := UsbPg + OhEd + I * 16;
+End;
+
+Function TdA(J : LongInt) : LongInt;
+Begin
+  TdA := UsbPg + OhTd + J * 16;
+End;
+
+{ Mot de commande d'un TD : DP 0 SETUP 1 OUT 2 IN ; T 0 bascule de l'ED,
+  2 DATA0, 3 DATA1 ; R : paquet court accepte ; CC = 15 (non traite) }
+Function TdFl(Dp, T, R : LongInt) : LongInt;
+Begin
+  TdFl := (R Shl 18) Or (Dp Shl 19) Or (T Shl 24) Or LongInt($F0000000);
+End;
+
+{ Ecrit le TD J : tampon virtuel Buf (0 : aucun) de Len octets, suivant NextJ }
+Procedure TdSet(J, Fl, Buf, Len, NextJ : LongInt);
+Var A : LongInt;
+Begin
+  A := TdA(J);
+  MemL[0:A] := Fl;
+  If Len > 0 Then
+  Begin
+    MemL[0:A + 4] := V2P(Buf);
+    MemL[0:A + 12] := V2P(Buf) + Len - 1;
+  End
+  Else
+  Begin
+    MemL[0:A + 4] := 0;
+    MemL[0:A + 12] := 0;
+  End;
+  If NextJ >= 0 Then MemL[0:A + 8] := V2P(TdA(NextJ))
+  Else MemL[0:A + 8] := 0;
+End;
+
+{ Transfert de controle sur le point d'acces 0 (liste de controle). Les
+  donnees sont lues/ecrites en UsbPg2 + 16. Rend le nombre d'octets lus
+  (0 si ecriture) ou un nombre negatif : -CC (code de condition), -99 delai }
+Function UsbCtl(Addr, Low, Mps, RType, Req, Val, Idx, Len : LongInt) : LongInt;
+Var B, E, J, I, Cc, Dp, N, C, Cbp, Hd, Tl : LongInt; Dn : Boolean;
+Begin
+  UsbCtl := -99;
+  If Len > 480 Then Exit;
+  B := UsbPg2;
+  Mem[0:B] := RType;
+  Mem[0:B + 1] := Req;
+  MemW[0:B + 2] := Val;
+  MemW[0:B + 4] := Idx;
+  MemW[0:B + 6] := Len;
+  E := EdA(0);
+  MemL[0:E] := Addr Or (Low Shl 13) Or (1 Shl 14) Or (Mps Shl 16);  { saute }
+  TdSet(0, TdFl(0, 2, 0), B, 8, 1);
+  J := 1;
+  If Len > 0 Then
+  Begin
+    If (RType And $80) <> 0 Then TdSet(1, TdFl(2, 3, 1), B + 16, Len, 2)
+    Else TdSet(1, TdFl(1, 3, 0), B + 16, Len, 2);
+    J := 2;
+  End;
+  If ((RType And $80) <> 0) And (Len > 0) Then Dp := 1 Else Dp := 2;
+  TdSet(J, TdFl(Dp, 3, 0), 0, 0, J + 1);
+  MemL[0:E + 4] := V2P(TdA(J + 1));
+  MemL[0:E + 8] := V2P(TdA(0));
+  MemL[0:E + 12] := 0;
+  MemL[0:E] := Addr Or (Low Shl 13) Or (Mps Shl 16);               { actif }
+  OhW(OhCmd, 2);                                                   { CLF }
+  N := 0;
+  Dn := False;
+  UsbCtlBusy := 1;
+  While (N < 60) And (Not Dn) Do
+  Begin
+    Hd := MemL[0:E + 8];
+    Tl := MemL[0:E + 4];
+    If ((Hd And 1) <> 0)
+       Or ((Hd And LongInt($FFFFFFF0)) = (Tl And LongInt($FFFFFFF0))) Then
+      Dn := True
+    Else
+    Begin
+      SleepOn(LongInt(@UsbWchan), 1, False);
+      Inc(N);
+    End;
+  End;
+  UsbCtlBusy := 0;
+  MemL[0:E] := Addr Or (Low Shl 13) Or (1 Shl 14) Or (Mps Shl 16);
+  Hd := MemL[0:E + 8];
+  MemL[0:E + 8] := MemL[0:E + 4] And LongInt($FFFFFFF0);         { vide l'ED }
+  If Not Dn Then Exit;
+  Cc := 0;
+  For I := 0 To J Do
+  Begin
+    C := (MemL[0:TdA(I)] Shr 28) And 15;
+    If (C <> 0) And (Cc = 0) Then Cc := C;
+  End;
+  If Cc <> 0 Then
+  Begin
+    UsbCtl := -Cc;
+    Exit;
+  End;
+  UsbCtl := 0;
+  If (Len > 0) And ((RType And $80) <> 0) Then
+  Begin
+    Cbp := MemL[0:TdA(1) + 4];
+    If Cbp = 0 Then UsbCtl := Len
+    Else UsbCtl := Cbp - V2P(B + 16);
+  End;
+End;
+
+{ Chaine ASCII d'un descripteur de chaine (index Idx) }
+Function UsbStr(Addr, Low, Mps, Idx : LongInt) : String;
+Var R, Lg, I, Lang : LongInt; S : String;
+Begin
+  S := '';
+  If Idx <> 0 Then
+  Begin
+    Lang := $0409;
+    R := UsbCtl(Addr, Low, Mps, $80, 6, $0300, 0, 4);
+    If R >= 4 Then Lang := MemW[0:UsbPg2 + 18];
+    R := UsbCtl(Addr, Low, Mps, $80, 6, $0300 Or Idx, Lang, 64);
+    If R >= 2 Then
+    Begin
+      Lg := Mem[0:UsbPg2 + 16];
+      If Lg > R Then Lg := R;
+      I := 2;
+      While (I + 1 < Lg) And (Length(S) < 40) Do
+      Begin
+        If (Mem[0:UsbPg2 + 16 + I + 1] = 0) And (Mem[0:UsbPg2 + 16 + I] >= 32)
+           And (Mem[0:UsbPg2 + 16 + I] < 127) Then
+          S := S + Chr(Mem[0:UsbPg2 + 16 + I])
+        Else S := S + '?';
+        Inc(I, 2);
+      End;
+    End;
+  End;
+  UsbStr := S;
+End;
+
+{ Champ de Size bits a partir du bit Off de l'octet Buf (petit boutiste) }
+Function UsbBits(Buf, Off, Size, Sg : LongInt) : LongInt;
+Var V, I, B : LongInt;
+Begin
+  V := 0;
+  If Size > 32 Then Size := 32;
+  For I := 0 To Size - 1 Do
+  Begin
+    B := (Mem[0:Buf + ((Off + I) Shr 3)] Shr ((Off + I) And 7)) And 1;
+    V := V Or (B Shl I);
+  End;
+  If (Sg <> 0) And (Size < 32) And (Size > 0) Then
+    If (V And (1 Shl (Size - 1))) <> 0 Then V := V - (1 Shl Size);
+  UsbBits := V;
+End;
+
+{ Analyse minimale d'un descripteur de rapport HID (Len octets en Buf) :
+  boutons (page 9), axes X Y et molette (page 1). Remplit les champs du
+  tuyau K ; rend la taille du rapport en octets }
+Function UsbParseHid(K, Buf, Len : LongInt) : LongInt;
+Var Pos, B, Sz, Ty, Tg, Val, SVal, Page, LMin, LMax, RSz, RCnt, Id, BitO,
+    I, NU, Fl, U, UMin, UMax, Kd, Fx : LongInt;
+    Us : Array[0..15] Of LongInt;
+Begin
+  Pos := 0; Page := 0; LMin := 0; LMax := 0; RSz := 0; RCnt := 0; Id := 0;
+  BitO := 0; NU := 0; UMin := 0; UMax := -1;
+  UsbDev[K].NF := 0;
+  UsbDev[K].HasId := 0;
+  While Pos < Len Do
+  Begin
+    B := Mem[0:Buf + Pos];
+    If B = $FE Then
+    Begin
+      Pos := Pos + 3 + Mem[0:Buf + Pos + 1];
+      Continue;
+    End;
+    Sz := B And 3;
+    If Sz = 3 Then Sz := 4;
+    Ty := (B Shr 2) And 3;
+    Tg := (B Shr 4) And 15;
+    Val := 0;
+    For I := 0 To Sz - 1 Do
+      If Pos + 1 + I < Len Then
+        Val := Val Or (Mem[0:Buf + Pos + 1 + I] Shl (8 * I));
+    SVal := Val;
+    If (Sz = 1) And (Val > 127) Then SVal := Val - 256;
+    If (Sz = 2) And (Val > 32767) Then SVal := Val - 65536;
+    Pos := Pos + 1 + Sz;
+    If Ty = 1 Then
+    Begin
+      Case Tg Of
+        0 : Page := Val;
+        1 : LMin := SVal;
+        2 : If LMin < 0 Then LMax := SVal Else LMax := Val;
+        7 : RSz := Val;
+        8 : Begin Id := Val; UsbDev[K].HasId := 1; BitO := 8; End;
+        9 : RCnt := Val;
+      End;
+    End
+    Else If Ty = 2 Then
+    Begin
+      Case Tg Of
+        0 : Begin
+              If NU < 16 Then Us[NU] := Val;
+              Inc(NU);
+            End;
+        1 : UMin := Val;
+        2 : UMax := Val;
+      End;
+    End
+    Else If Ty = 0 Then
+    Begin
+      If Tg = 8 Then
+      Begin
+        Fl := Val;
+        If (Fl And 1) = 0 Then
+          For I := 0 To RCnt - 1 Do
+          Begin
+            U := -1;
+            If NU > 0 Then
+            Begin
+              If I < NU Then U := Us[I] Else U := Us[NU - 1];
+              If NU > 16 Then U := -1;
+            End
+            Else If UMax >= UMin Then U := UMin + I;
+            Kd := 0;
+            If (Fl And 2) <> 0 Then
+            Begin
+              If (Page = 9) And (U >= 1) And (U <= 3) Then Kd := 1
+              Else If Page = 1 Then
+              Begin
+                If U = $30 Then Kd := 2
+                Else If U = $31 Then Kd := 3
+                Else If U = $38 Then Kd := 4;
+              End;
+            End;
+            If (Kd <> 0) And (UsbDev[K].NF < 12) Then
+            Begin
+              Fx := UsbDev[K].NF;
+              UsbDev[K].FK[Fx] := Kd; UsbDev[K].FA[Fx] := U - 1;
+              UsbDev[K].FB[Fx] := BitO + I * RSz; UsbDev[K].FS[Fx] := RSz;
+              UsbDev[K].FMin[Fx] := LMin; UsbDev[K].FMax[Fx] := LMax;
+              UsbDev[K].FRel[Fx] := (Fl Shr 2) And 1;
+              If LMin < 0 Then UsbDev[K].FSg[Fx] := 1
+              Else UsbDev[K].FSg[Fx] := 0;
+              UsbDev[K].FId[Fx] := Id;
+              UsbDev[K].NF := Fx + 1;
+            End;
+          End;
+        BitO := BitO + RSz * RCnt;
+      End;
+      NU := 0; UMin := 0; UMax := -1;
+    End;
+  End;
+  UsbParseHid := (BitO + 7) Div 8;
+End;
+
+{ Un code de balayage (bit 8 : prefixe E0) vers le clavier }
+Procedure UsbKbdSend(Code : LongInt; Brk : Boolean);
+Begin
+  If Code = 0 Then Exit;
+  If (Code And $100) <> 0 Then KbdScan($E0);
+  If Brk Then KbdScan((Code And $FF) Or $80) Else KbdScan(Code And $FF);
+End;
+
+{ Rapport du clavier de boot : modificateurs, octet reserve, 6 touches }
+Procedure UsbKbdReport(K, Buf, Len : LongInt);
+Var I, J, M, U, Found : LongInt;
+Begin
+  If Len < 8 Then Exit;
+  M := Mem[0:Buf];
+  For I := 0 To 7 Do
+    If ((M Xor UsbDev[K].PrevKeys[0]) And (1 Shl I)) <> 0 Then
+      UsbKbdSend(UsbModSc[I], (M And (1 Shl I)) = 0);
+  UsbDev[K].PrevKeys[0] := M;
+  { relachements }
+  For I := 2 To 7 Do
+  Begin
+    U := UsbDev[K].PrevKeys[I];
+    If U > 3 Then
+    Begin
+      Found := 0;
+      For J := 2 To 7 Do
+        If Mem[0:Buf + J] = U Then Found := 1;
+      If Found = 0 Then
+      Begin
+        If U <= 101 Then
+        Begin
+          UsbKbdSend(UsbKeySc[U], True);
+          If UsbRepSc = UsbKeySc[U] Then UsbRepSc := 0;
+        End;
+      End;
+    End;
+  End;
+  { appuis }
+  For I := 2 To 7 Do
+  Begin
+    U := Mem[0:Buf + I];
+    If U > 3 Then
+    Begin
+      Found := 0;
+      For J := 2 To 7 Do
+        If UsbDev[K].PrevKeys[J] = U Then Found := 1;
+      If (Found = 0) And (U <= 101) Then
+      Begin
+        UsbKbdSend(UsbKeySc[U], False);
+        UsbRepSc := UsbKeySc[U];
+        UsbRepAt := Jiffies + 50;
+      End;
+    End;
+  End;
+  For I := 2 To 7 Do UsbDev[K].PrevKeys[I] := Mem[0:Buf + I];
+End;
+
+{ Position d'un axe absolu ramenee a 0..65535 }
+Function UsbScale(V, Mn, Mx : LongInt) : LongInt;
+Var R, Rg : LongInt;
+Begin
+  Rg := Mx - Mn + 1;
+  If Rg < 2 Then Rg := 2;
+  V := V - Mn;
+  If V < 0 Then V := 0;
+  If V >= Rg Then V := Rg - 1;
+  R := ((V Shl 15) Div Rg) Shl 1;
+  R := R + (R Shr 15);
+  If R > 65535 Then R := 65535;
+  UsbScale := R;
+End;
+
+{ Rapport d'une souris ou d'une tablette decrit par le descripteur HID }
+Procedure UsbPtrReport(K, Buf, Len : LongInt);
+Var I, V, Btn, Dx, Dy, Dz, Ax, Ay, Ch, B0, GotX, GotY, Any : LongInt;
+Begin
+  Btn := 0; Dx := 0; Dy := 0; Dz := 0; Ax := UsbDev[K].PrevX;
+  Ay := UsbDev[K].PrevY; GotX := 0; GotY := 0;
+  For I := 0 To UsbDev[K].NF - 1 Do
+  Begin
+    If (UsbDev[K].HasId <> 0) And (Mem[0:Buf] <> UsbDev[K].FId[I]) Then
+      Continue;
+    If UsbDev[K].FB[I] + UsbDev[K].FS[I] > Len * 8 Then Continue;
+    V := UsbBits(Buf, UsbDev[K].FB[I], UsbDev[K].FS[I], UsbDev[K].FSg[I]);
+    Case UsbDev[K].FK[I] Of
+      1 : If V <> 0 Then Btn := Btn Or (1 Shl UsbDev[K].FA[I]);
+      2 : If UsbDev[K].Kind = 3 Then
+          Begin
+            Ax := UsbScale(V, UsbDev[K].FMin[I], UsbDev[K].FMax[I]);
+            GotX := 1;
+          End
+          Else Dx := Dx + V;
+      3 : If UsbDev[K].Kind = 3 Then
+          Begin
+            Ay := UsbScale(V, UsbDev[K].FMin[I], UsbDev[K].FMax[I]);
+            GotY := 1;
+          End
+          Else Dy := Dy + V;
+      4 : Dz := Dz + V;
+    End;
+  End;
+  Ch := Btn Xor UsbDev[K].Btn;
+  If UsbDev[K].Kind = 2 Then
+  Begin
+    If (Dx = 0) And (Dy = 0) And (Dz = 0) And (Ch = 0) Then Exit;
+    If Dx > 255 Then Dx := 255;
+    If Dx < -256 Then Dx := -256;
+    If Dy > 255 Then Dy := 255;
+    If Dy < -255 Then Dy := -255;
+    B0 := Btn And 7;
+    If Dx < 0 Then B0 := B0 Or $10;
+    If -Dy < 0 Then B0 := B0 Or $20;
+    UsbDev[K].Btn := Btn;
+    MousePacket(B0, Dx, -Dy, -Dz);
+    Exit;
+  End;
+  { tablette : event2 }
+  If AbsSrc <> 2 Then Exit;
+  Any := 0;
+  If (Ch And 1) <> 0 Then EvPush(2, 1, $110, Btn And 1);
+  If (Ch And 2) <> 0 Then EvPush(2, 1, $111, (Btn Shr 1) And 1);
+  If (Ch And 4) <> 0 Then EvPush(2, 1, $112, (Btn Shr 2) And 1);
+  If Ch <> 0 Then Any := 1;
+  UsbDev[K].Btn := Btn;
+  If (GotX <> 0) And ((Ax <> UsbDev[K].PrevX) Or (UsbDev[K].Nrep = 0)) Then
+  Begin
+    EvPush(2, 3, 0, Ax);
+    Any := 1;
+  End;
+  If (GotY <> 0) And ((Ay <> UsbDev[K].PrevY) Or (UsbDev[K].Nrep = 0)) Then
+  Begin
+    EvPush(2, 3, 1, Ay);
+    Any := 1;
+  End;
+  UsbDev[K].PrevX := Ax; UsbDev[K].PrevY := Ay;
+  VbAbsX := Ax; VbAbsY := Ay;
+  If Dz <> 0 Then
+  Begin
+    EvPush(2, 2, 8, Dz);
+    Any := 1;
+  End;
+  If Any <> 0 Then EvSync(2);
+End;
+
+Function HexByte(V : LongInt) : String;
+Begin
+  HexByte := HexStr(V And 255, 2);
+End;
+
+{ Un rapport recu du tuyau K (Len octets en Buf) }
+Procedure UsbReport(K, Buf, Len : LongInt);
+Var S : String; I : LongInt;
+Begin
+  Inc(PerfC[14]);
+  If UsbDev[K].Nrep < 3 Then
+  Begin
+    S := '';
+    For I := 0 To Len - 1 Do
+      If I < 12 Then S := S + HexByte(Mem[0:Buf + I]) + ' ';
+    KLog('usb: rapport ' + IntStr(UsbDev[K].Nrep + 1) + ' du tuyau '
+        + IntStr(K) + ' (' + IntStr(Len) + ' octets) : ' + S);
+  End;
+  If UsbDev[K].Kind = 1 Then UsbKbdReport(K, Buf, Len)
+  Else UsbPtrReport(K, Buf, Len);
+  Inc(UsbDev[K].Nrep);
+End;
+
+{ (Re)arme le tuyau K : le TD fictif devient actif, l'ancien actif devient le
+  nouveau fictif (la file de l'ED ne se vide jamais pour le controleur) }
+Procedure UsbRearm(K : LongInt);
+Var N, O : LongInt;
+Begin
+  N := UsbDev[K].TdDum;
+  O := UsbDev[K].TdCur;
+  TdSet(N, TdFl(2, 0, 1), UsbPg2 + UsbDev[K].BufOfs, UsbDev[K].Len, O);
+  MemL[0:EdA(UsbDev[K].EdI) + 4] := V2P(TdA(O));
+  UsbDev[K].TdCur := N;
+  UsbDev[K].TdDum := O;
+End;
+
+{ TD J retire par le controleur }
+Procedure UsbTdDone(J : LongInt);
+Var K, A, Cc, Cbp, Len, B : LongInt;
+Begin
+  For K := 0 To UsbMaxDev - 1 Do
+    If (UsbDev[K].Used <> 0) And (UsbDev[K].TdCur = J) Then
+    Begin
+      A := TdA(J);
+      Cc := (MemL[0:A] Shr 28) And 15;
+      If Cc <> 0 Then
+      Begin
+        If UsbDev[K].Dead = 0 Then
+          KLog('usb: tuyau ' + IntStr(K) + ' arrete, code de condition '
+              + IntStr(Cc));
+        UsbDev[K].Dead := 1;
+        Exit;
+      End;
+      B := UsbPg2 + UsbDev[K].BufOfs;
+      Cbp := MemL[0:A + 4];
+      If Cbp = 0 Then Len := UsbDev[K].Len
+      Else Len := Cbp - V2P(B);
+      If (Len < 0) Or (Len > UsbDev[K].Len) Then Len := UsbDev[K].Len;
+      UsbRearm(K);
+      UsbReport(K, B, Len);
+      Exit;
+    End;
+End;
+
+{ File des TD termines du HCCA (octet 84h) ; l'appelant tient UsbBusy }
+Procedure UsbDone;
+Var Dh, Td, J, N, I : LongInt; List : Array[0..31] Of LongInt;
+Begin
+  Dh := MemL[0:UsbPg + $84] And LongInt($FFFFFFF0);
+  MemL[0:UsbPg + $84] := 0;
+  N := 0;
+  Td := Dh;
+  While (Td <> 0) And (N < 32) Do
+  Begin
+    If Td < UsbPhys1 + OhTd Then Break;
+    J := (Td - UsbPhys1 - OhTd) Div 16;
+    If J >= 64 Then Break;
+    List[N] := J;
+    Inc(N);
+    Td := MemL[0:TdA(J) + 8] And LongInt($FFFFFFF0);
+  End;
+  For I := N - 1 DownTo 0 Do UsbTdDone(List[I]);
+End;
+
+Procedure UsbIrqHandler;
+Var St : LongInt;
+Begin
+  If Not UsbOn Then Exit;
+  { cas courant : la file des TD termines (en memoire) est non vide, un
+    seul acces de registre (acquittement de WDH) }
+  If MemL[0:UsbPg + $84] <> 0 Then
+  Begin
+    If AtomicXchg(LongInt(@UsbBusy), 1) <> 0 Then Exit;
+    UsbDone;
+    OhW(OhIntSt, 2);
+    UsbBusy := 0;
+    If UsbCtlBusy <> 0 Then WakeUp(LongInt(@UsbWchan));
+    Exit;
+  End;
+  St := OhR(OhIntSt) And $52;           { WDH, UE, RHSC : les seuls actives }
+  If St = 0 Then Exit;
+  If AtomicXchg(LongInt(@UsbBusy), 1) <> 0 Then Exit;
+  If (St And 2) <> 0 Then UsbDone;
+  OhW(OhIntSt, St);
+  UsbBusy := 0;
+  If UsbCtlBusy <> 0 Then WakeUp(LongInt(@UsbWchan));
+  If (St And 64) <> 0 Then WakeUp(LongInt(@UsbPortWchan));
+End;
+
+{ Tick : file des TD termines si l'IRQ s'est perdue ; repetition des touches }
+Procedure UsbTick;
+Begin
+  If Not UsbOn Then Exit;
+  If MemL[0:UsbPg + $84] <> 0 Then
+    If AtomicXchg(LongInt(@UsbBusy), 1) = 0 Then
+    Begin
+      UsbDone;
+      OhW(OhIntSt, 2);
+      UsbBusy := 0;
+      If UsbCtlBusy <> 0 Then WakeUp(LongInt(@UsbWchan));
+    End;
+  If UsbRepSc <> 0 Then
+    If Jiffies - UsbRepAt >= 0 Then
+    Begin
+      UsbKbdSend(UsbRepSc, False);
+      UsbRepAt := Jiffies + 3;
+    End;
+End;
+
+{ VMMDev ne doit plus annoncer la souris absolue (la tablette USB la remplace) }
+Procedure VbDropAbs;
+Var Fl : LongInt;
+Begin
+  If Not VbOn Then Exit;
+  Fl := SaveFlagsCli;
+  VbHdr(28, 2);
+  MemL[0:VbReq + 24] := 0;
+  VbCall;
+  RestoreFlags(Fl);
+  KLog('usb: VMMDev ne fournit plus la position absolue (tablette USB)');
+End;
+
+Procedure VbRestoreAbs;
+Var Fl : LongInt;
+Begin
+  If Not VbOn Then Exit;
+  Fl := SaveFlagsCli;
+  VbHdr(28, 2);
+  MemL[0:VbReq + 24] := 1;
+  VbCall;
+  RestoreFlags(Fl);
+  If VbWantAbs Then AbsSrc := 1;
+End;
+
+{ Cree le tuyau d'interruption K (Addr, point d'acces Ep, MPS, Len octets par
+  rapport) et le relie a la liste periodique }
+Procedure UsbStartPipe(K, Addr, Low, Ep, Mps, Len, Kind, Port : LongInt);
+Var E, I, Last : LongInt;
+Begin
+  If Len > 64 Then Len := 64;
+  If Len < 1 Then Len := 1;
+  UsbDev[K].Used := 0;
+  UsbDev[K].Kind := Kind; UsbDev[K].Addr := Addr; UsbDev[K].Ep := Ep;
+  UsbDev[K].Len := Len; UsbDev[K].Port := Port; UsbDev[K].Dead := 0;
+  UsbDev[K].EdI := 1 + K;
+  UsbDev[K].TdCur := 4 + 2 * K; UsbDev[K].TdDum := 5 + 2 * K;
+  UsbDev[K].BufOfs := 512 + K * 64;
+  UsbDev[K].Btn := 0; UsbDev[K].Nrep := 0;
+  UsbDev[K].PrevX := 0; UsbDev[K].PrevY := 0;
+  For I := 0 To 7 Do UsbDev[K].PrevKeys[I] := 0;
+  E := EdA(1 + K);
+  MemL[0:E] := Addr Or (Ep Shl 7) Or (Low Shl 13) Or (1 Shl 14)
+      Or (Mps Shl 16);
+  TdSet(UsbDev[K].TdCur, TdFl(2, 0, 1), UsbPg2 + UsbDev[K].BufOfs, Len,
+      UsbDev[K].TdDum);
+  TdSet(UsbDev[K].TdDum, 0, 0, 0, -1);
+  MemL[0:E + 4] := V2P(TdA(UsbDev[K].TdDum));
+  MemL[0:E + 8] := V2P(TdA(UsbDev[K].TdCur));
+  MemL[0:E + 12] := 0;
+  If UsbIntHead < 0 Then
+  Begin
+    UsbIntHead := 1 + K;
+    UsbIntTail := 1 + K;
+    For I := 0 To 3 Do MemL[0:UsbPg + I * 32] := V2P(E);
+  End
+  Else If UsbIntTail <> 1 + K Then
+  Begin
+    Last := EdA(UsbIntTail);
+    MemL[0:Last + 12] := V2P(E);
+    UsbIntTail := 1 + K;
+  End;
+  UsbDev[K].Used := 1;
+  MemL[0:E] := Addr Or (Ep Shl 7) Or (Low Shl 13) Or (Mps Shl 16);   { actif }
+End;
+
+Function UsbFreeDev : LongInt;
+Var K : LongInt;
+Begin
+  UsbFreeDev := -1;
+  For K := UsbMaxDev - 1 DownTo 0 Do
+    If UsbDev[K].Used = 0 Then UsbFreeDev := K;
+End;
+
+Function KMknod(Const P : String; Mode, Rdev : LongInt) : LongInt; Forward;
+Function MkDev(Maj, Min : LongInt) : LongInt; Forward;
+
+{ Interface HID IfN du peripherique Addr : tuyau d'interruption si clavier,
+  souris ou tablette. Rend vrai si un tuyau a ete demarre }
+Function UsbSetupHid(Addr, Low, Mps0, Port, IfN, Sub, Pro, Ep, EpMps, RepLen,
+    Interval : LongInt; Const Nm : String) : Boolean;
+Var K, R, Kd, I, Sz, Fx, Fy : LongInt; Sv : PFsStruct;
+Begin
+  UsbSetupHid := False;
+  K := UsbFreeDev;
+  If K < 0 Then
+  Begin
+    KLog('usb: trop de peripheriques HID (' + IntStr(UsbMaxDev) + ')');
+    Exit;
+  End;
+  If (Sub = 1) And (Pro = 1) Then
+  Begin
+    R := UsbCtl(Addr, Low, Mps0, $21, $0B, 0, IfN, 0);   { SET_PROTOCOL boot }
+    If R < 0 Then KLog('usb: SET_PROTOCOL refuse (' + IntStr(R) + ')');
+    R := UsbCtl(Addr, Low, Mps0, $21, $0A, 0, IfN, 0);   { SET_IDLE 0 }
+    KLog('usb: clavier (interface ' + IntStr(IfN) + ', point ' + IntStr(Ep)
+        + ', ' + Nm + ')');
+    UsbStartPipe(K, Addr, Low, Ep And 15, EpMps, 8, 1, Port);
+    UsbSetupHid := True;
+    Exit;
+  End;
+  If (RepLen < 8) Or (RepLen > 480) Then
+  Begin
+    KLog('usb: interface HID ' + IntStr(IfN) + ' : descripteur de rapport '
+        + 'de ' + IntStr(RepLen) + ' octets ignore');
+    Exit;
+  End;
+  R := UsbCtl(Addr, Low, Mps0, $81, 6, $2200, IfN, RepLen);
+  If R <= 0 Then
+  Begin
+    KLog('usb: GET_DESCRIPTOR(rapport) refuse (' + IntStr(R) + ')');
+    Exit;
+  End;
+  MemCopy(LongInt(@UsbRepD[0]), UsbPg2 + 16, R);
+  Sz := UsbParseHid(K, LongInt(@UsbRepD[0]), R);
+  Fx := -1; Fy := -1;
+  For I := 0 To UsbDev[K].NF - 1 Do
+  Begin
+    If UsbDev[K].FK[I] = 2 Then Fx := I;
+    If UsbDev[K].FK[I] = 3 Then Fy := I;
+  End;
+  Kd := 0;
+  If (Fx >= 0) And (Fy >= 0) Then
+  Begin
+    If UsbDev[K].FRel[Fx] = 0 Then Kd := 3 Else Kd := 2;
+  End;
+  KLog('usb: interface HID ' + IntStr(IfN) + ' sous-classe ' + IntStr(Sub)
+      + ' protocole ' + IntStr(Pro) + ' : rapport de ' + IntStr(R)
+      + ' octets, ' + IntStr(UsbDev[K].NF) + ' champs, taille '
+      + IntStr(Sz) + ' octets, type ' + IntStr(Kd));
+  If Kd = 0 Then
+  Begin
+    KLog('usb: interface HID ' + IntStr(IfN) + ' ignoree (ni souris ni '
+        + 'tablette)');
+    Exit;
+  End;
+  If Kd = 3 Then
+  Begin
+    If AbsSrc = 2 Then
+    Begin
+      KLog('usb: deuxieme tablette ignoree');
+      Exit;
+    End;
+    KLog('usb: tablette ' + Nm + ' : X ' + IntStr(UsbDev[K].FMin[Fx]) + '..'
+        + IntStr(UsbDev[K].FMax[Fx]) + ', Y ' + IntStr(UsbDev[K].FMin[Fy])
+        + '..' + IntStr(UsbDev[K].FMax[Fy]));
+  End
+  Else KLog('usb: souris ' + Nm);
+  R := UsbCtl(Addr, Low, Mps0, $21, $0A, 0, IfN, 0);     { SET_IDLE 0 }
+  UsbStartPipe(K, Addr, Low, Ep And 15, EpMps, Sz, Kd, Port);
+  If Kd = 3 Then
+  Begin
+    AbsSrc := 2;
+    AbsBus := 3; AbsVid := UsbVid; AbsPid := UsbPid;
+    If Nm = '' Then AbsName := 'USB Tablet' Else AbsName := Nm;
+    If (Not VbOn) And (UsbEv2 = 0) Then
+    Begin
+      UsbEv2 := 1;
+      { un fil noyau n'a pas de repertoire racine : celui de init }
+      Sv := Cur^.Fs;
+      If (Sv = Nil) And (InitTask <> Nil) Then Cur^.Fs := InitTask^.Fs;
+      R := KMknod('/dev/input/event2', S_IFCHR Or $1B0, MkDev(13, 66));
+      Cur^.Fs := Sv;
+      If R < 0 Then KLog('usb: /dev/input/event2 non cree (' + IntStr(R) + ')');
+    End;
+    VbDropAbs;
+    KLog('usb: tablette active sur /dev/input/event2 (0..65535)');
+  End;
+  UsbSetupHid := True;
+End;
+
+{ Enumeration du peripherique du port P (1..) }
+Procedure UsbEnumPort(P : LongInt);
+Var St, Low, Mps, Addr, R, I, N, Total, Pos, Ln, Ty, CfgV, IfN, Alt, Cl, Sb,
+    Pr, Ep, EpM, EpI, RepL, Prod, Dcl, Got, NC : LongInt;
+    Nm : String;
+    CIf, CSub, CPro, CEp, CMps, CInt, CRep : Array[0..7] Of LongInt;
+    Reg : LongInt;
+Begin
+  Reg := OhRhPort + (P - 1) * 4;
+  OhW(Reg, $10);                                   { SetPortReset }
+  N := 0;
+  Repeat
+    SleepTicks(1);
+    St := OhR(Reg);
+    Inc(N);
+  Until ((St And $100000) <> 0) Or (N > 30);
+  OhW(Reg, $100000);                               { efface PRSC }
+  St := OhR(Reg);
+  If (St And 2) = 0 Then
+  Begin
+    KLog('usb: port ' + IntStr(P) + ' : reinitialisation sans effet (etat '
+        + HexStr(St, 8) + ')');
+    Exit;
+  End;
+  Low := (St Shr 9) And 1;
+  If Low <> 0 Then KLog('usb: port ' + IntStr(P)
+      + ' : peripherique branche, vitesse basse (1,5 Mb/s)')
+  Else KLog('usb: port ' + IntStr(P)
+      + ' : peripherique branche, vitesse pleine (12 Mb/s)');
+  SleepTicks(2);
+  Mps := 8;
+  R := UsbCtl(0, Low, 8, $80, 6, $0100, 0, 8);
+  If R < 8 Then
+  Begin
+    KLog('usb: port ' + IntStr(P) + ' : GET_DESCRIPTOR(peripherique) '
+        + 'refuse (' + IntStr(R) + ')');
+    Exit;
+  End;
+  Mps := Mem[0:UsbPg2 + 16 + 7];
+  If (Mps <> 8) And (Mps <> 16) And (Mps <> 32) And (Mps <> 64) Then Mps := 8;
+  Addr := UsbNext;
+  Inc(UsbNext);
+  If UsbNext > 120 Then UsbNext := 1;
+  R := UsbCtl(0, Low, Mps, 0, 5, Addr, 0, 0);
+  If R < 0 Then
+  Begin
+    KLog('usb: port ' + IntStr(P) + ' : SET_ADDRESS refuse (' + IntStr(R)
+        + ')');
+    Exit;
+  End;
+  SleepTicks(1);
+  R := UsbCtl(Addr, Low, Mps, $80, 6, $0100, 0, 18);
+  If R < 18 Then
+  Begin
+    KLog('usb: port ' + IntStr(P) + ' : descripteur incomplet (' + IntStr(R)
+        + ')');
+    Exit;
+  End;
+  UsbVid := MemW[0:UsbPg2 + 16 + 8];
+  UsbPid := MemW[0:UsbPg2 + 16 + 10];
+  Dcl := Mem[0:UsbPg2 + 16 + 4];
+  Prod := Mem[0:UsbPg2 + 16 + 15];
+  KLog('usb: port ' + IntStr(P) + ' adresse ' + IntStr(Addr) + ' : '
+      + HexStr(UsbVid, 4) + ':' + HexStr(UsbPid, 4) + ' classe '
+      + IntStr(Dcl) + ' MPS0 ' + IntStr(Mps) + ' USB '
+      + HexStr(MemW[0:UsbPg2 + 16 + 2], 4));
+  If Dcl = 9 Then
+  Begin
+    KLog('usb: port ' + IntStr(P) + ' : hub externe non gere');
+    Exit;
+  End;
+  R := UsbCtl(Addr, Low, Mps, $80, 6, $0200, 0, 9);
+  If R < 9 Then
+  Begin
+    KLog('usb: GET_DESCRIPTOR(configuration) refuse (' + IntStr(R) + ')');
+    Exit;
+  End;
+  Total := MemW[0:UsbPg2 + 16 + 2];
+  CfgV := Mem[0:UsbPg2 + 16 + 5];
+  If Total > 480 Then Total := 480;
+  R := UsbCtl(Addr, Low, Mps, $80, 6, $0200, 0, Total);
+  If R < 9 Then
+  Begin
+    KLog('usb: configuration complete refusee (' + IntStr(R) + ')');
+    Exit;
+  End;
+  MemCopy(LongInt(@UsbCfg[0]), UsbPg2 + 16, R);
+  Total := R;
+  R := UsbCtl(Addr, Low, Mps, 0, 9, CfgV, 0, 0);
+  If R < 0 Then
+  Begin
+    KLog('usb: SET_CONFIGURATION refuse (' + IntStr(R) + ')');
+    Exit;
+  End;
+  Nm := UsbStr(Addr, Low, Mps, Prod);
+  KLog('usb: port ' + IntStr(P) + ' : "' + Nm + '", configuration '
+      + IntStr(CfgV) + ', ' + IntStr(Total) + ' octets de descripteurs');
+  { interfaces HID avec un point d'interruption en entree }
+  NC := 0; Pos := 0; IfN := -1; Alt := 0; Cl := 0; Sb := 0; Pr := 0;
+  RepL := 0; Got := 0;
+  While Pos + 2 <= Total Do
+  Begin
+    Ln := UsbCfg[Pos];
+    Ty := UsbCfg[Pos + 1];
+    If Ln < 2 Then Break;
+    If Ty = 4 Then
+    Begin
+      IfN := UsbCfg[Pos + 2]; Alt := UsbCfg[Pos + 3];
+      Cl := UsbCfg[Pos + 5]; Sb := UsbCfg[Pos + 6]; Pr := UsbCfg[Pos + 7];
+      RepL := 0;
+      KLog('usb:   interface ' + IntStr(IfN) + ' alt ' + IntStr(Alt)
+          + ' classe ' + IntStr(Cl) + '/' + IntStr(Sb) + '/' + IntStr(Pr));
+    End
+    Else If (Ty = $21) And (Ln >= 9) Then
+      RepL := UsbCfg[Pos + 7] Or (UsbCfg[Pos + 8] Shl 8)
+    Else If (Ty = 5) And (Ln >= 7) Then
+    Begin
+      Ep := UsbCfg[Pos + 2];
+      EpM := UsbCfg[Pos + 4] Or (UsbCfg[Pos + 5] Shl 8);
+      EpI := UsbCfg[Pos + 6];
+      If (Cl = 3) And (Alt = 0) And ((UsbCfg[Pos + 3] And 3) = 3)
+         And ((Ep And $80) <> 0) And (NC < 8) Then
+      Begin
+        CIf[NC] := IfN; CSub[NC] := Sb; CPro[NC] := Pr; CEp[NC] := Ep;
+        CMps[NC] := EpM And $7FF; CInt[NC] := EpI; CRep[NC] := RepL;
+        Inc(NC);
+      End;
+    End;
+    Pos := Pos + Ln;
+  End;
+  If NC = 0 Then
+  Begin
+    KLog('usb: port ' + IntStr(P) + ' : aucune interface HID, ignore');
+    Exit;
+  End;
+  For I := 0 To NC - 1 Do
+    If UsbSetupHid(Addr, Low, Mps, P, CIf[I], CSub[I], CPro[I], CEp[I],
+                   CMps[I], CRep[I], CInt[I], Nm) Then Got := 1;
+  If Got = 0 Then KLog('usb: port ' + IntStr(P) + ' : rien a utiliser');
+End;
+
+{ Un port se deconnecte : ses tuyaux sont arretes }
+Procedure UsbPortGone(P : LongInt);
+Var K : LongInt;
+Begin
+  For K := 0 To UsbMaxDev - 1 Do
+    If (UsbDev[K].Used <> 0) And (UsbDev[K].Port = P) Then
+    Begin
+      MemL[0:EdA(UsbDev[K].EdI)] := MemL[0:EdA(UsbDev[K].EdI)] Or (1 Shl 14);
+      UsbDev[K].Used := 0;
+      KLog('usb: port ' + IntStr(P) + ' : peripherique retire (tuyau '
+          + IntStr(K) + ')');
+      If UsbDev[K].Kind = 3 Then
+      Begin
+        AbsSrc := 0;
+        VbRestoreAbs;
+      End;
+    End;
+End;
+
+{ Fil noyau kusbd : alimente les ports, puis surveille les changements }
+Procedure UsbMain;
+Var P, St, Reg, Pg : LongInt;
+Begin
+  Pg := (OhR(OhRhA) Shr 24) And 255;
+  { reinitialisation du bus (HCFS = USBRESET deja ecrit) : les peripheriques
+    reviennent a l'etat par defaut (le BIOS les avait peut-etre adresses) }
+  SleepTicks(6);
+  OhW(OhCtl, $97);              { operationnel, listes periodique + controle }
+  OhW(OhIntSt, -1);
+  OhW(OhIntEn, LongInt($80000052));              { MIE, UE, RHSC, WDH }
+  KLog('usb: controleur operationnel');
+  OhW(OhRhSt, $10000);                             { alimentation globale }
+  For P := 1 To UsbNPorts Do OhW(OhRhPort + (P - 1) * 4, $100);
+  SleepTicks(10 + (Pg * 2) Div 10);
+  While True Do
+  Begin
+    For P := 1 To UsbNPorts Do
+    Begin
+      Reg := OhRhPort + (P - 1) * 4;
+      St := OhR(Reg);
+      If ((St And $1F0000) <> 0) Or (((St And 1) <> 0) And (Not UsbTried[P]))
+         Then KLog('usb: port ' + IntStr(P) + ' etat ' + HexStr(St, 8));
+      If (St And $1F0000) <> 0 Then OhW(Reg, St And $1F0000);
+      If (St And $10000) <> 0 Then
+      Begin
+        If (St And 1) <> 0 Then
+        Begin
+          UsbPortGone(P);
+          UsbTried[P] := True;
+          UsbEnumPort(P);
+        End
+        Else
+        Begin
+          UsbTried[P] := False;
+          UsbPortGone(P);
+        End;
+      End
+      Else If ((St And 1) <> 0) And (Not UsbTried[P]) Then
+      Begin
+        UsbTried[P] := True;
+        UsbEnumPort(P);
+      End;
+    End;
+    SleepOn(LongInt(@UsbPortWchan), 2000, False);
+  End;
+End;
+
+Procedure UsbInit;
+Var D, F, Nf, Id, Cl, Hdr, Bar, Cmd, Rev, Fi, Fm, N, Ctl, I : LongInt;
+    Dev, Fn : LongInt;
+Begin
+  UsbOn := False;
+  UsbIntHead := -1;
+  UsbNext := 1;
+  If Pos(' nousb', ' ' + CmdLine) > 0 Then Exit;
+  Dev := -1; Fn := 0;
+  For D := 0 To 31 Do
+  Begin
+    Id := PciRead(0, D, 0, 0);
+    If (Id = -1) Or ((Id And $FFFF) = $FFFF) Then Continue;
+    Hdr := (PciRead(0, D, 0, $0C) Shr 16) And $FF;
+    If (Hdr And $80) <> 0 Then Nf := 8 Else Nf := 1;
+    For F := 0 To Nf - 1 Do
+    Begin
+      Id := PciRead(0, D, F, 0);
+      If (Id = -1) Or ((Id And $FFFF) = $FFFF) Then Continue;
+      Cl := (PciRead(0, D, F, 8) Shr 8) And $FFFFFF;
+      If (Cl Shr 8) = $0C03 Then
+      Begin
+        If Cl = $0C0310 Then
+        Begin
+          If Dev < 0 Then
+          Begin
+            Dev := D; Fn := F;
+          End
+          Else KLog('usb: deuxieme controleur OHCI ignore ('
+              + HexStr(Id And $FFFF, 4) + ':' + HexStr(Id Shr 16, 4) + ')');
+        End
+        Else KLog('usb: controleur '
+            + HexStr(Id And $FFFF, 4) + ':' + HexStr(Id Shr 16, 4)
+            + ' classe ' + HexStr(Cl, 6) + ' non gere (OHCI seulement)');
+      End;
+    End;
+  End;
+  If Dev < 0 Then Exit;
+  Id := PciRead(0, Dev, Fn, 0);
+  Bar := PciRead(0, Dev, Fn, $10);
+  If (Bar And 1) <> 0 Then
+  Begin
+    KLog('usb: OHCI ' + HexStr(Id And $FFFF, 4) + ':' + HexStr(Id Shr 16, 4)
+        + ' : BAR 0 en espace d''E/S, abandon');
+    Exit;
+  End;
+  Bar := Bar And LongInt($FFFFF000);
+  If Bar = 0 Then
+  Begin
+    KLog('usb: OHCI sans adresse (BAR 0 vide)');
+    Exit;
+  End;
+  Cmd := PciRead(0, Dev, Fn, 4);
+  PciWrite(0, Dev, Fn, 4, (Cmd And $FFFF) Or 6);
+  UsbIrq := PciRead(0, Dev, Fn, $3C) And $FF;
+  I := AllocZeroPage;
+  UsbPg := AllocZeroPage;
+  UsbPg2 := AllocZeroPage;
+  If (I = 0) Or (UsbPg = 0) Or (UsbPg2 = 0) Then Exit;
+  MemL[0:I] := Bar Or $13;
+  MemL[0:MasterPd + UsbPde * 4] := V2P(I) Or $13;
+  FlushTlb;
+  UsbRegs := LongInt(UsbPde Shl 22);
+  UsbPhys1 := V2P(UsbPg);
+  Rev := OhR(0) And $FF;
+  KLog('usb: OHCI ' + HexStr(Id And $FFFF, 4) + ':' + HexStr(Id Shr 16, 4)
+      + ' en ' + HexStr(Bar, 8) + ' (00:' + HexStr(Dev, 2) + '.'
+      + IntStr(Fn) + '), IRQ '
+      + IntStr(UsbIrq) + ', revision ' + HexStr(Rev, 2));
+  If Rev <> $10 Then
+  Begin
+    KLog('usb: revision OHCI inattendue, abandon');
+    Exit;
+  End;
+  Ctl := OhR(OhCtl);
+  If (Ctl And $100) <> 0 Then
+  Begin
+    KLog('usb: le BIOS (SMM) possede le controleur : demande de reprise');
+    OhW(OhCmd, 8);
+    N := 0;
+    While ((OhR(OhCtl) And $100) <> 0) And (N < 200) Do
+    Begin
+      SmpDelayUs(100);
+      Inc(N);
+    End;
+    If (OhR(OhCtl) And $100) <> 0 Then
+      KLog('usb: le BIOS ne rend pas le controleur, on le prend');
+  End;
+  Fi := OhR(OhFmInt);
+  OhW(OhIntDis, -1);
+  OhW(OhCmd, 1);                                   { HCR : reinitialisation }
+  N := 0;
+  While ((OhR(OhCmd) And 1) <> 0) And (N < 200) Do
+  Begin
+    SmpDelayUs(1);
+    Inc(N);
+  End;
+  If (OhR(OhCmd) And 1) <> 0 Then
+  Begin
+    KLog('usb: reinitialisation du controleur sans fin, abandon');
+    Exit;
+  End;
+  { ED 0 (controle) : saute, file vide ; listes }
+  MemL[0:EdA(0)] := (1 Shl 14);
+  TdSet(3, 0, 0, 0, -1);
+  MemL[0:EdA(0) + 4] := V2P(TdA(3));
+  MemL[0:EdA(0) + 8] := V2P(TdA(3));
+  OhW(OhHcca, UsbPhys1);
+  OhW(OhCtlHead, V2P(EdA(0)));
+  OhW(OhBulkHead, 0);
+  N := Fi And $3FFF;
+  If (N < $2A00) Or (N > $3000) Then N := $2EDF;
+  Fm := N Or ((((N - 210) * 6) Div 7) Shl 16)
+      Or ((Fi Xor LongInt($80000000)) And LongInt($80000000));
+  OhW(OhFmInt, Fm);
+  OhW(OhPerStart, (N * 9) Div 10);
+  OhW(OhLsThr, $628);
+  OhW(OhCtl, 3);                 { USBRESET : kusbd attend 60 ms puis passe }
+  UsbNPorts := OhR(OhRhA) And $FF;
+  If UsbNPorts > 15 Then UsbNPorts := 15;
+  KLog('usb: controleur initialise, ' + IntStr(UsbNPorts)
+      + ' port(s) a la racine, horloge ' + HexStr(Fm, 8));
+  UsbOn := True;
+  If (UsbIrq > 0) And (UsbIrq < 16) Then IrqEnable(UsbIrq)
+  Else KLog('usb: pas d''IRQ utilisable : surveillance par le tick seulement');
 End;
 
 { ---- Intel e1000 (82540EM : carte par defaut de VirtualBox et de QEMU
@@ -25365,7 +26886,8 @@ Var
   FbSaveDac : Array[0..191] Of Byte;
   FbFOps : Array[0..15] Of LongInt;
   { cartes : 1 Bochs/VirtualBox VBE (1CEh/1CFh), 2 VMware SVGA II (VMSVGA) }
-  FbKind, FbBase, FbOpens, FbMapped, FbTk : LongInt;
+  FbKind, FbBase, FbOpens, FbMapped, FbTk, FbManual : LongInt;
+  FbUpdEvery : LongInt;             { ticks entre deux UPDATE (fbupd=N) }
   VmIo, VmFifo, VmFifoOn, VmFifoSz, VmMaxW, VmMaxH, FbBar : LongInt;
   FbInfo : String;                 { cartes VGA vues et carte choisie }
   FbPci : String;                  { liste des cartes PCI VGA }
@@ -25391,12 +26913,14 @@ End;
 
 Function VmR(Idx : LongInt) : LongInt;
 Begin
+  Inc(PerfC[5]);
   OutL(VmIo, Idx);
   VmR := InL(VmIo + 1);
 End;
 
 Procedure VmW(Idx, V : LongInt);
 Begin
+  Inc(PerfC[5]);
   OutL(VmIo, Idx);
   OutL(VmIo + 1, V);
 End;
@@ -25421,6 +26945,77 @@ Begin
     If Nx >= Mx Then Nx := Mn;
   End;
   MemL[0:VmFifo + 8] := Nx;
+  Inc(PerfC[6]);
+End;
+
+{ ecrit N mots dans la FIFO (rien si pas la place) ; 0 ou -1 }
+Function VmFifoPut(Src, N : LongInt) : LongInt;
+Var Nx, St, Mn, Mx, Used, I : LongInt;
+Begin
+  VmFifoPut := -1;
+  If VmFifoOn = 0 Then Exit;
+  Mn := MemL[0:VmFifo]; Mx := MemL[0:VmFifo + 4];
+  Nx := MemL[0:VmFifo + 8]; St := MemL[0:VmFifo + 12];
+  If (Mx <= Mn) Or (Nx < Mn) Or (Nx >= Mx) Then Exit;
+  Used := Nx - St;
+  If Used < 0 Then Used := Used + (Mx - Mn);
+  If Used + N * 4 + 8 >= Mx - Mn Then Exit;
+  For I := 0 To N - 1 Do
+  Begin
+    MemL[0:VmFifo + Nx] := MemL[0:Src + I * 4];
+    Nx := Nx + 4;
+    If Nx >= Mx Then Nx := Mn;
+  End;
+  MemL[0:VmFifo + 8] := Nx;
+  VmFifoPut := 0;
+End;
+
+{ FBIO_K32_CURDEF : curseur materiel ARGB (SVGA_CMD_DEFINE_ALPHA_CURSOR) }
+Function VmCursorDef(W, H, Hx, Hy, Px : LongInt) : LongInt;
+Var Buf : LongInt;
+Begin
+  VmCursorDef := -ENOMEM;
+  If (W < 1) Or (H < 1) Or (W > 64) Or (H > 64) Then
+  Begin
+    VmCursorDef := -EINVAL;
+    Exit;
+  End;
+  Buf := AllocPages(2);
+  If Buf = 0 Then Exit;
+  MemL[0:Buf] := 22;
+  MemL[0:Buf + 4] := 0;
+  MemL[0:Buf + 8] := Hx;
+  MemL[0:Buf + 12] := Hy;
+  MemL[0:Buf + 16] := W;
+  MemL[0:Buf + 20] := H;
+  MemCopy(Buf + 24, Px, W * H * 4);
+  If VmFifoPut(Buf, 6 + W * H) = 0 Then VmCursorDef := 0
+  Else VmCursorDef := -EAGAIN;
+  FreePages(Buf, 2);
+End;
+
+{ FBIO_K32_CURMOVE : position et visibilite. Si la FIFO annonce
+  CURSOR_BYPASS_3 (capacite 16, mot 4) : trois ecritures en memoire et le
+  compteur, aucun VM-exit (voie VirtualBox, NON prouvee ici : QEMU ne
+  l'offre pas) ; sinon registres CURSOR_ID/X/Y/ON (4 sorties) }
+Procedure VmCursorMove(X, Y, On : LongInt);
+Begin
+  If (MemL[0:VmFifo] >= 1200) And ((MemL[0:VmFifo + 16] And 16) <> 0) Then
+  Begin
+    MemL[0:VmFifo + 36] := On;
+    MemL[0:VmFifo + 40] := X;
+    MemL[0:VmFifo + 44] := Y;
+    MemL[0:VmFifo + 48] := MemL[0:VmFifo + 48] + 1;
+    Inc(PerfC[11]);
+  End
+  Else
+  Begin
+    VmW(24, 0);
+    VmW(25, X);
+    VmW(26, Y);
+    VmW(27, On);
+    Inc(PerfC[12]);
+  End;
 End;
 
 { Initialise la FIFO (une seule fois) : minimum apres la zone des registres,
@@ -25508,6 +27103,7 @@ Begin
     FbSize := FbLine * Y;
     FbXOff := 0; FbYOff := 0;
     FbGfx := True;
+    VgaHidden := True;
     MemFill(FbBase, 0, FbSize);
     VmUpdate(0, 0, X, Y);
     FbSetMode := 0;
@@ -25535,6 +27131,7 @@ Begin
   FbSize := FbLine * VY;
   FbXOff := 0; FbYOff := 0;
   FbGfx := True;
+  VgaHidden := True;
   MemFill(FbBase, 0, FbSize);
   FbSetMode := 0;
 End;
@@ -25616,6 +27213,7 @@ Begin
   N := FbSize - F^.Pos;
   If N > Cnt Then N := Cnt;
   MemCopy(FbBase + F^.Pos, Buf, N);
+  Inc(PerfC[7], N Shr 10);
   F^.Pos := F^.Pos + N;
   FbWrite := N;
 End;
@@ -25702,6 +27300,56 @@ Begin
         FbFillVar(Arg);
         FbIoctl := 0;
       End;
+    $46F0 :                                  { FBIO_K32_UPDATE x,y,w,h }
+      Begin
+        If (FbKind <> 2) Or (Not FbGfx) Then Exit;
+        If Not EnsureUser(Arg, 16, False) Then
+        Begin
+          FbIoctl := -EFAULT;
+          Exit;
+        End;
+        FbManual := 1;
+        X := MemL[0:Arg]; Y := MemL[0:Arg + 4];
+        VX := MemL[0:Arg + 8]; VY := MemL[0:Arg + 12];
+        If (VX > 0) And (VY > 0) And (X >= 0) And (Y >= 0) And
+           (X + VX <= FbW) And (Y + VY <= FbH) Then VmUpdate(X, Y, VX, VY);
+        FbIoctl := 0;
+      End;
+    $46F1 :                                  { FBIO_K32_CURDEF w,h,hx,hy,px }
+      Begin
+        If (FbKind <> 2) Or (Not FbGfx) Then Exit;
+        If Not EnsureUser(Arg, 20, False) Then
+        Begin
+          FbIoctl := -EFAULT;
+          Exit;
+        End;
+        If (MemL[0:Arg] < 1) Or (MemL[0:Arg] > 64) Or (MemL[0:Arg + 4] < 1)
+           Or (MemL[0:Arg + 4] > 64) Then
+        Begin
+          FbIoctl := -EINVAL;
+          Exit;
+        End;
+        If Not EnsureUser(MemL[0:Arg + 16], MemL[0:Arg] * MemL[0:Arg + 4] * 4,
+                          False) Then
+        Begin
+          FbIoctl := -EFAULT;
+          Exit;
+        End;
+        FbIoctl := VmCursorDef(MemL[0:Arg], MemL[0:Arg + 4],
+                               MemL[0:Arg + 8], MemL[0:Arg + 12],
+                               MemL[0:Arg + 16]);
+      End;
+    $46F2 :                                  { FBIO_K32_CURMOVE x,y,on }
+      Begin
+        If (FbKind <> 2) Or (Not FbGfx) Then Exit;
+        If Not EnsureUser(Arg, 12, False) Then
+        Begin
+          FbIoctl := -EFAULT;
+          Exit;
+        End;
+        VmCursorMove(MemL[0:Arg], MemL[0:Arg + 4], MemL[0:Arg + 8]);
+        FbIoctl := 0;
+      End;
     $4611 : FbIoctl := 0;                    { FBIOBLANK : sans effet }
     $4602 :                                  { FBIOGET_FSCREENINFO }
       Begin
@@ -25720,7 +27368,8 @@ Begin
         Else MemL[0:Arg + 32] := 2;          { TRUECOLOR }
         MemW[0:Arg + 36] := 1;               { xpanstep, ypanstep }
         MemW[0:Arg + 38] := 1;
-        MemL[0:Arg + 48] := FbLine;          { line_length }
+        MemL[0:Arg + 44] := FbLine;          { line_length (Linux : 44) }
+        MemL[0:Arg + 48] := FbLine;          { ancien emplacement (compat.) }
         FbIoctl := 0;
       End;
     $4604, $4605 :                           { FBIOGETCMAP, FBIOPUTCMAP }
@@ -25818,6 +27467,7 @@ Begin
     If FbSaveMem <> 0 Then MemCopy(FbVirt, FbSaveMem, 262144);
     Port[$3C8] := 0;
     For I := 0 To 191 Do Port[$3C9] := FbSaveDac[I];
+    VgaHidden := False;
     VcShow(ActiveVc);
   End;
 End;
@@ -25831,15 +27481,17 @@ End;
 Procedure FbRelease(F : PFile);
 Begin
   If FbOpens > 0 Then Dec(FbOpens);
+  If FbOpens <= 0 Then FbManual := 0;
 End;
 
 { Tous les 5 ticks (20 Hz) : ecran entier redessine par l'hote (VMware) }
 Procedure FbTick;
 Begin
   If (FbKind <> 2) Or (Not FbGfx) Or (VmFifoOn = 0) Then Exit;
+  If FbManual <> 0 Then Exit;
   If (FbOpens <= 0) And (FbMapped = 0) Then Exit;
   Inc(FbTk);
-  If FbTk >= 5 Then
+  If FbTk >= FbUpdEvery Then
   Begin
     FbTk := 0;
     VmUpdate(0, 0, FbW, FbH);
@@ -25877,6 +27529,9 @@ Var S : String;
 Begin
   FbOn := False;
   FbGfx := False;
+  FbUpdEvery := 5;
+  If CmdGet('fbupd') <> '' Then FbUpdEvery := StrVal(CmdGet('fbupd'));
+  If FbUpdEvery < 1 Then FbUpdEvery := 1;
   W0 := 0; H0 := 0; B0 := 32;
   S := CmdGet('fb');
   If S <> '' Then
@@ -33871,7 +35526,7 @@ Begin
       SysPoll := 0;
       Exit;
     End;
-    If SleepTicks(1) = WakeSignal Then
+    If SleepOn(LongInt(@PollWchan), 1, True) = WakeSignal Then
     Begin
       SysPoll := -EINTR;
       Exit;
@@ -33964,7 +35619,7 @@ Begin
       DoSelect := Cnt;
       Exit;
     End;
-    If SleepTicks(1) = WakeSignal Then
+    If SleepOn(LongInt(@PollWchan), 1, True) = WakeSignal Then
     Begin
       DoSelect := -EINTR;
       Exit;
@@ -34354,6 +36009,8 @@ Procedure IrqBody(N : LongInt; FromUser : Boolean);
 Begin
   If (N < 16) And (ModIrqFn[N] <> 0) Then Call0(ModIrqFn[N]);
   If NetPresent And (N = NicIrq) Then NicIrqHandler;
+  If VbOn And (Not VbSim) And (N = VbIrq) Then VbIrqHandler;
+  If UsbOn And (N = UsbIrq) Then UsbIrqHandler;
   Case N Of
     0 : Begin
           TimerTick(FromUser);
@@ -45223,6 +46880,8 @@ Begin
   SyAddInt('kernel/threads-max', 0, MaxTasks - 1, 0, 1000000, 0);
   SyAddInt('kernel/randomize_va_space', LongInt(@SyRandomize), 2, 0, 2, 1);
   SyAddInt('kernel/panic', LongInt(@SyPanic), 0, 0, 3600, 1);
+  SyAddInt('k32/vbox_sim_x', LongInt(@VbSimX), 0, 0, 65535, 1);
+  SyAddInt('k32/vbox_sim_y', LongInt(@VbSimY), 0, 0, 65535, 1);
   If CmdGet('panic') <> '' Then SyPanic := StrVal(CmdGet('panic'));
   SyAddInt('kernel/panic_on_oops', LongInt(@SyPanicOops), 0, 0, 1, 1);
   SyAddStr('kernel/printk', SkStr, '4' + Chr(9) + '4' + Chr(9) + '1' + Chr(9)
@@ -45473,6 +47132,7 @@ Begin
   KMknod('/dev/input/mice', S_IFCHR Or $1B0, MkDev(13, 63));
   KMknod('/dev/input/event0', S_IFCHR Or $1B0, MkDev(13, 64));
   KMknod('/dev/input/event1', S_IFCHR Or $1B0, MkDev(13, 65));
+  If VbOn Then KMknod('/dev/input/event2', S_IFCHR Or $1B0, MkDev(13, 66));
   VfsSymlink('/proc/self/fd', '/dev/fd');
   VfsSymlink('/proc/self/fd/0', '/dev/stdin');
   VfsSymlink('/proc/self/fd/1', '/dev/stdout');
@@ -45566,7 +47226,7 @@ Const
   PxMax = 40;
   PxPart = 1; PxDiskst = 2; PxDevices = 3; PxIntr = 4; PxIoports = 5;
   PxIomem = 6; PxVmstat = 7; PxBuddy = 8; PxMisc = 9; PxCgroups = 10;
-  PxTty = 11; PxTtyDrv = 12; PxFb = 13; PxSysrq = 20;
+  PxTty = 11; PxTtyDrv = 12; PxFb = 13; PxPerf = 14; PxSysrq = 20;
   PxNTcp = 30; PxNUdp = 31; PxNRaw = 32; PxNUnix = 33; PxNSnmp = 34;
   PxNSock = 35; PxNArp = 36; PxNProto = 37; PxNIf6 = 38;
   PidEntMax = 25;                { entrees des repertoires /proc/PID }
@@ -45617,6 +47277,7 @@ Begin
   PxN := 0;
   PxAdd(1, 'partitions', 0, PxPart);
   PxAdd(1, 'fb', 0, PxFb);
+  PxAdd(1, 'k32perf', 0, PxPerf);
   PxAdd(1, 'diskstats', 0, PxDiskst);
   PxAdd(1, 'devices', 0, PxDevices);
   PxAdd(1, 'interrupts', 0, PxIntr);
@@ -45982,6 +47643,28 @@ Begin
   If FbPci = '' Then PAddLn('# pci : aucune carte de classe VGA');
 End;
 
+{ /proc/k32perf : compteurs (total, par seconde) des acces qui coutent un
+  VM-exit sous un hyperviseur, pour chercher ce qui fait ramer le bureau }
+Procedure PxGenPerf;
+Const Nm : Array[0..14] Of String[24] = ('irq', 'lapic_eoi', 'pic_eoi_ports',
+  'kbc_kbd_ports', 'kbc_mouse_ports', 'svga_registers', 'svga_updates',
+  'fb_write_kb', 'cmos_reads', 'klog_calls', 'ticks', 'cursor_fifo_moves',
+  'cursor_reg_moves', 'ohci_reg_access', 'usb_reports');
+Var I : LongInt;
+Begin
+  PAddLn('# compteur total par_seconde');
+  For I := 0 To 14 Do
+    PAddLn(Nm[I] + ' ' + IntStr(PerfC[I]) + ' ' + IntStr(PerfRate[I]));
+  If FbKind = 2 Then PAddLn('fb_update_every_ticks ' + IntStr(FbUpdEvery)
+      + ' 0');
+  If VbOn Then
+  Begin
+    PAddLn('vbox_requests ' + IntStr(VbNReq) + ' 0');
+    PAddLn('vbox_events ' + IntStr(VbNEv) + ' 0');
+    PAddLn('vbox_errors ' + IntStr(VbNErr) + ' 0');
+  End;
+End;
+
 Procedure PxGenDiskstats;
 Var I, X : LongInt;
 Begin
@@ -46307,6 +47990,7 @@ Begin
     Case Ino - PxBase Of
       PxPart : PxGenPartitions;
       PxFb : PxGenFb;
+      PxPerf : PxGenPerf;
       PxDiskst : PxGenDiskstats;
       PxDevices : PxGenDevices;
       PxIntr : PxGenIntr;
@@ -49723,8 +51407,8 @@ End;
   encodes en base64, ecrits dans le tmpfs racine au demarrage. }
 
 Const
-  EmbCount = 61;
-  EmbPath : Array[0..60] Of String[20] = (
+  EmbCount = 64;
+  EmbPath : Array[0..63] Of String[20] = (
     '/sbin/init',
     '/bin/hello',
     '/bin/forkwait',
@@ -49779,6 +51463,9 @@ Const
     '/bin/cgtest',
     '/bin/bdtest',
     '/bin/vttest',
+    '/bin/idler',
+    '/bin/vboxtest',
+    '/bin/usbtest',
     '/bin/effects',
     '/bin/modtest',
     '/bin/hello.ko',
@@ -49786,20 +51473,21 @@ Const
     '/bin/badinit.ko',
     '/bin/unkmod.ko',
     '/bin/irqmod.ko');
-  EmbSize : Array[0..60] Of LongInt = (
+  EmbSize : Array[0..63] Of LongInt = (
     3880, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
     2320, 1104, 12408, 6948, 3124, 2476, 3268, 10872, 2376, 2004, 5100, 3932,
-    5064, 22088, 2812, 10804, 8460, 4256, 2196, 3924, 2552, 4028, 12328, 8776,
+    5064, 22088, 2812, 10804, 9740, 4256, 2196, 3924, 2552, 4028, 12328, 8776,
     6368, 7332, 11572, 7548, 7316, 5932, 9416, 11828, 5256, 3912, 6836, 9680,
-    2128, 4404, 1128, 5220, 2788, 3200, 4016, 9456, 3276, 1336, 980, 816,
-    2288);
-  EmbStart : Array[0..61] Of LongInt = (
+    2128, 4404, 1128, 5220, 2788, 3200, 1224, 2976, 4988, 4016, 9456, 3276,
+    1336, 980, 816, 2288);
+  EmbStart : Array[0..64] Of LongInt = (
     0, 87, 125, 169, 220, 271, 321, 409, 447, 484, 536, 637, 698, 750, 775,
     1051, 1206, 1276, 1332, 1405, 1647, 1700, 1745, 1859, 1947, 2060, 2551,
-    2614, 2855, 3043, 3138, 3187, 3275, 3332, 3422, 3696, 3892, 4034, 4197,
-    4455, 4623, 4786, 4918, 5128, 5391, 5508, 5595, 5747, 5963, 6011, 6109,
-    6135, 6251, 6313, 6385, 6475, 6686, 6759, 6789, 6811, 6830, 6881);
-  EmbData : Array[0..6880] Of String[60] = (
+    2614, 2855, 3072, 3167, 3216, 3304, 3361, 3451, 3725, 3921, 4063, 4226,
+    4484, 4652, 4815, 4947, 5157, 5420, 5537, 5624, 5776, 5992, 6040, 6138,
+    6164, 6280, 6342, 6414, 6442, 6509, 6620, 6710, 6921, 6994, 7024, 7046,
+    7065, 7116);
+  EmbData : Array[0..7115] Of String[60] = (
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAAAQDgAAAAAAADQAIAAC',
     'ACgABwAGAAEAAAAAAAAAAIAECACABAhQDAAAUAwAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuBQAAACJ5VdWU4Pk8IHskAUA',
@@ -52655,194 +54343,223 @@ Const
     'AAASAAAABAAAABAAAAAJAAAAAwAAAAAAAAAAAAAA7CcAANAAAAAAAAAAAAAA',
     'AAEAAAAAAAAAEQAAAAMAAAAAAAAAAAAAALwoAAA3AAAAAAAAAAAAAAABAAAA',
     'AAAAAA==',
-    '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',
-    '0oXAD5TCuP+aBAjouhIAAIudtPX//4PJ/zHSuBMAAADNgDHSg/jquAubBAgP',
-    'lMLolhIAAFBqAP+1tPX//2oBagP/taz1//9qAGjAAAAA6EERAAAx0oPEIIXA',
-    'ica4F5sECA+fwuhhEgAAhfYPjkcBAAAxyYF+FAAA/wB1MYuFsPX//7sCAAAA',
-    'mff7gTyGAP8AAHUaaYWw9f//IAMAADHJgbwGkAEAAFY0EgAPlMGJyrgfmwQI',
-    '6BESAACLnbT1//8x0mmFsPX//7AEAADHhAbIAAAA782rAGmFsPX//ywBAACN',
-    'DIXIAAAAuBMAAADNgDH/uAMAAACLnbT1//+6BAAAAIm9xPX//42NxPX//82A',
-    'MdK4LJsECIG9xPX//+/NqwAPlMLooxEAALgCAAAAzYCJw2mFsPX//7QEAACN',
-    'vAbIAAAAhdt1D8cHmYh3ALgBAAAAzYDr/jHJuAcAAACJys2AMdKBP5mIdwC4',
-    'OpsECA+UwuhWEQAAMdJphbD1//9ABgAAAfCLvbD1//85+n0MxwD///8AQoPA',
-    'BOvqi42s9f//uFsAAACJ882AMdKFwLhOmwQID5TC6BIRAABTi4Ws9f//MfaN',
-    'nYj2//9qAAUAIAAA/7W09f//agFqAVBqAGjAAAAA6K8PAACDxCDB6B+JwrhY',
-    'mwQI6NMQAAC4apsECOipEAAAibWM9v//uKIAAAAxyceFiPb//wQAAADNgLh0',
-    'mwQI6NIPAACJhbD1//+4e5sECOjCDwAAiYWs9f//jYXo9f//6FQQAACLnbT1',
-    '//+4NgAAAMeF6PX//yADAADHhez1//9YAgAAuQFGAACNlej1///HhfD1//8g',
-    'AwAAx4X09f//WAIAAMeFAPb//yAAAADNgInChcB1JoG96PX//yADAAB1HIG9',
-    '7PX//1gCAAB1EDHSg70A9v//IA+UwusCMdK4gZsECOgDEAAAi5209f//uDYA',
-    'AAC5AEYAAI2V6PX//82AMdKBvej1//8gAwAAdSSBvez1//9YAgAAdRiBvfD1',
-    '//8gAwAAdQwx0oO9APb//yAPlMK4kJsECOivDwAAi5209f//uDYAAAC5AkYA',
-    'ALoApAQIzYAx0oE9MKQECIAMAAB1DzHSgT0UpAQIAEwdAA+UwrihmwQIMfa/',
-    '/wAAAOhqDwAAMcC6AAD/AIkUhQClBAhAPSADAAB0G7oAAP8APQkBAAB+5T0U',
-    'AgAAugD/AAAPT9fr1oudtPX//7gTAAAAifEx0s2AuAQAAAC6gAwAALkApQQI',
-    'i5209f//zYCBxoAMAACB/gDiBAB1mbiwmwQI6NkOAACDvbD1//8AdCExyY2d',
-    'iPb//7iiAAAAx4WI9v//AgAAAImNjPb//zHJzYCNhej1//++NgAAAOiODgAA',
-    'ifC5AUYAAMeF6PX//wAFAADHhez1//8ABAAAi5209f//jZXo9f//x4Xw9f//',
-    'AAUAAMeF9PX//wAEAADHhQD2//8gAAAAzYAx0oXAuLubBAgPlMLoZw4AAInw',
-    'uQJGAACLnbT1//+6AKQECM2AMdK4zJsECIE9MKQECAAUAAAPlMIx9ug4DgAA',
-    'McC6AAD/AIkUhQClBAhAPQAFAAB0ILoAAP8APakBAAB+5T1UAwAAugD/AAC/',
-    '/wAAAA9P1+vRvxMAAACLnbT1//+J8THSifjNgLgEAAAAugAUAAC5AKUECIud',
-    'tPX//82AgcYAFAAAgf4A0AcAdZKLnbT1//+J+LnAMk4AMdLHhcT1//8A//8A',
-    'zYC4BAAAAIudtPX//42NxPX//4nCzYC43JsECOhwDQAAg72w9f//AHQhMdKN',
-    'nYj2//+4ogAAADHJx4WI9v//AgAAAImVjPb//82Ag72s9f//AI2F6PX//w+F',
-    'RQYAAOgdDQAAi5209f//uDYAAADHhej1//+AAgAAx4Xs9f//4AEAALkBRgAA',
-    'jZXo9f//x4Xw9f//gAIAAMeF9PX//+ABAADHhQD2//8QAAAAzYCJwoXAdSmD',
-    'vQD2//8QdSKDvQj2//8LdRmDvQz2//8FdRAx0oO9GPb//wYPlMLrAjHSuOeb',
-    'BAgx9ujHDAAAMcC6APj//429iPb//2aJFEdAPYACAAB0ILoA+P//PdQAAAB+',
-    '4j2pAQAAuuAHAAC/HwAAAA9P1+vOi5209f//uBMAAACJ8THSzYC4BAAAAIud',
-    'tPX//7oABQAAifnNgIHGAAUAAIH+APQBAHWUuPmbBAjoMQwAAIO9sPX//wB0',
-    'HceFiPb//wIAAAAxwIn7McmJhYz2//+4ogAAAM2AjYXo9f//6O8LAACLnbT1',
-    '//+4NgAAAMeF6PX//yADAADHhez1//9YAgAAuQFGAACNlej1///HhfD1//8g',
-    'AwAAx4X09f//WAIAAMeFAPb//xgAAADNgDHShcB1DDHSg70A9v//GA+UwrgE',
-    'nAQI6LoLAAC4NgAAALkCRgAAi5209f//ugCkBAjNgDHSuBacBAi/EwAAAIE9',
-    'MKQECGAJAAAPlMIx9uiDCwAAjZ2I9v//MdIxwDHJg/gBiAsPlMH32YP4ARjA',
-    'QohLAYPDA4hD/4H6IAMAAHQggfoJAQAAftMxwIH6FQIAAA+dwECB+hUCAAAP',
-    'nMFJ67+LnbT1//+J+InxMdLNgLgEAAAAi5209f//umAJAACNjYj2///NgIHG',
-    'YAkAAIH+gKkDAA+Fe////7gknAQI6NQKAACDvbD1//8AdCExwI2diPb//zHJ',
-    'x4WI9v//AgAAAImFjPb//7iiAAAAzYCNhej1///ojgoAAIudtPX//7g2AAAA',
-    'x4Xo9f//gAIAAMeF7PX//+ABAAC5AUYAAI2V6PX//8eF8PX//4ACAADHhfT1',
-    '///gAQAAx4UA9v//CAAAAM2AMdKFwHUMMdKDvQD2//8ID5TCuC+cBAgx9jH/',
-    '6FUKAAAxwLkFRgAAibXM9f//iYWI9v//jYXI9f//i5209f//iYWQ9v//jYXQ',
-    '9f//iYWU9v//jYXY9f//ibXQ9f//vjYAAACJvdj1//+NvYj2//+JhZj2//8x',
-    'wIn6iYWc9v//ifDHhcj1//8AAP//x4XU9f////8AAMeF3PX//wAA///HhYz2',
-    '//8EAAAAzYAx0oXAuECcBAgPlMLougkAAI2F4PX//4udtPX//4n6iYWQ9v//',
-    'McC5BEYAAImFmPb//4mFlPb//4nwx4Xg9f//CQAJAMeF5PX//wkACQDNgDHS',
-    'ZoG94vX//wD/dQ0x0maDveD1//8AD5TCuEucBAjoVwkAALg2AAAAuQJGAACL',
-    'nbT1//+6AKQECM2AMdKDPSCkBAgDuFacBAgPlMIx/+goCQAAMfawAYiGAKUE',
-    'CEaB/oACAAB0GLABgf7UAAAAfueB/qkBAAAPn8CDwALr2YudtPX//7gTAAAA',
-    'ifkx0s2AuAQAAACLnbT1//+5AKUECInyzYCBx4ACAACB/wD6AAB1orhnnAQI',
-    '6KAIAACDvbD1//8AdCEx27iiAAAAMcnHhYj2//8CAAAAiZ2M9v//jZ2I9v//',
-    'zYCNhej1///oWggAAIudtPX//7g2AAAAx4Xo9f//gAIAAMeF7PX//+ABAAC5',
-    'AUYAAI2V6PX//8eF8PX//4ACAADHhfT1///AAwAAx4UA9v//IAAAAM2AMdKF',
-    'wHUPMdKBvfT1///AAwAAD5TCuHKcBAgx9r8A/wAA6BsIAACB/t8BAAC6AAD/',
-    'AA9P1zHAiRSFAKUECEA9gAIAAHXxac4ACgAAi5209f//uBMAAAAx0s2AuAQA',
-    'AAC6AAoAALkApQQIi5209f//zYBGgf7AAwAAdayNhej1//++NgAAAL8ARgAA',
-    '6IEHAACLnbT1//+J8In5jZXo9f//zYC5BkYAAIudtPX//4nwx4X89f//4AEA',
-    'AM2AMdKFwLiBnAQID5TC6HYHAACLnbT1//+J8In5jZXo9f//zYAx0riInAQI',
-    'gb389f//4AEAAA+UwuhLBwAAuJOcBAjoIQcAAIO9sPX//wAPhB4DAAAxyY2d',
-    'iPb//7iiAAAAx4WI9v//AgAAAImNjPb//zHJzYDp+AIAAOjYBgAAvjYAAAC/',
-    'AUYAAMeF6PX//4ACAADHhez1///gAQAAifCLnbT1//+J+ceF8PX//4ACAACN',
-    'lej1///HhfT1///gAQAAx4UA9v//EAAAAM2AMdKD+Oq4npwECA+UwuipBgAA',
-    'jYXo9f//6G0GAACLnbT1//+J8In5x4Xo9f//gAIAAI2V6PX//8eF7PX//+AB',
-    'AADHhfD1//+AAgAAx4X09f//4AEAAMeFAPb//wgAAADNgDHSg/jquLScBAgP',
-    'lMLoSAYAAI2F6PX//+gMBgAAi5209f//ifCJ+ceF6PX//wAEAACNlej1///H',
-    'hez1//8AAwAAx4Xw9f//AAQAAMeF9PX//wAGAADHhQD2//8gAAAAzYCJwoXA',
-    'dR2Bvez1//8AAwAAdRMx0oG99PX//wADAAAPlMLrAjHSuMmcBAjoygUAAI2F',
-    '6PX//+iOBQAAi5209f//uDYAAADHhej1//8ABAAAx4Xs9f//AAMAALkBRgAA',
-    'jZXo9f//x4Xw9f//AAQAAMeF9PX//wADAADHhQD2//8gAAAAzYCJwoXAdRqB',
-    'vej1//8ABAAAdRAx0oO9APb//yAPlMLrAjHSuOCcBAjoSQUAALg2AAAAuQJG',
-    'AACLnbT1//+6AKQECM2AuQYAAAC6CJoECLgApAQIv/8AAADoHgQAADHShcC4',
-    '9JwECA+UwjH26AYFAAAxwLoAAP8AiRSFAKUECEA9AAQAAHQbugAA/wA9VAEA',
-    'AH7lPakCAAC6AP8AAA9P1+vWi5209f//uBMAAACJ8THSzYC4BAAAALoAEAAA',
-    'uQClBAiLnbT1///NgIHGABAAAIH+AEAGAHWZuPmbBAjodQQAAIO9sPX//wB0',
-    'ITHSjZ2I9v//uKIAAAAxyceFiPb//wIAAACJlYz2///NgI2F6PX//+gvBAAA',
-    'uDYAAAC5AUYAAMeF6PX//wAFAADHhez1//8ABAAAi5209f//jZXo9f//x4Xw',
-    '9f//AAUAAMeF9PX//wAEAADHhQD2//8gAAAAzYC+NgAAAIudtPX//7kGRgAA',
-    'x4X89f//WAIAAInwjZXo9f//zYAx0oP46rj+nAQIvwFGAAAPlMLo2wMAAI2F',
-    '6PX//+ifAwAAi5209f//ifCJ+ceF6PX//4ACAACNlej1///Hhez1///gAQAA',
-    'x4Xw9f//gAIAAMeF9PX//+ABAADHhQD2//8HAAAAzYAx0oP46rgMnQQID5TC',
-    '6HoDAACNhej1///oPgMAAIudtPX//4nwifnHhej1//8ACgAAjZXo9f//x4Xs',
-    '9f//QAYAAMeF8PX//wAKAADHhfT1///QBwAAx4UA9v//IAAAAM2AMdKD+Oq4',
-    'G50ECA+UwugZAwAAjYXo9f//6N0CAACLnbT1//+J8In5x4Xo9f//ZAAAAI2V',
-    '6PX//8eF7PX//2QAAADHhfD1//9kAAAAx4X09f//ZAAAAMeFAPb//yAAAADN',
-    'gDHSg/jquCqdBAgPlMLouAIAAI2ViPb//4nQ6HoCAACLnbT1//+J8In5x4WI',
-    '9v//IAMAAI2ViPb//8eFjPb//1gCAADHhZD2//8gAwAAx4WU9v//WAIAAMeF',
-    'oPb//yAAAADHhdz2//8CAAAAzYC5AEYAAInHifCLnbT1//+Nlej1///NgIX/',
-    'dT6Dvaz1//8BGcAlgP3//wUABQAAOYXo9f//dSWDvaz1//8BGcAl4P3//wUA',
-    'BAAAOYXs9f//D5TAD7bAicfrAjH/ifq4O50ECL42AAAAMdvo7wEAAInwuTpL',
-    'AAC6AQAAAM2AuEydBAiNvYj2///o0QEAAInwuTtLAACJ+seFiPb////////N',
-    'gIXAdRYx0oO9iPb//wG4W50ECA+UwuiiAQAAMfa4NgAAALk6SwAAifOJ8s2A',
-    'ugEAAAC4aZ0ECOiBAQAAuHSdBAjoVwEAAIO9sPX//wB0HceFiPb//wIAAAAx',
-    'wIn7ifGJhYz2//+4ogAAAM2AuAYAAACLnbT1///NgI1l8DHAWVteX12NYfzD',
-    'VVdWU4tEJBSLXCQYi0wkHItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADN',
-    'gDHtieCD5PBQ6D8BAABVAcGJ5VaJ1lOJwznLdBIPtgMPthY40HQEKdDrBkNG',
-    '6+oxwFteXcNVMdKJ0YnlV1a+BQAAAFO7i5kECIHsHAEAAImF4P7//4nwzYAx',
-    '/4nGi4Xg/v//gDw4AHQDR+vxMcCJheT+//+F9nghjY3o/v//uAMAAAC6/wAA',
-    'AInzzYCJheT+//+4BgAAAM2AMfaLjeT+//+NBDc5yH8cjYXo/v//i5Xg/v//',
-    'ifkB8OhR////hcB0B0br1zHA6wW4AQAAAIHEHAEAAFteX13DjZCgAAAAicFA',
-    'xgEAOdB19sNVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJ',
-    'xrilmQQIU4nT6M3///+J8OjG////hdu4npkECLqZmQQID0XC6LL///+F23QI',
-    '/wUEzQQI6wb/BQDNBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBRUugX5///',
-    'icO4AQAAAM2Ag8QQ6/4vcHJvYy9jbWRsaW5lACBPSwoAIEZBSUwKAEtURVNU',
-    'OiAAL2Rldi9mYjAAICAocGFzIGRlIC9kZXYvZmIwIDogdGVzdHMgZnJhbWVi',
-    'dWZmZXIgaWdub3JlcykKAGZiLnZzY3JlZW5pbmZvAGZiLmdlb21ldHJ5AEJP',
-    'Q0hTAFZNV0FSRQBmYi5mc2NyZWVuaW5mbwAvcHJvYy9mYgAjIGZiOgAjIHBj',
-    'aSAwMDoAMCBCT0NIUyBWQkUAMCBWTVdBUkUgU1ZHQSBJSQBmYi5wcm9jX2Zi',
-    'AC9zeXMvY2xhc3MvZ3JhcGhpY3MvZmIwL25hbWUAZmIuc3lzX25hbWUAL3N5',
-    'cy9jbGFzcy9ncmFwaGljcy9pbmZvAGZiLnN5c19pbmZvAGZiLmlvY3RsX2Jh',
-    'ZABmYi53cml0ZV9yb3dzAGZiLmxzZWVrX3BpeGVsAGZiLndyaXRlX3BpeGVs',
-    'AGZiLnJlYWRfYmFjawBmYi5yZWFkX3JvdwBmYi5zZWVrX2VuZABmYi5zZWVr',
-    'X2JhZABmYi5tbWFwAGZiLm1tYXBfcmVhZABmYi5tbWFwX3dyaXRlAGZiLm1t',
-    'YXBfZm9ya19zaGFyZWQAZmIubXVubWFwAGZiLm1tYXBfYmFkX3JhbmdlAGZi',
-    'IERSQVdOCgBmYnNob3QAZmJ2bXcAZmIucHV0XzgwMHg2MDAAZmIuZ2V0X2Fm',
-    'dGVyX3B1dABmYi5mc2NyZWVuXzgwMABGQi1TSE9UIDEKAGZiLnB1dF8xMjgw',
-    'eDEwMjQAZmIuZnNjcmVlbl8xMjgwAEZCLVNIT1QgMgoAZmIucHV0XzY0MHg0',
-    'ODB4MTYARkItU0hPVCAzCgBmYi5wdXRfODAweDYwMHgyNABmYi5mc2NyZWVu',
-    'XzI0AEZCLVNIT1QgNAoAZmIucHV0XzY0MHg0ODB4OABmYi5wdXRjbWFwAGZi',
-    'LmdldGNtYXAAZmIudmlzdWFsX3BzZXVkbwBGQi1TSE9UIDUKAGZiLnB1dF92',
-    'aXJ0dWFsAGZiLnBhbgBmYi5wYW5fZ2V0AEZCLVNIT1QgNgoAZmIudm13X3B1',
-    'dF8xNl9yZWZ1c2VkAGZiLnZtd19wdXRfOF9yZWZ1c2VkAGZiLnZtd192aXJ0',
-    'dWFsX2NsYW1wZWQAZmIudm13X3B1dF8xMDI0eDc2OABmYi52bXdfaWQAZmIu',
-    'cGFuX2VpbnZhbABmYi5wdXRfYmFkX2JwcABmYi5wdXRfdG9vX2JpZwBmYi5w',
-    'dXRfdG9vX3NtYWxsAGZiLmFjdGl2YXRlX3Rlc3QAZmIua2RfZ3JhcGhpY3MA',
-    'ZmIua2RfZ2V0bW9kZQBmYi5rZF90ZXh0AEZCLVNIT1QgNwoAR0NDOiAoVWJ1',
-    'bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAA',
-    'AAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8KAAAAI5gECCcAAAACAAEAEgAAAEqY',
-    'BAijAAAAAgABACEAAADtmAQIEQAAAAIAAQA7AAAA/pgECCAAAAACAAEAQAAA',
-    'AB6ZBAhEAAAAAgABAEYAAAAEzQQIBAAAAAEAAwBOAAAAAM0ECAQAAAABAAMA',
-    'VgAAAGCkBAigAAAAAQADAFkAAAAApAQIRAAAAAEAAwBcAAAAAKAECAAEAAAB',
-    'AAMAYQAAAAClBAgAKAAAAQADAGUAAABimQQIKQAAABIAAQBrAAAA6JcECAAA',
-    'AAAQAAEAcgAAAA+YBAgAAAAAEAABAIQAAAAWmAQIAAAAABAAAQB/AAAAAKAE',
-    'CAAAAAAQAAMAZgAAAJSABAhUFwAAEgABAIsAAAAAoAQIAAAAABAAAwCSAAAA',
-    'CM0ECAAAAAAQAAMAAGZidGVzdC5jAG1lbWNtcF8Aa3VfY21kbGluZV9oYXMA',
-    'bWVtc2V0LmNvbnN0cHJvcC4wLmlzcmEuMABwdXRzAGt0ZXN0AGt1X3Bhc3MA',
-    'a3VfZmFpbAB2aQBmaQBwYi4wAHJvdwBjbWFpbgBrdV9zYzYAX19yZXN0b3Jl',
-    'X3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIA',
-    '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',
+    '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',
+    'EwAAAM2AuAMAAACLnQS///+5QLsECIuV+L7//82AMcmBPVS7BAgAAP8AdSeJ',
+    '+LsCAAAAmff7gTyFQLsECAD/AAB1EDHJgTy9LLsECP8AAAAPlMGJyriAngQI',
+    '6F0XAACLnQS///+4EwAAADHJugIAAADNgIuV9L7//w+v1400lQAAAACJtQC/',
+    '//85xnQEMdLrLrgEAAAAi50Ev///jY0Mv///icLNgIP45HXiuAMAAACLnQS/',
+    '///NgDHShcAPlMK4jJ4ECOjzFgAAi50Ev///g8n/MdK4EwAAAM2AMdKD+Oq4',
+    'mJ4ECA+UwujPFgAAVmoA/7UEv///agFqA/+1AL///2oAaMAAAADoGBUAADHS',
+    'g8QghcCJxrikngQID5/C6JoWAACF9g+ONQEAADHJgX4UAAD/AHUpifi7AgAA',
+    'AJn3+4E8hgD/AAB1FmnHIAMAADHJgbwGkAEAAFY0EgAPlMGJyrisngQI6FIW',
+    'AABpx7AEAACLnQS///8x0seEBsgAAADvzasAaccsAQAAjQyFyAAAALgTAAAA',
+    'zYAx27gDAAAAugQAAACJnQy///+NjQy///+LnQS////NgDHSuLmeBAiBvQy/',
+    '///vzasAD5TC6OwVAAC4AgAAAM2AicNpx7QEAACNhAbIAAAAiYX8vv//hdt1',
+    'D8cAmYh3ALgBAAAAzYDr/jHJuAcAAACJys2Ai4X8vv//MdKBOJmIdwC4x54E',
+    'CA+UwuiXFQAAacdABgAAMdIB8Dn6fQzHAP///wBCg8AE6/CLjQC///+4WwAA',
+    'AInzzYAx0oXAuNueBAgPlMLoXRUAAFKLhQC///+Nnei///9qAAUAIAAA/7UE',
+    'v///agFqAVBqAGjAAAAA6JoTAACDxCDB6B+JwrjlngQI6CAVAAC4954ECOj2',
+    'FAAAMcm4ogAAAMeF6L///wQAAACJjey///8xyc2AuAGfBAjouxMAAImFAL//',
+    '/7gInwQI6KsTAACJhfy+//+NhUi////onxQAAIudBL///7g2AAAAx4VIv///',
+    'IAMAAMeFTL///1gCAAC5AUYAAI2VSL///8eFUL///yADAADHhVS///9YAgAA',
+    'x4Vgv///IAAAAM2AicKFwHUmgb1Iv///IAMAAHUcgb1Mv///WAIAAHUQMdKD',
+    'vWC///8gD5TC6wIx0rgOnwQI6E4UAACLnQS///+4NgAAALkARgAAjZVIv///',
+    'zYAx0oG9SL///yADAAB1JIG9TL///1gCAAB1GIG9UL///yADAAB1DDHSg71g',
+    'v///IA+UwrgdnwQI6PoTAACLnQS///+4NgAAALkCRgAAukC6BAjNgDHSgT1s',
+    'ugQIgAwAAHUPMdKBPVS6BAgATB0AD5TCuC6fBAgx9r//AAAA6LUTAAAxwLoA',
+    'AP8AiRSFQLsECEA9IAMAAHQbugAA/wA9CQEAAH7lPRQCAAC6AP8AAA9P1+vW',
+    'i50Ev///uBMAAACJ8THSzYC4BAAAALqADAAAuUC7BAiLnQS////NgIHGgAwA',
+    'AIH+AOIEAHWZuD2fBAjoJBMAAIO9AL///wB0ITHAjZ3ov///McnHhei///8C',
+    'AAAAiYXsv///uKIAAADNgI2FSL///742AAAA6NkSAACJ8LkBRgAAx4VIv///',
+    'AAUAAMeFTL///wAEAACLnQS///+NlUi////HhVC///8ABQAAx4VUv///AAQA',
+    'AMeFYL///yAAAADNgDHShcC4SJ8ECA+UwuiyEgAAifC5AkYAAIudBL///7pA',
+    'ugQIzYAx0rhZnwQIgT1sugQIABQAAA+UwjH26IMSAAAxwLoAAP8AiRSFQLsE',
+    'CEA9AAUAAHQgugAA/wA9qQEAAH7lPVQDAAC6AP8AAL//AAAAD0/X69G/EwAA',
+    'AIudBL///4nxMdKJ+M2AuAQAAAC6ABQAALlAuwQIi50Ev///zYCBxgAUAACB',
+    '/gDQBwB1koudBL///4n4ucAyTgAx0seFDL///wD//wDNgLgEAAAAi50Ev///',
+    'jY0Mv///icLNgLhpnwQI6LsRAACDvQC///8AdCExwI2d6L///zHJx4Xov///',
+    'AgAAAImF7L///7iiAAAAzYCDvfy+//8AjYVIv///D4VFBgAA6GgRAACLnQS/',
+    '//+4NgAAAMeFSL///4ACAADHhUy////gAQAAuQFGAACNlUi////HhVC///+A',
+    'AgAAx4VUv///4AEAAMeFYL///xAAAADNgInChcB1KYO9YL///xB1IoO9aL//',
+    '/wt1GYO9bL///wV1EDHSg714v///Bg+UwusCMdK4dJ8ECDH26BIRAAAxwLoA',
+    '+P//jb3ov///ZokUR0A9gAIAAHQgugD4//891AAAAH7iPakBAAC64AcAAL8f',
+    'AAAAD0/X686LnQS///+4EwAAAInxMdLNgLgEAAAAi50Ev///ugAFAACJ+c2A',
+    'gcYABQAAgf4A9AEAdZS4hp8ECOh8EAAAg70Av///AHQdx4Xov///AgAAADHA',
+    'ifsxyYmF7L///7iiAAAAzYCNhUi////oOhAAAIudBL///7g2AAAAx4VIv///',
+    'IAMAAMeFTL///1gCAAC5AUYAAI2VSL///8eFUL///yADAADHhVS///9YAgAA',
+    'x4Vgv///GAAAAM2AMdKFwHUMMdKDvWC///8YD5TCuJGfBAjoBRAAALg2AAAA',
+    'uQJGAACLnQS///+6QLoECM2AMdK4o58ECL8TAAAAgT1sugQIYAkAAA+UwjH2',
+    '6M4PAACNnei///8x0jHAMcmD+AGICw+UwffZg/gBGMBCiEsBg8MDiEP/gfog',
+    'AwAAdCCB+gkBAAB+0zHAgfoVAgAAD53AQIH6FQIAAA+cwUnrv4udBL///4n4',
+    'ifEx0s2AuAQAAACLnQS///+6YAkAAI2N6L///82AgcZgCQAAgf6AqQMAD4V7',
+    '////uLGfBAjoHw8AAIO9AL///wB0ITHAjZ3ov///McnHhei///8CAAAAiYXs',
+    'v///uKIAAADNgI2FSL///+jZDgAAi50Ev///uDYAAADHhUi///+AAgAAx4VM',
+    'v///4AEAALkBRgAAjZVIv///x4VQv///gAIAAMeFVL///+ABAADHhWC///8I',
+    'AAAAzYAx0oXAdQwx0oO9YL///wgPlMK4vJ8ECDHbjb3ov///vjYAAADolw4A',
+    'ADHAMdIxyYmFFL///4mFGL///42FEL///4mF8L///42FGL///4mF9L///42F',
+    'JL///4mVJL///4n6iY3ov///uQVGAACJhfi///+J8Imd/L///4udBL///8eF',
+    'EL///wAA///HhRy//////wAAx4Uov///AAD//8eF7L///wQAAADNgDHShcC4',
+    'zZ8ECA+UwugFDgAAjYU0v///i50Ev///ifqJhfC///8xwLkERgAAiYX4v///',
+    'iYX0v///ifDHhTS///8JAAkAx4U4v///CQAJAM2AMdJmgb02v///AP91DTHS',
+    'ZoO9NL///wAPlMK42J8ECOiiDQAAuDYAAAC5AkYAAIudBL///7pAugQIzYAx',
+    '0oM9YLoECAO4458ECA+UwjH/6HMNAAAx9rABiIZAuwQIRoH+gAIAAHQYsAGB',
+    '/tQAAAB+54H+qQEAAA+fwIPAAuvZi50Ev///uBMAAACJ+THSzYC4BAAAAIud',
+    'BL///7lAuwQIifLNgIHHgAIAAIH/APoAAHWiuPSfBAjo6wwAAIO9AL///wB0',
+    'ITHAjZ3ov///McnHhei///8CAAAAiYXsv///uKIAAADNgI2FSL///+ilDAAA',
+    'i50Ev///uDYAAADHhUi///+AAgAAx4VMv///4AEAALkBRgAAjZVIv///x4VQ',
+    'v///gAIAAMeFVL///8ADAADHhWC///8gAAAAzYAx0oXAdQ8x0oG9VL///8AD',
+    'AAAPlMK4/58ECDH2vwD/AADoZgwAAIH+3wEAALoAAP8AD0/XMcCJFIVAuwQI',
+    'QD2AAgAAdfFpzgAKAACLnQS///+4EwAAADHSzYC4BAAAALoACgAAuUC7BAiL',
+    'nQS////NgEaB/sADAAB1rI2FSL///742AAAAvwBGAADozAsAAIudBL///4nw',
+    'ifmNlUi////NgLkGRgAAi50Ev///ifDHhVy////gAQAAzYAx0oXAuA6gBAgP',
+    'lMLowQsAAIudBL///4nwifmNlUi////NgDHSuBWgBAiBvVy////gAQAAD5TC',
+    '6JYLAAC4IKAECOhsCwAAg70Av///AA+EHgMAADHAjZ3ov///McnHhei///8C',
+    'AAAAiYXsv///uKIAAADNgOn4AgAA6CMLAAC+NgAAAL8BRgAAx4VIv///gAIA',
+    'AMeFTL///+ABAACJ8IudBL///4n5x4VQv///gAIAAI2VSL///8eFVL///+AB',
+    'AADHhWC///8QAAAAzYAx0oP46rgroAQID5TC6PQKAACNhUi////ouAoAAIud',
+    'BL///4nwifnHhUi///+AAgAAjZVIv///x4VMv///4AEAAMeFUL///4ACAADH',
+    'hVS////gAQAAx4Vgv///CAAAAM2AMdKD+Oq4QaAECA+UwuiTCgAAjYVIv///',
+    '6FcKAACLnQS///+J8In5x4VIv///AAQAAI2VSL///8eFTL///wADAADHhVC/',
+    '//8ABAAAx4VUv///AAYAAMeFYL///yAAAADNgInChcB1HYG9TL///wADAAB1',
+    'EzHSgb1Uv///AAMAAA+UwusCMdK4VqAECOgVCgAAjYVIv///6NkJAACLnQS/',
+    '//+4NgAAAMeFSL///wAEAADHhUy///8AAwAAuQFGAACNlUi////HhVC///8A',
+    'BAAAx4VUv///AAMAAMeFYL///yAAAADNgInChcB1GoG9SL///wAEAAB1EDHS',
+    'g71gv///IA+UwusCMdK4baAECOiUCQAAuDYAAAC5AkYAAIudBL///7pAugQI',
+    'zYC5BgAAALqVnQQIuEC6BAi//wAAAOgHCAAAMdKFwLiBoAQID5TCMfboUQkA',
+    'ADHAugAA/wCJFIVAuwQIQD0ABAAAdBu6AAD/AD1UAQAAfuU9qQIAALoA/wAA',
+    'D0/X69aLnQS///+4EwAAAInxMdLNgLgEAAAAugAQAAC5QLsECIudBL///82A',
+    'gcYAEAAAgf4AQAYAdZm4hp8ECOjACAAAg70Av///AHQhMcCNnei///8xyceF',
+    '6L///wIAAACJhey///+4ogAAAM2AjYVIv///6HoIAAC4NgAAALkBRgAAx4VI',
+    'v///AAUAAMeFTL///wAEAACLnQS///+NlUi////HhVC///8ABQAAx4VUv///',
+    'AAQAAMeFYL///yAAAADNgL42AAAAi50Ev///uQZGAADHhVy///9YAgAAifCN',
+    'lUi////NgDHSg/jquIugBAi/AUYAAA+UwugmCAAAjYVIv///6OoHAACLnQS/',
+    '//+J8In5x4VIv///gAIAAI2VSL///8eFTL///+ABAADHhVC///+AAgAAx4VU',
+    'v///4AEAAMeFYL///wcAAADNgDHSg/jquJmgBAgPlMLoxQcAAI2FSL///+iJ',
+    'BwAAi50Ev///ifCJ+ceFSL///wAKAACNlUi////HhUy///9ABgAAx4VQv///',
+    'AAoAAMeFVL///9AHAADHhWC///8gAAAAzYAx0oP46riooAQID5TC6GQHAACN',
+    'hUi////oKAcAAIudBL///4nwifnHhUi///9kAAAAjZVIv///x4VMv///ZAAA',
+    'AMeFUL///2QAAADHhVS///9kAAAAx4Vgv///IAAAAM2AMdKD+Oq4t6AECA+U',
+    'wugDBwAAjZXov///idDoxQYAAIudBL///4nwifnHhei///8gAwAAjZXov///',
+    'x4Xsv///WAIAAMeF8L///yADAADHhfS///9YAgAAx4UAwP//IAAAAMeFPMD/',
+    '/wIAAADNgLkARgAAiceJ8IudBL///42VSL///82Ahf91PoO9/L7//wEZwCWA',
+    '/f//BQAFAAA5hUi///91JYO9/L7//wEZwCXg/f//BQAEAAA5hUy///8PlMAP',
+    'tsCJx+sCMf+J+rjIoAQIjb0kv///vhSiBAjoNgYAAIO9/L7//wC5BAAAAPOl',
+    'jb0Yv///viSiBAi5AwAAAPOljb0kv///dU++NgAAAIudBL///7nwRgAAifqJ',
+    '8M2Ag/jndSSJ8LnyRgAAjZUYv///i50Ev///zYCD+OcPlMAPtsCJhfy+//+L',
+    'lfy+//+42aAECOliAwAAMcCJwo2N6L///4PiAYP6ARnSgeIAAf6BgeoAAf8A',
+    'iRSBQD0AEAAAddm+NgAAAImNRL///4n6ufBGAADHhTS///8QAAAAifCLnQS/',
+    '///HhTi///8QAAAAx4U8v///AQAAAMeFQL///wIAAADNgDHShcC456AECA+U',
+    'wjHb6D8FAACJnSy///+J8In6i50Ev///ufBGAADNgDHShcC4+6AECA+UwugX',
+    'BQAAifCLnQS///+J+seFLL///0AAAAC58EYAAMeFJL////YEAADNgDHShcCN',
+    'vTS///+4D6EECA+UwujbBAAAufFGAACJ8In6i50Ev///zYAx0oXAuCKhBAgP',
+    'lMLouQQAAInwi50Ev///ifrHhTS///9BAAAAufFGAADNgDHSg/jquDChBAgP',
+    'lMLojAQAADHAi50Ev///ifqJhUS///+58UYAAInwx4U0v///EAAAAM2AMdKD',
+    '+PK4QqEECA+UwjHb6FUEAAC6QLIECLhWoQQI6NMDAACJxjnzfS+Ng0CyBAi5',
+    'EQAAALpkoQQI6M4CAACFwHUTjYNRsgQI6IkDAACJhfy+///rC0PrzTHJiY38',
+    'vv//jb0Yv///vjYAAAC58kYAAIudBL///4nwifrNgDHShcC4dqEECA+Uwujc',
+    'AwAAifCLnQS///+J+seFGL///ywBAAC58kYAAMeFHL///8gAAADNgLpAsgQI',
+    'uFahBAgx2+gzAwAAicc5+30rjYNAsgQIuREAAAC6ZKEECOguAgAAhcB1D42D',
+    'UbIECOjpAgAAicbrBUPr0TH2Mds5+30pjYNAsgQIuRIAAAC6haEECOj7AQAA',
+    'hcB1DY2DUrIECOi2AgAA6wVD69MxwIu9/L7//4nxugEAAAAp+YP5AnQNSA+f',
+    'wDHSOfcPlMIhwriYoQQIMdvoFQMAADHSuFahBAjHhRC///8BAAAAiZUUv///',
+    'ukCyBAjogQIAAInGOfN9K42DQLIECLkNAAAAuq+hBAjofAEAAIXAdQ+Ng02y',
+    'BAjoNwIAAInG6wVD69Ex9o2dEL///7iiAAAAMcnNgLpAsgQIuFahBAgx2+gu',
+    'AgAAicc5+30pjYNAsgQIuQ0AAAC6r6EECOgpAQAAhcB1DY2DTbIECOjkAQAA',
+    '6wVD69MxwIX2D5/BMdI5xri9oQQID5TCIcroWAIAAL82AAAAMdu5OksAAIn4',
+    'ugEAAADNgLjeoQQIjbXov///6DMCAACJ+Lk7SwAAifLHhei/////////zYCF',
+    'wHUWMdKDvei///8BuO2hBAgPlMLoBAIAADH/uDYAAAC5OksAAIn7ifrNgLoB',
+    'AAAAuPuhBAjo4wEAALgGogQI6LkBAACDvQC///8AdB3Hhei///8CAAAAMcCJ',
+    '84n5iYXsv///uKIAAADNgLgGAAAAi50Ev///zYCNZfAxwFlbXl9djWH8w1VX',
+    'VlOLRCQUi1wkGItMJByLVCQgi3QkJIt8JCiLbCQszYBbXl9dw7itAAAAzYAx',
+    '7Yngg+TwUOihAQAAVQHBieVWidZTicM5y3QSD7YDD7YWONB0BCnQ6wZDRuvq',
+    'McBbXl3DVTHSidGJ5VdWvgUAAABTuxidBAiB7BwBAACJheD+//+J8M2AMf+J',
+    'xouF4P7//4A8OAB0A0fr8THAiYXk/v//hfZ4IY2N6P7//7gDAAAAuv8AAACJ',
+    '882AiYXk/v//uAYAAADNgDH2i43k/v//jQQ3Och/HI2F6P7//4uV4P7//4n5',
+    'AfDoUf///4XAdAdG69cxwOsFuAEAAACBxBwBAABbXl9dw1WJwTHAieVTD74Z',
+    'jVPQgPoJdwpr0ApBjUQa0OvrW13DVYnlVonWMdJTidGJw7gFAAAAzYCJw4XA',
+    'eCK4AwAAALr+AwAAifHNgDHShcAPSdC4BgAAAMYEFgDNgInTidhbXl3DjZCg',
+    'AAAAicFAxgEAOdB19sNVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtd',
+    'w1WJ5VaJxrgynQQIU4nT6M3///+J8OjG////hdu4K50ECLomnQQID0XC6LL/',
+    '//+F23QI/wVE4wQI6wb/BUDjBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBR',
+    'UuiN4///icO4AQAAAM2Ag8QQ6/4AAAAvcHJvYy9jbWRsaW5lACBPSwoAIEZB',
+    'SUwKAEtURVNUOiAAL2Rldi9mYjAAICAocGFzIGRlIC9kZXYvZmIwIDogdGVz',
+    'dHMgZnJhbWVidWZmZXIgaWdub3JlcykKAGZiLnZzY3JlZW5pbmZvAGZiLmdl',
+    'b21ldHJ5AEJPQ0hTAFZNV0FSRQBmYi5mc2NyZWVuaW5mbwAvcHJvYy9mYgAj',
+    'IGZiOgAjIHBjaSAwMDoAMCBCT0NIUyBWQkUAMCBWTVdBUkUgU1ZHQSBJSQBm',
+    'Yi5wcm9jX2ZiAC9zeXMvY2xhc3MvZ3JhcGhpY3MvZmIwL25hbWUAZmIuc3lz',
+    'X25hbWUAL3N5cy9jbGFzcy9ncmFwaGljcy9pbmZvAGZiLnN5c19pbmZvAGZi',
+    'LmlvY3RsX2JhZABmYi53cml0ZV9yb3dzAGZiLmxzZWVrX3BpeGVsAGZiLndy',
+    'aXRlX3BpeGVsAGZiLnJlYWRfYmFjawBmYi5yZWFkX3JvdwBmYi5zZWVrX2Vu',
+    'ZABmYi5zZWVrX2JhZABmYi5tbWFwAGZiLm1tYXBfcmVhZABmYi5tbWFwX3dy',
+    'aXRlAGZiLm1tYXBfZm9ya19zaGFyZWQAZmIubXVubWFwAGZiLm1tYXBfYmFk',
+    'X3JhbmdlAGZiIERSQVdOCgBmYnNob3QAZmJ2bXcAZmIucHV0XzgwMHg2MDAA',
+    'ZmIuZ2V0X2FmdGVyX3B1dABmYi5mc2NyZWVuXzgwMABGQi1TSE9UIDEKAGZi',
+    'LnB1dF8xMjgweDEwMjQAZmIuZnNjcmVlbl8xMjgwAEZCLVNIT1QgMgoAZmIu',
+    'cHV0XzY0MHg0ODB4MTYARkItU0hPVCAzCgBmYi5wdXRfODAweDYwMHgyNABm',
+    'Yi5mc2NyZWVuXzI0AEZCLVNIT1QgNAoAZmIucHV0XzY0MHg0ODB4OABmYi5w',
+    'dXRjbWFwAGZiLmdldGNtYXAAZmIudmlzdWFsX3BzZXVkbwBGQi1TSE9UIDUK',
+    'AGZiLnB1dF92aXJ0dWFsAGZiLnBhbgBmYi5wYW5fZ2V0AEZCLVNIT1QgNgoA',
+    'ZmIudm13X3B1dF8xNl9yZWZ1c2VkAGZiLnZtd19wdXRfOF9yZWZ1c2VkAGZi',
+    'LnZtd192aXJ0dWFsX2NsYW1wZWQAZmIudm13X3B1dF8xMDI0eDc2OABmYi52',
+    'bXdfaWQAZmIucGFuX2VpbnZhbABmYi5wdXRfYmFkX2JwcABmYi5wdXRfdG9v',
+    'X2JpZwBmYi5wdXRfdG9vX3NtYWxsAGZiLmFjdGl2YXRlX3Rlc3QAZmIuazMy',
+    'X2Vub3R0eQBmYi5rMzJfdXBkYXRlX3Byb2JlAGZiLmszMl91cGRhdGVfZW1w',
+    'dHkAZmIuazMyX3VwZGF0ZV9jbGlwAGZiLmszMl9jdXJkZWYAZmIuazMyX2N1',
+    'cmRlZl9iaWcAZmIuazMyX2N1cmRlZl9mYXVsdAAvcHJvYy9rMzJwZXJmAGN1',
+    'cnNvcl9yZWdfbW92ZXMgAGZiLmszMl9jdXJtb3ZlAGN1cnNvcl9maWZvX21v',
+    'dmVzIABmYi5rMzJfY3VybW92ZV9jb3VudGVkAHN2Z2FfdXBkYXRlcyAAZmIu',
+    'azMyX21hbnVhbF9ub19wZXJpb2RpY191cGRhdGUAZmIua2RfZ3JhcGhpY3MA',
+    'ZmIua2RfZ2V0bW9kZQBmYi5rZF90ZXh0AEZCLVNIT1QgNwoAAAAAAAAAAAAA',
+    'AABAAAAAQAAAAAoAAAAUAAAAAQAAAEdDQzogKFVidW50dSAxMy4zLjAtNnVi',
+    'dW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAA',
+    'AAAAAAAAAAAEAPH/CgAAAEubBAgnAAAAAgABABIAAABymwQIowAAAAIAAQAh',
+    'AAAAFZwECCAAAAACAAEAJgAAADWcBAhCAAAAAgABADgAAAB3nAQIEQAAAAIA',
+    'AQBSAAAAiJwECCAAAAACAAEAVwAAAKicBAhEAAAAAgABAF0AAABE4wQIBAAA',
+    'AAEAAwBlAAAAQOMECAQAAAABAAMAbQAAAKC6BAigAAAAAQADAHAAAABAugQI',
+    'RAAAAAEAAwBzAAAAQLYECAAEAAABAAMAeAAAAEC7BAgAKAAAAQADAHwAAABA',
+    'sgQIAAQAAAEAAwCBAAAA7JwECCkAAAASAAEAhwAAABCbBAgAAAAAEAABAI4A',
+    'AAA3mwQIAAAAABAAAQCgAAAAPpsECAAAAAAQAAEAmwAAAECyBAgAAAAAEAAD',
+    'AIIAAACUgAQIfBoAABIAAQCnAAAAMLIECAAAAAAQAAMArgAAAEjjBAgAAAAA',
+    'EAADAABmYnRlc3QuYwBtZW1jbXBfAGt1X2NtZGxpbmVfaGFzAHBudW0Ac2x1',
+    'cnAuY29uc3Rwcm9wLjAAbWVtc2V0LmNvbnN0cHJvcC4wLmlzcmEuMABwdXRz',
+    'AGt0ZXN0AGt1X3Bhc3MAa3VfZmFpbAB2aQBmaQBwYi4xAHJvdwBwZi4wAGNt',
+    'YWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9l',
+    'bmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAu',
+    'YnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiUAAAAgRwAAAAAAAAAAAAAAQAA',
+    'AAAAAAAhAAAAAQAAAAIAAAAYnQQIGB0AABgFAAAAAAAAAAAAAAQAAAAAAAAA',
+    'KQAAAAgAAAADAAAAQLIECEAiAAAIMQAAAAAAAAAAAAAgAAAAAAAAAC4AAAAB',
+    'AAAAMAAAAAAAAAAwIgAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAA',
+    'AAAAAAAAYCIAAIABAAAGAAAAEAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAA',
+    'AOAjAACzAAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAACTJAAA',
+    'NwAAAAAAAAAAAAAAAQAAAAAAAAA=',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAp4cECDQAAABgDwAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAgODQAADg0AAAUAAAAAEAAAAQAAAAAA',
     'AAAAkAQIAJAECAAAAAAIGAAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -53928,7 +55645,7 @@ Const
     '8QQAAIudaP///7gHAAAAMdKNjYz+///NgLgHAAAAi51s////zYC4BwAAAIud',
     'cP///82AugEAAAC4YpgECOizBAAAMdK4AgAAAIlXBM2AiYWE/v//g8QQhcB1',
     'Jle5AQAAADHSifBXagBqAOhJBAAAuAEAAACLnYT+///NgIPEEOv+McnHRwQB',
-    'AAAAuKIAAACNnWj///+JjWj///8xyceFbP///wBaYgLNgFNoAXAAAFZqAWoA',
+    'AAAAuKIAAACNnWj///+JjWj///8xyceFbP///4DR8AjNgFNoAXAAAFZqAWoA',
     'agVXaPAAAADoagMAAIPEIDHShcB+C4tHBDHSg/gHD5TCuHyYBAjoFgQAAIud',
     'hP7//7gHAAAAMdKNjYz+///NgDHAMcmJB4n4UlK6BgAAAGoAagDorAMAAIPE',
     'EDHShcB1F4sXuBQAAADNgIHi////PznCD5TCD7bSuIqYBAjovwMAADHJugYA',
@@ -56185,6 +57902,212 @@ Const
     'AAAADAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAIgKAAB/AAAAAAAAAAAA',
     'AAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAAHCwAANwAAAAAAAAAAAAAAAQAA',
     'AAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAPIEECDQAAACwAwAAAAAAADQAIAAC',
+    'ACgABwAGAAEAAAAAAAAAAIAECACABAhVAgAAVQIAAAUAAAAAEAAAUeV0ZAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuDKCBAiJ5VdWvhAAAABTg+wQ',
+    '6L0AAACFwHUVuDmCBAjorwAAAIP4ARn2g+b9g8YGMdKAuj+CBAgAdANC6/S4',
+    'BAAAALk/ggQIuwEAAADNgDHSv6IAAACNXewxwMdF7AEAAAAxyYlF8In4zYBC',
+    'OdZ16THSgLpLggQIAHQDQuv0uAQAAAC5S4IECLsBAAAAzYCDxBAxwFteX13D',
+    'VVdWU4tEJBSLXCQYi0wkHItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADN',
+    'gDHtieCD5PBQ6LUAAABVMdKJ0YnlV78FAAAAVlO7JIIECIHsDAEAAImF7P7/',
+    '/4n4zYAx9onHi4Xs/v//gDwwAHQDRuvxMcCJhfD+//+F/3ghjY30/v//uAMA',
+    'AAC6/wAAAIn7zYCJhfD+//+4BgAAAM2AjYX0/v//ifMpw4md6P7//4u96P7/',
+    '/40UBzmV8P7//3wji43s/v//icKNPAY5+nQNihk4GnQDQOvXQkHr77gBAAAA',
+    '6wIxwIHEDAEAAFteX13DVYnlU4tFCIsQjUgEjUSQCFBRUuhe/v//icO4AQAA',
+    'AM2Ag8QM6/4vcHJvYy9jbWRsaW5lAGlkbGUxNgBpZGxlNgBJRExFLVNUQVJU',
+    'CgBJRExFLUVORAoAR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4w',
+    'NC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx',
+    '/wkAAABJgQQItQAAAAIAAQAYAAAA/oEECCYAAAASAAEAHgAAAA6BBAgAAAAA',
+    'EAABACUAAAA1gQQIAAAAABAAAQA3AAAAPIEECAAAAAAQAAEAMgAAAFWSBAgA',
+    'AAAAEAACABkAAAB0gAQImgAAABIAAQA+AAAAVZIECAAAAAAQAAIARQAAAFiS',
+    'BAgAAAAAEAACAABpZGxlci5jAGt1X2NtZGxpbmVfaGFzAGNtYWluAGt1X3Nj',
+    'NgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10',
+    'YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuY29tbWVudAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEA',
+    'AAAGAAAAdIAECHQAAACwAQAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAMgAA',
+    'ACSCBAgkAgAAMQAAAAAAAAAAAAAAAQAAAAEAAAApAAAAAQAAADAAAAAAAAAA',
+    'VQIAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAAIQCAACw',
+    'AAAABQAAAAMAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAAA0AwAASgAAAAAA',
+    'AAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAAfgMAADIAAAAAAAAAAAAA',
+    'AAEAAAAAAAAA',
+    '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',
+    'QUlMCgBLVEVTVDogAC9wcm9jL2NtZGxpbmUAazMydmJveGZha2U9MQBWaXJ0',
+    'dWFsQm94IG1vdXNlIGludGVncmF0aW9uAHZib3guZXZkZXZfbmFtZQB2Ym94',
+    'LmV2ZGV2X2hhc19hYnMAdmJveC5ldmRldl9hYnNfeHkAdmJveC5hYnNfcmFu',
+    'Z2UAMTIzNDUAL3Byb2Mvc3lzL2szMi92Ym94X3NpbV94AHZib3guc2ltX3Nl',
+    'dF94ADU0MzIxAC9wcm9jL3N5cy9rMzIvdmJveF9zaW1feQB2Ym94LnNpbV9z',
+    'ZXRfeQB2Ym94LmFic194AHZib3guYWJzX3kAdmJveC5zeW4AMTAwAHZib3gu',
+    'YWJzX3NlY29uZF9tb3ZlAC9wcm9jL2szMnBlcmYAdmJveF9yZXF1ZXN0cwB2',
+    'Ym94LnBlcmZfcmVxdWVzdHMAdmJveF9lcnJvcnMgMCAwAHZib3gubm9fcmVm',
+    'dXNlZF9yZXF1ZXN0AHZib3g6IGludGVncmF0aW9uIGRlAHZib3guam91cm5h',
+    'bABLVEVTVDogdmJveCBET05FCgAgICh2Ym94IDogZXNzYWkgaWdub3JlLCB2',
+    'b2lyIFJVTlZCT1guU0gpCgAvZGV2L2lucHV0L2V2ZW50MgB2Ym94LmV2ZW50',
+    'Ml9leGlzdHMAR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4x',
+    'KSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8M',
+    'AAAAFIUECCcAAAACAAEAFAAAADuFBAhEAAAAAgABABcAAAB/hQQIIAAAAAIA',
+    'AQAcAAAAn4UECEQAAAACAAEAIgAAAATYBAgEAAAAAQADACoAAAAA2AQIBAAA',
+    'AAEAAwAyAAAA44UECEEAAAACAAEAQgAAAADQBAgACAAAAQADAEYAAAAAkAQI',
+    'AEAAAAEAAwBLAAAAJIYECCkAAAASAAEAUQAAANmEBAgAAAAAEAABAFgAAAAA',
+    'hQQIAAAAABAAAQBqAAAAB4UECAAAAAAQAAEAZQAAAACQBAgAAAAAEAADAEwA',
+    'AACUgAQIRQQAABIAAQBxAAAAAJAECAAAAAAQAAMAeAAAAAjYBAgAAAAAEAAD',
+    'AAB2Ym94dGVzdC5jAG1lbWNtcF8Ad3IAcHV0cwBrdGVzdABrdV9wYXNzAGt1',
+    'X2ZhaWwAaGFzLmNvbnN0cHJvcC4wAGIuMQBrbS4wAGNtYWluAGt1X3NjNgBf',
+    'X3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIA',
+    'LnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNzAC5jb21tZW50',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAbAAAA',
+    'AQAAAAYAAACUgAQIlAAAALkFAAAAAAAAAAAAAAEAAAAAAAAAIQAAAAEAAAAy',
+    'AAAATYYECE0GAAD/AQAAAAAAAAAAAAABAAAAAQAAACkAAAAIAAAAAwAAAACQ',
+    'BAgAEAAACEgAAAAAAAAAAAAAIAAAAAAAAAAuAAAAAQAAADAAAAAAAAAATAgA',
+    'AC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAAHwIAAAwAQAA',
+    'BgAAAAsAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAACsCQAAfQAAAAAAAAAA',
+    'AAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAAKQoAADcAAAAAAAAAAAAAAAEA',
+    'AAAAAAAA',
+    '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',
+    'ugKNBAgPRcLosv///4XbdAj/BWQoBQjrBv8FYCgFCFteXcNVieVTg+wIi0UI',
+    'ixCNSASNRJAIUFFS6K7z//+Jw7gBAAAAzYCDxBDr/i9wcm9jL2NtZGxpbmUA',
+    'IE9LCgAgRkFJTAoAS1RFU1Q6IAB1c2Jtb2RlPQAgICh1c2IgOiBlc3NhaSBp',
+    'Z25vcmUsIHZvaXIgUlVOVVNCLlNIKQoAdXNibW9kZT1hYnMAdXNibW9kZT1w',
+    'cmlvAC9kZXYvaW5wdXQvZXZlbnQyAHVzYi5ldmVudDJfZXhpc3RzAFFFTVUg',
+    'VVNCIFRhYmxldAB1c2IudGFibGV0X25hbWUAdXNiLmV2ZGV2X2hhc19hYnMA',
+    'dXNiLmV2ZGV2X2Fic194eQB1c2IuZXZkZXZfYnRuAHVzYi5hYnNfcmFuZ2UA',
+    'dXNiLmV2ZGV2X2lkAHVzYjogVk1NRGV2IG5lIGZvdXIAdXNiLnByaW9fam91',
+    'cm5hbAAvcHJvYy9zeXMvazMyL3Zib3hfc2ltX3gAMTExMTEAL3Byb2Mvc3lz',
+    'L2szMi92Ym94X3NpbV95ADIyMjIyAHVzYi5wcmlvX3ZtbWRldl9zaWxlbnQA',
+    'VVNCLVJFQURZLUFCUwoAdXNiLmFic194AHVzYi5hYnNfeQB1c2IuYWJzX3N5',
+    'bgBVU0ItUkVBRFktTU9WRTIKAHVzYi5hYnNfY29ybmVyAEtURVNUOiB1c2Ig',
+    'RE9ORQoAVVNCLVJFQURZLUJUTgoAdXNiLmJ1dHRvbl9sZWZ0AFVTQi1SRUFE',
+    'WS1XSEVFTAoAdXNiLndoZWVsAC9kZXYvaW5wdXQvZXZlbnQwAHVzYi5ldmVu',
+    'dDBfb3BlbgBVU0ItUkVBRFktS0VZCgB1c2Iua2V5X2FfbWFrZV9icmVhawAv',
+    'ZGV2L3R0eTEAdXNiLmtleV90dHkAVVNCLVJFQURZLVJFUEVBVAoAdXNiLmtl',
+    'eV9yZXBlYXQAdXNibW9kZT1ob3QAVVNCLVJFQURZLUhPVAoAdXNiLmhvdF93',
+    'YWl0ZWQAdXNibW9kZT1yZWwAL2Rldi9pbnB1dC9taWNlAC9kZXYvaW5wdXQv',
+    'ZXZlbnQxAHVzYi5taWNlX29wZW4AVVNCLVJFQURZLVJFTAoAdXNiLnJlbF94',
+    'AHVzYi5yZWxfeQB1c2IucmVsX2J1dHRvbgB1c2IucmVsX3doZWVsAHVzYi5t',
+    'aWNlX3BhY2tldHMAdXNiLm1pY2VfbW90aW9uAEdDQzogKFVidW50dSAxMy4z',
+    'LjAtNnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAABAAAAAAAAAAAAAAAEAPH/CwAAAMCLBAhDAAAAAgABAA8AAAADjAQIZAAA',
+    'AAIAAQAXAAAAZ4wECCAAAAACAAEAHAAAAIeMBAhEAAAAAgABACIAAABkKAUI',
+    'BAAAAAEAAwAqAAAAYCgFCAQAAAABAAMAMgAAAGAgBQgACAAAAQADADYAAABg',
+    'oAQIAIAAAAEAAwA7AAAAy4wECCkAAAASAAEAQQAAAIWLBAgAAAAAEAABAEgA',
+    'AACsiwQIAAAAABAAAQBaAAAAs4sECAAAAAAQAAEAVQAAAGCgBAgAAAAAEAAD',
+    'ADwAAACUgAQI8QoAABIAAQBhAAAASKAECAAAAAAQAAMAaAAAAGgoBQgAAAAA',
+    'EAADAAB1c2J0ZXN0LmMAaGFzAG1vZGVfaXMAcHV0cwBrdGVzdABrdV9wYXNz',
+    'AGt1X2ZhaWwAYi4xAGttLjAAY21haW4Aa3Vfc2M2AF9fcmVzdG9yZV9ydABf',
+    'X2Jzc19zdGFydABfZWRhdGEAX2VuZAAALnN5bXRhYgAuc3RydGFiAC5zaHN0',
+    'cnRhYgAudGV4dAAucm9kYXRhAC5ic3MALmNvbW1lbnQAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiU',
+    'AAAAYAwAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAADIAAAD0jAQI9AwAAFQD',
+    'AAAAAAAAAAAAAAEAAAABAAAAKQAAAAgAAAADAAAAYKAECGAQAAAIiAAAAAAA',
+    'AAAAAAAgAAAAAAAAAC4AAAABAAAAMAAAAAAAAABIEAAALQAAAAAAAAAAAAAA',
+    'AQAAAAEAAAABAAAAAgAAAAAAAAAAAAAAeBAAACABAAAGAAAACgAAAAQAAAAQ',
+    'AAAACQAAAAMAAAAAAAAAAAAAAJgRAABtAAAAAAAAAAAAAAABAAAAAAAAABEA',
+    'AAADAAAAAAAAAAAAAAAFEgAANwAAAAAAAAAAAAAAAQAAAAAAAAA=',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAI4cECDQAAABwDgAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAgsDAAALAwAAAUAAAAAEAAAAQAAAEAM',
     'AABAnAQIQJwECAAAAAAIAgAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -57560,6 +59483,8 @@ Begin
   NetInit;
   TunInit;
   FbInit;
+  VbInit;
+  UsbInit;
   MountRoot;
   InitPts;
   MakeTree;
@@ -57590,6 +59515,18 @@ Begin
     T^.State := TsRunnable;
   End;
   If BootQuiet Then LogToVc := False;
+  If UsbOn Then
+  Begin
+    T := KernelThread(LongInt(@UsbMain));
+    If T <> Nil Then
+    Begin
+      For I := 0 To 15 Do T^.Comm[I] := 0;
+      For I := 1 To 5 Do T^.Comm[I - 1] := Ord('kusbd'[I]);
+      T^.State := TsSleepUn;
+      T^.WakeAt := 0;
+      T^.State := TsRunnable;
+    End;
+  End;
   KLog('demarrage du systeme');
   SmpGo;
   If SmpRun Then IdleLoopSmp;

@@ -1,0 +1,14 @@
+ok   deux zones separees : 1 recopie
+ok   deux zones separees : 20 lignes, 200 pixels
+ok   deux zones qui se touchent : une seule
+ok   12 zones (8 au plus) : bien moins que l ecran
+ok   pas d image complete inutile
+ok   fonction 00h
+ok   absolu milieu
+ok   BTN_LEFT
+ok   BTN_RIGHT
+ok   absolu coin bas droit
+ok   absolu coin haut gauche
+ok   plage 0..99 (fonctions 07h et 08h)
+ok   valeur hors plage bornee
+fin

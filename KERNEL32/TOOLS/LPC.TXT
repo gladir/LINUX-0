@@ -440,3 +440,38 @@ Tests : TESTS/C/UX11 (Graph : 38 verifications analytiques et sommes de
 controle), UX12 (souris : fichier MOUSEDEV de paquets PS/2), UX13 (clavier :
 sequences du noyau dans UX13.IN) ; RUN.SH exporte GFXMEM=1 et MOUSEDEV pour les
 programmes UX. Essais QEMU : TESTS/U/RUNGFX.SH (GFXT.PY).
+
+Cout d'un deplacement de souris (lot C1 : VirtualBox / VMSVGA)
+---------------------------------------------------------------
+Mesure (TESTS/U/RUNGFX.SH bench, GFXBENCH.PAS, compteurs GfxStat ; variable
+GFXSTAT=1 ecrit les compteurs sur la sortie d'erreur a la fin) pour la boucle de
+GEOWORKS (KeyPressed, GetMouseState, Delay(4)), 800 tours en 8 s, 160
+deplacements : appels noyau de l'unite Graph : avant 5 par tour au repos
+(poll, 3 lectures de la souris, nanosleep) = 4000, apres 1,2 par tour = 922 (un
+poll par tour dans Delay + une lecture par deplacement). Pixels ecrits dans
+l'ecran par deplacement : curseur dessine par le programme 228 (inchange : une
+seule zone, dont l'ancienne et la nouvelle position), curseur de l'unite
+(Intr 33h AX=1) 434 en logiciel (defaut) et 0 avec GFXHWCUR=1 (noyau VMware).
+- Un seul poll(clavier, souris, evdev absolu) par attente ; les paquets
+  en attente sont lus d'un coup avant de redessiner ; Delay(Ms) attend dans
+  poll (reste actif aux evenements, duree exacte) ; KeyPressed et
+  GetMouseState ne lisent que s'il s'est ecoule plus d'une milliseconde
+  (RDTSC calibre a InitGraph ; GFXNOTSC=1 : sans limite) ; recopie vers
+  l'ecran au plus toutes les 8 ms
+  (Delay et CloseGraph recopient sans attendre) ; jusqu'a 8 zones modifiees
+  recopiees separement (fusionnees quand elles se touchent), une seule
+  commande de mise a jour du pilote pour le rectangle englobant.
+- Pilote (noyau avec les ioctl, sinon repli automatique) : ioctl /dev/fb0 46F0h
+  {x,y,w,h} (mise a jour VMware SVGA du rectangle : ACTIF par defaut, le premier
+  appel supprime la mise a jour plein ecran periodique du noyau). Curseur
+  MATERIEL (46F1h {w,h,hotx,hoty,pixels ARGB} puis 46F2h {x,y,on}, un ioctl par
+  deplacement, aucun pixel ecrit) : OPT-IN seulement, GFXHWCUR=1, car il n'est pas
+  visible dans une capture d'ecran ni verifie sous VirtualBox reel ; par defaut
+  le curseur de l'unite (Intr 33h AX=1) est dessine par le logiciel dans la
+  memoire video, par-dessus l'image, jamais dans le tampon.
+- Entree absolue : /dev/input/event0..7 ayant EV_ABS ABS_X et ABS_Y (EVIOCGBIT,
+  EVIOCGABS) : position mise a l'echelle de la plage de la souris, BTN_LEFT /
+  BTN_RIGHT / BTN_MIDDLE / BTN_TOUCH ; repli /dev/input/mice. MOUSEREL=1 ignore
+  l'evdev ; MOUSEEVDEV=fichier et MOUSEABS=xmax,ymax pour les essais (UX14).
+Limite : essai sous VirtualBox reel impossible ici (QEMU -vga vmware seulement :
+curseur materiel par registres, pas CURSOR_BYPASS_3, invisible dans screendump).

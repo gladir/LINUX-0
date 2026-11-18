@@ -989,6 +989,84 @@ Teste sous QEMU : `VGA=vmware ./RUNFB.SH -n` (captures d'ecran exactes en
 (Bochs) restent verts. **Non teste** : VirtualBox lui-meme (ni VMSVGA ni
 VBoxVGA : ports, taille de la FIFO et rafraichissement a verifier).
 
+**VirtualBox : couts de VM-exit, VMMDev, inventaire (lot D7-11)** : sous
+Hyper-V/NEM chaque acces de port ou de registre d'un peripherique emule coute
+un VM-exit. Mesure sous QEMU (`-trace cpu_in,cpu_out,memory_region_ops_*`,
+`TESTS/K/RUNPERF.SH`) : le demarrage faisait **1 280 000 acces** (1 200 000
+lectures du port 80h) a cause de `AtapiCapacity` qui attendait 4 x 300 000
+lectures par lecteur de CD vide (celui que VirtualBox presente toujours) ; il
+n'en fait plus que **76 000** (-94 %) : REQUEST SENSE (« pas de support » =
+abandon immediat) et attente de 3 000 lectures. Au repos : ~0 acces par
+seconde (hors LAPIC, que QEMU ne trace pas). Souris : IRQ 12 draine tous les
+octets disponibles d'un coup (moins d'interruptions et d'EOI par paquet) ;
+`MemFill` ecrit par mots de 32 bits ; frequence des UPDATE VMware reglable
+(`fbupd=N` ticks, 5 par defaut). `/proc/k32perf` : totaux et taux par seconde
+des interruptions, EOI LAPIC/8259, acces 8042 clavier/souris, registres SVGA,
+UPDATE, Ko ecrits dans /dev/fb0, lectures CMOS, appels KLog, ticks (et
+compteurs VMMDev). **Pilote VMMDev** (PCI 80EE:CAFE : ES de requete BAR 0,
+memoire BAR 1, IRQ) : ReportGuestInfo/2, ReportGuestStatus, filtre d'evenements,
+SetMouseStatus (`GUEST_CAN_ABSOLUTE` ; `vboxcursor=1` ajoute
+`NEEDS_HOST_CURSOR`), GetMouseStatus et AcknowledgeEvents sur IRQ ou, par
+securite, a chaque tick ; positions rendues sur `/dev/input/event2`
+(« VirtualBox mouse integration », EV_ABS ABS_X/ABS_Y de 0 a 65535, boutons
+repris du PS/2, EVIOCGABS) ; `/dev/input/mice` et PS/2 intacts ; messages
+`vbox: ...` au demarrage ; option `novbox`. **Prouve seulement contre une
+simulation logicielle** (`k32vboxfake=1`, position par
+`/proc/sys/k32/vbox_sim_x|y`, `RUNVBOX.SH`) qui verifie la structure des
+requetes (taille, version 10001h, type, rc) comme je la connais des en-tetes de
+VirtualBox ; **jamais teste contre VirtualBox** (valeurs de types, taille des
+requetes et ordre des operations a verifier avec le journal `vbox:`).
+`FBIOGET_FSCREENINFO` : `line_length` est maintenant a l'offset 44 (Linux) et
+reste recopie a 48. `e2fsck-lite` : limite portee a 524288 inodes.
+En mode graphique le noyau n'ecrit plus dans la memoire VGA texte (B8000h,
+MMIO : un VM-exit par ecriture ; `VgaHidden`) : la console texte vit dans
+`VcBuf` et est redessinee au retour en KD_TEXT ou en panique.
+
+**USB OHCI + HID, curseur materiel VMSVGA (lot D7-12)** : VirtualBox
+presente par defaut un controleur OHCI et une *tablette USB* comme pointeur.
+`UsbInit` detecte le controleur par sa classe PCI (0C0310), mappe ses
+registres (BAR 0, FC000000h), prend la main sur le BIOS, le reinitialise
+(HCR) et le met en USBRESET ; le fil noyau `kusbd` laisse 60 ms de
+reinitialisation du bus, passe en operationnel (liste de controle + liste
+periodique, IRQ WDH/RHSC/UE), alimente les ports, puis enumere chaque
+peripherique (reinitialisation du port, SET_ADDRESS, descripteurs, chaine du
+produit, SET_CONFIGURATION, interfaces HID). Branchement/retrait a chaud
+(interruption RHSC, repli par un balayage toutes les 20 s). Hub externe,
+stockage, UHCI/EHCI/xHCI : non geres (journal `usb: ... non gere`). Entrees :
+clavier de boot (usages HID -> codes de balayage de l'ensemble 1 -> `KbdScan`,
+le meme chemin que le PS/2 : consoles, Alt+Fn, KbMode ; repetition par le tick,
+500 ms puis 33 Hz) ; souris relative (descripteur de rapport analyse ->
+`MousePacket` : `/dev/input/event1` et `/dev/input/mice` comme le PS/2) ;
+tablette absolue (axes X/Y absolus, boutons, molette) sur `/dev/input/event2`
+(EV_ABS ABS_X/ABS_Y ramenes a 0..65535, BTN_LEFT/RIGHT/MIDDLE, REL_WHEEL ;
+nom lu dans le descripteur de chaine, ex. « QEMU USB Tablet » ; bustype USB).
+**Priorite** documentee : tablette USB > VMMDev > PS/2 : une seule source
+alimente event2 (`AbsSrc`) ; quand la tablette est active VMMDev recoit
+SetMouseStatus sans GUEST_CAN_ABSOLUTE (l'hote n'envoie plus l'absolu par deux
+voies) ; le PS/2 relatif reste sur `/dev/input/mice`. Les rapports arrivent par
+la file des TD termines du HCCA (en memoire) : au repos aucun acces de registre
+hors le balayage des ports ; ~2 acces de registre par rapport (lecture de
+`HcInterruptStatus` quand l'IRQ est redoublee + acquittement) contre ~16 pour
+une souris PS/2 (mesure QEMU : 3,0 puis 2 apres l'optimisation du cas courant).
+`/proc/k32perf` : `ohci_reg_access`, `usb_reports`. Journal `usb: ...`
+(controleur, ports, descripteurs, interfaces, champs HID, trois premiers
+rapports de chaque tuyau en hexadecimal) : a me rapporter depuis VirtualBox.
+Option `nousb`. `TESTS/K/RUNUSB.SH` (QEMU, `-device pci-ohci` avec usb-tablet,
+usb-kbd, usb-mouse ; evenements par QMP) verifie l'enumeration, la tablette
+(position, coins, boutons, molette, EVIOCGABS/EVIOCGNAME/EVIOCGID), le clavier
+(event0, tty, repetition), la souris (event1, mice), la priorite sur VMMDev
+(simulation) et le branchement/retrait a chaud. **Non teste sur VirtualBox**
+(descripteurs de la tablette VirtualBox analyses « sur le papier » : rapport de
+7 octets, X/Y 0..7FFFh). Curseur materiel VMSVGA pour Graph (ioctl de
+`/dev/fb0`) : `FBIO_K32_UPDATE` 46F0 (rectangle ; le premier appel passe en
+mode manuel : plus d'UPDATE periodique tant que le fichier est ouvert),
+`FBIO_K32_CURDEF` 46F1 (curseur ARGB jusqu'a 64x64, SVGA_CMD_DEFINE_ALPHA_CURSOR),
+`FBIO_K32_CURMOVE` 46F2 (position : FIFO CURSOR_BYPASS_3 sans VM-exit si
+l'hote l'annonce, sinon registres CURSOR_*) ; -ENOTTY hors VMware SVGA ; la voie
+CURSOR_BYPASS_3 n'est pas prouvable sous QEMU (compteurs `cursor_fifo_moves` /
+`cursor_reg_moves`). `poll()`/`select()` sur les evenements d'entree sont
+reveilles directement par l'IRQ (plus d'attente complete d'un tick de 10 ms).
+
 **Bureau : CD, consoles, souris (lot D7-10)** : (1) `CDROMEJECT` (5309h),
 `CDROMCLOSETRAY` (5319h), `CDROM_LOCKDOOR` (5329h) et `CDROM_DRIVE_STATUS`
 (5326h) sur `/dev/hdc`, `/dev/sr0` (ATAPI IDE ou AHCI) : PREVENT/ALLOW MEDIUM
@@ -1760,6 +1838,51 @@ le nom choisit l'environnement ; PAS de serveur X : phase 2) :
   `FSPROBE`, `e2tools`, `INSTOPS` ne lisent que des offsets de moins de 2 Gio.
 * Essais : `RUNINST.SH fail` (mkfs remplace par `sleep` via la cle de preseed
   `testmkfs=`, delai 4 s) et `RUNINST.SH sata8g` (disque creux 8 Go, ich9-ahci, 1 Gio).
+
+### Redemarrage apres l'installation : le systeme installe, pas l'assistant
+
+Retour utilisateur (VirtualBox 7.0.6, Windows 11, BIOS, disque et CD sur SATA/AHCI) :
+le bouton **Redemarrer** relancait l'installation, alors que fermer puis rouvrir la VM
+demarrait bien le systeme installe.
+
+* **Cause constatee sous QEMU** (ich9-ahci pour le disque ET le CD, SeaBIOS, ordre CD puis
+  disque, sans `-no-reboot`) : l'ejection du noyau fonctionne (`START STOP UNIT` apres
+  `PREVENT ALLOW 0` : `info block` donne `tray open`), mais **la reinitialisation du
+  materiel referme le plateau et le CD est a nouveau amorcable** ; le BIOS demarre donc le
+  CD, et l'assistant (preseed ou non) refaisait l'installation en boucle. Un
+  redemarrage "a froid" par fermeture de la VM prend un chemin different (CD retire).
+  `SysReboot(RESTART)` fait bien un reset complet (le BIOS, le chargeur du CD et le
+  noyau repartent de zero : verifie par la banniere du chargeur apres "Redemarrage du
+  systeme").
+* **Garde-fou (quoi qu'il arrive de l'ejection)** : au lancement, l'assistant cherche un
+  systeme deja installe (`/etc/k32/installed` et `/sbin/init` sur une partition
+  ext2/3/4). S'il en trouve un, il **n'installe pas** : page "Systeme deja installe"
+  (7 langues, langue prise dans `/etc/default/locale` du systeme installe) avec decompte
+  de 5 s (preseed `installedwait=`), puis, par defaut, **Demarrer le systeme installe** ;
+  autres choix : **Reinstaller** (l'assistant normal, ou la suite du preseed) et **Shell
+  (F2)**. Le decompte s'arrete si le focus quitte "Demarrer". `k32setup.reinstall` (ligne
+  de commande) ou `reinstall=yes` (preseed) forcent l'assistant sans la page.
+* **Demarrer le systeme installe depuis le CD** : `SwitchRoot` monte la racine installee,
+  y deplace `/dev`, `/proc` et `/sys` (`MS_MOVE`), appelle `pivot_root` (le noyau deplace
+  la racine de tous les processus, init compris), ferme l'ecran, puis demande a init
+  (`/var/run/init.req` = `R`, SIGHUP) de **se relancer** : `INIT.PAS` arrete les
+  processus du CD et fait `exec /sbin/init` du systeme installe ; son `/etc/inittab`,
+  son `/etc/rc` et sa session (terminal, GNOME, KDE, GEOWORKS)
+  demarrent comme apres un amorcage du disque. C'est le meme noyau que sur le disque.
+  Si le montage ou le pivot echoue, rien n'est change et un message est affiche.
+* **Ejection plus robuste** (`EjectCd`) : demontage du CD, puis sur `/dev/sr0..3`,
+  `hdc`, `hdd`, `hdb`, `scd0`, `cdrom` : `CDROM_LOCKDOOR 0` puis `CDROMEJECT`, avec le
+  retour de chaque ioctl dans le journal (`ejection /dev/sr0 : deverrouillage 0,
+  CDROMEJECT 0`). `k32setup.noeject` simule une ejection sans effet (essais). Nouvelle
+  commande `eject [-t] [-v] [dev...]` (`USR/EJECT.PAS`).
+* Limites : le systeme demarre ainsi garde `/proc/cmdline` du CD et l'ancienne racine
+  en memoire du CD reste montee sous `/oldroot` (umount repond "cible occupee" : une
+  reference du noyau subsiste, une quinzaine de Mo de RAM) ; apres `reboot`, le CD
+  (s'il est toujours la) repasse par la page et redemarre le systeme installe : retirer
+  le CD dans les reglages de la VM pour un amorcage direct du disque.
+* Essais (`RUNINST.SH reboot reboot-noeject guard guard-reinstall`) : disque et CD sur
+  AHCI, preseed jusqu'a "Redemarrer", reset reel ; avec et sans ejection ; le systeme
+  installe arrive dans le terminal, GNOME, KDE ou GEOWORKS ; Reinstaller ; `reinstall=yes`.
 
 ### Lot E6 (suite 2) : strace, tcpdump, bc, dc, ed, script
 

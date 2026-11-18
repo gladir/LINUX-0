@@ -9,7 +9,7 @@
 #   ecrits par le Terminal et par un bouton Programmes Linux, pixels, sortie
 #   vers Linux).
 #   usage : georun.py WORK ROOT_DIR KERNEL.ELF CAPDIR [vga|vmware] [ide|ahci]
-import os, subprocess, sys, time
+import os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from QCTL import Q
@@ -89,10 +89,12 @@ def shot(name):
     return os.path.join(WORK, name + TAG + '.ppm')
 
 
-def colors(ppm, rgb, tol=8):
+def colors(ppm, rgb, tol=8, box=None):
     from PIL import Image
     import numpy
     a = numpy.asarray(Image.open(ppm).convert('RGB')).astype(int)
+    if box:
+        a = a[box[1]:box[3], box[0]:box[2]]
     d = numpy.abs(a - numpy.array(rgb))
     return int((d.max(axis=2) <= tol).sum())
 
@@ -121,6 +123,52 @@ def goto(x, y):
     q.move(-2000, -2000)
     q.move(x, y)
     time.sleep(0.3)
+
+
+def diffpx(p1, p2, mask=()):
+    """pixels differents ; mask = rectangles (x1, y1, x2, y2) ignores"""
+    from PIL import Image
+    import numpy
+    a = numpy.asarray(Image.open(p1).convert('RGB')).astype(int)
+    b = numpy.asarray(Image.open(p2).convert('RGB')).astype(int)
+    d = numpy.abs(a - b).max(axis=2) > 8
+    for x1, y1, x2, y2 in mask:
+        d[y1:y2 + 1, x1:x2 + 1] = False
+    return int(d.sum())
+
+
+def shot_np(name):
+    q.shot(name + TAG)
+    return os.path.join(WORK, name + TAG + '.ppm')
+
+
+CLOCK = ((520, 220, 600, 260),)           # horloge de l'ecran d'accueil
+HWCUR = bool(os.environ.get('GEOHW'))       # curseur materiel : hors capture
+
+
+def cur_check(label, trail=True):
+    """le curseur de la souris est-il VISIBLE (dessine dans le tampon, donc
+    dans screendump) apres un mouse_move, sans trainee derriere lui ?"""
+    goto(300, 200)
+    pa = shot_np('cura')
+    q.cmd('mouse_move 60 40', 0.2)
+    time.sleep(1.5)
+    pb = shot('cursor-' + re.sub('[^a-z0-9]+', '-', label.lower()).strip('-'))
+    d = diffpx(pa, pb)
+    if HWCUR and d == 0:
+        RES.append(('curseur (%s) : materiel, non verifiable' % label, True))
+        print('%-52s SKIP' % ('curseur (%s) : materiel' % label))
+        return
+    ok = d >= 60
+    extra = ''
+    if trail:
+        q.cmd('mouse_move -60 -40', 0.2)
+        time.sleep(1.5)
+        pc = shot_np('curc')
+        t = diffpx(pa, pc, CLOCK)       # la minute de l'horloge change
+        ok = ok and t == 0
+        extra = ', trainee %d px' % t
+    check('curseur visible : %s (%d px changes%s)' % (label, d, extra), ok)
 
 
 def click_at(x, y, wait=1.5):
@@ -153,7 +201,15 @@ def alive():
     mark = 'PSN%d' % SEQ[0]
     n = len(q.text())
     q.serial('echo "' + mark + '[$(ps | grep -c [g]eoworks)]"\n')
-    q.wait(mark + r'\[\d+\]', 40, n)
+    q.wait(mark + r'\[\d+\]', 90, n)
+    if (mark + '[1]') in q.text()[n:]:
+        return True
+    time.sleep(3)                      # une seconde chance (ps lent)
+    SEQ[0] += 1
+    mark = 'PSN%d' % SEQ[0]
+    n = len(q.text())
+    q.serial('echo "' + mark + '[$(ps | grep -c [g]eoworks)]"\n')
+    q.wait(mark + r'\[\d+\]', 90, n)
     return (mark + '[1]') in q.text()[n:]
 
 
@@ -183,6 +239,7 @@ print('ecran %dx%d' % (SW, SH))
 check('geoworks tourne (ecran d\'accueil)', alive())
 check('accueil dessine (fond gris et logo jaune)',
       colors(p, (170, 170, 170)) > 50000 and colors(p, (255, 255, 85)) > 500)
+cur_check('ecran d\'accueil')
 sh('for d in WORLD SYSTEM DOCUMENT USERDATA/HELP; do '
    '[ -d /usr/share/geoworks/$d ] && echo DIROK-$d; done; echo DIRS-END', 2)
 d = out_since('for d in WORLD SYSTEM')
@@ -252,6 +309,7 @@ time.sleep(4)
 p = shot('desktop-after-exit')
 check('Terminal : exit ferme la fenetre (GeoManager visible)',
       colors(p, (255, 255, 255)) > 20000)
+cur_check('bureau apres le Terminal')
 
 # ---- 3. Programmes Linux (bouton configure) ---------------------------
 sh('echo "Test|echo GEO-RUN-OK > /tmp/geo-run.out|1" > '
@@ -271,16 +329,9 @@ time.sleep(3)
 p = shot('linux-programs-back')
 check('retour au graphique apres le programme', alive() and
       colors(p, (170, 170, 170)) > 50000)
+cur_check('retour d\'un programme Linux')
 
 # ---- 4. applications de chaque famille --------------------------------
-def diffpx(p1, p2):
-    from PIL import Image
-    import numpy
-    a = numpy.asarray(Image.open(p1).convert('RGB')).astype(int)
-    b = numpy.asarray(Image.open(p2).convert('RGB')).astype(int)
-    return int((numpy.abs(a - b).max(axis=2) > 8).sum())
-
-
 def wait_ready(name, timeout=60):
     """attend que la fenetre de l'application soit dessinee (des pixels
     blancs) : le demarrage depend de la charge de la machine"""
@@ -337,6 +388,10 @@ for arg, name, label, acts in APPS:
           (alive() or alive() or alive()) and
           (colors(p, (255, 255, 255)) > 500 or
            diffpx(p0, p) > 5000))
+    if arg == 'CALC':
+        cur_check('fenetre ouverte (Calculatrice)')
+    if arg == 'NOTEPAD':
+        cur_check('menu ouvert (Notepad)', False)
     if acts:
         check('%s : l\'action change l\'ecran (%d pixels)' % (label,
               diffpx(p0, p)), diffpx(p0, p) > 30)
@@ -349,11 +404,28 @@ if True:
           colors(p, (170, 170, 170)) > 10000)
     q.key('esc', 0.5)
 
+# ---- 4b. glisser une fenetre (cadre XOR limite, deplacement final) ------
+start('/NOWELCOME')
+p0 = shot('drag-before')
+goto(300, 12)
+q.cmd('mouse_button 1', 0.3)
+for _ in range(20):
+    q.cmd('mouse_move 5 5', 0.1)
+q.cmd('mouse_button 0', 0.5)
+time.sleep(2)
+p = shot('drag-after')
+cur_check('apres un glissement de fenetre')
+BOX = (0, 0, 90, 60)       # coin haut gauche : fenetre avant, bureau apres
+check('glisser la fenetre GeoManager (coin haut gauche decouvert)',
+      colors(p0, (85, 85, 85), 8, BOX) < 2500 and
+      colors(p, (85, 85, 85), 8, BOX) > 4000 and alive())
+
 # ---- 5. retour a Linux ------------------------------------------------
 start()
 q.key('esc', 0.5)
 time.sleep(1)
 p = shot('exit-confirm')
+cur_check('boite de dialogue', False)
 q.key('ret', 0.5)
 time.sleep(3)
 check('Quitter vers Linux : geoworks termine', not alive())

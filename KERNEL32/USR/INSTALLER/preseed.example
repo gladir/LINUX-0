@@ -22,3 +22,11 @@ fs=ext4
 # ui=gui (defaut), text ou none ; reboot=reboot ou halt
 reboot=reboot
 endwait=5
+# session : terminal (defaut), kde, gnome ou geoworks (mode de demarrage)
+#session=gnome
+# Si un systeme LINUX-0 est deja installe sur un disque (CD redemarre :
+# BIOS, ejection sans effet), l'assistant ne reinstalle pas : il demarre le
+# systeme installe apres un decompte (installedwait secondes, defaut 5).
+# reinstall=yes force l'installation malgre tout (efface le disque).
+#installedwait=5
+#reinstall=yes

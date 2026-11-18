@@ -1641,3 +1641,67 @@ it: Avvio: %1
 es: Arranque: %1
 pt: Arranque: %1
 nl: Opstarten: %1
+@INSD_T
+fr: Système déjà installé
+en: System already installed
+de: System bereits installiert
+it: Sistema già installato
+es: Sistema ya instalado
+pt: Sistema já instalado
+nl: Systeem al geïnstalleerd
+@INSD_I
+fr: Un système LINUX-0 est déjà installé sur ce disque (%1).\n\nLe CD d'installation est encore là (ou le BIOS l'a démarré en premier) : le système installé va démarrer, avec l'environnement choisi à l'installation (%2).
+en: A LINUX-0 system is already installed on this disk (%1).\n\nThe installation CD is still there (or the BIOS started it first): the installed system will now start, with the environment chosen at install time (%2).
+de: Auf dieser Festplatte ist bereits ein LINUX-0-System installiert (%1).\n\nDie Installations-CD ist noch da (oder das BIOS startete sie zuerst): das installierte System startet jetzt, mit der bei der Installation gewählten Umgebung (%2).
+it: Un sistema LINUX-0 è già installato su questo disco (%1).\n\nIl CD di installazione è ancora presente (o il BIOS lo ha avviato per primo): il sistema installato sta per partire, con l'ambiente scelto all'installazione (%2).
+es: Ya hay un sistema LINUX-0 instalado en este disco (%1).\n\nEl CD de instalación sigue ahí (o la BIOS lo arrancó primero): el sistema instalado va a arrancar, con el entorno elegido en la instalación (%2).
+pt: Já existe um sistema LINUX-0 instalado neste disco (%1).\n\nO CD de instalação ainda lá está (ou o BIOS arrancou-o primeiro): o sistema instalado vai arrancar, com o ambiente escolhido na instalação (%2).
+nl: Op deze schijf is al een LINUX-0-systeem geïnstalleerd (%1).\n\nDe installatie-cd zit er nog (of het BIOS startte hem eerst): het geïnstalleerde systeem start nu, met de bij de installatie gekozen omgeving (%2).
+@INSD_I2
+fr: Choisissez « Réinstaller » uniquement pour effacer le disque et refaire l'installation.
+en: Choose "Reinstall" only to erase the disk and install again.
+de: Wählen Sie "Neu installieren" nur, um die Platte zu löschen und neu zu installieren.
+it: Scegliete "Reinstalla" solo per cancellare il disco e installare di nuovo.
+es: Elija "Reinstalar" solo para borrar el disco e instalar de nuevo.
+pt: Escolha "Reinstalar" apenas para apagar o disco e instalar de novo.
+nl: Kies "Opnieuw installeren" alleen om de schijf te wissen en opnieuw te installeren.
+@INSD_CNT
+fr: Démarrage du système installé dans %1 s...
+en: Starting the installed system in %1 s...
+de: Das installierte System startet in %1 s...
+it: Avvio del sistema installato tra %1 s...
+es: Arranque del sistema instalado en %1 s...
+pt: A arrancar o sistema instalado em %1 s...
+nl: Het geïnstalleerde systeem start over %1 s...
+@INSD_BOOT
+fr: Démarrer le système installé
+en: Start the installed system
+de: Installiertes System starten
+it: Avvia il sistema installato
+es: Iniciar el sistema instalado
+pt: Iniciar o sistema instalado
+nl: Geïnstalleerd systeem starten
+@INSD_REINST
+fr: Réinstaller
+en: Reinstall
+de: Neu installieren
+it: Reinstalla
+es: Reinstalar
+pt: Reinstalar
+nl: Opnieuw installeren
+@INSD_GO
+fr: Démarrage du système installé...
+en: Starting the installed system...
+de: Das installierte System wird gestartet...
+it: Avvio del sistema installato...
+es: Iniciando el sistema instalado...
+pt: A iniciar o sistema instalado...
+nl: Het geïnstalleerde systeem wordt gestart...
+@INSD_FAIL
+fr: Impossible de démarrer le système installé : %1
+en: Cannot start the installed system: %1
+de: Das installierte System kann nicht gestartet werden: %1
+it: Impossibile avviare il sistema installato: %1
+es: No se puede iniciar el sistema instalado: %1
+pt: Não foi possível iniciar o sistema instalado: %1
+nl: Het geïnstalleerde systeem kan niet worden gestart: %1
