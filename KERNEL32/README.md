@@ -1018,6 +1018,9 @@ VirtualBox ; **jamais teste contre VirtualBox** (valeurs de types, taille des
 requetes et ordre des operations a verifier avec le journal `vbox:`).
 `FBIOGET_FSCREENINFO` : `line_length` est maintenant a l'offset 44 (Linux) et
 reste recopie a 48. `e2fsck-lite` : limite portee a 524288 inodes.
+En mode graphique le noyau n'ecrit plus dans la memoire VGA texte (B8000h,
+MMIO : un VM-exit par ecriture ; `VgaHidden`) : la console texte vit dans
+`VcBuf` et est redessinee au retour en KD_TEXT ou en panique.
 
 **Bureau : CD, consoles, souris (lot D7-10)** : (1) `CDROMEJECT` (5309h),
 `CDROMCLOSETRAY` (5319h), `CDROM_LOCKDOOR` (5329h) et `CDROM_DRIVE_STATUS`
@@ -1790,6 +1793,49 @@ le nom choisit l'environnement ; PAS de serveur X : phase 2) :
   `FSPROBE`, `e2tools`, `INSTOPS` ne lisent que des offsets de moins de 2 Gio.
 * Essais : `RUNINST.SH fail` (mkfs remplace par `sleep` via la cle de preseed
   `testmkfs=`, delai 4 s) et `RUNINST.SH sata8g` (disque creux 8 Go, ich9-ahci, 1 Gio).
+
+### Redemarrage apres l'installation : le systeme installe, pas l'assistant
+
+Retour utilisateur (VirtualBox 7.0.6, Windows 11, BIOS, disque et CD sur SATA/AHCI) :
+le bouton **Redemarrer** relancait l'installation, alors que fermer puis rouvrir la VM
+demarrait bien le systeme installe.
+
+* **Cause constatee sous QEMU** (ich9-ahci pour le disque ET le CD, SeaBIOS, ordre CD puis
+  disque, sans `-no-reboot`) : l'ejection du noyau fonctionne (`START STOP UNIT` apres
+  `PREVENT ALLOW 0` : `info block` donne `tray open`), mais **la reinitialisation du
+  materiel referme le plateau et le CD est a nouveau amorcable** ; le BIOS demarre donc le
+  CD, et l'assistant (preseed ou non) refaisait l'installation en boucle. Un
+  redemarrage "a froid" par fermeture de la VM prend un chemin different (CD retire).
+  `SysReboot(RESTART)` fait bien un reset complet (le BIOS, le chargeur du CD et le
+  noyau repartent de zero : verifie par la banniere du chargeur apres "Redemarrage du
+  systeme").
+* **Garde-fou (quoi qu'il arrive de l'ejection)** : au lancement, l'assistant cherche un
+  systeme deja installe (`/etc/k32/installed` et `/sbin/init` sur une partition
+  ext2/3/4). S'il en trouve un, il **n'installe pas** : page "Systeme deja installe"
+  (7 langues, langue prise dans `/etc/default/locale` du systeme installe) avec decompte
+  de 5 s (preseed `installedwait=`), puis, par defaut, **Demarrer le systeme installe** ;
+  autres choix : **Reinstaller** (l'assistant normal, ou la suite du preseed) et **Shell
+  (F2)**. Le decompte s'arrete si le focus quitte "Demarrer". `k32setup.reinstall` (ligne
+  de commande) ou `reinstall=yes` (preseed) forcent l'assistant sans la page.
+* **Demarrer le systeme installe depuis le CD** : `SwitchRoot` monte la racine installee,
+  y deplace `/dev`, `/proc` et `/sys` (`MS_MOVE`), appelle `pivot_root` (le noyau deplace
+  la racine de tous les processus, init compris), ferme l'ecran, puis demande a init
+  (`/var/run/init.req` = `R`, SIGHUP) de **se relancer** : `INIT.PAS` arrete les
+  processus du CD, demonte `/oldroot` et fait `exec /sbin/init` du systeme installe ;
+  son `/etc/inittab`, son `/etc/rc` et sa session (terminal, GNOME, KDE, GEOWORKS)
+  demarrent comme apres un amorcage du disque. C'est le meme noyau que sur le disque.
+  Si le montage ou le pivot echoue, rien n'est change et un message est affiche.
+* **Ejection plus robuste** (`EjectCd`) : demontage du CD, puis sur `/dev/sr0..3`,
+  `hdc`, `hdd`, `hdb`, `scd0`, `cdrom` : `CDROM_LOCKDOOR 0` puis `CDROMEJECT`, avec le
+  retour de chaque ioctl dans le journal (`ejection /dev/sr0 : deverrouillage 0,
+  CDROMEJECT 0`). `k32setup.noeject` simule une ejection sans effet (essais). Nouvelle
+  commande `eject [-t] [-v] [dev...]` (`USR/EJECT.PAS`).
+* Limites : le systeme demarre ainsi garde `/proc/cmdline` du CD ; apres `reboot`, le CD
+  (s'il est toujours la) repasse par la page et redemarre le systeme installe : retirer
+  le CD dans les reglages de la VM pour un amorcage direct du disque.
+* Essais (`RUNINST.SH reboot reboot-noeject guard guard-reinstall`) : disque et CD sur
+  AHCI, preseed jusqu'a "Redemarrer", reset reel ; avec et sans ejection ; le systeme
+  installe arrive dans le terminal, GNOME, KDE ou GEOWORKS ; Reinstaller ; `reinstall=yes`.
 
 ### Lot E6 (suite 2) : strace, tcpdump, bc, dc, ed, script
 

@@ -1131,6 +1131,28 @@ reboot=reboot
     check(tag + ' : init du systeme installe (getty relances)',
           'K32OK' in out and not out.strip().startswith('0'), out)
     cap(q, 'i', tag + '-fin')
+    if noeject:
+        # arret depuis le systeme demarre par pivot_root : init (re-execute)
+        q.serial('poweroff\n')
+        gone = False
+        for _ in range(40):
+            if not q.alive():
+                gone = True
+                break
+            time.sleep(1)
+        check(tag + ' : poweroff depuis le systeme installe : machine eteinte',
+              gone)
+    else:
+        # redemarrage depuis le systeme installe : le CD repasse par la garde
+        n0 = q.text().count('K32SETUP: page installed')
+        q.serial('reboot\n')
+        for _ in range(120):
+            if q.text().count('K32SETUP: page installed') > n0:
+                break
+            time.sleep(1)
+        check(tag + ' : reboot depuis le systeme installe : le CD repasse par '
+              'la page "systeme deja installe"',
+              q.text().count('K32SETUP: page installed') > n0)
     q.quit()
     return disk
 
@@ -1219,12 +1241,27 @@ def t_guard_reinstall():
           q.wait(r'K32SETUP: page installed', 150))
     time.sleep(1)
     q.key('tab')
-    time.sleep(0.5)
+    time.sleep(8)
+    check('greinst : Tab vers Reinstaller : le decompte est arrete (pas de '
+          'demarrage apres 8 s)',
+          'init : demarrage du systeme installe' not in q.text())
     q.key('ret')
     check('greinst : Reinstaller : l\'assistant demarre (page de la langue)',
           q.wait(r'K32SETUP: page 0\b', 30))
     time.sleep(1)
     cap(q, 'a', 'garde-fou-reinstaller')
+    q.quit()
+    # sans interface (ui=none) : demarrage direct du systeme installe
+    pre0 = "lang=fr\nui=none\nreboot=halt\n"
+    img3 = os.path.join(WORK, 'gnoui.img')
+    subprocess.run(['cp', '--sparse=always', disk, img3], check=True)
+    iso = build_iso('gnoui', 'console=tty0 console=ttyS0 rw '
+                    'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
+                    {'preseed.cfg': pre0})
+    q = qemu_ahci_cd('gnoui', iso, img3)
+    check('gnoui : ui=none : demarrage direct du systeme installe',
+          q.wait(r'init : demarrage du systeme installe', 150))
+    check('gnoui : login: du systeme installe', q.wait(r'reboot login:', 90))
     q.quit()
     pre = """lang=fr
 keyboard=fr

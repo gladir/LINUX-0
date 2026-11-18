@@ -764,11 +764,15 @@ Begin
   Port[$3D4] := $0E; Port[$3D5] := (P Shr 8) And $FF;
 End;
 
+Var
+  VgaHidden : Boolean;     { mode graphique : pas d'ecriture dans la memoire
+                             VGA texte (chaque ecriture est un VM-exit) }
+
 { Ecrire une cellule (caractere + attribut) dans la console Vc }
 Procedure VcCell(Vc, Idx, W : LongInt);
 Begin
   VcBuf[Vc * 2000 + Idx] := W;
-  If Vc = ActiveVc Then MemW[0:VideoBase + Idx * 2] := W;
+  If (Vc = ActiveVc) And (Not VgaHidden) Then MemW[0:VideoBase + Idx * 2] := W;
 End;
 
 Procedure VcClearRange(Vc, A, B : LongInt);
@@ -784,7 +788,7 @@ Begin
     VcBuf[Vc * 2000 + I] := VcBuf[Vc * 2000 + I + ScrCols];
   For I := 2000 - ScrCols To 1999 Do
     VcBuf[Vc * 2000 + I] := (DefAttr Shl 8) Or $20;
-  If Vc = ActiveVc Then
+  If (Vc = ActiveVc) And (Not VgaHidden) Then
     MemCopy(VideoBase, LongInt(@VcBuf[Vc * 2000]), 4000);
 End;
 
@@ -792,6 +796,7 @@ End;
 Procedure VcShow(Vc : LongInt);
 Begin
   ActiveVc := Vc;
+  If VgaHidden Then Exit;
   MemCopy(VideoBase, LongInt(@VcBuf[Vc * 2000]), 4000);
   VgaCursor;
 End;
@@ -25876,6 +25881,7 @@ Begin
     FbSize := FbLine * Y;
     FbXOff := 0; FbYOff := 0;
     FbGfx := True;
+    VgaHidden := True;
     MemFill(FbBase, 0, FbSize);
     VmUpdate(0, 0, X, Y);
     FbSetMode := 0;
@@ -25903,6 +25909,7 @@ Begin
   FbSize := FbLine * VY;
   FbXOff := 0; FbYOff := 0;
   FbGfx := True;
+  VgaHidden := True;
   MemFill(FbBase, 0, FbSize);
   FbSetMode := 0;
 End;
@@ -26188,6 +26195,7 @@ Begin
     If FbSaveMem <> 0 Then MemCopy(FbVirt, FbSaveMem, 262144);
     Port[$3C8] := 0;
     For I := 0 To 191 Do Port[$3C9] := FbSaveDac[I];
+    VgaHidden := False;
     VcShow(ActiveVc);
   End;
 End;

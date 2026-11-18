@@ -6,11 +6,20 @@
 #   KERNEL32-INSTALL.ISO) sous QEMU : voir instest.py.
 #     RUNINST.SH [-r racine] [-k noyau.elf] [-c dossier_captures] [scenario...]
 #   scenarios : tz auto-fr auto-de ui-fr ui-de text refuse virtio exist
-#   auto-log fail (defaut) et sata8g (a la demande : 8 Go, 1 Gio de RAM)
+#   auto-log fail reboot reboot-noeject guard guard-reinstall (defaut) et
+#   sata8g (a la demande : 8 Go, 1 Gio de RAM)
 #     virtio   installation sur un disque virtio-blk (/dev/vda)
 #     fail     ecran d'echec (mkfs bloque, delai 4 s) : message, journal,
 #              Reessayer / Shell / Quitter
 #     sata8g   disque creux de 8 Go sur ich9-ahci, -m 1024, de bout en bout
+#     reboot   disque ET CD sur AHCI, boot CD puis disque, preseed jusqu'a
+#              "Redemarrer", reset reel : le CD redemarre, l'assistant
+#              detecte le systeme installe et le demarre (pivot_root)
+#     reboot-noeject  idem, ejection simulee sans effet, session GNOME
+#     guard    le systeme installe demarre depuis le CD en terminal, GNOME,
+#              KDE et GEOWORKS (session editee dans /etc/k32/session)
+#     guard-reinstall  Tab+Reinstaller (decompte arrete, assistant) ;
+#              preseed reinstall=yes (pas de garde-fou)
 #     tz       fuseaux horaires (TZif, heure d'ete) contre l'hote
 #     auto-fr  installation automatique (preseed) en francais, guide, ext4+swap
 #     auto-de  idem en allemand, manuel : ext3 + swap + /home, horloge locale
