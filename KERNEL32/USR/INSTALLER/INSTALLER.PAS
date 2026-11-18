@@ -34,7 +34,7 @@ Const
   RES_REBUILD = -2;
   S_LANG = 0;  S_WELC = 1;  S_KEY = 2;  S_TZ = 3;  S_CLK = 4;  S_HOST = 5;
   S_ACC = 6;  S_DISK = 7;  S_METH = 8;  S_PED = 9;  S_ROLE = 10;  S_SUM = 11;
-  S_INST = 12;  S_END = 13;
+  S_INST = 12;  S_END = 13;  S_SESS = 14;
   LangCode : Array[0..6] Of String[2] = ('FR', 'EN', 'DE', 'IT', 'ES', 'PT',
     'NL');
   LangName : Array[0..6] Of String[12] = ('Fran'#231'ais', 'English',
@@ -394,21 +394,32 @@ Begin
   If TextOnly Then UiTextOpen Else UiGfxGrid;
 End;
 
+{ ordre des etapes : le mode de demarrage suit les comptes }
+Function StepOrd(I : LongInt) : LongInt;
+Begin
+  If I = S_SESS Then StepOrd := S_ACC * 2 + 1
+  Else If I > S_ACC Then StepOrd := I * 2
+  Else StepOrd := I * 2;
+End;
+
 Function StepNo(S : LongInt) : LongInt;
 Var N, I : LongInt;
 Begin
   N := 0;
-  For I := 0 To S Do
-    If (PartMode = 2) Or ((I <> S_PED) And (I <> S_ROLE)) Then Inc(N);
+  For I := 0 To S_SESS Do
+    If (StepOrd(I) <= StepOrd(S)) And ((PartMode = 2) Or
+       ((I <> S_PED) And (I <> S_ROLE))) Then Inc(N);
   StepNo := N;
 End;
 
 Function StepTotal : LongInt;
 Begin
-  If PartMode = 2 Then StepTotal := 14 Else StepTotal := 12;
+  If PartMode = 2 Then StepTotal := 15 Else StepTotal := 13;
 End;
 
 Var PageF5 : Boolean;
+  HelpExtra : String;
+  Session : String;
 
 { debut de page : titre, aide, boutons de navigation }
 Procedure BeginPage(Id : LongInt; Const Name : String);
@@ -419,6 +430,7 @@ Begin
              ' - ' + Name;
   UiFoot := Msg(M_FOOT);
   PageF5 := False;
+  HelpExtra := '';
   OpMark('page ' + NumS(Id));
 End;
 
@@ -456,6 +468,7 @@ Begin
   UiLabel(0, 5, UiCw, 3, Msg(M_HELP_2), 0);
   UiLabel(0, 9, UiCw, 3, Msg(M_HELP_3), 0);
   UiLabel(0, 13, UiCw, 3, Msg(M_HELP_4), WF_DIM);
+  If HelpExtra <> '' Then UiLabel(0, 16, UiCw, 2, HelpExtra, 0);
   UiButton(NAV_NEXT, UiCw - Length(Msg(M_OK)) - 4, UiWh - 4,
            Length(Msg(M_OK)) + 4, Msg(M_OK), WF_DEF Or WF_CANCEL);
   UiSetFocusId(NAV_NEXT);
@@ -1177,6 +1190,86 @@ Begin
   PageAcc := R;
 End;
 
+{ ---- page : mode de demarrage ---- }
+
+Var SessIdx : LongInt;
+
+Function SessName(I : LongInt) : String;
+Begin
+  Case I Of
+    1 : SessName := 'kde';
+    2 : SessName := 'gnome';
+    3 : SessName := 'geoworks';
+  Else
+    SessName := 'terminal';
+  End;
+End;
+
+Function SessIndex(Const S : String) : LongInt;
+Var I : LongInt;
+Begin
+  SessIndex := 0;
+  For I := 0 To 3 Do
+    If SessName(I) = LowerS(S) Then SessIndex := I;
+End;
+
+{ remarque sous les choix selon le mode retenu }
+Procedure CheckSess;
+Var K : LongInt; T : String; Fl : LongInt;
+Begin
+  If UiChecked(10) Then K := 0
+  Else If UiChecked(11) Then K := 1
+  Else If UiChecked(12) Then K := 2
+  Else K := 3;
+  SessIdx := K;
+  T := '';
+  Fl := WF_DIM;
+  If (K = 3) And (Not OpFileExists('/usr/bin/geoworks')) Then
+  Begin
+    T := Msg(M_SESS_NOGEO);
+    Fl := WF_ERR;
+  End
+  Else If (K > 0) And (Not UiGfx) Then
+  Begin
+    T := Msg(M_SESS_NOFB);
+    Fl := WF_ERR;
+  End;
+  UiSetText(20, T);
+  UiSetFlag(20, WF_ERR Or WF_DIM, False);
+  UiSetFlag(20, Fl, True);
+End;
+
+Function PageSess : LongInt;
+Var R, K : LongInt;
+Begin
+  Repeat
+    BeginPage(S_SESS, Msg(M_SESS_T));
+    HelpExtra := Msg(M_SESS_HELP);
+    UiLabel(0, 0, UiCw, 2, Msg(M_SESS_I), 0);
+    For K := 0 To 3 Do
+    Begin
+      UiRadio(10 + K, 1, 0, 3 + K * 2, UiCw, Msg(M_SESS_N0 + K), SessIdx = K,
+              WF_NOTIFY);
+      UiLabel(3, 4 + K * 2, UiCw - 3, 1, Msg(M_SESS_D0 + K), WF_DIM);
+    End;
+    UiLabelId(20, 0, 12, UiCw, 2, '', WF_DIM);
+    UiLabel(0, 15, UiCw, 3, Msg(M_SESS_NOTE), WF_DIM);
+    NavButtons(True, Msg(M_NEXT));
+    UiSetFocusId(10 + SessIdx);
+    CheckSess;
+    Repeat
+      R := PageRun;
+      If R >= RES_NOTIFY Then
+      Begin
+        CheckSess;
+        R := 0;
+      End;
+    Until R <> 0;
+  Until R <> RES_REBUILD;
+  Session := SessName(SessIdx);
+  PageSess := R;
+End;
+
 { ---- page : disque ---- }
 
 Function PageDisk : LongInt;
@@ -1802,8 +1895,9 @@ Begin
          Fmt(M_SUM_TZ, TzName, '', '') + #10 +
          Fmt(M_SUM_HOST, Host, '', '') + #10 +
          Fmt(M_SUM_USER, U, '', '') + #10 +
+         Fmt(M_SUM_SESS, SessName(SessIdx), '', '') + #10 +
          Fmt(M_SUM_DISK, DiskPath, NumS(DkMb(DkSectors(DiskPath))), '');
-    UiLabel(0, 0, UiCw, 6, T, 0);
+    UiLabel(0, 0, UiCw, 7, T, 0);
     N := 0;
     T := '';
     For I := 1 To MAXPT Do
@@ -1814,9 +1908,9 @@ Begin
                      RoleLine(I));
         Inc(N);
       End;
-    UiLabel(0, 6, UiCw, 5, T, WF_DIM);
+    UiLabel(0, 7, UiCw, 5, T, WF_DIM);
     If ExistNote <> '' Then
-      UiLabel(0, 11, UiCw, UiCh - 14, Msg(M_SUM_EXIST) + #10 + ExistNote,
+      UiLabel(0, 12, UiCw, UiCh - 15, Msg(M_SUM_EXIST) + #10 + ExistNote,
               WF_ERR);
     UiCheck(30, 0, UiCh - 2, UiCw, Fmt(M_SUM_CONF, DiskPath, '', ''), False,
             WF_NOTIFY Or WF_ERR);
@@ -1968,6 +2062,16 @@ Begin
     End;
   Pw := Pw + 'proc /proc proc defaults 0 0' + #10;
   If Not OpWriteFile(TGT + '/etc/fstab', Pw, 420, False) Then Exit;
+  { mode de demarrage (terminal, kde, gnome, geoworks) ; marque du systeme
+    installe : l'assistant ne s'y lance jamais }
+  OpMkdirP(TGT + '/etc/k32', 493);
+  If Session = '' Then Session := 'terminal';
+  If Not OpWriteFile(TGT + '/etc/k32/session', Session + #10, 420, False) Then
+    Exit;
+  If UserName <> '' Then
+    OpWriteFile(TGT + '/etc/k32/session-user', UserName + #10, 420, False);
+  OpWriteFile(TGT + '/etc/k32/installed', 'installed by k32-setup' + #10, 420,
+              False);
   { nom de la machine }
   If Not OpWriteFile(TGT + '/etc/hostname', Host + #10, 420, False) Then Exit;
   If Not OpWriteFile(TGT + '/etc/hosts', '127.0.0.1 localhost' + #10 +
@@ -2330,9 +2434,29 @@ End;
 
 { ---- page : fin ---- }
 
+{ ejecte le CD-ROM d'installation (CDROMEJECT) pour que le BIOS ne
+  relance pas l'assistant depuis le CD apres le redemarrage }
+Procedure EjectCd;
+Const Devs : Array[0..3] Of String[10] = ('/dev/hdc', '/dev/hdd', '/dev/hdb',
+  '/dev/sr0');
+Var I, Fd : LongInt;
+Begin
+  SysUmount(CDMNT);
+  For I := 0 To 3 Do
+  Begin
+    Fd := SysOpen(Devs[I], O_RDONLY Or $800, 0);
+    If Fd >= 0 Then
+    Begin
+      SysIoctlL(Fd, $5309, 0);
+      SysClose(Fd);
+    End;
+  End;
+End;
+
 Procedure DoReboot;
 Begin
   SysSync;
+  EjectCd;
   If RebootMode = 'halt' Then
     SysReboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_POWER_OFF)
   Else
@@ -2492,6 +2616,8 @@ Begin
   If PsGet('partitioning', 'guided') = 'manual' Then PartMode := 2
   Else PartMode := 1;
   RebootMode := PsGet('reboot', 'reboot');
+  SessIdx := SessIndex(PsGet('session', 'terminal'));
+  Session := SessName(SessIdx);
   S := PsGet('date', '');
   T := PsGet('time', '');
   If (S <> '') And (T <> '') Then
@@ -2523,6 +2649,8 @@ End;
 Function NextStep(S : LongInt) : LongInt;
 Begin
   Case S Of
+    S_ACC : NextStep := S_SESS;
+    S_SESS : NextStep := S_DISK;
     S_METH : If PartMode = 2 Then NextStep := S_PED Else NextStep := S_SUM;
     S_PED : NextStep := S_ROLE;
     S_ROLE : NextStep := S_SUM;
@@ -2537,6 +2665,8 @@ Begin
     S_SUM : If PartMode = 2 Then PrevStep := S_ROLE Else PrevStep := S_METH;
     S_PED : PrevStep := S_METH;
     S_ROLE : PrevStep := S_PED;
+    S_DISK : PrevStep := S_SESS;
+    S_SESS : PrevStep := S_ACC;
   Else
     If S > 0 Then PrevStep := S - 1 Else PrevStep := 0;
   End;
@@ -2579,6 +2709,7 @@ Begin
           R := PagePed;
         End;
       S_ROLE : R := PageRole;
+      S_SESS : R := PageSess;
       S_SUM : R := PageSum;
       S_INST :
         Begin
@@ -2680,6 +2811,13 @@ BEGIN
   RebootMode := 'reboot';
   InstProgW := -1;
   OpTimeout := 900;
+  { jamais depuis un systeme deja installe (disque dur) }
+  If OpFileExists('/etc/k32/installed') And Not CmdHas('k32setup.force') Then
+  Begin
+    SysPut(2, 'k32-setup: systeme deja installe (/etc/k32/installed) : ' +
+           'assistant refuse' + #10);
+    SysExit(4);
+  End;
   OpLogOpen;
   AutoMode := False;
   CdOk := MountCd;

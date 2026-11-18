@@ -10395,6 +10395,43 @@ Begin
   DiskBlkpg := 0;
 End;
 
+{ Commande ATAPI sans donnees (START STOP UNIT, PREVENT ALLOW) }
+Function AtapiSimple(D, Op, B4 : LongInt) : LongInt;
+Var Cdb : Array[0..11] Of Byte; R : LongInt;
+Begin
+  MemFill(LongInt(@Cdb[0]), 0, 12);
+  Cdb[0] := Op;
+  Cdb[4] := B4;
+  R := AtapiCmd(D, LongInt(@Cdb[0]), 0, 0);
+  If R < 0 Then AtapiSimple := -EIO Else AtapiSimple := 0;
+End;
+
+{ ioctl de lecteur de CD-ROM : CDROMEJECT (5309h), CDROMCLOSETRAY (5319h),
+  CDROM_LOCKDOOR (5329h), CDROM_DRIVE_STATUS (5326h) ; ENOTTY ailleurs }
+Function CdIoctl(D, Cmd, Arg : LongInt) : LongInt;
+Var R : LongInt;
+Begin
+  CdIoctl := -ENOTTY;
+  If Not DiskAtapi[D] Then Exit;
+  Case Cmd Of
+    $5309 :
+      Begin
+        AtapiSimple(D, $1E, 0);                  { autoriser le retrait }
+        R := AtapiSimple(D, $1B, 2);             { START STOP UNIT : LoEj }
+        CdCache[D] := -1;
+        CdIoctl := R;
+      End;
+    $5319 :
+      Begin
+        R := AtapiSimple(D, $1B, 3);             { fermer le plateau }
+        CdCache[D] := -1;
+        CdIoctl := R;
+      End;
+    $5329 : CdIoctl := AtapiSimple(D, $1E, Arg And 1);   { verrou de porte }
+    $5326 : CdIoctl := 4;                        { CDS_DISC_OK }
+  End;
+End;
+
 Function BdevIoctl(F : PFile; Cmd, Arg : LongInt) : LongInt;
 Var Dk, Pt, Bs, Ge : LongInt;
 Begin
@@ -10417,6 +10454,11 @@ Begin
     Exit;
   End;
   Dk := BlkDisk(F^.Inode^.Rdev, Pt, Bs);
+  If (Dk >= 0) And (Cmd >= $5300) And (Cmd <= $53FF) Then
+  Begin
+    BdevIoctl := CdIoctl(Dk, Cmd, Arg);
+    Exit;
+  End;
   If Dk >= 0 Then
     Case Cmd Of
       $125F :                                    { BLKRRPART }
@@ -15922,6 +15964,9 @@ Type
   TTty = Record
     Index, Opens         : LongInt;
     KbMode               : LongInt;      { KDSKBMODE : 0 RAW, 1 XLATE, 2 MRAW }
+    KdMode               : LongInt;      { KDSETMODE : 0 texte, 1 graphique }
+    VtMode, VtRel, VtAcq, VtPid : LongInt;  { VT_SETMODE (VT_PROCESS = 1) }
+    GxW, GxH, GxB        : LongInt;      { mode graphique a retablir }
     Pgrp, Session        : LongInt;
     Iflag, Oflag, Cflag, Lflag, Line : LongInt;
     Cc                   : Array[0..31] Of Byte;
@@ -16275,7 +16320,16 @@ Begin
   Begin
     Dec(T^.Opens);
     { dernier descripteur ferme : le clavier redevient XLATE (comme Linux) }
-    If T^.Opens <= 0 Then T^.KbMode := 1;
+    If T^.Opens <= 0 Then
+    Begin
+      T^.KbMode := 1;
+      If T^.KdMode <> 0 Then
+      Begin
+        T^.KdMode := 0;
+        T^.VtMode := 0;
+        If T^.Index = ActiveVc Then FbTextMode;
+      End;
+    End;
     If T^.Index >= PtyBase Then
     Begin
       WakeUp(LongInt(@Ptys[T^.Index - PtyBase]));
@@ -16469,6 +16523,43 @@ Var
   KdGraphics : LongInt;      { KDSETMODE : 0 KD_TEXT, 1 KD_GRAPHICS }
 
 Procedure FbTextMode; Forward;
+Procedure FbGetMode(Var W, H, B : LongInt); Forward;
+Procedure FbReenter(W, H, B : LongInt); Forward;
+
+{ Signal a l'execution du processus Pid (gestion des consoles VT_PROCESS) }
+Procedure VtSignal(Pid, Sig : LongInt);
+Var I : LongInt;
+Begin
+  If (Pid <= 0) Or (Sig <= 0) Then Exit;
+  For I := 1 To MaxTasks - 1 Do
+    If (Tasks[I].State <> TsFree) And (Tasks[I].State <> TsZombie)
+       And (Tasks[I].Pid = Pid) Then SendSig(@Tasks[I], Sig);
+End;
+
+{ Changement de console (Alt+Fn, VT_ACTIVATE) : une console graphique
+  (KD_GRAPHICS) cede l'ecran (retour au texte VGA, signal de liberation si
+  VT_PROCESS) ; une console graphique qui redevient active retablit son mode
+  (ecran efface : le programme doit se redessiner, signal d'acquisition) }
+Procedure VtSwitch(New : LongInt);
+Var Old : LongInt;
+Begin
+  If (New < 0) Or (New >= NVc) Or (New = ActiveVc) Then Exit;
+  Old := ActiveVc;
+  If Ttys[Old].KdMode <> 0 Then
+  Begin
+    FbGetMode(Ttys[Old].GxW, Ttys[Old].GxH, Ttys[Old].GxB);
+    If Ttys[Old].VtMode = 1 Then
+      VtSignal(Ttys[Old].VtPid, Ttys[Old].VtRel);
+    FbTextMode;
+  End;
+  VcShow(New);
+  If (Ttys[New].KdMode <> 0) And (Ttys[New].GxW > 0) Then
+  Begin
+    FbReenter(Ttys[New].GxW, Ttys[New].GxH, Ttys[New].GxB);
+    If Ttys[New].VtMode = 1 Then
+      VtSignal(Ttys[New].VtPid, Ttys[New].VtAcq);
+  End;
+End;
 
 { KDGKBENT / KDSKBENT : struct kbentry { u8 table; u8 index; u16 value } ;
   tables 0 normale, 1 Maj, 2 AltGr ; valeur 0 = aucune, < 256 Latin-1,
@@ -16631,13 +16722,47 @@ Begin
       Begin
         If (Arg = 0) Or (Arg = 1) Then
         Begin
+          T^.KdMode := Arg;
           KdGraphics := Arg;
-          If Arg = 0 Then FbTextMode;
+          If (Arg = 0) And ((T^.Index = ActiveVc) Or (T^.Index >= NVc)) Then
+            FbTextMode;
           TtyIoctl := 0;
         End
         Else TtyIoctl := -EINVAL;
       End;
-    $4B3B : TtyIoctl := PutUserL(Arg, KdGraphics);   { KDGETMODE }
+    $4B3B : TtyIoctl := PutUserL(Arg, T^.KdMode);    { KDGETMODE }
+    $5601 :                                          { VT_GETMODE }
+      Begin
+        If Not EnsureUser(Arg, 8, True) Then
+        Begin
+          TtyIoctl := -EFAULT;
+          Exit;
+        End;
+        MemFill(Arg, 0, 8);
+        Mem[0:Arg] := T^.VtMode;
+        MemW[0:Arg + 2] := T^.VtRel;
+        MemW[0:Arg + 4] := T^.VtAcq;
+        TtyIoctl := 0;
+      End;
+    $5602 :                                          { VT_SETMODE }
+      Begin
+        If Not EnsureUser(Arg, 8, False) Then
+        Begin
+          TtyIoctl := -EFAULT;
+          Exit;
+        End;
+        If Mem[0:Arg] > 2 Then
+        Begin
+          TtyIoctl := -EINVAL;
+          Exit;
+        End;
+        T^.VtMode := Mem[0:Arg];
+        T^.VtRel := MemW[0:Arg + 2];
+        T^.VtAcq := MemW[0:Arg + 4];
+        T^.VtPid := Cur^.Pid;
+        TtyIoctl := 0;
+      End;
+    $5605 : TtyIoctl := 0;                           { VT_RELDISP }
     $4B46, $4B47 :                          { KDGKBENT, KDSKBENT }
       TtyIoctl := KbdEntIoctl(Cmd, Arg);
     $4B44 : TtyIoctl := PutUserL(Arg, T^.KbMode);         { KDGKBMODE }
@@ -16671,7 +16796,7 @@ Begin
       Begin
         If (Arg >= 1) And (Arg <= NVc) Then
         Begin
-          VcShow(Arg - 1);
+          VtSwitch(Arg - 1);
           TtyIoctl := 0;
         End
         Else TtyIoctl := -ENXIO;
@@ -17045,10 +17170,11 @@ Begin
     If Dz > 7 Then Dz := Dz - 16;
   End;
   EvMouse(MPkt[0], Dx, Dy, Dz);
-  If MLen + 3 > MouseBufSz Then Exit;
+  If MLen + 4 > MouseBufSz Then Exit;
   For I := 0 To 2 Do
     MouseBuf[(MHead + MLen + I) Mod MouseBufSz] := MPkt[I];
-  Inc(MLen, 3);
+  MouseBuf[(MHead + MLen + 3) Mod MouseBufSz] := Dz And $FF;
+  Inc(MLen, 4);
   WakeUp(LongInt(@MouseWchan));
 End;
 
@@ -17235,15 +17361,45 @@ Begin
   If (Nr = $90) Or (Nr = $A0) Then EvIoctl := 0;   { EVIOCGRAB, CLOCKID }
 End;
 
+{ /dev/input/mice : paquets de 3 octets (PS/2) ou, apres la sequence
+  d'activation d'IntelliMouse (F3 C8, F3 64, F3 50 ecrits sur le fichier), de
+  4 octets (ImPS/2 : molette) ; les reponses aux commandes (FA, identifiant
+  F2) sont rendues d'abord. F^.Priv : bit 0 ImPS/2, bits 1-3 avancement de la
+  sequence, bits 4-7 acquittements FA en attente, bit 8 identifiant en
+  attente }
 Function MouseRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
-Var N, I : LongInt;
+Var N, I, K, Sz : LongInt;
 Begin
   If (F^.Inode^.Rdev And $FF) >= 64 Then
   Begin
     MouseRead := EvRead(F, Buf, Cnt);
     Exit;
   End;
-  Cnt := (Cnt Div 3) * 3;
+  If Cnt <= 0 Then
+  Begin
+    MouseRead := -EINVAL;
+    Exit;
+  End;
+  N := 0;
+  While (N < Cnt) And (((F^.Priv Shr 4) And 15) > 0) Do
+  Begin
+    Mem[0:Buf + N] := $FA;
+    Inc(N);
+    F^.Priv := F^.Priv - 16;
+  End;
+  If (N < Cnt) And ((F^.Priv And $100) <> 0) Then
+  Begin
+    If (F^.Priv And 1) <> 0 Then Mem[0:Buf + N] := 3 Else Mem[0:Buf + N] := 0;
+    Inc(N);
+    F^.Priv := F^.Priv And Not $100;
+  End;
+  If N > 0 Then
+  Begin
+    MouseRead := N;
+    Exit;
+  End;
+  If (F^.Priv And 1) <> 0 Then Sz := 4 Else Sz := 3;
+  Cnt := (Cnt Div Sz) * Sz;
   If Cnt = 0 Then
   Begin
     MouseRead := -EINVAL;
@@ -17262,23 +17418,45 @@ Begin
       Exit;
     End;
   End;
-  N := Cnt;
-  If N > MLen Then N := MLen;
-  For I := 0 To N - 1 Do Mem[0:Buf + I] := MouseBuf[(MHead + I) Mod MouseBufSz];
-  MHead := (MHead + N) Mod MouseBufSz;
-  Dec(MLen, N);
+  K := 0;
+  While (N + Sz <= Cnt) And (MLen >= 4) Do
+  Begin
+    For I := 0 To Sz - 1 Do
+      Mem[0:Buf + N + I] := MouseBuf[(MHead + I) Mod MouseBufSz];
+    MHead := (MHead + 4) Mod MouseBufSz;
+    Dec(MLen, 4);
+    N := N + Sz;
+    Inc(K);
+  End;
   MouseRead := N;
 End;
 
 Function MouseWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
-Var I : LongInt;
+Var I, B, Ks : LongInt;
 Begin
   If (F^.Inode^.Rdev And $FF) >= 64 Then
   Begin
     MouseWrite := -EINVAL;
     Exit;
   End;
-  For I := 0 To Cnt - 1 Do KbcMouse(Mem[0:Buf + I]);
+  For I := 0 To Cnt - 1 Do
+  Begin
+    B := Mem[0:Buf + I];
+    Ks := (F^.Priv Shr 1) And 7;
+    { sequence F3 C8 F3 64 F3 50 : IntelliMouse }
+    If ((Ks = 0) Or (Ks = 2) Or (Ks = 4)) And (B = $F3) Then Inc(Ks)
+    Else If (Ks = 1) And (B = 200) Then Ks := 2
+    Else If (Ks = 3) And (B = 100) Then Ks := 4
+    Else If (Ks = 5) And (B = 80) Then
+    Begin
+      F^.Priv := F^.Priv Or 1;
+      Ks := 0;
+    End
+    Else Ks := 0;
+    F^.Priv := (F^.Priv And Not $E) Or (Ks Shl 1);
+    If B = $F2 Then F^.Priv := F^.Priv Or $100;     { identifiant }
+    If ((F^.Priv Shr 4) And 15) < 15 Then F^.Priv := F^.Priv + 16;   { FA }
+  End;
   MouseWrite := Cnt;
 End;
 
@@ -17296,7 +17474,8 @@ Begin
     Else MousePoll := POLLOUT;
     Exit;
   End;
-  If MLen > 0 Then MousePoll := POLLIN Or POLLOUT Else MousePoll := POLLOUT;
+  If (MLen > 0) Or (((F^.Priv Shr 4) And 15) > 0) Or ((F^.Priv And $100) <> 0)
+    Then MousePoll := POLLIN Or POLLOUT Else MousePoll := POLLOUT;
 End;
 
 Function MiscMouseOps : LongInt;
@@ -17514,7 +17693,7 @@ Begin
   { combinaisons systeme }
   If KbdAlt And (Code >= 59) And (Code <= 58 + NVc) Then
   Begin
-    VcShow(Code - 59);
+    VtSwitch(Code - 59);
     KbdE0 := False;
     Exit;
   End;
@@ -25677,6 +25856,18 @@ Begin
     ActiveVc := 0;
     VcShow(0);
   End;
+End;
+
+Procedure FbGetMode(Var W, H, B : LongInt);
+Begin
+  W := FbW; H := FbH; B := FbBpp;
+  If Not FbGfx Then W := 0;
+End;
+
+{ Retablit le mode graphique W x H x B (l'ecran est efface) }
+Procedure FbReenter(W, H, B : LongInt);
+Begin
+  If FbOn Then FbSetMode(W, H, W, H, B);
 End;
 
 Procedure FbInit;
@@ -49532,8 +49723,8 @@ End;
   encodes en base64, ecrits dans le tmpfs racine au demarrage. }
 
 Const
-  EmbCount = 60;
-  EmbPath : Array[0..59] Of String[20] = (
+  EmbCount = 61;
+  EmbPath : Array[0..60] Of String[20] = (
     '/sbin/init',
     '/bin/hello',
     '/bin/forkwait',
@@ -49587,6 +49778,7 @@ Const
     '/bin/pwrtest',
     '/bin/cgtest',
     '/bin/bdtest',
+    '/bin/vttest',
     '/bin/effects',
     '/bin/modtest',
     '/bin/hello.ko',
@@ -49594,19 +49786,20 @@ Const
     '/bin/badinit.ko',
     '/bin/unkmod.ko',
     '/bin/irqmod.ko');
-  EmbSize : Array[0..59] Of LongInt = (
+  EmbSize : Array[0..60] Of LongInt = (
     3880, 1688, 1956, 2268, 2260, 2224, 3940, 1704, 1652, 2296, 4536, 2720,
     2320, 1104, 12408, 6948, 3124, 2476, 3268, 10872, 2376, 2004, 5100, 3932,
-    4588, 22088, 2812, 10804, 8460, 4256, 2196, 3924, 2552, 4028, 12328, 8776,
+    5064, 22088, 2812, 10804, 8460, 4256, 2196, 3924, 2552, 4028, 12328, 8776,
     6368, 7332, 11572, 7548, 7316, 5932, 9416, 11828, 5256, 3912, 6836, 9680,
-    2128, 4404, 1128, 5220, 2788, 4016, 9456, 3276, 1336, 980, 816, 2288);
-  EmbStart : Array[0..60] Of LongInt = (
+    2128, 4404, 1128, 5220, 2788, 3200, 4016, 9456, 3276, 1336, 980, 816,
+    2288);
+  EmbStart : Array[0..61] Of LongInt = (
     0, 87, 125, 169, 220, 271, 321, 409, 447, 484, 536, 637, 698, 750, 775,
-    1051, 1206, 1276, 1332, 1405, 1647, 1700, 1745, 1859, 1947, 2049, 2540,
-    2603, 2844, 3032, 3127, 3176, 3264, 3321, 3411, 3685, 3881, 4023, 4186,
-    4444, 4612, 4775, 4907, 5117, 5380, 5497, 5584, 5736, 5952, 6000, 6098,
-    6124, 6240, 6302, 6392, 6603, 6676, 6706, 6728, 6747, 6798);
-  EmbData : Array[0..6797] Of String[60] = (
+    1051, 1206, 1276, 1332, 1405, 1647, 1700, 1745, 1859, 1947, 2060, 2551,
+    2614, 2855, 3043, 3138, 3187, 3275, 3332, 3422, 3696, 3892, 4034, 4197,
+    4455, 4623, 4786, 4918, 5128, 5391, 5508, 5595, 5747, 5963, 6011, 6109,
+    6135, 6251, 6313, 6385, 6475, 6686, 6759, 6789, 6811, 6830, 6881);
+  EmbData : Array[0..6880] Of String[60] = (
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAAAQDgAAAAAAADQAIAAC',
     'ACgABwAGAAEAAAAAAAAAAIAECACABAhQDAAAUAwAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuBQAAACJ5VdWU4Pk8IHskAUA',
@@ -51554,108 +51747,119 @@ Const
     'AAAAfAwAAAABAAAGAAAACAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAHwN',
     'AABnAAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAADjDQAANwAA',
     'AAAAAAAAAAAAAQAAAAAAAAA=',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
+    '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',
-    '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',
-    'ADHSg/4Cfgox0oB8JDpeD5TCuMCOBAjo5QAAADHSg/4EdQox0oB8JDteD5TC',
-    'uNSOBAjoygAAAItcJBy4NgAAAMdEJCQAHgAAuUZLAACNVCQkzYAPt0QkJot8',
-    'JBQx0jn4uOiOBAgPlMLolAAAALj+jgQI6GoAAAAxwIM9DJ8ECAAPlcCJRCQc',
-    '6xGLXCQciVwkGIn7id/pVfv//4tEJByNZfRbXl9dw1VXVlOLRCQUi1wkGItM',
-    'JByLVCQgi3QkJIt8JCiLbCQszYBbXl9dw7itAAAAzYAx7Yngg+TwUOhkAAAA',
-    'VYnBMdKJ5VOAPBEAdANC6/e4BAAAALsBAAAAzYBbXcNVieVWica4BowECFOJ',
-    '0+jN////ifDoxv///4XbuP+LBAi6+osECA9Fwuiy////hdt0CP8FEJ8ECOsG',
-    '/wUMnwQIW15dw1WJ5VOD7AiLRQiLEI1IBI1EkAhQUVLoqPT//4nDuAEAAADN',
-    'gIPEEOv+IE9LCgAgRkFJTAoAS1RFU1Q6IAAvcHJvYy9jbWRsaW5lAGszMm1v',
-    'dXNlACAgKHNvdXJpcyA6IGVzc2FpIGlnbm9yZSwgdm9pciBSVU5NT1VTRS5T',
-    'SCkKAC9kZXYvaW5wdXQvbWljZQBtb3VzZS5vcGVuAC9kZXYvaW5wdXQvZXZl',
-    'bnQxAC9kZXYvaW5wdXQvZXZlbnQwAGV2ZGV2Lm9wZW4ATU9VU0UtUkVBRFkK',
-    'AC9wcm9jL2ludGVycnVwdHMAbW91c2UucGFja2V0cwBtb3VzZS5idXR0b24A',
-    'bW91c2UubW90aW9uAGV2ZGV2LnZlcnNpb24AZXZkZXYuaWQAZXZkZXYubmFt',
-    'ZV9rYmQAZXZkZXYubmFtZV9tb3VzZQBldmRldi5iaXRzX3JlbABldmRldi5i',
-    'aXRzX2J0bgBldmRldi5iaXRzX3R5cGVzX2tiZABldmRldi5yZWFkX3NpemVf',
-    'ZWludmFsAGV2ZGV2LnJlbF94AGV2ZGV2LnJlbF95AGV2ZGV2LmJ1dHRvbgBl',
-    'dmRldi53aGVlbABldmRldi5zeW4AS0VZLVJFQURZCgBldmRldi5rZXlfYQBl',
-    'dmRldi5rZXlfdXBfZXh0ZW5kZWQAL2Rldi90dHkxAGtiZC5nZXRtb2RlX3hs',
-    'YXRlAGtiZC5zZXRtb2RlX21lZGl1bXJhdwBrYmQuZ2V0bW9kZV9tZWRpdW1y',
-    'YXcAUkFXLVJFQURZCgBrYmQubWVkaXVtcmF3X3ByZXNzX3JlbGVhc2UAa2Jk',
-    'LmtkZ2tiZW50AGtiZC5rZGdrYmVudF9laW52YWxfdGFibGUAa2JkLmtkZ2ti',
-    'ZW50X2VpbnZhbF9pbmRleABrYmQua2Rza2JlbnQAa2JkLmtkc2tiZW50X3Jl',
-    'YWRiYWNrAERFQUQtUkVBRFkKAGtiZC5kZWFkX2NpcmN1bWZsZXhfZQBrYmQu',
-    'ZGVhZF9zcGFjZV9zaWduAGtiZC5kZWFkX3R3aWNlX3NpZ24Aa2JkLmtkc2ti',
-    'ZW50X3Jlc3RvcmVkAE1PVVNFLURPTkUKAEdDQzogKFVidW50dSAxMy4zLjAt',
-    'NnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAAAQAA',
-    'AAAAAAAAAAAABADx/w0AAABtiwQIIAAAAAIAAQASAAAAjYsECEQAAAACAAEA',
-    'GAAAABCfBAgEAAAAAQADACAAAAAMnwQIBAAAAAEAAwAoAAAA0YsECCkAAAAS',
-    'AAEALgAAADKLBAgAAAAAEAABADUAAABZiwQIAAAAABAAAQBHAAAAYIsECAAA',
-    'AAAQAAEAQgAAAAyfBAgAAAAAEAADACkAAACUgAQIngoAABIAAQBOAAAACp8E',
-    'CAAAAAAQAAMAVQAAABSfBAgAAAAAEAADAABtb3VzZXRlc3QuYwBwdXRzAGt0',
-    'ZXN0AGt1X3Bhc3MAa3VfZmFpbABjbWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0',
-    'AF9fYnNzX3N0YXJ0AF9lZGF0YQBfZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNo',
-    'c3RydGFiAC50ZXh0AC5yb2RhdGEALmJzcwAuY29tbWVudAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGwAAAAEAAAAGAAAA',
-    'lIAECJQAAABmCwAAAAAAAAAAAAABAAAAAAAAACEAAAABAAAAMgAAAPqLBAj6',
-    'CwAAEAMAAAAAAAAAAAAAAQAAAAEAAAApAAAACAAAAAMAAAAMnwQIDA8AAAgA',
-    'AAAAAAAAAAAAAAQAAAAAAAAALgAAAAEAAAAwAAAAAAAAAAoPAAAtAAAAAAAA',
-    'AAAAAAABAAAAAQAAAAEAAAACAAAAAAAAAAAAAAA4DwAA4AAAAAYAAAAGAAAA',
-    'BAAAABAAAAAJAAAAAwAAAAAAAAAAAAAAGBAAAFoAAAAAAAAAAAAAAAEAAAAA',
-    'AAAAEQAAAAMAAAAAAAAAAAAAAHIQAAA3AAAAAAAAAAAAAAABAAAAAAAAAA==',
+    '/gN+rb82AAAAi1wkHI1UJGy5AlQAAIn4zYCLRCQUi1wkHLlHSwAAjVQkJGYx',
+    'wIDMHolEJCSJ+M2AMdKD/gF+EYB8JDjDdQox0oB8JDmqD5TCuByQBAjocAIA',
+    'ADHSg/4Cfgox0oB8JDpeD5TCuDKQBAjoVQIAADHSg/4EdQox0oB8JDteD5TC',
+    'uEaQBAjoOgIAAItcJBy4NgAAAMdEJCQAHgAAuUZLAACNVCQkzYAPt0QkJot8',
+    'JBAx0rvEjQQIOfi4WpAECA+Uwuj/AQAAuQIAAAAx0rgFAAAAzYCJwolEJBy4',
+    'cJAECPfSweof6NwBAACDfCQcAA+IPQEAALgEAAAAuciQBAi6BwAAAItcJBzN',
+    'gDHSg/gHuHqQBAgPlMIx9jH/6KYBAACNhCQQAgAAuggAAACLXCQcjQwwKfK4',
+    'AwAAAM2AhcB+N0cBxoP/HX8Fg/4HftMx0oP+CHUlgLwkEAIAAPp1G4C8JBYC',
+    'AAD6dREx0oC8JBcCAAADD5TC6wIx0riLkAQIMf8x9ug/AQAAuJyQBAjoFQEA',
+    'ADHAiUQkFItEJBy5AQAAAMeEJJQAAAABAAAAumQAAACNnCSQAAAAiYQkkAAA',
+    'ALioAAAAzYCFwH44i1wkHLgDAAAAugQAAACNjCTQAAAAzYCD+AR1HPaEJNAA',
+    'AAAIdBKKhCTTAAAAhMB0B4t8JBgPtvD/RCQUg3wkFGN/CPfHAQAAAHSDMdKF',
+    '9riokAQID5XCIfronwAAALgGAAAAi1wkHM2AuLqQBAjoagAAADHAgz3QoAQI',
+    'AA+VwIlEJBjrEYtcJBiJXCQcifuJ3+nl+f//i0QkGI1l9FteX13DVVdWU4tE',
+    'JBSLXCQYi0wkHItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADNgDHtieCD',
+    '5PBQ6GQAAABVicEx0onlU4A8EQB0A0Lr97gEAAAAuwEAAADNgFtdw1WJ5VaJ',
+    'xrh4jQQIU4nT6M3///+J8OjG////hdu4cY0ECLpsjQQID0XC6LL///+F23QI',
+    '/wXUoAQI6wb/BdCgBAhbXl3DVYnlU4PsCItFCIsQjUgEjUSQCFBRUug48///',
+    'icO4AQAAAM2Ag8QQ6/4AACBPSwoAIEZBSUwKAEtURVNUOiAAL3Byb2MvY21k',
+    'bGluZQBrMzJtb3VzZQAgIChzb3VyaXMgOiBlc3NhaSBpZ25vcmUsIHZvaXIg',
+    'UlVOTU9VU0UuU0gpCgAvZGV2L2lucHV0L21pY2UAbW91c2Uub3BlbgAvZGV2',
+    'L2lucHV0L2V2ZW50MQAvZGV2L2lucHV0L2V2ZW50MABldmRldi5vcGVuAE1P',
+    'VVNFLVJFQURZCgAvcHJvYy9pbnRlcnJ1cHRzAG1vdXNlLnBhY2tldHMAbW91',
+    'c2UuYnV0dG9uAG1vdXNlLm1vdGlvbgBldmRldi52ZXJzaW9uAGV2ZGV2Lmlk',
+    'AGV2ZGV2Lm5hbWVfa2JkAGV2ZGV2Lm5hbWVfbW91c2UAZXZkZXYuYml0c19y',
+    'ZWwAZXZkZXYuYml0c19idG4AZXZkZXYuYml0c190eXBlc19rYmQAZXZkZXYu',
+    'cmVhZF9zaXplX2VpbnZhbABldmRldi5yZWxfeABldmRldi5yZWxfeQBldmRl',
+    'di5idXR0b24AZXZkZXYud2hlZWwAZXZkZXYuc3luAEtFWS1SRUFEWQoAZXZk',
+    'ZXYua2V5X2EAZXZkZXYua2V5X3VwX2V4dGVuZGVkAC9kZXYvdHR5MQBrYmQu',
+    'Z2V0bW9kZV94bGF0ZQBrYmQuc2V0bW9kZV9tZWRpdW1yYXcAa2JkLmdldG1v',
+    'ZGVfbWVkaXVtcmF3AFJBVy1SRUFEWQoAa2JkLm1lZGl1bXJhd19wcmVzc19y',
+    'ZWxlYXNlAGtiZC5rZGdrYmVudABrYmQua2Rna2JlbnRfZWludmFsX3RhYmxl',
+    'AGtiZC5rZGdrYmVudF9laW52YWxfaW5kZXgAa2JkLmtkc2tiZW50AGtiZC5r',
+    'ZHNrYmVudF9yZWFkYmFjawBERUFELVJFQURZCgBrYmQuZGVhZF9jaXJjdW1m',
+    'bGV4X2UAa2JkLmRlYWRfc3BhY2Vfc2lnbgBrYmQuZGVhZF90d2ljZV9zaWdu',
+    'AGtiZC5rZHNrYmVudF9yZXN0b3JlZABtaWNlLm9wZW4AbWljZS5rbm9ja193',
+    'cml0ZQBtaWNlLmFja3NfYW5kX2lkAElNUFMtUkVBRFkKAG1pY2UuaW1wczJf',
+    'cGFja2V0AE1PVVNFLURPTkUKAAAA88jzZPNQ8kdDQzogKFVidW50dSAxMy4z',
+    'LjAtNnVidW50dTJ+MjQuMDQuMSkgMTMuMy4wAAAAAAAAAAAAAAAAAAAAAAAB',
+    'AAAAAAAAAAAAAAAEAPH/DQAAAN2MBAggAAAAAgABABIAAAD9jAQIRAAAAAIA',
+    'AQAYAAAA1KAECAQAAAABAAMAIAAAANCgBAgEAAAAAQADACgAAADIkAQIBwAA',
+    'AAEAAgAwAAAAQY0ECCkAAAASAAEANgAAAKKMBAgAAAAAEAABAD0AAADJjAQI',
+    'AAAAABAAAQBPAAAA0IwECAAAAAAQAAEASgAAANCgBAgAAAAAEAADADEAAACU',
+    'gAQIDgwAABIAAQBWAAAAz6AECAAAAAAQAAMAXQAAANigBAgAAAAAEAADAABt',
+    'b3VzZXRlc3QuYwBwdXRzAGt0ZXN0AGt1X3Bhc3MAa3VfZmFpbABrbm9jay4w',
+    'AGNtYWluAGt1X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRh',
+    'AF9lbmQAAC5zeW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0',
+    'YQAuYnNzAC5jb21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAAAAAbAAAAAQAAAAYAAACUgAQIlAAAANYMAAAAAAAAAAAA',
+    'AAEAAAAAAAAAIQAAAAEAAAACAAAAbI0ECGwNAABjAwAAAAAAAAAAAAAEAAAA',
+    'AAAAACkAAAAIAAAAAwAAANCgBAjQEAAACAAAAAAAAAAAAAAABAAAAAAAAAAu',
+    'AAAAAQAAADAAAAAAAAAAzxAAAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIA',
+    'AAAAAAAAAAAAAPwQAADwAAAABgAAAAcAAAAEAAAAEAAAAAkAAAADAAAAAAAA',
+    'AAAAAADsEQAAYgAAAAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAA',
+    'ThIAADcAAAAAAAAAAAAAAAEAAAAAAAAA',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAA1b8ECDQAAADgVAAAAAAAADQAIAAD',
     'ACgACQAIAAEAAAAAAAAAAIAECACABAiDTQAAg00AAAUAAAAAEAAAAQAAAABQ',
     'AAAA0AQIANAECAwAAACozgAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
@@ -55909,6 +56113,78 @@ Const
     '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',
+    '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',
+    'AM2ASHUIZotUJB6D4gG45ogECInz6PwAAAC6BgAAAInQzYCLXCQMidDNgOsM',
+    'MdK4n4gECOjdAAAAuPOIBAjoswAAADHAgz0oqQQIAA+VwI1l9FteX13DVVdW',
+    'U4tEJBSLXCQYi0wkHItUJCCLdCQki3wkKItsJCzNgFteX13DuK0AAADNgDHt',
+    'ieCD5PBQ6MgAAAChJKkECECjJKkECMOhIKkECECjIKkECMNVieVXVlOJwzHA',
+    'iRSFIJkECEA9AAQAAHXxMfa/EwAAAIn4ifEx0s2AuAQAAAC5IJkECLoAEAAA',
+    'zYCBxgAQAACB/gBABgB12VteX13DVYnBMdKJ5VOAPBEAdANC6/e4BAAAALsB',
+    'AAAAzYBbXcNVieVWica4XIcECFOJ0+jN////ifDoxv///4XbuFWHBAi6UIcE',
+    'CA9Fwuiy////hdt0CP8FLKkECOsG/wUoqQQIW15dw1WJ5VOD7AiLRQiLEI1I',
+    'BI1EkAhQUVLoUvn//4nDuAEAAADNgIPEEOv+IE9LCgAgRkFJTAoAS1RFU1Q6',
+    'IAAvZGV2L2ZiMAAgIChwYXMgZGUgL2Rldi9mYjApCgAvZGV2L3R0eTEAdnQu',
+    'b3Blbl90dHkxAHZ0LmtkX2dyYXBoaWNzAHZ0LmtkX2dldG1vZGUAdnQuc2V0',
+    'bW9kZQB2dC5nZXRtb2RlAC9kZXYvdHR5MgBDb25zb2xlIHZpcnR1ZWxsZSAy',
+    'IDogdGV4dGUgVkdBIHZpc2libGUgYXByZXMgQWx0K0YyIGRlcHVpcyBsZSBt',
+    'b2RlIGdyYXBoaXF1ZQ0KAFZULVNIT1QgMAoAdnQuYWN0aXZhdGVfMgB2dC5y',
+    'ZWxlYXNlX3NpZ25hbABWVC1TSE9UIDEKAHZ0LmFjcXVpcmVfc2lnbmFsAHZ0',
+    'Lm1vZGVfcmVzdG9yZWQAVlQtU0hPVCAyCgBWVC1TSE9UIDMKAC9kZXYvcHRt',
+    'eAB2dC5wdHlfb3BlbgB2dC5wdHlfc2V0d2luc3oAdnQucHR5X2dldHdpbnN6',
+    'X3NsYXZlAGFiYwB2dC5wdG14X2Zpb25yZWFkAHZ0LnB0bXhfcG9sbABLVEVT',
+    'VDogdnQgRE9ORQoAL2Rldi9wdHMvAAAAAAAAAAAAAAAAAAAAR0NDOiAoVWJ1',
+    'bnR1IDEzLjMuMC02dWJ1bnR1Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAA',
+    'AAAAAAAAAAEAAAAAAAAAAAAAAAQA8f8KAAAAX4YECAwAAAACAAEAEQAAACSp',
+    'BAgEAAAAAQADABkAAABrhgQIDAAAAAIAAQAgAAAAIKkECAQAAAABAAMAKAAA',
+    'AHeGBAhMAAAAAgABAC4AAAAgmQQIABAAAAEAAwAyAAAAw4YECCAAAAACAAEA',
+    'NwAAAOOGBAhEAAAAAgABAD0AAAAsqQQIBAAAAAEAAwBFAAAAKKkECAQAAAAB',
+    'AAMATQAAACeHBAgpAAAAEgABAFMAAAAkhgQIAAAAABAAAQBaAAAAS4YECAAA',
+    'AAAQAAEAbAAAAFKGBAgAAAAAEAABAGcAAAAgmQQIAAAAABAAAwBOAAAAlIAE',
+    'CJAFAAASAAEAcwAAABuZBAgAAAAAEAADAHoAAAAwqQQIAAAAABAAAwAAdnR0',
+    'ZXN0LmMAb25fcmVsAGdvdF9yZWwAb25fYWNxAGdvdF9hY3EAcGFpbnQAcm93',
+    'AHB1dHMAa3Rlc3QAa3VfcGFzcwBrdV9mYWlsAGNtYWluAGt1X3NjNgBfX3Jl',
+    'c3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5zeW10YWIALnN0',
+    'cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNzAC5jb21tZW50AAAA',
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABsAAAAB',
+    'AAAABgAAAJSABAiUAAAAvAYAAAAAAAAAAAAAAQAAAAAAAAAhAAAAAQAAAAIA',
+    'AABQhwQIUAcAAMsBAAAAAAAAAAAAAAEAAAAAAAAAKQAAAAgAAAADAAAAIJkE',
+    'CCAJAAAQEAAAAAAAAAAAAAAgAAAAAAAAAC4AAAABAAAAMAAAAAAAAAAbCQAA',
+    'LQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAAAAAAAAAASAkAAEABAAAG',
+    'AAAADAAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAAAIgKAAB/AAAAAAAAAAAA',
+    'AAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAAHCwAANwAAAAAAAAAAAAAAAQAA',
+    'AAAAAAA=',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAI4cECDQAAABwDgAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAgsDAAALAwAAAUAAAAAEAAAAQAAAEAM',
     'AABAnAQIQJwECAAAAAAIAgAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',

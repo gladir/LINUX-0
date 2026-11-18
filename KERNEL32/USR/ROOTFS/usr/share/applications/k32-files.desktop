@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Files
+Name[fr]=Fichiers
+Exec=sh -c 'ls -l; exec sh -l'
+Terminal=true
+Categories=System;FileManager;

@@ -93,3 +93,11 @@ PCnet : pris en charge (prouve sous QEMU).
   journalise les erreurs AHCI (dmesg).
 Dans VirtualBox : Configuration > Affichage > Controleur graphique :
 essayer VMSVGA (defaut), puis VBoxVGA.
+
+MODE DE DEMARRAGE (etape "Mode de demarrage" de l'assistant)
+  terminal (defaut) | KDE | GNOME | GEOWORKS ; stocke dans /etc/k32/session.
+  Commande : k32-session get | set MODE | status. Si /dev/fb0 est absent ou si
+  l'environnement echoue, le systeme demarre en terminal texte ; Alt+F2 a Alt+F4
+  donnent d'autres terminaux. Le CD est ejecte a la fin de l'installation : si
+  le BIOS le relance quand meme, retirez-le (VirtualBox : Peripheriques > Lecteurs
+  optiques > Retirer, ou ordre d'amorcage disque en premier).

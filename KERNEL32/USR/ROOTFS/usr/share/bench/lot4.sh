@@ -1,0 +1,75 @@
+# essais du lot E6 (bureaux) sous KERNEL32 : sh /usr/share/bench/lot4.sh
+# k32-session (get/set/run, replis), alias GNOME/KDE, fichiers .desktop.
+W=/tmp/lot4; rm -rf $W; mkdir -p $W; cd $W
+LANGUAGE=EN; export LANGUAGE
+P=0; F=0
+ok() { echo "LOT4-OK $1"; P=$((P+1)); }
+ko() { echo "LOT4-KO $1 : $2"; F=$((F+1)); }
+chk() { [ "$2" = "$3" ] && ok "$1" || ko "$1" "attendu [$2] obtenu [$3]"; }
+has() { grep -q -e "$3" "$2" && ok "$1" || ko "$1" "motif [$3] absent de $2"; }
+SAVE=$(cat /etc/k32/session 2>/dev/null)
+# ---- k32-session get / set ----
+k32-session set terminal; chk 'k32-session set terminal' terminal \
+  "$(k32-session get)"
+k32-session set KDE; chk 'k32-session set KDE -> kde' kde "$(k32-session get)"
+chk 'fichier /etc/k32/session' kde "$(cat /etc/k32/session)"
+k32-session set bogus 2> bad.txt; chk 'mode invalide : code 1' 1 $?
+has 'mode invalide : message' bad.txt 'mode invalide'
+chk 'mode inchange apres refus' kde "$(k32-session get)"
+echo GNOME > /etc/k32/session
+chk 'get normalise la casse' gnome "$(k32-session get)"
+echo zzz > /etc/k32/session
+chk 'fichier invalide -> terminal' terminal "$(k32-session get)"
+rm -f /etc/k32/session
+chk 'fichier absent -> terminal' terminal "$(k32-session get)"
+# ---- run ----
+k32-session set terminal; k32-session run; chk 'run terminal : code 0' 0 $?
+mv /usr/bin/geoworks /usr/bin/geoworks.x 2>/dev/null
+mv /bin/geoworks /bin/geoworks.x 2>/dev/null
+k32-session set geoworks
+k32-session run > run1.txt 2>&1; chk 'run geoworks absent : code 11' 11 $?
+has 'run geoworks absent : message' run1.txt 'absent'
+mv /usr/bin/geoworks.x /usr/bin/geoworks 2>/dev/null
+mv /bin/geoworks.x /bin/geoworks 2>/dev/null
+[ -x /usr/bin/geoworks ] && ok 'geoworks installe (/usr/bin/geoworks)' ||
+  ko 'geoworks installe' 'absent'
+mv /dev/fb0 /dev/fb0.x 2>/dev/null
+k32-session set gnome
+k32-session run > run2.txt 2>&1; chk 'run sans /dev/fb0 : code 10' 10 $?
+has 'run sans /dev/fb0 : message' run2.txt 'fb0 indisponible'
+mv /dev/fb0.x /dev/fb0 2>/dev/null
+mv /usr/bin/k32-gnome /usr/bin/k32-gnome.real 2>/dev/null
+mv /bin/k32-gnome /bin/k32-gnome.real 2>/dev/null
+printf '#!/bin/sh\nexit 5\n' > /usr/bin/k32-gnome; chmod 755 /usr/bin/k32-gnome
+k32-session run > run3.txt 2>&1; chk 'environnement en echec : code 12' 12 $?
+has 'environnement en echec : message' run3.txt 'a echoue'
+printf '#!/bin/sh\nexit 0\n' > /usr/bin/k32-gnome
+k32-session run > run4.txt 2>&1; chk 'environnement qui rend 0 : code 0' 0 $?
+printf '#!/bin/sh\necho K=$K32_USER U=$K32_UID H=$K32_HOME T=$K32_TTY\n' \
+  > /usr/bin/k32-gnome
+k32-session run > run5.txt 2>&1
+has 'variables K32_* transmises' run5.txt 'K=.* T=/dev/tty1'
+rm -f /usr/bin/k32-gnome
+mv /usr/bin/k32-gnome.real /usr/bin/k32-gnome 2>/dev/null
+mv /bin/k32-gnome.real /bin/k32-gnome 2>/dev/null
+has 'journal /var/log/k32-session.log' /var/log/k32-session.log 'echoue'
+k32-session status > st.txt
+has 'status : mode' st.txt '^mode: gnome'
+has 'status : fb0' st.txt '^fb0: ok'
+# ---- commandes compatibles et fichiers freedesktop ----
+for c in k32-gnome gnome-session gnome-terminal k32-kde startplasma-x11 \
+         startkde konsole dolphin k32-session; do
+  [ -x /bin/$c ] && ok "commande $c" || ko "commande $c" 'absente'
+done
+gnome-terminal --help > h1.txt; has 'gnome-terminal --help' h1.txt 'Usage'
+konsole --help > h2.txt; has 'konsole --help' h2.txt 'Usage'
+[ -f /usr/share/xsessions/gnome.desktop ] && ok 'xsessions/gnome.desktop' ||
+  ko 'xsessions/gnome.desktop' x
+has 'gnome.desktop : Exec' /usr/share/xsessions/gnome.desktop \
+  'Exec=/usr/bin/gnome-session'
+has 'plasma.desktop : Exec' /usr/share/xsessions/plasma.desktop \
+  'Exec=/usr/bin/startplasma-x11'
+has 'applications/*.desktop' /usr/share/applications/k32-nano.desktop \
+  '^Exec=nano'
+echo "${SAVE:-terminal}" > /etc/k32/session
+echo "LOT4-FIN ok=$P ko=$F"

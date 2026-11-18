@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Text Editor
+Name[fr]=Editeur de texte
+Exec=nano
+Terminal=true
+Categories=Utility;TextEditor;

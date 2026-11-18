@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Network
+Name[fr]=Reseau
+Exec=sh -c 'ifconfig; echo; route; echo; netstat -an'
+Terminal=true
+Categories=System;Network;

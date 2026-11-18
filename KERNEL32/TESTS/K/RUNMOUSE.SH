@@ -53,8 +53,11 @@ send('sendkey b')
 wait('DEAD-READY')
 for k in ['a', 'e', 'a', 'spc', 'a', 'a']:
     send('sendkey ' + k)
+wait('IMPS-READY')
+send('mouse_move 5 3 -2')
+send('mouse_move 1 1 -1')
 PY
 wait $QP
-tr -d '\r' < "$W/out.txt" | grep "KTEST: mouse\|KTEST: evdev\|KTEST: kbd\|MOUSE\|KPROG: /bin/mousetest"
-if grep -q "KTEST: mouse.motion OK" "$W/out.txt" && ! grep -q "KTEST: \(mouse\|evdev\|kbd\).* FAIL" "$W/out.txt"; then echo "RESULTAT : SUCCES"; rm -rf "$W"; exit 0
+tr -d '\r' < "$W/out.txt" | grep "KTEST: mouse\|KTEST: mice\|KTEST: evdev\|KTEST: kbd\|MOUSE\|KPROG: /bin/mousetest"
+if grep -q "KTEST: mouse.motion OK" "$W/out.txt" && ! grep -q "KTEST: \(mouse\|mice\|evdev\|kbd\).* FAIL" "$W/out.txt"; then echo "RESULTAT : SUCCES"; rm -rf "$W"; exit 0
 else echo "RESULTAT : ECHEC (traces dans $W)"; exit 1; fi

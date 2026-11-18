@@ -12,19 +12,17 @@
 Program MKAPI;
 
 Const
-  ApiName  = 'L32API.PAS';
   LpcName  = 'LPC32.PAS';
   TmpName  = 'LPC32.TMP';
-  Marker1  = '{ BEGIN L32API';
-  Marker2  = '{ END L32API }';
   Anchor   = 'Function D16EmbCount(Sel : Integer) : LongInt;';
 
 Var
   Src, Lpc, Dst : Text;
-  Lines : Array[1..5000] Of String;
+  Lines : Array[1..8000] Of String;
   N, I, J : LongInt;
   S, T : String;
   InBlock, Done : Boolean;
+  ApiName, Tag, Marker1, Marker2 : String;
 
 Procedure Fail(Const Msg : String);
 Begin
@@ -45,21 +43,25 @@ End;
 Procedure WriteBlock;
 Var K : LongInt;
 Begin
-  WriteLn(Dst, '{ BEGIN L32API : genere par MKAPI.PAS depuis ' +
-          'L32API.PAS (ne pas editer) }');
+  WriteLn(Dst, '{ BEGIN ', Tag, ' : genere par MKAPI.PAS depuis ' +
+          ApiName + ' (ne pas editer) }');
   WriteLn(Dst, 'Const');
-  WriteLn(Dst, '  L32API_N = ', N, ';');
-  WriteLn(Dst, '  L32API : Array[1..L32API_N] Of String[120] = (');
+  WriteLn(Dst, '  ', Tag, '_N = ', N, ';');
+  WriteLn(Dst, '  ', Tag, ' : Array[1..', Tag, '_N] Of String[120] = (');
   For K := 1 To N Do
   Begin
     Write(Dst, '    ''', Quote(Lines[K]), '''');
     If K < N Then WriteLn(Dst, ',') Else WriteLn(Dst);
   End;
   WriteLn(Dst, '  );');
-  WriteLn(Dst, '{ END L32API }');
+  WriteLn(Dst, '{ END ', Tag, ' }');
 End;
 
+Procedure Process(AName, ATag : String);
 Begin
+  ApiName := AName; Tag := ATag;
+  Marker1 := '{ BEGIN ' + Tag;
+  Marker2 := '{ END ' + Tag + ' }';
   Assign(Src, ApiName);
   {$I-} Reset(Src); {$I+}
   If IOResult <> 0 Then Fail('lecture impossible : ' + ApiName);
@@ -68,7 +70,7 @@ Begin
   Begin
     ReadLn(Src, S);
     While (Length(S) > 0) And (S[Length(S)] = ' ') Do Dec(S[0]);
-    If N >= 5000 Then Fail('L32API.PAS trop long');
+    If N >= 8000 Then Fail(ApiName + ' trop long');
     Inc(N);
     Lines[N] := S;
   End;
@@ -107,5 +109,11 @@ Begin
   If Not Done Then Fail('repere introuvable dans ' + LpcName);
   Erase(Lpc);
   Rename(Dst, LpcName);
-  WriteLn('MKAPI : ', N, ' lignes integrees dans ', LpcName);
+  WriteLn('MKAPI : ', N, ' lignes (', ApiName, ') integrees dans ',
+          LpcName);
+End;
+
+Begin
+  Process('L32API.PAS', 'L32API');
+  Process('L32GFX.PAS', 'L32GFX');
 End.

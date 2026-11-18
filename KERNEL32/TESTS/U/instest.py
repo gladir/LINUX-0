@@ -83,9 +83,9 @@ def drive(disk, iface='ide'):
     return 'file=%s,format=raw,if=%s' % (disk, iface)
 
 
-def qemu_cd(name, iso, disk, mem=256, iface='ide'):
+def qemu_cd(name, iso, disk, mem=256, iface='ide', extra=()):
     return Q(os.path.join(WORK, name), ['-cdrom', iso, '-boot', 'd', '-m',
-             str(mem), '-vga', 'std'] + drv_args(disk, iface),
+             str(mem), '-vga', 'std'] + list(extra) + drv_args(disk, iface),
              serial_io=True)
 
 
@@ -319,7 +319,7 @@ reboot=halt
                     'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
                     {'preseed.cfg': pre})
     disk = new_disk('auto-fr', 400)
-    q = qemu_cd('auto-fr', iso, disk)
+    q = qemu_cd('auto-fr', iso, disk, extra=['-no-shutdown'])
     ok = page(q, 12, 90)
     check('auto-fr : page de progression affichee', ok)
     time.sleep(6)
@@ -330,11 +330,15 @@ reboot=halt
     cap(q, 'fr-fin', 'auto-fr-fin')
     ended = False
     for _ in range(40):
-        if not q.alive():
+        if 'shutdown' in q.info('info status') or not q.alive():
             ended = True
             break
         time.sleep(1)
     check('auto-fr : arret apres installation (reboot=halt)', ended)
+    blk = q.info('info block')
+    check('auto-fr : le CD d\'installation a ete ejecte avant l\'arret',
+          'tray open' in blk or 'ejected' in blk or 'empty' in blk.lower(),
+          blk[-300:])
     q.quit()
     tab = read_table(disk)
     check('auto-fr : table MBR : Linux 83 active + swap 82',
@@ -559,6 +563,19 @@ def t_ui_fr():
           px(q, 'p6g', PINK) == 0)
     cap(q, 'd', 'fr-05-comptes')
     q.key('ret')
+    check('ui-fr : mode de demarrage', page(q, 14))
+    cap(q, 'd4', 'fr-05e-mode-demarrage')
+    q.key('down'); q.key('down'); q.key('down')           # GEOWORKS
+    time.sleep(0.4)
+    check('ui-fr : GEOWORKS present : aucune remarque rouge',
+          px(q, 'p14a', (179, 38, 30), 14) == 0)
+    cap(q, 'd5', 'fr-05f-geoworks')
+    q.key('up')                                           # GNOME
+    time.sleep(0.4)
+    check('ui-fr : GNOME : plus de remarque rouge',
+          px(q, 'p14b', (179, 38, 30), 14) == 0)
+    cap(q, 'd6', 'fr-05g-gnome')
+    q.key('ret')
     check('ui-fr : disque', page(q, 7))
     cap(q, 'e', 'fr-06-disque')
     q.key('ret')
@@ -596,6 +613,17 @@ def t_ui_fr():
         ('nom complet', 'grep luc /etc/passwd', r'Luc Dubois'),
         ('fuseau Europe/Paris', 'cat /etc/timezone', r'Europe/Paris'),
         ('clavier fr', 'cat /etc/default/keyboard', r'XKBLAYOUT="fr"'),
+        ('mode de demarrage GNOME ecrit', 'cat /etc/k32/session', r'gnome'),
+        ('k32-session get', 'k32-session get', r'gnome'),
+        ('k32-session status : environnement GNOME installe',
+         'k32-session status', r'programme: /(usr/)?bin/k32-gnome'),
+        ('commandes compatibles GNOME/KDE installees',
+         'ls /bin/gnome-session /bin/gnome-terminal /bin/startplasma-x11 '
+         '/bin/konsole /usr/share/xsessions/gnome.desktop', r'konsole'),
+        ('systeme installe : marque et pas d assistant',
+         'cat /etc/k32/installed; ls /sbin/k32-setup 2>&1',
+         r'installed by k32-setup(?s:.*)(introuvable|inexistant|not found|'
+         r'No such|impossible|Aucune)'),
     ]
     boot_verify('ui-fr', disk, 'secret', checks)
 
@@ -641,6 +669,7 @@ def t_ui_de():
     q.type('geheim'); q.key('tab'); q.type('geheim'); q.key('tab')
     q.type('Hans Mueller'); q.key('tab'); q.type('hans'); q.key('tab')
     q.type('passwort'); q.key('tab'); q.type('passwort')
+    q.key('ret'); page(q, 14)
     q.key('ret'); page(q, 7)
     q.key('ret'); page(q, 8)
     q.key('down')                               # manuell
@@ -770,6 +799,8 @@ def t_exist():
     page(q, 6)
     q.type('x'); q.key('tab'); q.type('x')
     q.key('ret')
+    page(q, 14)
+    q.key('ret')
     check('exist : page du disque', page(q, 7))
     cap(q, 'a', 'exist-disque')
     t = q.text().replace('\r', '')
@@ -790,6 +821,7 @@ def t_virtio():
 keyboard=es
 timezone=Europe/Madrid
 hostname=virtio-es
+session=kde
 rootpw=clave
 user=ana
 userpw=clave2
@@ -820,6 +852,7 @@ reboot=halt
           fs_check(disk, [(tab[0][1], tab[0][2])]))
     checks = [
         ('hostname', 'hostname', r'virtio-es'),
+        ('session=kde du preseed ecrite', 'cat /etc/k32/session', r'kde'),
         ('racine sur /dev/vda1', 'cat /proc/mounts', r'/dev/vda1 / '),
         ('fstab vda', 'cat /etc/fstab', r'/dev/vda1 / ext4'),
         ('cfg du chargeur', 'cat /boot/linux0.cfg', r'root=/dev/vda1'),

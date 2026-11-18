@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Manual
+Name[fr]=Manuel
+Exec=man man
+Terminal=true
+Categories=System;Documentation;

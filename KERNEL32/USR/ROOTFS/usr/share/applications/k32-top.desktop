@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=System Monitor
+Name[fr]=Moniteur systeme
+Exec=top
+Terminal=true
+Categories=System;Monitor;

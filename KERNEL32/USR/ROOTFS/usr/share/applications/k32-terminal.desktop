@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Name[fr]=Terminal
+Exec=sh -l
+Terminal=true
+NoDisplay=true
+Categories=System;TerminalEmulator;

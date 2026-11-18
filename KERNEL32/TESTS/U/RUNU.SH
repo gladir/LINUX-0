@@ -41,7 +41,7 @@ W=${W:-/tmp/linux0-u-tests}
 QT=${QEMU_T:-600}
 export LPC W
 mkdir -p "$W/bin" "$W/src"
-STEPS=${*:-sh bash host utils lot2host lot3host qemu tools lot2 lot3 power net install mod}
+STEPS=${*:-sh bash host utils lot2host lot3host vterm qemu tools lot2 lot3 lot4 desk power net install mod}
 FAIL=0
 build() {
   [ -n "$IMAGE" ] && return 0
@@ -206,6 +206,33 @@ for st in $STEPS; do
       -c '=sh /usr/share/bench/tools.sh' -c '=echo QFIN' -s 'QFIN$' > "$W/tools.txt" 2>&1
     grep 'TOOLS-KO\|TOOLS-FIN' "$W/tools.txt"
     grep -q 'TOOLS-FIN ok=[0-9]* ko=0' "$W/tools.txt" || FAIL=1 ;;
+  lot4)
+    build
+    [ -f "$IMAGE" ] || { FAIL=1; continue; }
+    cp "$IMAGE" "$W/l4.img"
+    python3 "$K32/TESTS/QEMU.PY" run "$W/l4.img" -m 64 -t "$QT" \
+      -c 'login: =root' -c 'Mot de passe : =root' \
+      -c '=sh /usr/share/bench/lot4.sh' -c '=echo QFIN' -s 'QFIN$' \
+      > "$W/lot4.txt" 2>&1
+    grep 'LOT4-KO\|LOT4-FIN' "$W/lot4.txt"
+    grep -q 'LOT4-FIN ok=[0-9]* ko=0' "$W/lot4.txt" || FAIL=1 ;;
+  desk)
+    # bureaux GNOME / KDE : fenetre Terminal, captures (QEMU -vga std)
+    build
+    [ -f "$IMAGE" ] || { FAIL=1; continue; }
+    python3 "$HERE/desktest.py" "$IMAGE" "$W/desk" "$K32/IMAGE/CAPTURES" std \
+      > "$W/desk.txt" 2>&1
+    grep -v Deprec "$W/desk.txt" | grep -v getdata | grep 'ECHEC\|DESK-FIN'
+    grep -q 'DESK-FIN ok=[0-9]* ko=0' "$W/desk.txt" || FAIL=1 ;;
+  vterm)
+    # coeur de l'emulateur de terminal (VTCORE.INC) sur l'hote
+    mkdir -p "$W/vt"; cp "$K32"/USR/VTCORE.INC "$K32"/TESTS/U/VTDRV.PAS "$W/vt/"
+    ( cd "$W/vt" && $LPC -3X -q VTDRV.PAS >/dev/null 2>&1 ) ||
+      { echo "ECHEC compilation VTDRV"; FAIL=1; continue; }
+    python3 "$HERE/vtermtest.py" "$W/vt/VTDRV" > "$W/vt/out.txt" 2>&1
+    grep '^KO' "$W/vt/out.txt" | head -5
+    tail -1 "$W/vt/out.txt"
+    grep -q '^KO\|Traceback' "$W/vt/out.txt" && FAIL=1 ;;
   lot3host)
     # lot E6 (suite 2) sur l'hote : strace (contre strace GNU), tcpdump (pcap
     # fabriques + capture sur lo), bc (contre GNU bc), dc, ed
