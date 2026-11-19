@@ -23,7 +23,7 @@ fi
 cp "$K32/KERNEL32.PAS" "$W/"
 (cd "$W" && "$LPC" -3K -q KERNEL32.PAS) || exit 1
 DISK=$((EXTMB + 160)); [ $DISK -lt 200 ] && DISK=200
-MKE_OPTS="-t ext4" "$HERE/MKEXT2.SH" "$W/a.img" $DISK $BS 256 >/dev/null || exit 1
+MKE_OPTS="${MKE_OPTS:--t ext4}" "$HERE/MKEXT2.SH" "$W/a.img" $DISK $BS 256 >/dev/null || exit 1
 rm -f "$W/b.img"; truncate -s $((MB + 8))M "$W/b.img"
 rm -f "$W/out.txt"
 T0=$(date +%s)
@@ -33,10 +33,18 @@ timeout ${TMO:-900} qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.
   -device ide-hd,drive=d0,bus=ahci.0 -drive "file=$W/b.img,format=raw,if=none,id=d1,cache=writethrough" \
   -device ide-hd,drive=d1,bus=ahci.1 $QX 2>/dev/null
 echo "duree totale (hote) : $(( $(date +%s) - T0 )) s"
-tr -d '\r' < "$W/out.txt" | grep -a "APERF\|KTEST: aperf\|ahci:\|Oops\|panique"
+tr -d '\r' < "$W/out.txt" | grep -a "APERF\|KTEST: aperf\|ahci:\|Oops\|panique\|dbg\|readahead\|grouped\|ahci_"
 RC=0
 grep -aq "KTEST: aperf DONE" "$W/out.txt" || { echo "aperf DONE absent"; RC=1; }
 grep -aq "KTEST: aperf.* FAIL" "$W/out.txt" && RC=1
+# garde-fou de performance : peu de commandes (grosses commandes, groupees, lecture
+# anticipee) et peu d'acces de registres (fin de commande par IRQ)
+tr -d '\r' < "$W/out.txt" | grep -a "^APERF" | awk -v mb=$MB -v emb=$EXTMB '
+  { n = $5; for (i = 1; i <= NF; i++) { if ($i == "commandes") c = $(i+1); if ($i == "registres") r = $(i+1) }
+    lim = ($2 == "brut") ? 1.5 * n + 4 : 6 * n + 16
+    if (c + 0 > lim) { print "ECHEC : " $2 " " $3 " trop de commandes (" c " > " lim ")"; bad = 1 }
+    if (c + 0 > 0 && r / c > 25) { print "ECHEC : " $2 " " $3 " trop d acces de registres par commande (" r / c ")"; bad = 1 } }
+  END { exit bad }' || RC=1
 e2fsck -fn "$W/a.img?offset=1048576" > "$W/fsck.txt" 2>&1 || { echo "e2fsck : ECHEC"; tail -5 "$W/fsck.txt"; RC=1; }
 python3 - "$W/b.img" $MB <<'P' || { echo "verification hote du disque brut : ECHEC"; RC=1; }
 import sys, array

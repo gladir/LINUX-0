@@ -6135,6 +6135,140 @@ Begin
   Else BufWrite := BufWriteRaw(B);
 End;
 
+{ ---- Entrees/sorties groupees (lot D7-14) : un tampon de rebond contigu de
+  1 Mo permet de lire ou ecrire des centaines de blocs en UNE commande
+  (disques SATA, NVMe, virtio : le cout est par commande, pas par octet).
+  Le verrou noyau garantit l'exclusivite ; BounceBusy protege contre la
+  reentree (peripherique de boucle, defaut de page pendant une copie).
+  bulkio=0 sur la ligne de commande : ancien comportement (un bloc par
+  commande). ---- }
+Const
+  BounceSz = 1048576;
+  MaxFlush = 4096;
+
+Var
+  BounceBuf : LongInt;
+  BounceBusy, BulkOn : Boolean;
+  RaDev, RaNext, RaWin : LongInt;
+  FlushList : Array[0..MaxFlush - 1] Of PBuf;
+  FlushBusy : Boolean;
+
+{ Les peripheriques dont le cout est par commande (pas l'IDE en E/S
+  programmees, ni disquette, memoire, boucle, CD) }
+Function BulkDev(Dev : LongInt) : Boolean;
+Var Maj : LongInt;
+Begin
+  Maj := (Dev Shr 8) And $FFF;
+  BulkDev := BulkOn And ((Maj = MajSd) Or (Maj = MajVd) Or (Maj = MajNvme));
+End;
+
+Function BounceGet : LongInt;
+Begin
+  BounceGet := 0;
+  If (Not BulkOn) Or BounceBusy Then Exit;
+  If BounceBuf = 0 Then BounceBuf := AllocPages(8);
+  If BounceBuf = 0 Then Exit;
+  BounceBusy := True;
+  BounceGet := BounceBuf;
+End;
+
+Procedure BounceFree;
+Begin
+  BounceBusy := False;
+End;
+
+Function BufBefore(A, B : PBuf) : Boolean;
+Begin
+  If A^.Dev <> B^.Dev Then BufBefore := A^.Dev < B^.Dev
+  Else If A^.Size <> B^.Size Then BufBefore := A^.Size < B^.Size
+  Else BufBefore := A^.Block < B^.Block;
+End;
+
+{ Ecrit les tampons modifies du peripherique Dev (0 : tous), tries par bloc,
+  les blocs consecutifs d'un meme peripherique en une seule commande ; les
+  tampons de la transaction du journal sont ignores (comme BufWrite) }
+Function BFlushRuns(Dev : LongInt) : LongInt;
+Var N, I, J, K, Gap, Tot, Bp : LongInt; B, T : PBuf; Ok : Boolean;
+Begin
+  BFlushRuns := 0;
+  If FlushBusy Then Exit;           { reentree (peripherique de boucle) }
+  N := 0;
+  B := BufAll;
+  While (B <> Nil) And (N < MaxFlush) Do
+  Begin
+    If ((B^.Flags And BvDirty) <> 0) And ((B^.Flags And BvJrn) = 0)
+       And ((Dev = 0) Or (B^.Dev = Dev)) Then
+    Begin
+      FlushList[N] := B;
+      Inc(B^.Count);                 { ne pas liberer pendant l'ecriture }
+      Inc(N);
+    End;
+    B := B^.Next;
+  End;
+  If N = 0 Then Exit;
+  FlushBusy := True;
+  BFlushRuns := N;
+  { tri de Shell par (peripherique, taille, bloc) }
+  Gap := N Div 2;
+  While Gap > 0 Do
+  Begin
+    For I := Gap To N - 1 Do
+    Begin
+      T := FlushList[I];
+      J := I;
+      While (J >= Gap) And BufBefore(T, FlushList[J - Gap]) Do
+      Begin
+        FlushList[J] := FlushList[J - Gap];
+        J := J - Gap;
+      End;
+      FlushList[J] := T;
+    End;
+    Gap := Gap Div 2;
+  End;
+  I := 0;
+  While I < N Do
+  Begin
+    B := FlushList[I];
+    J := I + 1;
+    Tot := B^.Size;
+    If BulkDev(B^.Dev) Then
+      While (J < N) And (FlushList[J]^.Dev = B^.Dev)
+            And (FlushList[J]^.Size = B^.Size)
+            And (FlushList[J]^.Block = FlushList[J - 1]^.Block + 1)
+            And (Tot + B^.Size <= BounceSz) Do
+      Begin
+        Tot := Tot + B^.Size;
+        Inc(J);
+      End;
+    Ok := False;
+    If J - I >= 2 Then
+    Begin
+      Bp := BounceGet;
+      If Bp <> 0 Then
+      Begin
+        For K := I To J - 1 Do
+          MemCopy(Bp + (K - I) * B^.Size, FlushList[K]^.Data, B^.Size);
+        If BlkRW(B^.Dev, B^.Block * (B^.Size Div 512), Tot Div 512, Bp,
+                 True) = 0 Then
+        Begin
+          For K := I To J - 1 Do
+            FlushList[K]^.Flags := FlushList[K]^.Flags And Not BvDirty;
+          PerfC[22] := PerfC[22] + (J - I);
+          Ok := True;
+        End;
+        BounceFree;
+      End;
+    End;
+    If Not Ok Then
+      For K := I To J - 1 Do
+        If (FlushList[K]^.Flags And BvDirty) <> 0 Then BufWrite(FlushList[K]);
+    I := J;
+  End;
+  For I := 0 To N - 1 Do
+    If FlushList[I]^.Count > 0 Then Dec(FlushList[I]^.Count);
+  FlushBusy := False;
+End;
+
 Procedure BufFree(B : PBuf);
 Var P, Q : PBuf; H : LongInt;
 Begin
@@ -6167,34 +6301,65 @@ Var
   BufMaxCount : LongInt;      { tampons au plus (2048 ; bufmax=N : essais) }
 
 Procedure BufShrink;
-Var B, N : PBuf; Limit : LongInt;
+Var B : PBuf; K, Need, I, J, M, A : LongInt; Okc : Boolean;
+    Cand : Array[0..63] Of PBuf;
+    CAge : Array[0..63] Of LongInt;
 Begin
   { l'ecriture d'un tampon (peripherique de boucle) peut allouer des
     tampons donc rappeler BufShrink pendant le parcours de la liste }
   If ShrinkBusy Then Exit;
   ShrinkBusy := True;
-  Limit := Jiffies - 6000;
-  B := BufAll;
-  While (B <> Nil) And (BufCount > BufMaxCount - 64) Do
+  { liberer les 64 (et plus) tampons les plus ANCIENS non utilises : les
+    plus recents (lectures anticipees, flux sequentiel) restent ; les
+    tampons modifies ne sont ecrits (tous ensemble, groupes) que si un
+    candidat est modifie }
+  Need := BufCount - (BufMaxCount - 64);
+  While Need > 0 Do
   Begin
-    N := B^.Next;
-    If (B^.Count = 0) And (B^.Age - Limit < 0) Then
+    M := 0;
+    B := BufAll;
+    While B <> Nil Do
     Begin
-      If (B^.Flags And BvDirty) <> 0 Then BufWrite(B);
-      BufFree(B);
+      If B^.Count = 0 Then
+      Begin
+        A := Jiffies - B^.Age;
+        If M < 64 Then Okc := True Else Okc := A > CAge[63];
+        If Okc Then
+        Begin
+          If M < 64 Then
+          Begin
+            J := M;
+            Inc(M);
+          End
+          Else J := M - 1;
+          While (J > 0) And (A > CAge[J - 1]) Do
+          Begin
+            CAge[J] := CAge[J - 1];
+            Cand[J] := Cand[J - 1];
+            Dec(J);
+          End;
+          CAge[J] := A;
+          Cand[J] := B;
+        End;
+      End;
+      B := B^.Next;
     End;
-    B := N;
-  End;
-  B := BufAll;
-  While (B <> Nil) And (BufCount > BufMaxCount - 64) Do
-  Begin
-    N := B^.Next;
-    If B^.Count = 0 Then
-    Begin
-      If (B^.Flags And BvDirty) <> 0 Then BufWrite(B);
-      BufFree(B);
-    End;
-    B := N;
+    If M = 0 Then Break;
+    If BulkOn Then
+      For I := 0 To M - 1 Do
+        If (Cand[I]^.Flags And BvDirty) <> 0 Then
+        Begin
+          K := BFlushRuns(0);
+          Break;
+        End;
+    For I := 0 To M - 1 Do
+      If Need > 0 Then
+      Begin
+        B := Cand[I];
+        If (B^.Flags And BvDirty) <> 0 Then BufWrite(B);
+        BufFree(B);
+        Dec(Need);
+      End;
   End;
   ShrinkBusy := False;
 End;
@@ -6202,10 +6367,11 @@ End;
 { Memoire insuffisante : ecrire puis liberer tous les tampons inutilises (les
   tampons de la transaction du journal restent) }
 Procedure BufReclaim;
-Var B, N : PBuf;
+Var B, N : PBuf; K : LongInt;
 Begin
   If ShrinkBusy Then Exit;
   ShrinkBusy := True;
+  If BulkOn Then K := BFlushRuns(0);
   B := BufAll;
   While B <> Nil Do
   Begin
@@ -6262,20 +6428,80 @@ End;
 
 { Tampon valide du bloc (lu au besoin) ; Nil en cas d'erreur d'E/S }
 Function BRead(Dev, Block, Size : LongInt) : PBuf;
-Var B : PBuf;
+Var B, P : PBuf; Nra, J, Spb, Tot, Bp : LongInt; Done : Boolean;
 Begin
   B := BGetBlk(Dev, Block, Size);
   BRead := B;
   If B = Nil Then Exit;
   If (B^.Flags And BvValid) = 0 Then
   Begin
-    If BlkRW(Dev, Block * (Size Div 512), Size Div 512, B^.Data, False)
-        <> 0 Then
+    Done := False;
+    Nra := 1;
+    If BulkDev(Dev) And (Size <= 4096) Then
     Begin
-      Dec(B^.Count);
-      BufFree(B);
-      BRead := Nil;
-      Exit;
+      { lecture anticipee : si ce bloc suit la fin de la derniere lecture
+        (ou de la derniere fenetre), la fenetre double (32 Ko a 512 Ko) ;
+        sinon elle repart de zero }
+      If (Dev = RaDev) And (Block = RaNext) Then
+      Begin
+        If RaWin = 0 Then RaWin := 32768
+        Else If RaWin < 524288 Then RaWin := RaWin * 2;
+      End
+      Else RaWin := 0;
+      If RaWin > 0 Then
+      Begin
+        Spb := Size Div 512;
+        Nra := RaWin Div Size;
+        Tot := BlkSectors(Dev);
+        If Block * Spb + Nra * Spb > Tot Then
+          Nra := (Tot - Block * Spb) Div Spb;
+        If Nra > BufMaxCount Div 4 Then Nra := BufMaxCount Div 4;
+        J := 1;
+        While (J < Nra) And (BufFind(Dev, Block + J, Size) = Nil) Do Inc(J);
+        If J < Nra Then Nra := J;
+        If Nra < 2 Then Nra := 1
+        Else
+        Begin
+          Bp := BounceGet;
+          If Bp <> 0 Then
+          Begin
+            If BlkRW(Dev, Block * Spb, Nra * Spb, Bp, False) = 0 Then
+            Begin
+              MemCopy(B^.Data, Bp, Size);
+              For J := 1 To Nra - 1 Do
+              Begin
+                P := BGetBlk(Dev, Block + J, Size);
+                If P <> Nil Then
+                Begin
+                  If (P^.Flags And BvValid) = 0 Then
+                  Begin
+                    MemCopy(P^.Data, Bp + J * Size, Size);
+                    P^.Flags := P^.Flags Or BvValid;
+                  End;
+                  Dec(P^.Count);
+                End;
+              End;
+              PerfC[21] := PerfC[21] + Nra - 1;
+              Done := True;
+            End;
+            BounceFree;
+          End
+          Else Nra := 1;
+        End;
+      End;
+      RaDev := Dev;
+      If Done Then RaNext := Block + Nra Else RaNext := Block + 1;
+    End;
+    If Not Done Then
+    Begin
+      If BlkRW(Dev, Block * (Size Div 512), Size Div 512, B^.Data, False)
+          <> 0 Then
+      Begin
+        Dec(B^.Count);
+        BufFree(B);
+        BRead := Nil;
+        Exit;
+      End;
     End;
     B^.Flags := B^.Flags Or BvValid;
   End;
@@ -6302,8 +6528,14 @@ End;
 
 { Ecrire tous les tampons modifies (Dev = 0 : tous) }
 Procedure BSync(Dev : LongInt);
-Var B : PBuf;
+Var B : PBuf; K : LongInt;
 Begin
+  If BulkOn Then
+  Begin
+    K := 0;
+    While (BFlushRuns(Dev) >= MaxFlush) And (K < 16) Do Inc(K);
+    Exit;
+  End;
   B := BufAll;
   While B <> Nil Do
   Begin
@@ -6315,8 +6547,9 @@ End;
 
 { Invalider les tampons d'un peripherique (apres umount) }
 Procedure BInvalidate(Dev : LongInt);
-Var B, N : PBuf;
+Var B, N : PBuf; K : LongInt;
 Begin
+  If BulkOn Then K := BFlushRuns(Dev);
   B := BufAll;
   While B <> Nil Do
   Begin
@@ -6360,6 +6593,12 @@ Procedure InitBlock;
 Var I : LongInt;
 Begin
   BufMaxCount := 2048;
+  If NPages >= 131072 Then BufMaxCount := 8192
+  Else If NPages >= 65536 Then BufMaxCount := 4096;
+  BulkOn := CmdGet('bulkio') <> '0';
+  BounceBuf := 0;
+  BounceBusy := False;
+  RaDev := 0; RaNext := -1; RaWin := 0;
   If CmdGet('bufmax') <> '' Then BufMaxCount := StrVal(CmdGet('bufmax'));
   If BufMaxCount < 96 Then BufMaxCount := 96;
   For I := 0 To BufHash - 1 Do BufTab[I] := Nil;
@@ -10270,7 +10509,7 @@ Begin
 End;
 
 Function BdevRead(F : PFile; Buf, Cnt : LongInt) : LongInt;
-Var Dev, N, Done, Blk, Off, Chunk : LongInt; B : PBuf;
+Var Dev, N, Done, Blk, Off, Chunk, Bp, J : LongInt; B : PBuf;
 Begin
   Dev := F^.Inode^.Rdev;
   If BlkSectors(Dev) = 0 Then
@@ -10284,6 +10523,35 @@ Begin
   Begin
     Blk := U64ShrL(F^.Pos, F^.PosHi, 10);
     Off := F^.Pos And 1023;
+    { gros transfert aligne : une commande de 1 Mo au plus par le tampon de
+      rebond, les tampons modifies pas encore ecrits passent par-dessus }
+    If BulkDev(Dev) And (Off = 0) And (N - Done >= 8192) Then
+    Begin
+      Bp := BounceGet;
+      If Bp <> 0 Then
+      Begin
+        Chunk := N - Done;
+        If Chunk > BounceSz Then Chunk := BounceSz;
+        Chunk := Chunk And Not 1023;
+        If BlkRW(Dev, Blk * 2, Chunk Div 512, Bp, False) <> 0 Then
+        Begin
+          BounceFree;
+          If Done = 0 Then BdevRead := -EIO Else BdevRead := Done;
+          Exit;
+        End;
+        For J := 0 To Chunk Div 1024 - 1 Do
+        Begin
+          B := BufFind(Dev, Blk + J, 1024);
+          If (B <> Nil) And ((B^.Flags And BvDirty) <> 0) Then
+            MemCopy(Bp + J * 1024, B^.Data, 1024);
+        End;
+        MemCopy(Buf + Done, Bp, Chunk);
+        BounceFree;
+        Done := Done + Chunk;
+        U64AddU(F^.Pos, F^.PosHi, Chunk);
+        Continue;
+      End;
+    End;
     Chunk := 1024 - Off;
     If Chunk > N - Done Then Chunk := N - Done;
     B := BRead(Dev, Blk, 1024);
@@ -10303,7 +10571,7 @@ End;
 Function LoopReadOnly(Min : LongInt) : Boolean; Forward;
 
 Function BdevWrite(F : PFile; Buf, Cnt : LongInt) : LongInt;
-Var Dev, N, Done, Blk, Off, Chunk : LongInt; B : PBuf;
+Var Dev, N, Done, Blk, Off, Chunk, Bp, J : LongInt; B : PBuf;
 Begin
   Dev := F^.Inode^.Rdev;
   If (((Dev Shr 8) And $FFF) = MajLoop) And LoopReadOnly(Dev And $FF) Then
@@ -10327,6 +10595,38 @@ Begin
   Begin
     Blk := U64ShrL(F^.Pos, F^.PosHi, 10);
     Off := F^.Pos And 1023;
+    { gros transfert aligne : ecriture directe par le tampon de rebond (les
+      tampons de 1 Ko du meme intervalle sont mis a jour et propres) }
+    If BulkDev(Dev) And (Off = 0) And (N - Done >= 8192) Then
+    Begin
+      Bp := BounceGet;
+      If Bp <> 0 Then
+      Begin
+        Chunk := N - Done;
+        If Chunk > BounceSz Then Chunk := BounceSz;
+        Chunk := Chunk And Not 1023;
+        MemCopy(Bp, Buf + Done, Chunk);
+        If BlkRW(Dev, Blk * 2, Chunk Div 512, Bp, True) <> 0 Then
+        Begin
+          BounceFree;
+          If Done = 0 Then BdevWrite := -EIO Else BdevWrite := Done;
+          Exit;
+        End;
+        For J := 0 To Chunk Div 1024 - 1 Do
+        Begin
+          B := BufFind(Dev, Blk + J, 1024);
+          If B <> Nil Then
+          Begin
+            MemCopy(B^.Data, Bp + J * 1024, 1024);
+            B^.Flags := (B^.Flags Or BvValid) And Not BvDirty;
+          End;
+        End;
+        BounceFree;
+        Done := Done + Chunk;
+        U64AddU(F^.Pos, F^.PosHi, Chunk);
+        Continue;
+      End;
+    End;
     Chunk := 1024 - Off;
     If Chunk > N - Done Then Chunk := N - Done;
     If Chunk = 1024 Then B := BGetBlk(Dev, Blk, 1024) Else B := BRead(Dev, Blk,
@@ -21394,6 +21694,12 @@ Const
 
 Var
   AhHba, AhNr : LongInt;
+  { fin de commande par interruption : l'IRQ accumule PxIS par emplacement ;
+    l'attente se fait avec le verrou noyau (sti ; hlt) pour garder
+    l'atomicite du systeme de fichiers, repli en scrutation (ahciirq=0, IF
+    coupe, IRQ perdue) }
+  AhIrq, AhIrqUse, AhIrqOn, AhLost, AhWaitCpu, AhMaxSec, AhSpin : LongInt;
+  AhIsAcc : Array[0..8] Of LongInt;
   AhFl : Array[0..8] Of LongInt;
   AhPort, AhMem, AhKind : Array[0..8] Of LongInt;
       { par emplacement 5..8 : numero de port, memoire, 1 sd / 2 sr, rang }
@@ -21498,6 +21804,150 @@ Begin
   End;
 End;
 
+{ Le noyau peut-il attendre l'IRQ de l'AHCI ? Seulement une fois les
+  interruptions actives (IF) : au demarrage (IF coupe) on scrute. La premiere
+  fois on active l'IRQ (GHC.IE, PxIE des ports presents, ligne du PIC/IOAPIC). }
+Function AhIrqReady : Boolean;
+Var Fl, Sl, Pb : LongInt;
+Begin
+  AhIrqReady := False;
+  If AhIrqUse = 0 Then Exit;
+  asm
+    pushfd
+    pop eax
+    mov Fl,eax
+  end;
+  If (Fl And $200) = 0 Then Exit;
+  If AhIrqOn = 0 Then
+  Begin
+    If (AhIrq < 1) Or (AhIrq > 15) Then
+    Begin
+      AhIrqUse := 0;
+      Exit;
+    End;
+    For Sl := 5 To 8 Do
+      If DiskPresent[Sl] And (AhKind[Sl] <> 0) Then
+      Begin
+        Pb := $100 + AhPort[Sl] * $80;
+        AhW(Pb + $10, -1);
+        AhW(Pb + $14, LongInt($7D80000F));       { DHRS PSS DSS SDBS + erreurs }
+      End;
+    AhW(8, -1);
+    AhW(4, AhR(4) Or 2);                         { GHC.IE }
+    AhIrqOn := 1;
+    IrqEnable(AhIrq);
+    KLog('ahci: fin de commande par interruption (IRQ ' + IntStr(AhIrq)
+        + ')');
+
+  End;
+  AhIrqReady := True;
+End;
+
+{ IRQ de l'AHCI : accumule PxIS de chaque port dans AhIsAcc, acquitte, et
+  reveille le processeur qui attend (sti ; hlt) }
+Procedure AhciIrq;
+Var Is, Sl, Pb, Pis : LongInt;
+Begin
+  If AhIrqOn = 0 Then Exit;
+  Is := AhR(8);
+  If Is = 0 Then Exit;
+  Inc(PerfC[17]);
+  For Sl := 5 To 8 Do
+    If DiskPresent[Sl] And (AhKind[Sl] <> 0)
+       And (((Is Shr AhPort[Sl]) And 1) <> 0) Then
+    Begin
+      Pb := $100 + AhPort[Sl] * $80;
+      Pis := AhR(Pb + $10);
+      AhW(Pb + $10, Pis);
+      AhIsAcc[Sl] := AhIsAcc[Sl] Or Pis Or LongInt($80000000);
+    End;
+  AhW(8, Is);
+  If SmpRun And (AhWaitCpu >= 0) And (AhWaitCpu <> MyCpu) Then
+    LapicIpi(PCpu[AhWaitCpu].Apic, VecIpiResched);
+End;
+
+{ Attente de la fin de la commande de l'emplacement Sl (PxCI emplacement 0).
+  1) courte attente EN MEMOIRE (aucun acces de registre) : le peripherique
+  ecrit sa FIS registres D2H (octet 34h) dans la zone de reception en
+  RAM a la fin de la commande ; 2) sinon sommeil du processeur : interruptions
+  autorisees seulement pendant le hlt (la verification se fait IF coupe : pas
+  de reveil perdu), le verrou noyau reste pris. Chaque reveil est verifie par
+  une lecture de PxCI (une IRQ en retard d'une commande precedente ne doit
+  pas faire croire a une fin). Un reveil par le tick sans IRQ de l'AHCI
+  depuis 20 ms : si la commande est finie sans IRQ, l'IRQ est consideree
+  perdue (apres 8 fois : scrutation). }
+Procedure AhWaitIrq(Sl, Pb : LongInt);
+Var Fl, T0, N, Fb : LongInt;
+Begin
+  Fb := AhMem[Sl] + 1024 + $40;
+  N := 0;
+  While (Mem[0:Fb] <> $34) And (N < AhSpin) Do
+  Begin
+    asm
+      db 243,144
+    end;
+    Inc(N);
+  End;
+  If Mem[0:Fb] = $34 Then
+  Begin
+    N := 0;
+    While ((AhR(Pb + $38) And 1) <> 0) And (N < 50) Do
+    Begin
+      asm
+        db 243,144
+      end;
+      Inc(N);
+    End;
+    If (AhR(Pb + $38) And 1) = 0 Then Exit;
+  End;
+  asm
+    pushfd
+    pop eax
+    mov Fl,eax
+    cli
+  end;
+  T0 := Jiffies;
+  While True Do
+  Begin
+    If (AhIsAcc[Sl] <> 0) Or (Mem[0:Fb] = $34) Then
+    Begin
+      If (AhIsAcc[Sl] And $7D800000) <> 0 Then Break;
+      If (AhR(Pb + $38) And 1) = 0 Then
+      Begin
+        AhLost := 0;
+        Break;
+      End;
+      AhIsAcc[Sl] := 0;
+    End;
+    If Jiffies - T0 >= 3000 Then Break;
+    If (Jiffies - T0 >= 2) And (AhIsAcc[Sl] = 0) And (Mem[0:Fb] <> $34)
+       And ((AhR(Pb + $38) And 1) = 0) Then
+    Begin
+      Inc(AhLost);
+      If AhLost >= 8 Then
+      Begin
+        AhIrqUse := 0;
+        KLog('ahci: l''IRQ ne vient pas, retour a la scrutation');
+      End;
+      Break;
+    End;
+    AhWaitCpu := MyCpu;
+    asm
+      sti
+      hlt
+      cli
+    end;
+    { noyau preemptible : l'IRQ survenue pendant qu'on detient le verrou noyau
+      est differee (ligne masquee) ; on la traite ici }
+    If PreemptOn Then RunBH;
+  End;
+  AhWaitCpu := -1;
+  asm
+    push Fl
+    popfd
+  end;
+End;
+
 { Execute une commande ; Fis : adresse de la FIS (20 octets), Cdb : paquet
   ATAPI (0 : aucun), Buf/Len : tampon de donnees (DMA) ; Wr : ecriture.
   Une seule entree de PRDT (4 Mo au plus). Attente par scrutation avec
@@ -21506,7 +21956,7 @@ End;
   -EIO. }
 Function AhCmd(Sl : LongInt; Fis, Cdb, Buf, Len : LongInt; Wr : Boolean)
     : LongInt;
-Var Pb, Cl, Ct, N, Tf, Is : LongInt;
+Var Pb, Cl, Ct, N, Tf, Is : LongInt; UseIrq : Boolean;
 Begin
   AhCmd := -EIO;
   Pb := $100 + AhPort[Sl] * $80;
@@ -21544,19 +21994,31 @@ Begin
   End;
   AhW(Pb + $10, -1);                     { acquitter PxIS }
   AhW(Pb + $30, -1);                     { PxSERR }
+  AhIsAcc[Sl] := 0;
+  Mem[0:Cl + 1024 + $40] := 0;           { FIS D2H : levee a la fin }
+  UseIrq := AhIrqReady;
   AhW(Pb + $38, 1);                      { PxCI : emplacement 0 }
   Inc(PerfC[15]);
   PerfC[16] := PerfC[16] + (Len + 1023) Div 1024;
   N := 0;
   Is := 0;
-  While ((AhR(Pb + $38) And 1) <> 0) And (N < 3000000) Do
+  If UseIrq Then
   Begin
-    Is := AhR(Pb + $10);
-    If (Is And $7D800000) <> 0 Then Break;
-    If (N And 255) = 255 Then AhDelay(10);
-    Inc(N);
+    Inc(PerfC[19]);
+    AhWaitIrq(Sl, Pb);
+  End
+  Else
+  Begin
+    Inc(PerfC[20]);
+    While ((AhR(Pb + $38) And 1) <> 0) And (N < 3000000) Do
+    Begin
+      Is := AhR(Pb + $10);
+      If (Is And $7D800000) <> 0 Then Break;
+      If (N And 255) = 255 Then AhDelay(10);
+      Inc(N);
+    End;
   End;
-  Is := AhR(Pb + $10);
+  Is := AhR(Pb + $10) Or AhIsAcc[Sl];
   Tf := AhR(Pb + $20);
   If ((Is And $7D800000) <> 0) Or ((AhR(Pb + $38) And 1) <> 0)
      Or ((Tf And $21) <> 0) Then
@@ -21591,9 +22053,12 @@ Begin
   Mem[0:Fis + 12] := Cnt And $FF; Mem[0:Fis + 13] := (Cnt Shr 8) And $FF;
 End;
 
-{ Lecture / ecriture de secteurs de 512 octets du disque ATA (emplacement D) }
+{ Lecture / ecriture de secteurs de 512 octets du disque ATA (emplacement D) :
+  commandes de 8192 secteurs (4 Mo : une seule entree de PRDT, le tampon du
+  noyau est contigu en physique) au plus ; en cas d'echec d'une grande
+  commande, repli par morceaux de 256 secteurs }
 Function AhciRW(D, Lba, Count, Buf : LongInt; Write : Boolean) : LongInt;
-Var Fis : Array[0..23] Of Byte; Ch, Done, R : LongInt;
+Var Fis : Array[0..23] Of Byte; Ch, Done, R, Sub, Cn : LongInt;
 Begin
   AhciRW := -EIO;
   If (D < 5) Or (D > 8) Or (AhKind[D] <> 1) Then Exit;
@@ -21601,7 +22066,7 @@ Begin
   While Done < Count Do
   Begin
     Ch := Count - Done;
-    If Ch > 256 Then Ch := 256;
+    If Ch > AhMaxSec Then Ch := AhMaxSec;
     If Write Then AhFis(LongInt(@Fis[0]), $35, Lba + Done, Ch, 0)
     Else AhFis(LongInt(@Fis[0]), $25, Lba + Done, Ch, 0);
     R := AhCmd(D, LongInt(@Fis[0]), 0, Buf + Done * 512, Ch * 512, Write);
@@ -21609,6 +22074,26 @@ Begin
     Begin
       KLog('ahci: nouvel essai');
       R := AhCmd(D, LongInt(@Fis[0]), 0, Buf + Done * 512, Ch * 512, Write);
+    End;
+    If (R <> 0) And (Ch > 256) Then
+    Begin
+      { repli : morceaux de 256 secteurs }
+      KLog('ahci: grande commande refusee, repli par 256 secteurs');
+      Sub := 0;
+      R := 0;
+      While (Sub < Ch) And (R = 0) Do
+      Begin
+        Cn := Ch - Sub;
+        If Cn > 256 Then Cn := 256;
+        If Write Then AhFis(LongInt(@Fis[0]), $35, Lba + Done + Sub, Cn, 0)
+        Else AhFis(LongInt(@Fis[0]), $25, Lba + Done + Sub, Cn, 0);
+        R := AhCmd(D, LongInt(@Fis[0]), 0, Buf + (Done + Sub) * 512, Cn * 512,
+            Write);
+        If R <> 0 Then
+          R := AhCmd(D, LongInt(@Fis[0]), 0, Buf + (Done + Sub) * 512,
+              Cn * 512, Write);
+        Sub := Sub + Cn;
+      End;
     End;
     If R <> 0 Then
     Begin
@@ -21711,6 +22196,12 @@ Begin
   AhciProbe := 0;
   AhNr := 0;
   Ns := 0; Nr := 0;
+  AhWaitCpu := -1;
+  If CmdGet('ahciirq') = '0' Then AhIrqUse := 0 Else AhIrqUse := 1;
+  AhIrqOn := 0;
+  If CmdGet('bulkio') = '0' Then AhMaxSec := 256 Else AhMaxSec := 8192;
+  AhSpin := 2000;
+  If CmdGet('ahcispin') <> '' Then AhSpin := StrVal(CmdGet('ahcispin'));
   For Dev := 0 To 31 Do
   Begin
     Cls := PciRead(0, Dev, 0, 8) Shr 8;
@@ -21719,6 +22210,7 @@ Begin
     If Bar = 0 Then Continue;
     Cmd := PciRead(0, Dev, 0, 4);
     PciWrite(0, Dev, 0, 4, Cmd Or 6);             { memoire + maitre du bus }
+    AhIrq := PciRead(0, Dev, 0, $3C) And $FF;
     Pt := AllocZeroPage;
     If Pt = 0 Then Continue;
     For I := 0 To 7 Do MemL[0:Pt + I * 4] := (Bar And LongInt($FFFFF000))
@@ -32032,7 +32524,7 @@ End;
 { ---- Fichiers : lecture, ecriture ---- }
 
 Function SysRead(Fd, Buf, Cnt : LongInt) : LongInt;
-Var F : PFile; Done, N, Chunk : LongInt;
+Var F : PFile; Done, N, Chunk, Lim : LongInt;
 Begin
   F := FdGet(Fd);
   If F = Nil Then
@@ -32046,10 +32538,13 @@ Begin
     Exit;
   End;
   Done := 0;
+  Lim := RdChunk;
+  If ((F^.Inode^.Mode And S_IFMT) = S_IFBLK)
+     Or ((F^.Inode^.Mode And S_IFMT) = S_IFREG) Then Lim := 1048576;
   While Done < Cnt Do
   Begin
     Chunk := Cnt - Done;
-    If Chunk > RdChunk Then Chunk := RdChunk;
+    If Chunk > Lim Then Chunk := Lim;
     If Not EnsureUser(Buf + Done, Chunk, True) Then
     Begin
       If Done = 0 Then SysRead := -EFAULT Else SysRead := Done;
@@ -32068,7 +32563,7 @@ Begin
 End;
 
 Function SysWrite(Fd, Buf, Cnt : LongInt) : LongInt;
-Var F : PFile; Done, N, Chunk : LongInt;
+Var F : PFile; Done, N, Chunk, Lim : LongInt;
 Begin
   F := FdGet(Fd);
   If F = Nil Then
@@ -32082,10 +32577,13 @@ Begin
     Exit;
   End;
   Done := 0;
+  Lim := RdChunk;
+  If ((F^.Inode^.Mode And S_IFMT) = S_IFBLK)
+     Or ((F^.Inode^.Mode And S_IFMT) = S_IFREG) Then Lim := 1048576;
   While Done < Cnt Do
   Begin
     Chunk := Cnt - Done;
-    If Chunk > RdChunk Then Chunk := RdChunk;
+    If Chunk > Lim Then Chunk := Lim;
     If Not EnsureUser(Buf + Done, Chunk, False) Then
     Begin
       If Done = 0 Then SysWrite := -EFAULT Else SysWrite := Done;
@@ -36195,6 +36693,7 @@ Begin
   If NetPresent And (N = NicIrq) Then NicIrqHandler;
   If VbOn And (Not VbSim) And (N = VbIrq) Then VbIrqHandler;
   If UsbOn And (N = UsbIrq) Then UsbIrqHandler;
+  If (AhIrqOn <> 0) And (N = AhIrq) Then AhciIrq;
   Case N Of
     0 : Begin
           TimerTick(FromUser);
@@ -36247,6 +36746,11 @@ Begin
     IrqDefer(N);
     IrqAck(N);
     AtomicOr(LongInt(@PendIrq), 1 Shl N);
+    { un processeur attend la fin d'une commande AHCI (sti ; hlt, verrou
+      noyau pris) : le reveiller pour qu'il traite cette IRQ differee }
+    If (AhIrqOn <> 0) And (N = AhIrq) And SmpRun And (AhWaitCpu >= 0)
+       And (AhWaitCpu <> MyCpu) Then
+      LapicIpi(PCpu[AhWaitCpu].Apic, VecIpiResched);
   End;
 End;
 
@@ -36441,6 +36945,11 @@ Begin
     IrqDefer(N);
     IrqAck(N);
     AtomicOr(LongInt(@PendIrq), 1 Shl N);
+    { un processeur attend la fin d'une commande AHCI (sti ; hlt, verrou
+      noyau pris) : le reveiller pour qu'il traite cette IRQ differee }
+    If (AhIrqOn <> 0) And (N = AhIrq) And SmpRun And (AhWaitCpu >= 0)
+       And (AhWaitCpu <> MyCpu) Then
+      LapicIpi(PCpu[AhWaitCpu].Apic, VecIpiResched);
   End;
 End;
 
@@ -51720,16 +52229,16 @@ Const
     2320, 1104, 12408, 6948, 3124, 2476, 3268, 10872, 2376, 2004, 5100, 3932,
     5064, 22088, 2812, 10804, 9740, 4256, 2196, 3924, 2552, 4028, 12328, 8776,
     6368, 7332, 11572, 7548, 7316, 5932, 9416, 11828, 5256, 3912, 6836, 9680,
-    2128, 4404, 1128, 5220, 2788, 3200, 1224, 4220, 4340, 6800, 4016, 9456,
+    2128, 4404, 1128, 5220, 2788, 3200, 1224, 4220, 4872, 6800, 4016, 9456,
     3276, 1336, 980, 816, 2288);
   EmbStart : Array[0..65] Of LongInt = (
     0, 87, 125, 169, 220, 271, 321, 409, 447, 484, 536, 637, 698, 750, 775,
     1051, 1206, 1276, 1332, 1405, 1647, 1700, 1745, 1859, 1947, 2060, 2551,
     2614, 2855, 3072, 3167, 3216, 3304, 3361, 3451, 3725, 3921, 4063, 4226,
     4484, 4652, 4815, 4947, 5157, 5420, 5537, 5624, 5776, 5992, 6040, 6138,
-    6164, 6280, 6342, 6414, 6442, 6536, 6633, 6785, 6875, 7086, 7159, 7189,
-    7211, 7230, 7281);
-  EmbData : Array[0..7280] Of String[60] = (
+    6164, 6280, 6342, 6414, 6442, 6536, 6645, 6797, 6887, 7098, 7171, 7201,
+    7223, 7242, 7293);
+  EmbData : Array[0..7292] Of String[60] = (
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAkoUECDQAAAAQDgAAAAAAADQAIAAC',
     'ACgABwAGAAEAAAAAAAAAAIAECACABAhQDAAAUAwAAAUAAAAAEAAAUeV0ZAAA',
     'AAAAAAAAAAAAAAAAAAAAAAAABgAAABAAAABVuBQAAACJ5VdWU4Pk8IHskAUA',
@@ -58266,103 +58775,115 @@ Const
     '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',
-    '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',
-    'MLkgAAAA6x+FwHQRMdJJ9/aKkl6LBAiIVA3W6+uF23kGxkQN1S1JjUXWAcjo',
-    'Rv///4PEMFteXcNVieVXVlOJ04PsPIt9GIt1IIlF3ItFDIlN4ItNCIlF2ItF',
-    'EIlF1ItFFIlF0ItFHIlFzItFJIlFyDHAiUXkhdJ+DWlF4OgDAACZ9/uJReS4',
-    'b4sECIlNxOjk/v//i0Xc6Nz+//+4dosECOjS/v//i0Xg6C7///+4eosECOjA',
-    '/v//idjoHf///7iCiwQI6K/+//+LReToC////7iJiwQI6J3+//+LTcSLRdgp',
-    'yOj0/v//uJyLBAjohv7//4tV1ItF0CnQ6N3+//+4oosECOhv/v//i0XMKfjo',
-    'yf7//7i1iwQI6Fv+//+LRcgp8Oi1/v//g8Q8uACMBAhbXl9d6UD+//9VMdKJ',
-    '0YnlV1ZTu7yLBAiD7BCJRei4BQAAAM2AiUXsMf+LReiAPDgAdANH6/Qx0oN9',
-    '7ACJVfB4LL4DAAAAuSCdBAi6/w8AAItd7InwzYCJxotd7LgGAAAAzYAxwIX2',
-    'D0nGiUXwi0XwMdLGgCCdBAgAuCCdBAiLdfCNDDqJVew58X1YjRwHi3XoicGJ',
-    'XeSLXeQ52XQKih44GXU8QUbr74A8OCB1MoXSdAiAeP8KdSjrBTHAiUXsi0Xs',
-    'jYw4IZ0ECDHAD74RjVrQgPsJdxFrwApBjUQQ0OvrQkDrm4PI/4PEEFteX13D',
-    'VYnlU4PsCItFCIsQjUgEjUSQCFBRUuhm9f//icO4AQAAAM2Ag8QQ6/4vcHJv',
-    'Yy9jbWRsaW5lACBPSwoAIEZBSUwKAEtURVNUOiAAMDEyMzQ1Njc4OWFiY2Rl',
-    'ZgBBUEVSRiAAIDogACBNbyBlbiAAIG1zID0gACBNby9zIDsgY29tbWFuZGVz',
-    'IAAsIEtvIAAsIGFjY2VzIHJlZ2lzdHJlcyAALCBJUlEgAC9wcm9jL2szMnBl',
-    'cmYAYXBlcmYAYXBlcmZleHQAICAoYXBlcmYgOiBpZ25vcmUsIHZvaXIgUlVO',
-    'QUhDSVBFUkYuU0gpCgAvZGV2L3NkYgBhcGVyZi5yYXdfb3BlbgBhaGNpX2Nv',
-    'bW1hbmRzAGFoY2lfa2IAYWhjaV9yZWdfYWNjZXNzAGFoY2lfaXJxAGFwZXJm',
-    'LnJhd193cml0ZQBicnV0IGVjcml0dXJlAGFwZXJmLnJhd19yZWFkX3Zlcmlm',
-    'eQBicnV0IGxlY3R1cmUAZXh0NAAvbW50AC9kZXYvc2RhMQBhcGVyZi5leHQ0',
-    'X21vdW50AC9tbnQvYXBlcmYuYmluAGFwZXJmLmV4dDRfd3JpdGUAZXh0NCBl',
-    'Y3JpdHVyZQBhcGVyZi5leHQ0X3JlYWRfdmVyaWZ5AGV4dDQgbGVjdHVyZQBL',
-    'VEVTVDogYXBlcmYgRE9ORQoAR0NDOiAoVWJ1bnR1IDEzLjMuMC02dWJ1bnR1',
-    'Mn4yNC4wNC4xKSAxMy4zLjAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAA',
-    'AAAAAAQA8f8JAAAAvoYECOQAAAACAAEAEAAAACCtBAgAAgAAAQADABUAAACi',
-    'hwQILQAAAAIAAQAcAAAAz4cECD8AAAACAAEAJAAAAECvFAgAABAAAQADACgA',
-    'AABArwQIAAAQAAEAAwAtAAAADogECGAAAAACAAEANAAAAG6IBAggAAAAAgAB',
-    'ADkAAACOiAQIRAAAAAIAAQA/AAAARK8kCAQAAAABAAMARwAAAECvJAgEAAAA',
-    'AQADAE8AAADSiAQIXQAAAAIAAQBUAAAAL4kECP8AAAACAAEAWAAAAC6KBAjl',
-    'AAAAAgABAF0AAAAgnQQIABAAAAEAAwBhAAAAIK8ECAQAAAABAAMAZgAAABOL',
-    'BAgpAAAAEgABAGwAAACDhgQIAAAAABAAAQBzAAAAqoYECAAAAAAQAAEAhQAA',
-    'ALGGBAgAAAAAEAABAIAAAAAgnQQIAAAAABAAAwBnAAAAlIAECO8FAAASAAEA',
-    'jAAAABSdBAgAAAAAEAADAJMAAABIryQIAAAAABAAAwAAYXBlcmYuYwBjbWRu',
-    'dW0AY2wuMQBub3dfbXMAZmlsbGJsawBidWYAYmFzZQBjaGtibGsAcHV0cwBr',
-    'dGVzdABrdV9wYXNzAGt1X2ZhaWwAcHV0ZAByZXAAcGVyZgBiLjAAdGFjYwBj',
-    'bWFpbgBrdV9zYzYAX19yZXN0b3JlX3J0AF9fYnNzX3N0YXJ0AF9lZGF0YQBf',
-    'ZW5kAAAuc3ltdGFiAC5zdHJ0YWIALnNoc3RydGFiAC50ZXh0AC5yb2RhdGEA',
-    'LmJzcwAuY29tbWVudAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-    'AAAAAAAAAAAAABsAAAABAAAABgAAAJSABAiUAAAAqAoAAAAAAAAAAAAAAQAA',
-    'AAAAAAAhAAAAAQAAADIAAAA8iwQIPAsAANgBAAAAAAAAAAAAAAEAAAABAAAA',
-    'KQAAAAgAAAADAAAAIJ0ECCANAAAoEiAAAAAAAAAAAAAgAAAAAAAAAC4AAAAB',
-    'AAAAMAAAAAAAAAAUDQAALQAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAgAAAAAA',
-    'AAAAAAAARA0AAKABAAAGAAAAEgAAAAQAAAAQAAAACQAAAAMAAAAAAAAAAAAA',
-    'AOQOAACYAAAAAAAAAAAAAAABAAAAAAAAABEAAAADAAAAAAAAAAAAAAB8DwAA',
-    'NwAAAAAAAAAAAAAAAQAAAAAAAAA=',
+    'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAm4gECDQAAADIEQAAAAAAADQAIAAD',
+    'ACgACAAHAAEAAAAAAAAAAIAECACABAj/DgAA/w4AAAUAAAAAEAAAAQAAAAAA',
+    'AAAAkAQIAJAECAAAAAAoIiAABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',
+    'AAAAAAAGAAAAEAAAAI1MJASD5PC4r40ECP9x/FWJ5VdWU1GB7DgBAADoGggA',
+    'AImF5P7//7i1jQQI6AoIAACLneT+//+JheD+//+LveD+//8J+3UPuL6NBAjo',
+    'hAkAAOl1BwAAMcBpyLF5N56JwsHqBTHKiRSFILIECEA9AAAEAHXkg73k/v//',
+    'AA+O5QIAALkCAAAAMdK4BQAAALvnjQQIzYCJwomF3P7//7jwjQQIuwEAAAD3',
+    '0sHqH+hFCQAAg73c/v//AA+IDgcAALj/jQQIMf/ozAoAAImF1P7//7gNjgQI',
+    '6LwKAACJhdD+//+4FY4ECOisCgAAiYXM/v//uCWOBAjonAoAAImFyP7//+gF',
+    'CAAAifjoKwgAAOj5BwAAi53c/v//ugAAEAC5ILIUCInGuAQAAADNgD0AABAA',
+    'dRro1AcAAEcp8AEFALIECDm95P7//3W+MdLrBboBAAAAiZXA/v//6K8HAACJ',
+    'w7gkAAAAzYDooQcAADH2KdgDBQCyBAiJNQCyBAiJhdj+//+4/40ECOgNCgAA',
+    'icO4DY4ECOgBCgAAica4FY4ECOj1CQAAice4JY4ECOjpCQAAi5XA/v//iYXE',
+    '/v//uC6OBAiD8gHoMAgAAIuNxP7//4uV2P7//7g+jgQIUYuN5P7///+1yP7/',
+    '/1f/tcz+//9W/7XQ/v//U/+11P7//+iZCAAAuAYAAACLndz+///NgDHSuAUA',
+    'AAC7540ECInRzYCDxCCJhdj+//+4/40ECDH26GYJAACJhdT+//+4DY4ECOhW',
+    'CQAAiYXQ/v//uBWOBAjoRgkAAImFzP7//7gljgQI6DYJAACJhcj+///onwYA',
+    'AOiaBgAAuwMAAAC6AAAQALkgshQIiceJ2Iud2P7//82AicPoeAYAACn4AwUA',
+    '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',
+    '6Pv7//+FwHU5i13kgLw7AJAECCB1LIX/dAmAv/+PBAgKdR+LdeSNjDcBkAQI',
+    'D74RjVrQgPsJdxBrwApBjUQQ0OvrR+umg8j/g8QcW15fXcNVieVTg+wIi0UI',
+    'ixCNSASNRJAIUFFS6IHz//+Jw7gBAAAAzYCDxBDr/i9wcm9jL2NtZGxpbmUA',
+    'IE9LCgAgRkFJTAoAS1RFU1Q6IAAwMTIzNDU2Nzg5YWJjZGVmAEFQRVJGIAAg',
+    'OiAAIE1vIGVuIAAgbXMgPSAAIE1vL3MgOyBjb21tYW5kZXMgACwgS28gACwg',
+    'YWNjZXMgcmVnaXN0cmVzIAAsIElSUSAAL3Byb2MvazMycGVyZgBhcGVyZgBh',
+    'cGVyZmV4dAAgIChhcGVyZiA6IGlnbm9yZSwgdm9pciBSVU5BSENJUEVSRi5T',
+    'SCkKAC9kZXYvc2RiAGFwZXJmLnJhd19vcGVuAGFoY2lfY29tbWFuZHMAYWhj',
+    'aV9rYgBhaGNpX3JlZ19hY2Nlc3MAYWhjaV9pcnEAYXBlcmYucmF3X3dyaXRl',
+    'AGJydXQgZWNyaXR1cmUAYXBlcmYucmF3X3JlYWRfdmVyaWZ5AGJydXQgbGVj',
+    'dHVyZQBleHQ0AC9tbnQAL2Rldi9zZGExAGFwZXJmLmV4dF9tb3VudAAvbW50',
+    'L2FwZXJmLmJpbgBhcGVyZi5leHRfd3JpdGUAZXh0NCBlY3JpdHVyZQBhcGVy',
+    'Zi5leHRfcmVhZF92ZXJpZnkAZXh0NCBsZWN0dXJlAEtURVNUOiBhcGVyZiBE',
+    'T05FCgBrMzJwb3dlcgBHQ0M6IChVYnVudHUgMTMuMy4wLTZ1YnVudHUyfjI0',
+    'LjA0LjEpIDEzLjMuMAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAABADx',
+    '/wkAAACoiAQIJwAAAAIAAQARAAAAz4gECM4AAAACAAEAGAAAAACgBAgAAgAA',
+    'AQADAB0AAACdiQQILQAAAAIAAQAkAAAAyokECD8AAAACAAEALAAAACCyFAgA',
+    'ABAAAQADADAAAAAgsgQIAAAQAAEAAwA1AAAACYoECGAAAAACAAEAPAAAAGmK',
+    'BAggAAAAAgABAEEAAACJigQIRAAAAAIAAQBHAAAAJLIkCAQAAAABAAMATwAA',
+    'ACCyJAgEAAAAAQADAFcAAADNigQIXQAAAAIAAQBcAAAAKosECP8AAAACAAEA',
+    'YAAAACmMBAjPAAAAAgABAGUAAAAAkAQIABAAAAEAAwBpAAAAALIECAQAAAAB',
+    'AAMAbgAAAACiBAgAEAAAAQADAHMAAAD4jAQIKQAAABIAAQB5AAAAbYgECAAA',
+    'AAAQAAEAgAAAAJSIBAgAAAAAEAABAJIAAACbiAQIAAAAABAAAQCNAAAAAJAE',
+    'CAAAAAAQAAMAdAAAAJSABAjZBwAAEgABAJkAAAAAkAQIAAAAABAAAwCgAAAA',
+    'KLIkCAAAAAAQAAMAAGFwZXJmLmMAbWVtY21wXwBjbWRudW0AY2wuMQBub3df',
+    'bXMAZmlsbGJsawBidWYAYmFzZQBjaGtibGsAcHV0cwBrdGVzdABrdV9wYXNz',
+    'AGt1X2ZhaWwAcHV0ZAByZXAAcGVyZgBiLjAAdGFjYwBwYi4yAGNtYWluAGt1',
+    'X3NjNgBfX3Jlc3RvcmVfcnQAX19ic3Nfc3RhcnQAX2VkYXRhAF9lbmQAAC5z',
+    'eW10YWIALnN0cnRhYgAuc2hzdHJ0YWIALnRleHQALnJvZGF0YQAuYnNzAC5j',
+    'b21tZW50AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'AAAbAAAAAQAAAAYAAACUgAQIlAAAAI0MAAAAAAAAAAAAAAEAAAAAAAAAIQAA',
+    'AAEAAAAyAAAAIY0ECCENAADeAQAAAAAAAAAAAAABAAAAAQAAACkAAAAIAAAA',
+    'AwAAAACQBAgAEAAAKCIgAAAAAAAAAAAAIAAAAAAAAAAuAAAAAQAAADAAAAAA',
+    'AAAA/w4AAC0AAAAAAAAAAAAAAAEAAAABAAAAAQAAAAIAAAAAAAAAAAAAACwP',
+    'AADAAQAABgAAABQAAAAEAAAAEAAAAAkAAAADAAAAAAAAAAAAAADsEAAApQAA',
+    'AAAAAAAAAAAAAQAAAAAAAAARAAAAAwAAAAAAAAAAAAAAkREAADcAAAAAAAAA',
+    'AAAAAAEAAAAAAAAA',
     'f0VMRgEBAQAAAAAAAAAAAAIAAwABAAAAQo4ECDQAAABQGQAAAAAAADQAIAAD',
     'ACgACAAHAAEAAAAAAAAAAIAECACABAjmFgAA5hYAAAUAAAAAEAAAAQAAAAAH',
     'AAAApwQIAKcECAAAAAAIGAEABgAAAAAQAABR5XRkAAAAAAAAAAAAAAAAAAAA',

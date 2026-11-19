@@ -1022,6 +1022,50 @@ En mode graphique le noyau n'ecrit plus dans la memoire VGA texte (B8000h,
 MMIO : un VM-exit par ecriture ; `VgaHidden`) : la console texte vit dans
 `VcBuf` et est redessinee au retour en KD_TEXT ou en panique.
 
+**Disque AHCI rapide : IRQ, grosses commandes, groupement, lecture anticipee
+(lot D7-14)** : sous un hyperviseur le cout d'une commande AHCI est son nombre
+d'acces de registres (VM-exits) : avant, chaque bloc de 1 Ko etait une commande
+et l'attente active lisait PxCI/PxIS en boucle (~740 000 acces de registres par
+Mo ecrit, mesure RUNAHCIPERF). Maintenant : (1) fin de commande : courte
+attente EN MEMOIRE (le peripherique ecrit sa FIS D2H, octet 34h, dans la zone
+de reception en RAM : aucun acces de registre, `ahcispin=N` iterations, 2000 par
+defaut), puis par INTERRUPTION : l'IRQ de l'AHCI (GHC.IE, PxIE) accumule PxIS par port et le
+noyau attend en `sti ; hlt` EN GARDANT le verrou noyau (le systeme de fichiers
+suppose l'atomicite sous ce verrou : on ne dort donc pas, on dort le
+processeur ; les IRQ differees du noyau preemptible sont traitees par RunBH,
+une IPI reveille un autre processeur) ; repli par scrutation quand IF est coupe
+(demarrage), si l'IRQ ne vient pas (8 fins de commande sans IRQ : message
+« l'IRQ ne vient pas ») ou avec `ahciirq=0` ; (2) commandes de 8192 secteurs
+(4 Mo, une entree de PRDT : les tampons du noyau sont contigus en physique)
+avec repli par 256 secteurs si une grande commande echoue ; (3) un tampon de
+rebond contigu de 1 Mo : `read`/`write` de peripherique bloc de 1 Mo = UNE
+commande (tampons de 1 Ko du meme intervalle recopies/mis a jour ; `read` et
+`write` de fichier ou de peripherique bloc passent jusqu'a 1 Mo par appel au
+lieu de 64 Ko) ; (4) ecriture differee GROUPEE : les tampons modifies sont
+tries et les blocs consecutifs ecrits en une commande (sync, bdflush, umount,
+pression du cache) ; le cache n'ecrit que quand un candidat a l'eviction est
+modifie, et evince les tampons les PLUS ANCIENS (avant : les plus recents) ;
+(5) LECTURE ANTICIPEE sequentielle : une lecture qui suit la fin de la
+precedente double la fenetre (32 Ko a 512 Ko) et lit les blocs suivants en une
+commande ; cache de 4096 (>= 256 Mo) ou 8192 tampons (>= 512 Mo). S'applique
+aux disques SATA, NVMe et virtio (pas l'IDE en E/S programmees, ni CD, boucle,
+disquette). `bulkio=0` : ancien comportement (commandes de 256 secteurs, un bloc
+par commande, attente active). `/proc/k32perf` : `ahci_commands`, `ahci_kb`,
+`ahci_irq`, `ahci_reg_access`, `ahci_sleep_waits`, `ahci_poll_waits`,
+`readahead_blocks`, `grouped_write_blocks`. Mesures QEMU ich9-ahci
+`-drive cache=writethrough` (TESTS/K/RUNAHCIPERF.SH) : disque brut 1 Mo par
+`write` : 1024 commandes et 742 000 acces de registres par Mo -> 1 commande et
+12 acces par Mo ; fichier ext4 : 1 100 commandes par Mo -> 4 par Mo. Debit
+mesure sous TCG (limite par le processeur emule, pas par l'hote) : brut ecriture
+2 -> 145 Mo/s, lecture 13 -> 640-775 Mo/s ; ext4 ecriture 2 -> 11 Mo/s,
+lecture 10 -> 17 Mo/s. Integrite : 1 Go brut + 512 Mo ext4 ecrits/relus avec
+motif a marqueur par secteur verifie par le noyau ET par l'hote, e2fsck -fn
+propre. Sous VirtualBox reel : NON mesure (les VM-exits sont supprimes mais
+l'IRQ PCI de l'AHCI de VirtualBox et le gain reel restent a verifier).
+Divers : `ls | wc -l` donnant 12 pour 120 entrees n'est pas un defaut du
+noyau (LS.PAS met en colonnes meme dans un tube et tronque a 240 entrees :
+BUGS_NOYAU.md, DEMANDES_E6.md).
+
 **VirtualBox : VMMDev et USB sont ETEINTS par defaut (lot D7-13)** : le
 premier essai sous VirtualBox 7.0.6 (backup-65) a fait disparaitre le pointeur :
 annoncer des « Guest Additions » (ReportGuestInfo + GUEST_CAN_ABSOLUTE) fait

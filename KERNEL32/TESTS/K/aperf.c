@@ -55,14 +55,14 @@ int main(void){
   }
   if(emb>0){
     int r=mount("/dev/sda1","/mnt","ext4",0,0);
-    ktest("aperf.ext4_mount",r==0);
+    ktest("aperf.ext_mount",r==0);
     if(r==0){
       fd=open("/mnt/aperf.bin",O_WRONLY|O_CREAT|O_TRUNC,0644);bad=fd<0;
       c0=perf("ahci_commands");k0=perf("ahci_kb");r0=perf("ahci_reg_access");i0=perf("ahci_irq");t0=now_ms();
       for(k=0;k<emb&&!bad;k++){long a;fillblk(k);a=now_ms();if(write(fd,buf,sizeof buf)!=(int)sizeof buf)bad=1;tacc+=now_ms()-a;}
       {long a=now_ms();if(!bad)fsync(fd);close(fd);sync();tacc+=now_ms()-a;}
       t1=t0+tacc;tacc=0;c1=perf("ahci_commands");k1=perf("ahci_kb");r1=perf("ahci_reg_access");i1=perf("ahci_irq");
-      ktest("aperf.ext4_write",!bad);
+      ktest("aperf.ext_write",!bad);
       rep("ext4 ecriture",t1-t0,emb,c0,c1,k0,k1,r0,r1,i0,i1);
       umount("/mnt");
       mount("/dev/sda1","/mnt","ext4",0,0);     /* relecture depuis le disque */
@@ -70,12 +70,14 @@ int main(void){
       c0=perf("ahci_commands");k0=perf("ahci_kb");r0=perf("ahci_reg_access");i0=perf("ahci_irq");t0=now_ms();
       for(k=0;k<emb&&!bad;k++){long a=now_ms();int rr=read(fd,buf,sizeof buf);tacc+=now_ms()-a;if(rr!=(int)sizeof buf||!chkblk(k))bad=1;}
       t1=t0+tacc;tacc=0;c1=perf("ahci_commands");k1=perf("ahci_kb");r1=perf("ahci_reg_access");i1=perf("ahci_irq");
-      ktest("aperf.ext4_read_verify",!bad);
+      ktest("aperf.ext_read_verify",!bad);
       rep("ext4 lecture",t1-t0,emb,c0,c1,k0,k1,r0,r1,i0,i1);
       close(fd);
       umount("/mnt");
     }
   }
+  {static char pb[4096];int n=0,fd2=open("/proc/k32perf",O_RDONLY,0);if(fd2>=0){n=read(fd2,pb,sizeof pb-1);close(fd2);}if(n>0)write(1,pb,n);}
   puts("KTEST: aperf DONE\n");
+  if(ku_cmdline_has("k32power")){sync();reboot_off();}
   return ku_fail?1:0;
 }
