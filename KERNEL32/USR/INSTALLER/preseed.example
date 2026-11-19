@@ -33,3 +33,5 @@ endwait=5
 # curseur : fleche prisme coloree (defaut) ; plaincursor=yes = ancienne
 # fleche blanche (comparaisons d'images)
 #plaincursor=yes
+# essais : mkfsslow=250 ralentit chaque ecriture de mkfs de 250 ms
+#mkfsslow=250

@@ -1143,6 +1143,14 @@ reboot=reboot
           'K32OK' in out and not out.strip().startswith('0'), out)
     cap(q, 'i', tag + '-fin')
     if noeject:
+        # fichiers et repertoires crees apres l'installation (groupes ext4
+        # initialises paresseusement) puis e2fsck -fn de l'hote
+        out = sh_run(q, 'i=0; while [ $i -lt 120 ]; do mkdir -p /lz/d$i; '
+                     'echo $i > /lz/d$i/f; i=$((i+1)); done; sync; '
+                     'cat /lz/d0/f /lz/d60/f /lz/d119/f', 120)
+        check(tag + ' : 120 repertoires crees apres l\'installation (%s)' %
+              out.strip().replace('\n', ' '),
+              out.split() == ['0', '60', '119'], out)
         # arret depuis le systeme demarre par pivot_root : init (re-execute)
         q.serial('poweroff\n')
         gone = False
@@ -1153,6 +1161,9 @@ reboot=reboot
             time.sleep(1)
         check(tag + ' : poweroff depuis le systeme installe : machine eteinte',
               gone)
+        tab = read_table(disk)
+        check(tag + ' : e2fsck -fn propre apres usage (ext4 paresseux)',
+              fs_check(disk, [(tab[0][1], tab[0][2])]))
     else:
         # redemarrage depuis le systeme installe : le CD repasse par la garde
         n0 = q.text().count('K32SETUP: page installed')
@@ -1466,13 +1477,105 @@ def t_cursor():
     q.quit()
 
 
+# ----------------------------------------- progression de l'installation
+def t_progress():
+    """operation longue (mkfs ext3 ralenti : preseed mkfsslow) : la page
+    d'installation doit changer visiblement au moins 2 fois par seconde
+    (compteur de groupes, pourcentage, chrono, indicateur) ; la barre est
+    monotone et finit a 100 % ; l'installation reste correcte"""
+    pre = """lang=fr
+keyboard=fr
+timezone=Europe/Paris
+hostname=prog
+rootpw=secret
+partitioning=guided
+swap=64
+fs=ext3
+mkfsslow=250
+endwait=3
+reboot=halt
+"""
+    iso = build_iso('prog', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'preseed=/cdrom/preseed.cfg k32setup.verbose=/dev/ttyS0',
+                    {'preseed.cfg': pre})
+    disk = new_disk('prog', 800)
+    q = qemu_cd('prog', iso, disk, extra=['-no-shutdown'], iface='ahci')
+    check('prog : page de progression', page(q, 12, 120))
+    from PIL import Image
+    t0 = time.time()
+    crops = []
+    bars = []
+    stamps = []
+    k = 0
+    copied = 0
+    saved = False
+    while time.time() - t0 < 90:
+        q.cmd('screendump ' + os.path.join(q.work, 'pg.ppm'), 0.25)
+        time.sleep(0.15)
+        try:
+            im = Image.open(os.path.join(q.work, 'pg.ppm')).convert('RGB')
+        except Exception:
+            continue
+        # zone des deux lignes de texte et de la barre (haut de la page)
+        crop = im.crop((20, 120, 1000, 230))
+        crops.append(crop.tobytes())
+        # barre : plus longue suite de pixels de la couleur de remplissage
+        row = None
+        best = 0
+        for y in range(120, 230):
+            run = 0
+            mx = 0
+            for x in range(20, 1000, 2):
+                r, g, b = im.getpixel((x, y))
+                if abs(r - 0x2E) < 30 and abs(g - 0x6D) < 30 and \
+                   abs(b - 0xB4) < 30:
+                    run += 1
+                    mx = max(mx, run)
+                else:
+                    run = 0
+            if mx > best:
+                best = mx
+        bars.append(best * 2)
+        stamps.append(time.time() - t0)
+        if k % 12 == 0:
+            cap(q, 'pgc', 'progression-%02d' % (k // 12))
+        k += 1
+        tx = q.text()
+        if 'Copie du systeme depuis le CD-ROM' in tx and not copied:
+            copied = time.time()
+        if copied and not saved and time.time() - copied > 1.2:
+            saved = True
+            cap(q, 'pg', 'progression-copie')
+        if 'K32SETUP: DONE' in tx:
+            break
+        time.sleep(0.2)
+    done = q.wait(r'K32SETUP: DONE', 200)
+    check('prog : installation terminee', done)
+    distinct = len(set(crops))
+    dur = stamps[-1] - stamps[0] if stamps else 0
+    # nombre de changements visibles par seconde
+    chg = sum(1 for a, b in zip(crops, crops[1:]) if a != b)
+    print('   %d captures en %.1f s, %d etats distincts, %d changements, '
+          'barre %s' % (len(crops), dur, distinct, chg, bars[::6]))
+    check('prog : operation de %.0f s observee (>= 10 s)' % dur, dur >= 10)
+    check('prog : au moins 4 etats visuellement differents (%d)' % distinct,
+          distinct >= 4)
+    check('prog : un changement visible au moins toutes les 2 s '
+          '(%d changements en %.0f s)' % (chg, dur), chg * 2 >= dur)
+    mono = all(b >= a for a, b in zip(bars, bars[1:]))
+    check('prog : barre monotone (%s)' % bars[::8][:12], mono)
+    cap(q, 'pgd', 'progression-fin')
+    q.quit()
+
+
 ALL = {'tz': t_tz, 'auto-fr': t_auto_fr, 'auto-de': t_auto_de,
        'ui-fr': t_ui_fr, 'ui-de': t_ui_de, 'text': t_text,
        'refuse': t_refuse, 'virtio': t_virtio, 'exist': t_exist,
        'auto-log': t_auto_log, 'sata8g': t_sata8g, 'sata40g': t_sata40g,
        'fail': t_fail, 'reboot': t_reboot, 'reboot-noeject': t_reboot_noeject,
        'guard': t_guard, 'guard-reinstall': t_guard_reinstall,
-       'pointer': t_pointer, 'cursor': t_cursor}
+       'pointer': t_pointer, 'cursor': t_cursor,
+       'progress': t_progress}
 DEFAULT = [k for k in ALL if k not in ('sata8g', 'sata40g')]
 os.makedirs(WORK, exist_ok=True)
 for s in (SCEN or DEFAULT):

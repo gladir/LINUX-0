@@ -24,11 +24,62 @@ Var
   OpTailL : Array[0..11] Of String[100];   { dernieres lignes du journal }
   OpTailN : LongInt;
   OpStage, OpSub : String;
+  { progression exposee par mkfs (fichier K32_PROGRESS : phase permille
+    groupe groupes) et par l'extraction (nom courant) }
+  OpPh, OpPm, OpGrp, OpNGrp : LongInt;     { OpPm < 0 : pas de compteur }
+  OpCur : String;             { entree de l'archive en cours d'extraction }
+  OpLastBeat : LongInt;       { dernier battement de l'interface (ms) }
   TestMkfs : String;          { preseed testmkfs : remplace mkfs (essais) }
+  OpSlow : String;            { preseed mkfsslow : ms par ecriture (essais) }
 
 { mise a jour de l'interface : message (ou '') et progression des fichiers
   (millieme, -1 : inchangee) ; definie par le programme principal }
 Procedure OpUiHook(Const S : String; Permille : LongInt); Forward;
+
+{ lit le fichier de progression de mkfs : "phase permille groupe groupes" ;
+  rend Vrai si son contenu a change depuis le dernier appel }
+Var OpProgLast : String;
+
+Function OpReadProg : Boolean;
+Var F, N, I, K, V, E : LongInt; B : Array[0..63] Of Byte; S, T : String;
+    Vals : Array[0..3] Of LongInt;
+Begin
+  OpReadProg := False;
+  F := SysOpen('/tmp/k32-progress', O_RDONLY, 0);
+  If F < 0 Then Exit;
+  N := SysRead(F, B, 63);
+  SysClose(F);
+  If N <= 0 Then Exit;
+  S := '';
+  For I := 0 To N - 1 Do
+    If B[I] >= 32 Then S := S + Chr(B[I]);
+  If S = OpProgLast Then Exit;
+  OpProgLast := S;
+  OpReadProg := True;
+  { quatre entiers separes par des espaces }
+  K := 0;
+  T := '';
+  For I := 0 To 3 Do Vals[I] := 0;
+  For I := 1 To Length(S) + 1 Do
+    If (I > Length(S)) Or (S[I] = ' ') Then
+    Begin
+      If (T <> '') And (K < 4) Then
+      Begin
+        Val(T, V, E);
+        If E = 0 Then Vals[K] := V;
+        Inc(K);
+      End;
+      T := '';
+    End
+    Else T := T + S[I];
+  If K >= 2 Then
+  Begin
+    OpPh := Vals[0];
+    OpPm := Vals[1];
+    OpGrp := Vals[2];
+    OpNGrp := Vals[3];
+  End;
+End;
 
 Function OpNum2(V : LongInt) : String;
 Var S : String;
@@ -201,6 +252,12 @@ Begin
   End;
   SysEnvInherit;
   If OpTzEnv <> '' Then SysEnvAdd('TZ=' + OpTzEnv);
+  SysEnvAdd('K32_PROGRESS=/tmp/k32-progress');
+  If OpSlow <> '' Then SysEnvAdd('K32_MKFS_SLOW=' + OpSlow);
+  SysUnlink('/tmp/k32-progress');
+  OpProgLast := '';
+  OpPm := -1;
+  OpPh := 0;
   Pid := SysFork;
   If Pid = 0 Then
   Begin
@@ -227,8 +284,10 @@ Begin
   Begin
     W2 := SysWaitPid(Pid, St, 1);
     If (W2 = Pid) Or (W2 < 0) Then Break;
-    SysPoll(LongInt(@Dm), 0, 200);
+    SysPoll(LongInt(@Dm), 0, 100);
     Now_ := SysTime;
+    { une commande dont le compteur avance n'est pas bloquee }
+    If OpReadProg Then LastGrow := Now_;
     OpElapsed := Now_ - T0;
     If OpLogFd >= 0 Then
       If SysFStat(OpLogFd, Sta) = 0 Then
@@ -248,6 +307,7 @@ Begin
       Exit;
     End;
   End;
+  OpPm := -1;
   If SysWIfExited(St) Then OpExec := SysWExitStatus(St)
   Else OpExec := 126;
 End;
@@ -339,9 +399,17 @@ Begin
 End;
 
 Procedure OpTick(Delta : LongInt);
-Var Pm : LongInt;
+Var Pm, Tn : LongInt;
 Begin
   OpBytes := OpBytes + Delta;
+  { battement de l'interface (chrono, indicateur d'activite) au moins 4 fois
+    par seconde meme sans nouveau pourcent }
+  Tn := GetTickCount;
+  If (Tn - OpLastBeat > 250) Or (Tn - OpLastBeat < 0) Then
+  Begin
+    OpLastBeat := Tn;
+    OpUiHook('', -2);
+  End;
   If OpTotalBytes > 0 Then
   Begin
     Pm := OpBytes Div (OpTotalBytes Div 1000 + 1);
@@ -429,6 +497,7 @@ Begin
     While (Length(Name) > 0) And (Name[Length(Name)] = '/') Do
       Delete(Name, Length(Name), 1);
     Full := Dest + '/' + Name;
+    OpCur := '/' + Name;
     Link := OpHStr(Hdr, 157, 100);
     If Name = '' Then
     Begin

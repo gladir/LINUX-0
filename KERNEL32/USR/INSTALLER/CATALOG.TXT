@@ -1705,3 +1705,51 @@ it: Impossibile avviare il sistema installato: %1
 es: No se puede iniciar el sistema instalado: %1
 pt: Não foi possível iniciar o sistema instalado: %1
 nl: Het geïnstalleerde systeem kan niet worden gestart: %1
+@P_ITAB
+fr: tables d'inodes : groupe %1/%2
+en: inode tables: group %1/%2
+de: Inode-Tabellen: Gruppe %1/%2
+it: tabelle degli inode: gruppo %1/%2
+es: tablas de inodos: grupo %1/%2
+pt: tabelas de inodes: grupo %1/%2
+nl: inode-tabellen: groep %1/%2
+@P_JRN
+fr: journal
+en: journal
+de: Journal
+it: giornale
+es: diario
+pt: diário
+nl: journal
+@P_META
+fr: métadonnées : groupe %1/%2
+en: metadata: group %1/%2
+de: Metadaten: Gruppe %1/%2
+it: metadati: gruppo %1/%2
+es: metadatos: grupo %1/%2
+pt: metadados: grupo %1/%2
+nl: metagegevens: groep %1/%2
+@P_ELAPSED
+fr: écoulé
+en: elapsed
+de: vergangen
+it: trascorso
+es: transcurrido
+pt: decorrido
+nl: verstreken
+@P_REMAIN
+fr: reste ~
+en: left ~
+de: Rest ~
+it: resta ~
+es: resta ~
+pt: resta ~
+nl: nog ~
+@P_FILE
+fr: fichier
+en: file
+de: Datei
+it: file
+es: archivo
+pt: ficheiro
+nl: bestand

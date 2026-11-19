@@ -140,6 +140,11 @@ Var
   NextIno : LongInt;
   Buf : Array[0..4095] Of Byte;
   Zero : Array[0..4095] Of Byte;
+  { ecritures groupees (1 Mo) : tampon de zeros, de relecture et du journal }
+  ZBuf, RBuf, JBuf : Array[0..1048575] Of Byte;
+  { progression : fichier K32_PROGRESS (phase permille groupe groupes) }
+  ProgPath : String;
+  ProgT, WDone, WTot, ProgPh, SlowMs : LongInt;
   Now : LongInt;
   Quiet, Yes : Boolean;
   Lang : LongInt;
@@ -162,6 +167,7 @@ Var
   FsCrcTab : Array[0..255] Of LongInt;
   Crc16Tab : Array[0..255] Of LongInt;
   GrpFlags, GrpUnused : Array[0..MAXGRP - 1] Of LongInt;
+  GrpZeroed : Array[0..MAXGRP - 1] Of Boolean;   { table d'inodes mise a zero }
   GrpBCsum, GrpICsum : Array[0..MAXGRP - 1] Of LongInt;
   { extents du fichier en cours }
   ExtLog, ExtPhys, ExtLen : Array[0..MAXEXT - 1] Of LongInt;
@@ -237,6 +243,73 @@ End;
 Procedure WriteBlk(Blk : LongInt; Addr : LongInt);
 Begin
   WriteAtS(PartStart + Blk * (BS Div 512), 0, Addr, BS);
+End;
+
+{ lecture a l'octet 0 du secteur Sect : rend le nombre d'octets lus }
+Function ReadAtS(Sect, Addr, Len : LongInt) : LongInt;
+Var R, Done : LongInt; Res : Array[0..1] Of LongInt;
+Begin
+  ReadAtS := 0;
+  If SysLLSeek(Fd, (Sect Shr 23) And $1FF, Sect Shl 9, LongInt(@Res[0]),
+     SEEK_SET) < 0 Then Exit;
+  Done := 0;
+  While Done < Len Do
+  Begin
+    R := LnxSys3(3, Fd, Addr + Done, Len - Done);
+    If R <= 0 Then Break;
+    Done := Done + R;
+  End;
+  ReadAtS := Done;
+End;
+
+Function AllZero(Addr, Len : LongInt) : Boolean;
+Var I : LongInt;
+Begin
+  AllZero := False;
+  For I := 0 To (Len Div 4) - 1 Do
+    If MemL[0:Addr + I * 4] <> 0 Then Exit;
+  AllZero := True;
+End;
+
+{ progression : une ligne "phase permille groupe groupes" ecrite (au plus
+  6 fois par seconde) dans le fichier K32_PROGRESS que l'installateur lit }
+Procedure ProgPut(Ph, G : LongInt; Force : Boolean);
+Var T, Pm, F : LongInt; L, A, B, C : String;
+Begin
+  If ProgPath = '' Then Exit;
+  T := GetTickCount;
+  If (Not Force) And (Abs(T - ProgT) < 150) Then Exit;
+  ProgT := T;
+  Pm := 0;
+  If WTot > 0 Then
+    If WTot < 2000000 Then Pm := (WDone * 1000) Div WTot
+    Else Pm := WDone Div (WTot Div 1000);
+  If Pm > 1000 Then Pm := 1000;
+  Str(Ph, L);
+  Str(Pm, A);
+  Str(G, B);
+  Str(NGroups, C);
+  L := L + ' ' + A + ' ' + B + ' ' + C + #10;
+  F := SysOpen(ProgPath, O_WRONLY Or O_CREAT Or O_TRUNC, 420);
+  If F < 0 Then Exit;
+  SysWrite(F, L[1], Length(L));
+  SysClose(F);
+End;
+
+{ ecrit Cnt blocs depuis Addr ; un tampon de zeros n'est ecrit que si la
+  zone n'est pas deja a zero (disque neuf : aucune ecriture) }
+Procedure WriteBlocks(Blk, Cnt, Addr : LongInt);
+Var Len, Sect : LongInt;
+Begin
+  { essais : K32_MKFS_SLOW=ms ralentit chaque ecriture groupee (operation
+    longue reproductible pour les essais de progression) }
+  If SlowMs > 0 Then Sleep(SlowMs);
+  Len := Cnt * BS;
+  Sect := PartStart + Blk * (BS Div 512);
+  If AllZero(Addr, Len) Then
+    If ReadAtS(Sect, LongInt(@RBuf), Len) = Len Then
+      If AllZero(LongInt(@RBuf), Len) Then Exit;
+  WriteAtS(Sect, 0, Addr, Len);
 End;
 
 Procedure PutB(Addr, Off, V : LongInt);
@@ -1173,9 +1246,12 @@ Begin
     GrpUnused[G] := 0;
     If FeatMcsum Or FeatGdtCsum Then
     Begin
-      GrpFlags[G] := 4;                          { ITABLE_ZEROED }
+      { ITABLE_ZEROED seulement si la table a ete mise a zero (sinon
+        initialisation paresseuse : le groupe est INODE_UNINIT) }
+      If GrpZeroed[G] Then GrpFlags[G] := 4 Else GrpFlags[G] := 0;
       GrpUnused[G] := IPG - Hi;
-      If (Used = 0) And (G > 0) Then GrpFlags[G] := GrpFlags[G] Or 1;
+      If ((Used = 0) And (G > 0)) Or Not GrpZeroed[G] Then
+        GrpFlags[G] := GrpFlags[G] Or 1;
       If (G > 0) And (G < NGroups - 1) Then
       Begin
         Ov := GrpOverhead(G);
@@ -1204,6 +1280,8 @@ Begin
     End;
     PutW(LongInt(@Gdt), Lo + 28, GrpUnused[G]);
     GdCsum(G, LongInt(@Gdt));
+    WDone := WDone + 2;
+    ProgPut(3, G + 1, False);
   End;
   For G := 0 To NGroups - 1 Do
     If HasBackup(G) Then
@@ -1215,16 +1293,54 @@ Begin
         WriteBlk(GroupBase(G) + 1 + K, LongInt(@Gd));
       End;
     End;
+  WDone := WTot;
+  ProgPut(3, NGroups, True);
 End;
 
 { ---------- mke2fs : zone des inodes a zero, lost+found ---------- }
 
+Function DefaultJournal : LongInt; Forward;
+
 Procedure FormatFs;
-Var G, K : LongInt;
+Var G, K, N, Cb, Ej, Nz : LongInt; Lazy : Boolean;
 Begin
-  FillChar(Zero, BS, 0);
+  FillChar(ZBuf, SizeOf(ZBuf), 0);
+  Cb := 1048576 Div BS;
+  Ej := 0;
+  If FeatJournal Then
+    If JrnMb > 0 Then Ej := JrnMb * (1048576 Div BS)
+    Else Ej := DefaultJournal;
+  { uninit_bg / metadata_csum : initialisation paresseuse des tables
+    d'inodes (comme lazy_itable_init de mke2fs) : seul le groupe 0, qui
+    porte les inodes reserves, est mis a zero ; les autres groupes sont
+    marques INODE_UNINIT sans ITABLE_ZEROED (le noyau n'y lit jamais un inode
+    libre, e2fsck ignore les groupes INODE_UNINIT) }
+  Lazy := FeatGdtCsum Or FeatMcsum;
+  Nz := NGroups;
+  If Lazy Then Nz := 1;
+  ProgPath := SysGetEnv('K32_PROGRESS');
+  Val(SysGetEnv('K32_MKFS_SLOW'), SlowMs, K);
+  If K <> 0 Then SlowMs := 0;
+  WDone := 0;
+  WTot := Nz * ITB + Ej + NGroups * 2 + 1;
+  ProgPut(1, 0, True);
   For G := 0 To NGroups - 1 Do
-    For K := 0 To ITB - 1 Do WriteBlk(GrpITab[G] + K, LongInt(@Zero));
+  Begin
+    GrpZeroed[G] := (Not Lazy) Or (G = 0);
+    If GrpZeroed[G] Then
+    Begin
+      K := 0;
+      While K < ITB Do
+      Begin
+        N := ITB - K;
+        If N > Cb Then N := Cb;
+        WriteBlocks(GrpITab[G] + K, N, LongInt(@ZBuf));
+        K := K + N;
+        WDone := WDone + N;
+        ProgPut(1, G + 1, False);
+      End;
+    End;
+  End;
 End;
 
 Procedure MakeLostFound;
@@ -1262,13 +1378,24 @@ Begin
 End;
 
 Procedure MakeJournal;
-Var K, Blk, A : LongInt; Jb : Array[0..4095] Of Byte;
+Var K, Q, Blk, A, Js, Jc, Cb : LongInt;
 Begin
   FileBegin;
-  A := LongInt(@Jb);
+  Cb := 1048576 Div BS;
+  Js := 0;
+  Jc := 0;
   For K := 0 To JrnBlocks - 1 Do
   Begin
-    FillChar(Jb, BS, 0);
+    Blk := AllocBlock;
+    { blocs consecutifs : un tampon de 1 Mo ecrit d'un coup }
+    If (Jc > 0) And ((Blk <> Js + Jc) Or (Jc >= Cb)) Then
+    Begin
+      WriteBlocks(Js, Jc, LongInt(@JBuf));
+      Jc := 0;
+    End;
+    If Jc = 0 Then Js := Blk;
+    A := LongInt(@JBuf) + Jc * BS;
+    FillChar(JBuf[Jc * BS], BS, 0);
     If K = 0 Then
     Begin
       PutBE(A, 0, $C03B3998);
@@ -1278,13 +1405,15 @@ Begin
       PutBE(A, 20, 1);                { s_first }
       PutBE(A, 24, 1);                { s_sequence }
       PutBE(A, 28, 0);                { s_start : journal propre }
-      For Blk := 0 To 15 Do PutB(A, 48 + Blk, FsUuid[Blk]);
+      For Q := 0 To 15 Do PutB(A, 48 + Q, FsUuid[Q]);
       PutBE(A, 64, 1);                { s_nr_users }
     End;
-    Blk := AllocBlock;
-    WriteBlk(Blk, A);
+    Inc(Jc);
     FileAddBlock(Blk);
+    Inc(WDone);
+    ProgPut(2, 0, False);
   End;
+  If Jc > 0 Then WriteBlocks(Js, Jc, LongInt(@JBuf));
   FileEnd(8);
   PutInode(8, $8180, 0, 0, JrnBlocks * BS, Now, Now, Now, 1, FSect, FFlags,
            FBlocks);

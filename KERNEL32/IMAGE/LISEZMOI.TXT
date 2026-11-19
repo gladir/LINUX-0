@@ -39,6 +39,13 @@ KERNEL32/TOOLS/MKINSTALLCD.SH -o KERNEL32-INSTALL.ISO).
   (boutons : Demarrer / Reinstaller / Shell) ; retirer le CD dans les
   reglages de la machine pour un amorcage direct du disque.
 
+Pendant l'installation (etape 12/13) : la barre avance reellement ; sous la
+  barre, une ligne donne l'operation en cours (formatage : groupe n/N ;
+  copie : fichier et Mo), le pourcentage, le temps ecoule, le temps restant
+  estime et un indicateur tournant (si rien ne bouge, la machine est figee).
+  Le formatage d'un disque neuf de 32 Go dure une quinzaine de secondes en
+  ext4 (tables d'inodes initialisees paresseusement), plus en ext3/ext2.
+
 Souris et clavier (VirtualBox, VMware, QEMU) :
   - Le clavier suffit pour tout l'assistant : Tab / Maj+Tab (champ suivant ou
     precedent), Entree (valider), Echap (annuler), fleches (listes), F1 (aide),

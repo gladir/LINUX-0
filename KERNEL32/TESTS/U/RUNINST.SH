@@ -24,6 +24,8 @@
 #              l'ouverture, clics absolus, clavier seul, F2 + k32-input
 #     cursor   curseur prisme : 3 teintes souris immobile, contraste sur le
 #              blanc, pas de trainee, k32setup.plaincursor (ancienne fleche)
+#     progress mkfs ext3 ralenti (preseed mkfsslow) : la page change au moins
+#              toutes les 2 s, >= 4 etats, barre monotone jusqu'a 100 %
 #     tz       fuseaux horaires (TZif, heure d'ete) contre l'hote
 #     auto-fr  installation automatique (preseed) en francais, guide, ext4+swap
 #     auto-de  idem en allemand, manuel : ext3 + swap + /home, horloge locale

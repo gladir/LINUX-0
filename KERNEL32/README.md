@@ -1904,6 +1904,29 @@ demarrait bien le systeme installe.
   AHCI, preseed jusqu'a "Redemarrer", reset reel ; avec et sans ejection ; le systeme
   installe arrive dans le terminal, GNOME, KDE ou GEOWORKS ; Reinstaller ; `reinstall=yes`.
 
+### Installation lente : formatage rapide et progression continue
+
+Retour VirtualBox : l'etape 12/13 restait a 3 % pendant plusieurs minutes (mkfs) puis sautait a 100 %.
+
+* **Mesure** (QEMU, disque creux 32 Go sur ich9-ahci, `cache=writethrough`) : l'etape lente etait
+  **mkfs.ext4** (254 s sur 265 s : ecritures de 4 Ko, 512 Mo de tables d'inodes mises a zero) ;
+  extraction du tar 4 s, chargeur 1 s.
+* **Correctif `USR/INSTALL.PAS`** : ecritures groupees de 1 Mo ; une zone a ecrire a zero n'est ecrite
+  que si elle ne l'est pas deja (relecture, disque neuf : aucune ecriture) ; **tables d'inodes
+  paresseuses** sur ext4 (uninit_bg / metadata_csum, comme `lazy_itable_init`) : seul le groupe 0
+  est mis a zero, les autres groupes sont `INODE_UNINIT` sans `ITABLE_ZEROED` (le noyau sait les
+  initialiser, `e2fsck -fn` reste propre) ; journal ecrit par blocs consecutifs. Apres : **ext4 32 Go
+  en 15 s** (installation complete 25 s), ext3/ext2 38 s (les tables sont relues). Au-dela, c'est
+  le noyau : 256 secteurs par commande AHCI (voir `DEMANDES_D7.md`).
+* **Progression** : mkfs ecrit `K32_PROGRESS` (phase, millieme, groupe, groupes ; au plus 6 fois par
+  seconde) ; l'installateur le lit toutes les 100 ms et affiche, sous la barre (qui suit reellement
+  le compteur), `tables d'inodes : groupe 90/92 | 57 % | ecoule 00:25 | reste ~00:18 |` (indicateur
+  d'activite tournant) ; extraction : `fichier /usr/bin/ls : 12/45 Mo | 27 % | ...` ; au moins 4
+  mises a jour par seconde, y compris pendant `sync` (execute dans un fils). Poids de la barre :
+  partitions 3 %, formatage 30 %, montages 2 %, copie 50 %, configuration/noyau/fin 15 %.
+* **Blocage** : une commande dont le compteur avance n'est plus consideree bloquee (`OpTimeout`).
+* Essai : `RUNINST.SH progress` (cle de preseed `mkfsslow=ms` : mkfs ext3 ralenti, operation de 60 s).
+
 ### Pointeur absolu et diagnostic des entrees (VirtualBox, tablette USB)
 
 Retour VirtualBox reel (noyau avec USB OHCI + VMMDev) : curseur absent, souris morte.

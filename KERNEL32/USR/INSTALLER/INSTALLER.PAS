@@ -65,6 +65,7 @@ Var
   PedN : LongInt;
   StageBase, StageSpan : LongInt;
   InstLogW, InstProgW, InstLblW : LongInt;
+  StageT0, InstT0, CurStage : LongInt;     { chronos (ms) et etape en cours }
   LastDraw : LongInt;
   CmdLine : String;
   PsKey, PsVal : Array[0..63] Of String[80];
@@ -1943,6 +1944,59 @@ End;
 
 { ---- installation ---- }
 
+{ mm:ss }
+Function Mmss(Sec : LongInt) : String;
+Begin
+  If Sec < 0 Then Sec := 0;
+  Mmss := OpNum2(Sec Div 60) + ':' + OpNum2(Sec Mod 60);
+End;
+
+{ ligne de compteur de la page d'installation : compteur de l'operation
+  (groupe de mkfs, entree et Mo du tar), pourcentage, temps ecoule, reste
+  estime, indicateur d'activite }
+Function InstCounter : String;
+Var E, Pc, F, Rm, Mx : LongInt; S, Sp : String;
+Begin
+  E := (GetTickCount - StageT0) Div 1000;
+  Sp := Copy('|/-\', ((GetTickCount Div 250) Mod 4) + 1, 1);
+  S := '';
+  Pc := -1;
+  F := -1;
+  If OpPm >= 0 Then
+  Begin
+    If OpPh = 1 Then S := Fmt(M_P_ITAB, NumS(OpGrp), NumS(OpNGrp), '')
+    Else If OpPh = 2 Then S := Msg(M_P_JRN)
+    Else S := Fmt(M_P_META, NumS(OpGrp), NumS(OpNGrp), '');
+    Pc := OpPm Div 10;
+    F := OpPm;
+  End
+  Else If (CurStage = 4) And (OpTotalBytes > 0) Then
+  Begin
+    Mx := UiCw - 62;
+    If Mx < 10 Then Mx := 10;
+    S := OpCur;
+    If Length(S) > Mx Then S := '...' + Copy(S, Length(S) - Mx + 4, Mx);
+    S := Msg(M_P_FILE) + ' ' + S + ' : ' + NumS(OpBytes Shr 20) + '/' +
+         NumS(OpTotalBytes Shr 20) + ' Mo';
+    F := OpBytes Div (OpTotalBytes Div 1000 + 1);
+    If F > 1000 Then F := 1000;
+    Pc := F Div 10;
+  End;
+  If Pc >= 0 Then
+  Begin
+    If S <> '' Then S := S + ' | ';
+    S := S + NumS(Pc) + ' %';
+  End;
+  If S <> '' Then S := S + ' | ';
+  S := S + Msg(M_P_ELAPSED) + ' ' + Mmss(E);
+  If (F > 30) And (E >= 3) Then
+  Begin
+    Rm := (E * (1000 - F)) Div F;
+    S := S + ' | ' + Msg(M_P_REMAIN) + Mmss(Rm);
+  End;
+  InstCounter := S + ' ' + Sp;
+End;
+
 Procedure OpUiHook(Const S : String; Permille : LongInt);
 Var Now_ : LongInt; Force : Boolean;
 Begin
@@ -1954,12 +2008,16 @@ Begin
   End;
   If Permille = -2 Then
   Begin
-    { battement : etape en cours et temps ecoule }
-    UiSetText(42, OpStage + OpSub + ' (' + NumS(OpElapsed) + ' s)');
+    { battement : etape, compteur, chrono, indicateur d'activite (au moins
+      4 fois par seconde) ; la barre suit le compteur de mkfs }
     Now_ := GetTickCount;
-    If (Now_ - LastDraw > 500) Or (Now_ - LastDraw < 0) Then
+    If (Now_ - LastDraw > 250) Or (Now_ - LastDraw < 0) Then
     Begin
       LastDraw := Now_;
+      If OpPm >= 0 Then
+        UiSetProg(41, StageBase + OpPm * StageSpan Div 1000);
+      UiSetText(42, OpStage + OpSub);
+      UiSetText(43, InstCounter);
       UiRedraw;
     End;
     Exit;
@@ -1983,11 +2041,16 @@ Procedure InstStage(N, Base, Span : LongInt);
 Begin
   StageBase := Base;
   StageSpan := Span;
+  CurStage := N;
+  StageT0 := GetTickCount;
+  OpPm := -1;
+  OpCur := '';
   If Not NoUi Then
   Begin
     OpStage := Msg(M_INST_1 + N - 1);
     OpSub := '';
     UiSetText(42, OpStage);
+    UiSetText(43, InstCounter);
     UiSetProg(41, Base);
     UiRedraw;
   End;
@@ -2191,7 +2254,9 @@ End;
 
 Procedure CleanMounts;
 Begin
-  SysSync;
+  { sync dans un fils : l'interface continue de battre (chrono, activite) }
+  OpSub := '';
+  If OpExec('/bin/sync', '') = 127 Then SysSync;
   SysUmount(TGT + '/home');
   SysUmount(TGT);
 End;
@@ -2217,6 +2282,7 @@ Var I, Rc : LongInt; Dev, Lbl, Args : String;
 Begin
   DoInstall := False;
   OpErr := '';
+  InstT0 := GetTickCount;
   If Not CdOk Then CdOk := MountCd;
   If Not CdOk Then
   Begin
@@ -2259,7 +2325,7 @@ Begin
     Exit;
   End;
   { 2 : formatage }
-  InstStage(2, 30, 100);
+  InstStage(2, 30, 300);
   For I := 1 To MAXPT Do
     If Pt[I].Used And (Pt[I].Role <> ROLE_NONE) Then
     Begin
@@ -2291,10 +2357,10 @@ Begin
         SaveLog(False);
         Exit;
       End;
-      If Not NoUi Then UiSetProg(41, 30 + (100 * I) Div 4);
+      If Not NoUi Then UiSetProg(41, 30 + (300 * I) Div 4);
     End;
   { 3 : montages }
-  InstStage(3, 130, 20);
+  InstStage(3, 330, 20);
   SysMkdir(TGT, 493);
   Dev := RootDev;
   OpLog(Fmt(M_L_MNT, Dev, TGT, ''));
@@ -2318,7 +2384,7 @@ Begin
       End;
     End;
   { 4 : copie }
-  InstStage(4, 150, 700);
+  InstStage(4, 350, 500);
   OpLog(Msg(M_L_COPY));
   If Not OpExtract(CDMNT + '/system.tar', TGT) Then
   Begin
@@ -2405,6 +2471,8 @@ Begin
     UiFoot := '';
     W := UiLabel(0, 0, UiCw, 1, '', 0);
     UiWd[W].Id := 42;
+    W := UiLabel(0, 2, UiCw, 1, '', WF_DIM);
+    UiWd[W].Id := 43;
     UiProg(41, 0, 1, UiCw);
     InstLogW := UiLog(0, 3, UiCw, UiCh - 3);
     InstProgW := 1;
@@ -3047,6 +3115,7 @@ BEGIN
     Val(PsGet('timeout', '900'), OpTimeout, K0);
     If K0 <> 0 Then OpTimeout := 900;
     TestMkfs := PsGet('testmkfs', '');
+    OpSlow := PsGet('mkfsslow', '');
   End;
   { curseur : fleche prisme (changeant de couleur) ; ancienne fleche
     blanche pour les comparaisons d'images : GFXPLAINCUR=1, k32setup.plaincursor
