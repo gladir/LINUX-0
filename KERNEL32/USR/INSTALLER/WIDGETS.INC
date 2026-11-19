@@ -709,7 +709,7 @@ Begin
   UiDrawWidgets;
   UiFooter(UiFoot);
   UiPresent;
-  If UiGfx And (InMsFd >= 0) Then GCursorShow(InMx, InMy);
+  If UiGfx And InPtr Then GCursorShow(InMx, InMy);
 End;
 
 { ---- boite de dialogue modale ---- }
@@ -1101,7 +1101,7 @@ Begin
     UiDlgFrame;
     UiDrawWidgets;
     UiPresent;
-    If UiGfx And (InMsFd >= 0) Then GCursorShow(InMx, InMy);
+    If UiGfx And InPtr Then GCursorShow(InMx, InMy);
   End
   Else UiRedraw;
   While True Do
@@ -1134,7 +1134,7 @@ Begin
           Need := True;
         End;
       EV_MOVE :
-        If UiGfx And (InMsFd >= 0) Then
+        If UiGfx And InPtr Then
         Begin
           GCursorHide;
           GCursorShow(A, B);
@@ -1152,7 +1152,7 @@ Begin
         UiDlgFrame;
         UiDrawWidgets;
         UiPresent;
-        If UiGfx And (InMsFd >= 0) Then GCursorShow(InMx, InMy);
+        If UiGfx And InPtr Then GCursorShow(InMx, InMy);
       End
       Else UiRedraw;
     End;

@@ -1289,12 +1289,82 @@ reboot=halt
     q.quit()
 
 
+# ------------------------------------------------ pointeur absolu, clavier
+def t_pointer():
+    """pointeur absolu (tablette USB : EV_ABS sur /dev/input/event*) en plus
+    du PS/2 ; curseur visible des l'ouverture ; shell de secours (F2) et
+    k32-input ; l'assistant se pilote au clavier seul"""
+    iso = build_iso('ptr', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'k32setup.verbose=/dev/ttyS0')
+    disk = new_disk('ptr', 64)
+    qsock = os.path.join(WORK, 'ptr.qmp')
+    if os.path.exists(qsock):
+        os.unlink(qsock)
+    q = Q(os.path.join(WORK, 'ptr'), ['-cdrom', iso, '-boot', 'd', '-m',
+          '256', '-vga', 'std', '-device', 'pci-ohci,id=ohci', '-device',
+          'usb-tablet,bus=ohci.0', '-qmp', 'unix:%s,server,nowait' % qsock]
+          + drv_args(disk), serial_io=True)
+    qm = Qmp(qsock)
+    check('ptr : assistant demarre (page de la langue)', page(q, 0, 120))
+    time.sleep(1)
+    from PIL import Image
+    q.shot('c0')
+    im = Image.open(os.path.join(q.work, 'c0.ppm')).convert('RGB')
+    blk = sum(1 for yy in range(384, 404) for xx in range(512, 526)
+              if im.getpixel((xx, yy)) == (255, 255, 255))
+    check('ptr : curseur dessine des l\'ouverture, au centre (%d pixels '
+          'blancs)' % blk, blk > 10)
+    cap(q, 'c0', 'pointeur-01-ouverture')
+    # noyau ou USB / VMMDev sont optionnels : activation a chaud
+    serial_root(q, 'root')
+    out = sh_run(q, '[ -w /proc/sys/k32/usb_enable ] && echo 1 > '
+                 '/proc/sys/k32/usb_enable; k32-input status | head -12')
+    print('   k32-input status :', out.strip().replace('\n', ' | ')[:300])
+    time.sleep(4)                       # balayage des evdev (2 s)
+    qm.abs(100, 252)                    # "English" dans la liste
+    time.sleep(0.5)
+    qm.click()
+    time.sleep(1)
+    cap(q, 'c1', 'pointeur-02-absolu')
+    q.shot('c1')
+    im = Image.open(os.path.join(q.work, 'c1.ppm')).convert('RGB')
+    sel = im.getpixel((300, 252))
+    check('ptr : clic au pointeur absolu sur "English" : ligne selectionnee '
+          '%s' % (sel,), abs(sel[0] - 0x2E) < 40 and abs(sel[2] - 0xB4) < 50)
+    qm.abs(752, 661)                    # "Suivant >"
+    time.sleep(0.5)
+    qm.click()
+    check('ptr : clic absolu sur Suivant : page 1 (accueil)',
+          page(q, 1, 20))
+    cap(q, 'c2', 'pointeur-03-accueil')
+    # clavier seul : Entree jusqu'a la page du nom de machine
+    for _ in range(3):
+        q.key('ret')
+        time.sleep(1.2)
+    check('ptr : clavier seul : Entree fait avancer les pages',
+          page(q, 3, 20))
+    # shell de secours (F2) puis k32-input
+    q.key('f2')
+    time.sleep(1)
+    q.key('ret')                        # Oui
+    time.sleep(2)
+    q.type('k32-input log')
+    q.key('ret')
+    time.sleep(3)
+    out = sh_run(q, 'head -2 /tmp/k32-input.txt; grep -c "=== " '
+                 '/tmp/k32-input.txt')
+    check('ptr : F2 ouvre un shell ; k32-input log ecrit le rapport',
+          '=== k32-input : rapport' in out, out)
+    q.quit()
+
+
 ALL = {'tz': t_tz, 'auto-fr': t_auto_fr, 'auto-de': t_auto_de,
        'ui-fr': t_ui_fr, 'ui-de': t_ui_de, 'text': t_text,
        'refuse': t_refuse, 'virtio': t_virtio, 'exist': t_exist,
        'auto-log': t_auto_log, 'sata8g': t_sata8g, 'sata40g': t_sata40g,
        'fail': t_fail, 'reboot': t_reboot, 'reboot-noeject': t_reboot_noeject,
-       'guard': t_guard, 'guard-reinstall': t_guard_reinstall}
+       'guard': t_guard, 'guard-reinstall': t_guard_reinstall,
+       'pointer': t_pointer}
 DEFAULT = [k for k in ALL if k not in ('sata8g', 'sata40g')]
 os.makedirs(WORK, exist_ok=True)
 for s in (SCEN or DEFAULT):

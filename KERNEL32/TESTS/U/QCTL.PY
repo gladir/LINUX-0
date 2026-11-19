@@ -199,5 +199,51 @@ class Q:
             self.p.kill()
 
 
+class Qmp:
+    """QMP (input-send-event) : pointeur ABSOLU d'une tablette USB ; le
+    moniteur texte (mouse_move) n'agit pas sur une tablette. A lancer avec
+    -qmp unix:CHEMIN,server,nowait"""
+    def __init__(self, path):
+        import json
+        self.json = json
+        self.s = socket.socket(socket.AF_UNIX)
+        for _ in range(100):
+            try:
+                self.s.connect(path)
+                break
+            except OSError:
+                time.sleep(0.1)
+        self.f = self.s.makefile('rw')
+        self.f.readline()
+        self.cmd('qmp_capabilities')
+
+    def cmd(self, c, args=None):
+        d = {'execute': c}
+        if args:
+            d['arguments'] = args
+        self.f.write(self.json.dumps(d) + '\n')
+        self.f.flush()
+        while True:
+            r = self.json.loads(self.f.readline())
+            if 'return' in r or 'error' in r:
+                return r
+
+    def abs(self, x, y, w=1024, h=768):
+        self.cmd('input-send-event', {'events': [
+            {'type': 'abs', 'data': {'axis': 'x',
+                                      'value': x * 32767 // (w - 1)}},
+            {'type': 'abs', 'data': {'axis': 'y',
+                                      'value': y * 32767 // (h - 1)}}]})
+
+    def btn(self, down, button='left'):
+        self.cmd('input-send-event', {'events': [
+            {'type': 'btn', 'data': {'down': down, 'button': button}}]})
+
+    def click(self):
+        self.btn(True)
+        time.sleep(0.1)
+        self.btn(False)
+
+
 if __name__ == '__main__':
     print(__doc__)

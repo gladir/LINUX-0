@@ -20,6 +20,8 @@
 #              KDE et GEOWORKS (session editee dans /etc/k32/session)
 #     guard-reinstall  Tab+Reinstaller (decompte arrete, assistant) ;
 #              preseed reinstall=yes (pas de garde-fou)
+#     pointer  tablette USB (pointeur absolu, QMP) : curseur visible des
+#              l'ouverture, clics absolus, clavier seul, F2 + k32-input
 #     tz       fuseaux horaires (TZif, heure d'ete) contre l'hote
 #     auto-fr  installation automatique (preseed) en francais, guide, ext4+swap
 #     auto-de  idem en allemand, manuel : ext3 + swap + /home, horloge locale

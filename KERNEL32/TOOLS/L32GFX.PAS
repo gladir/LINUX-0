@@ -1636,6 +1636,10 @@ Var
   { entree absolue (evdev avec ABS_X et ABS_Y) }
   BgAbsFd, BgAbsX, BgAbsY, BgAbsMinX, BgAbsMaxX, BgAbsMinY, BgAbsMaxY : LongInt;
   BgAbsSyn, BgAbsOk, BgAbsPoll : Boolean;
+  BgAbsAct, BgNoPoll, BgNoCur : Boolean;
+  BgAbsMs, BgAbsReal, BgAbsEv, BgAbsHold, BgPollErr, BgSkip, BgRelEv : LongInt;
+  BgPollRes : LongInt;                { resultat du dernier poll }
+  BgAbsPath, BgRelPath : String;
   { pilote : commandes de mise a jour et curseur materiel (ioctl 46F0h...) }
   BgHwUpd, BgHwCur, BgHwTried, BgHwOn, BgHwWant : Boolean;
   BgHwX, BgHwY : LongInt;
@@ -1674,9 +1678,19 @@ Begin
     BgElapsed := True;
     Exit;
   End;
+  { garde-fou : si l'horloge du processeur ne progresse pas (machine
+    virtuelle), 16 refus de suite finissent par un oui }
+  Inc(BgSkip);
+  If BgSkip >= 16 Then
+  Begin
+    BgSkip := 0;
+    BgElapsed := True;
+    Exit;
+  End;
   D := BgTsc - Since;
   If D < 0 Then D := D + 4294967296.0;
   BgElapsed := D >= 1.0 * Ms * BgTscMs;
+  If D >= 1.0 * Ms * BgTscMs Then BgSkip := 0;
 End;
 
 Procedure BgCalib;
@@ -1694,7 +1708,8 @@ Begin
   C1 := BgTsc;
   T1 := GetTickCount;
   If T1 > T0 Then BgTscMs := ((C1 - C0) And $7FFFFFFF) Div (T1 - T0);
-  If BgTscMs < 50000 Then
+  { plausible : 50 MHz a 10 GHz, et l'horloge a avance }
+  If (BgTscMs < 50000) Or (BgTscMs > 10000000) Or (C1 = C0) Then
   Begin
     BgNoTsc := True;
     BgTscMs := 0;
@@ -1854,6 +1869,16 @@ Begin
   If Any Then BgHwUpdate(Ux1, Uy1, Ux2, Uy2);
 End;
 
+{ la source absolue pilote-t-elle le curseur ? : elle a envoye au moins deux
+  positions differentes et la derniere date de moins de BgAbsHold ms
+  (2000 ; GFXABSMS) ; sinon le relatif PS/2 (toujours lu) pilote }
+Function BgAbsRecent : Boolean;
+Begin
+  BgAbsRecent := False;
+  If Not BgAbsAct Then Exit;
+  If GetTickCount - BgAbsMs < BgAbsHold Then BgAbsRecent := True;
+End;
+
 { ---- evenements de la souris (paquets PS/2 et evdev absolu) ---- }
 
 Procedure BgSetBtn(Nb : LongInt);
@@ -1888,6 +1913,7 @@ Begin
       If N = 0 Then BgMsPoll := False;
       Exit;
     End;
+    Inc(BgRelEv, N);
     For I := 0 To N - 1 Do
     Begin
       B := Buf[I];
@@ -1898,6 +1924,7 @@ Begin
       Begin
         BgMsN := 0;
         Inc(BgSt[11]);
+        If BgAbsRecent Then Continue;
         Dx := BgMsPk[1];
         Dy := BgMsPk[2];
         If (BgMsPk[0] And $10) <> 0 Then Dx := Dx - 256;
@@ -1941,29 +1968,33 @@ End;
 
 Procedure BgAbsRead;
 Var Ev : Array[0..63] Of LongInt; N, I, P, Ty, Co, V, Nb, Bit, Pass : LongInt;
+    Moved : Boolean;
 Begin
   If Not BgAbsOk Then Exit;
+  Moved := False;
   For Pass := 1 To 4 Do
   Begin
     Inc(BgSt[1]);
     N := SysRead(BgAbsFd, Ev, 256);
     If N = 0 Then BgAbsPoll := False;
-    If N < 16 Then
-    Begin
-      If BgAbsSyn Then BgAbsPlace;
-      Exit;
-    End;
+    If N < 16 Then Break;
     For I := 0 To N Div 16 - 1 Do
     Begin
       P := LongInt(@Ev) + I * 16;
       Ty := MemW[0:P + 8];
       Co := MemW[0:P + 10];
       V := MemL[0:P + 12];
+      Inc(BgAbsEv);
       If Ty = 3 Then
       Begin
-        If Co = 0 Then BgAbsX := V
-        Else If Co = 1 Then BgAbsY := V;
-        If Co <= 1 Then BgAbsSyn := True;
+        If (Co = 0) And (V <> BgAbsX) Then
+        Begin
+          BgAbsX := V; Inc(BgAbsReal); Moved := True;
+        End
+        Else If (Co = 1) And (V <> BgAbsY) Then
+        Begin
+          BgAbsY := V; Inc(BgAbsReal); Moved := True;
+        End;
         Inc(BgSt[11]);
       End
       Else If Ty = 1 Then
@@ -1976,25 +2007,53 @@ Begin
         End;
         If Bit <> 0 Then
         Begin
-          If BgAbsSyn Then BgAbsPlace;
           Nb := BgMb;
           If V = 1 Then Nb := Nb Or Bit
           Else If V = 0 Then Nb := Nb And (Not Bit);
           If Nb <> BgMb Then BgSetBtn(Nb);
+          If Not BgAbsAct Then BgAbsMs := GetTickCount;
         End;
-      End
-      Else If (Ty = 0) And (Co = 0) And BgAbsSyn Then BgAbsPlace;
+      End;
     End;
-    If N < 256 Then Exit;
+    If N < 256 Then Break;
   End;
-  If BgAbsSyn Then BgAbsPlace;
+  { une source silencieuse ou immobile ne prend jamais la main : il faut deux
+    positions differentes }
+  If Moved Then
+  Begin
+    If BgAbsReal >= 2 Then BgAbsAct := True;
+    BgAbsMs := GetTickCount;
+    If BgAbsAct Then BgAbsPlace;
+  End;
 End;
 
 { une attente : une seule commande poll sur le clavier, la souris et le
   peripherique absolu, puis lecture groupee de ce qui est pret }
 Procedure BgPoll(Ms : LongInt);
-Var Pf : Array[0..5] Of LongInt; N, K0, KM, KA, R : LongInt;
+Var Pf : Array[0..5] Of LongInt; N, K0, KM, KA, R, Av : LongInt;
 Begin
+  BgPollRes := 0;
+  { poll refuse par le noyau (peripherique sans poll) : lectures directes
+    de chaque source, attente par tranches de 10 ms }
+  If BgNoPoll Then
+  Begin
+    If Ms > 10 Then Ms := 10;
+    If Ms > 0 Then
+    Begin
+      Inc(BgSt[3]);
+      Sleep(Ms);
+    End;
+    If BgKbdUsed And (Not BgEof) Then
+    Begin
+      Av := 0;
+      If SysIoctl(0, $541B, Av) >= 0 Then
+        If Av > 0 Then BgKRead;
+    End;
+    If BgMsOpen Then BgMouseRead;
+    If BgAbsOk Then BgAbsRead;
+    BgLastPoll := BgTsc;
+    Exit;
+  End;
   N := 0; K0 := -1; KM := -1; KA := -1;
   If BgKbdUsed And (Not BgEof) Then
   Begin
@@ -2022,13 +2081,35 @@ Begin
   End;
   Inc(BgSt[0]);
   R := SysPoll(LongInt(@Pf), N, Ms);
+  BgPollRes := R;
   BgLastPoll := BgTsc;
+  If R < 0 Then
+  Begin
+    { erreur de poll : d'abord sans le peripherique absolu, ensuite sans poll }
+    Inc(BgPollErr);
+    If BgAbsOk And BgAbsPoll Then BgAbsPoll := False
+    Else Begin
+      BgNoPoll := True;
+      BgMsPoll := False;
+      BgAbsPoll := False;
+    End;
+    If Ms > 0 Then
+    Begin
+      If Ms > 10 Then Ms := 10;
+      Inc(BgSt[3]);
+      Sleep(Ms);
+    End;
+    If BgMsOpen Then BgMouseRead;
+    If BgAbsOk Then BgAbsRead;
+    Exit;
+  End;
   If R > 0 Then
   Begin
     If (K0 >= 0) And ((Pf[K0 * 2 + 1] Shr 16) <> 0) Then BgKRead;
     If (KM >= 0) And ((Pf[KM * 2 + 1] Shr 16) <> 0) Then BgMouseRead;
     If (KA >= 0) And ((Pf[KA * 2 + 1] Shr 16) <> 0) Then BgAbsRead;
   End;
+  { sources lues sans poll, ou dont le poll est trompeur }
   If BgMsOpen And (Not BgMsPoll) Then BgMouseRead;
   If BgAbsOk And (Not BgAbsPoll) Then BgAbsRead;
 End;
@@ -2093,6 +2174,8 @@ Begin
 End;
 
 { ---- ouverture et fermeture de l'ecran ---- }
+
+Procedure BgMouseOpen; Forward;
 
 Function BgNum(V : LongInt) : String;
 Var S : String;
@@ -2204,6 +2287,9 @@ Begin
     Str(BgSt[I], T);
     S := S + ' s' + BgNum(I) + '=' + T;
   End;
+  S := S + ' rel_octets=' + BgNum(BgRelEv) + ' abs_evts=' + BgNum(BgAbsEv) +
+       ' abs_pos=' + BgNum(BgAbsReal) + ' abs_actif=' + BgNum(Ord(BgAbsAct)) +
+       ' poll_err=' + BgNum(BgPollErr);
   SysPut(2, S + #10);
 End;
 
@@ -2416,10 +2502,19 @@ Begin
     LnxExitHook := BgAtExit;
     BgGfxHook := True;
   End;
+  { curseur : toujours present des InitGraph (au centre) sauf GFXNOCUR=1 }
+  BgNoCur := GetEnv('GFXNOCUR') <> '';
+  If GetEnv('GFXNOPOLL') <> '' Then BgNoPoll := True;
+  BgMouseOpen;
   If Not BgRange Then
   Begin
     BgMinX := 0; BgMaxX := BgW - 1; BgMinY := 0; BgMaxY := BgH - 1;
   End;
+  If Not BgMsOpen Then
+  Begin
+    BgMx := BgW Div 2; BgMy := BgH Div 2;
+  End;
+  If BgNoCur Then BgCurVis := 0 Else BgCurVis := 1;
   If BgMx > BgMaxX Then BgMx := BgMaxX;
   If BgMy > BgMaxY Then BgMy := BgMaxY;
   BgCurDrawn := False;
@@ -2546,6 +2641,13 @@ Begin
   BgAbsFd := Fd;
   BgAbsOk := True;
   BgAbsPoll := True;
+  BgAbsAct := False;
+  BgAbsReal := 0;
+  BgAbsEv := 0;
+  BgAbsX := -1; BgAbsY := -1;
+  BgAbsHold := 2000;
+  S := GetEnv('GFXABSMS');
+  If S <> '' Then Val(S, BgAbsHold, I_Dummy);
   BgAbsMinX := 0; BgAbsMaxX := 32767; BgAbsMinY := 0; BgAbsMaxY := 32767;
   S := GetEnv('MOUSEABS');
   P := Pos(',', S);
@@ -2577,7 +2679,11 @@ Begin
   If P <> '' Then
   Begin
     Fd := SysOpen(P, O_RDONLY Or O_NONBLOCK, 0);
-    If Fd >= 0 Then BgAbsSetup(Fd);
+    If Fd >= 0 Then
+    Begin
+      BgAbsPath := P;
+      BgAbsSetup(Fd);
+    End;
     Exit;
   End;
   If GetEnv('MOUSEREL') <> '' Then Exit;
@@ -2594,6 +2700,7 @@ Begin
         If SysIoctl(Fd, BgIoc(2, 69, 35, 8), Bits) >= 0 Then
           If (Bits[0] And 3) = 3 Then
           Begin
+            BgAbsPath := '/dev/input/event' + P;
             BgAbsSetup(Fd);
             Exit;
           End;
@@ -2603,7 +2710,7 @@ Begin
 End;
 
 Procedure BgMouseOpen;
-Var P : String;
+Var P, S : String;
 Begin
   If BgMsOpen Then Exit;
   BgMsPoll := True;
@@ -2613,11 +2720,21 @@ Begin
   BgMsFd := SysOpen(P, O_RDONLY Or O_NONBLOCK, 0);
   If (BgMsFd < 0) And (P = '/dev/input/mice') Then
     BgMsFd := SysOpen('/dev/psaux', O_RDONLY Or O_NONBLOCK, 0);
+  BgRelPath := P;
+  BgAbsPath := '';
   BgAbsFind;
   If (BgMsFd >= 0) Or BgAbsOk Then
   Begin
     BgMsOpen := True;
     BgMouseReset;
+  End;
+  If GetEnv('GFXSTAT') <> '' Then
+  Begin
+    S := 'GFXSRC rel=';
+    If BgMsFd >= 0 Then S := S + BgRelPath Else S := S + 'aucun';
+    S := S + ' abs=';
+    If BgAbsOk Then S := S + BgAbsPath Else S := S + 'aucun';
+    SysPut(2, S + #10);
   End;
 End;
 
@@ -2640,7 +2757,7 @@ Begin
   BgRange := False;
   BgMx := (BgMaxX + 1) Div 2; BgMy := (BgMaxY + 1) Div 2;
   BgMb := 0; BgMkx := 0; BgMky := 0; BgMsN := 0;
-  BgCurVis := 0;
+  If BgNoCur Then BgCurVis := 0 Else BgCurVis := 1;
   For K := 0 To 2 Do
   Begin
     BgPressN[K] := 0; BgRelN[K] := 0;
@@ -3005,7 +3122,7 @@ End;
 { ---- Crt : attente, son ---- }
 
 Procedure Delay_G(Ms : Word);
-Var T0, C0, Rem, Chunk : LongInt; UseT : Boolean; D : Double;
+Var T0, Rem, Chunk : LongInt;
 Begin
   If BgOk Then
   Begin
@@ -3023,23 +3140,20 @@ Begin
     Sleep(Ms);
     Exit;
   End;
-  UseT := (Not BgNoTsc) And (BgTscMs > 0) And (Ms <= 500);
-  If UseT Then C0 := BgTsc Else T0 := BgNow;
-  While True Do
+  { duree mesuree par l'horloge du systeme (jamais par RDTSC : une horloge
+    du processeur qui ne progresse pas ne doit pas bloquer le programme) }
+  T0 := BgNow;
+  Rem := Ms;
+  While Rem > 0 Do
   Begin
-    If UseT Then
-    Begin
-      D := BgTsc - C0;
-      If D < 0 Then D := D + 4294967296.0;
-      Rem := Ms - Trunc(D / BgTscMs);
-    End
-    Else Rem := Ms - (BgNow - T0);
-    If Rem <= 0 Then Break;
     Chunk := Rem;
     If BgDirty Or BgCurChange Then
       If Chunk > 4 Then Chunk := 4;
     BgPoll(Chunk);
     BgFlushDue;
+    { delai ecoule sans evenement : pas de lecture de l'heure }
+    If (BgPollRes = 0) And (Chunk = Rem) Then Rem := 0
+    Else Rem := Ms - (BgNow - T0);
   End;
   If BgDirty Or BgCurChange Then
   Begin
@@ -3057,6 +3171,23 @@ Begin
 End;
 
 { ---- outils de test ---- }
+
+{ le curseur de la souris est-il affiche ? }
+Function GfxCursorOn : Boolean;
+Begin
+  GfxCursorOn := BgCurVis >= 1;
+End;
+
+{ sources d'entree de la souris ouvertes (texte, comme GFXSTAT) }
+Function GfxSources : String;
+Var S : String;
+Begin
+  S := 'rel=';
+  If BgMsOpen And (BgMsFd >= 0) Then S := S + BgRelPath Else S := S + 'aucun';
+  S := S + ' abs=';
+  If BgAbsOk Then S := S + BgAbsPath Else S := S + 'aucun';
+  GfxSources := S;
+End;
 
 { compteurs : 0 poll, 1 lectures souris, 2 lectures clavier, 3 sommeils,
   4 heures lues, 5 recopies vers l'ecran, 6 lignes, 7 pixels, 8 curseurs

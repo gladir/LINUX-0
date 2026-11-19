@@ -1,0 +1,73 @@
+#!/bin/sh
+# k32-input : etat et choix des pilotes d'entree (souris, tablette USB,
+# integration VirtualBox) a chaud ; a lancer depuis un shell (Alt+F2).
+#   k32-input status   etat du noyau (/proc/k32input, dmesg usb: vbox: input)
+#   k32-input usb      active le pilote USB (tablette), desactive vbox
+#   k32-input vbox     active l'integration VirtualBox (VMMDev), desactive usb
+#   k32-input ps2      souris PS/2 seule (usb et vbox coupes)
+#   k32-input auto     active usb et vbox (le noyau choisit)
+#   k32-input log      ecrit un rapport lisible dans /tmp/k32-input.txt
+K=/proc/sys/k32
+OUT=/tmp/k32-input.txt
+
+usage() {
+  echo "usage : k32-input status|usb|vbox|ps2|auto|log"
+  echo "  status  etat des entrees (noyau, evenements, messages)"
+  echo "  usb     pilote USB (tablette) ; vbox : integration VirtualBox"
+  echo "  ps2     souris PS/2 seule ; auto : usb et vbox actifs"
+  echo "  log     rapport dans $OUT (a renvoyer au support)"
+}
+
+report() {
+  echo "=== k32-input : rapport"
+  date
+  echo "=== noyau"
+  cat /proc/version 2> /dev/null
+  cat /proc/cmdline 2> /dev/null
+  echo "=== /proc/k32input"
+  if [ -r /proc/k32input ]; then cat /proc/k32input
+  else echo "(absent : noyau sans /proc/k32input)"; fi
+  echo "=== $K"
+  for f in usb_enable vbox_enable; do
+    if [ -r $K/$f ]; then echo "$f = `cat $K/$f`"
+    else echo "$f : absent"; fi
+  done
+  echo "=== messages du noyau (usb: vbox: input)"
+  dmesg | grep -E 'usb:|vbox:|input'
+  echo "=== /dev/input"
+  ls -l /dev/input
+  echo "=== /proc/interrupts"
+  cat /proc/interrupts
+  echo "=== /proc/bus/input/devices"
+  cat /proc/bus/input/devices 2> /dev/null
+  echo "=== lspci"
+  lspci 2> /dev/null
+}
+
+setk() {
+  if [ -w $K/$1 ]; then
+    echo $2 > $K/$1
+    echo "$1 = `cat $K/$1`"
+  else
+    echo "k32-input : $K/$1 absent ou non modifiable" >&2
+    echo "(noyau sans cette option)" >&2
+    RC=1
+  fi
+}
+
+RC=0
+case $1 in
+  status)
+    report ;;
+  usb)  setk usb_enable 1; setk vbox_enable 0 ;;
+  vbox) setk usb_enable 0; setk vbox_enable 1 ;;
+  ps2)  setk usb_enable 0; setk vbox_enable 0 ;;
+  auto) setk usb_enable 1; setk vbox_enable 1 ;;
+  log)
+    report > $OUT 2>&1
+    echo "rapport ecrit dans $OUT : le lire (cat $OUT)"
+    echo "et le joindre au signalement." ;;
+  ''|-h|--help|'/?') usage ;;
+  *) usage >&2; RC=2 ;;
+esac
+exit $RC

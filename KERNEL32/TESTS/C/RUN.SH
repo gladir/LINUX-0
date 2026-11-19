@@ -112,7 +112,8 @@ if cp "$HERE/UX1.PAS" "$W/UXPROBE.PAS" && "$LPC" -3X -q "$W/UXPROBE.PAS" >/dev/n
     [ -f "$HERE/$N.IN" ] && IN=$HERE/$N.IN
     : > "$W/$N.ms"; : > "$W/$N.ev"
     (cd "$W" && GFXMEM=1 GFXNOTSC=1 MOUSEDEV="$W/$N.ms" \
-       MOUSEEVDEV="$W/$N.ev" MOUSEABS=1000,2000 LINUX0TEST=bonjour \
+       MOUSEEVDEV="$W/$N.ev" MOUSEABS=1000,2000 GFXABSMS=300 \
+       LINUX0TEST=bonjour \
        "./$N" $ARGS <"$IN" >"$W/$N.sortie" 2>&1)
     if cmp -s "$W/$N.sortie" "$HERE/$N.OUT"; then
       echo "ok    $N"; PASS=$((PASS+1))
