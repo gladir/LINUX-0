@@ -3048,6 +3048,11 @@ BEGIN
     If K0 <> 0 Then OpTimeout := 900;
     TestMkfs := PsGet('testmkfs', '');
   End;
+  { curseur : fleche prisme (changeant de couleur) ; ancienne fleche
+    blanche pour les comparaisons d'images : GFXPLAINCUR=1, k32setup.plaincursor
+    ou plaincursor=yes dans le fichier de reponses }
+  If CmdHas('k32setup.plaincursor') Then GPlain := True;
+  If AutoMode And (PsGet('plaincursor', 'no') = 'yes') Then GPlain := True;
   If Not NoUi Then
   Begin
     If Not TextOnly Then

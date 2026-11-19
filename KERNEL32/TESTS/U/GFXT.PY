@@ -24,7 +24,8 @@ from PIL import Image
 HERE = os.path.dirname(os.path.abspath(__file__))
 K32 = os.path.abspath(os.path.join(HERE, '..', '..'))
 WORK, LPC, KERN, CAPDIR, VGA = sys.argv[1:6]
-SCEN = sys.argv[6:] or ['prim', 'mouse', 'geo', 'dos', 'bench', 'robust']
+SCEN = sys.argv[6:] or ['prim', 'mouse', 'geo', 'dos', 'bench', 'robust',
+                        'prism']
 GEO = os.environ.get('GEOWORKS', '/home/user/dev-cools/GEOWORKS.PAS')
 RES = []
 
@@ -164,6 +165,37 @@ def scen_mouse(root, env='', tag='mouse'):
     q.quit()
 
 
+PRISM = {0: [(236, 121, 121), (224, 32, 32), (134, 19, 19), (247, 199, 199)],
+         1: [(121, 217, 140), (32, 192, 64), (19, 115, 38), (199, 239, 207)],
+         2: [(121, 160, 241), (32, 96, 232), (19, 58, 139), (199, 215, 249)]}
+NAMES = {0: 'rouge', 1: 'vert', 2: 'bleu'}
+
+
+def cursor_stats(im, x, y):
+    """(pixels noirs du contour, {teinte: pixels de facettes}) dans la boite
+    de la fleche prisme (15 x 22) dont la pointe est en (x, y)"""
+    black = 0
+    hue = {0: 0, 1: 0, 2: 0}
+    for j in range(22):
+        for i in range(15):
+            p = px(im, x + i, y + j) if x + i < im.size[0] and \
+                y + j < im.size[1] else None
+            if p == (0, 0, 0):
+                black += 1
+            for k, cols in PRISM.items():
+                if p in cols:
+                    hue[k] += 1
+    return black, hue
+
+
+def prism_at(im, x, y):
+    """fleche prisme visible en (x, y) : contour noir et facettes d'une
+    seule teinte"""
+    black, hue = cursor_stats(im, x, y)
+    return black >= 30 and max(hue.values()) >= 60 and \
+        sorted(hue.values())[1] == 0
+
+
 def arrow_at(im, x, y):
     """pointe blanche en (x, y), corps noir en (x + 1, y + 2)"""
     return (px(im, x, y) == (255, 255, 255) and
@@ -189,16 +221,88 @@ def scen_robust(root):
               want in q.text())
         a = load(cap(q, 'r0', 'robust-%s-centre' % tag.replace(' ', '-')))
         check('robust %s %s : curseur au centre sans aucun evenement' %
-              (tag, VGA), arrow_at(a, cx, cy), (px(a, cx, cy),))
+              (tag, VGA), prism_at(a, cx, cy), cursor_stats(a, cx, cy))
         if tag == 'absolu silencieux':
             q.move(50, 30)
             time.sleep(1.5)
             b = load(cap(q, 'r1', 'robust-relatif'))
             check('robust %s %s : le relatif deplace le curseur' % (tag, VGA),
-                  arrow_at(b, cx + 50, cy + 30) and
-                  not arrow_at(b, cx, cy))
+                  prism_at(b, cx + 50, cy + 30) and
+                  not prism_at(b, cx, cy))
         q.quit()
     scen_mouse(root, 'GFXNOPOLL=1 ', 'nopoll')
+
+
+def scen_prism(root):
+    """fleche prisme : contraste sur blanc et sur noir, une teinte primaire
+    par seconde sans bouger la souris, aucune trainee"""
+    w, h = (640, 480) if VGA == 'std' else (800, 600)
+    cx, cy = w // 2, h // 2
+    for bg, name in (('W', 'blanc'), ('K', 'noir')):
+        rd = initrd(root, '/bin/gfxcur0 ' + bg)
+        q = start('q-prism-' + bg, rd)
+        check('prism %s %s : programme lance' % (name, VGA),
+              q.wait('ready', 60))
+        time.sleep(1.0)
+        shots = []
+        seen = {}
+        for i in range(9):
+            a = load(cap(q, 'p%d' % i, 'prisme-%s-%d' % (name, i)))
+            black, hue = cursor_stats(a, cx, cy)
+            dom = max(hue, key=lambda k: hue[k])
+            shots.append(a)
+            if hue[dom] >= 60 and dom not in seen:
+                seen[dom] = (black, hue[dom], a, time.time())
+            if len(seen) == 3:
+                break
+            time.sleep(1.15)
+        check('prism %s %s : trois teintes (rouge, vert, bleu) a plus de 1,1 s '
+              'd intervalle sans bouger la souris (%s)' %
+              (name, VGA, sorted(NAMES[k] for k in seen)), len(seen) == 3)
+        if bg == 'W':
+            ok = all(b >= 30 for b, n, im, t in seen.values())
+            check('prism blanc %s : contour noir visible sur fond blanc pur' %
+                  VGA, ok and len(seen) > 0,
+                  [(NAMES[k], v[0]) for k, v in seen.items()])
+            # fleche entouree d'un fond blanc : aucune trainee entre images
+            box = (cx - 2, cy - 2, cx + 18, cy + 26)
+            allv = [list(im.getdata()) for im in shots]
+            nb = lambda im: sum(
+                1 for yy in range(h) for xx in range(0, w, 1)
+                if not (box[0] <= xx < box[2] and box[1] <= yy < box[3]) and
+                px(im, xx, yy) != (255, 255, 255))
+            if len(shots) >= 2:
+                check('prism blanc %s : aucune trainee ni salissure hors de '
+                      'la fleche' % VGA, nb(shots[0]) == 0 and
+                      nb(shots[-1]) == 0)
+            if CAPDIR and VGA == 'std':
+                os.makedirs(CAPDIR, exist_ok=True)
+                for k, (b, n, im, t) in seen.items():
+                    c = im.crop((cx - 12, cy - 6, cx + 28, cy + 34)).resize(
+                        (320, 320), Image.NEAREST)
+                    c.save(os.path.join(CAPDIR, 'curseur-prisme-%s.png' %
+                                        NAMES[k]))
+            # deplacement : pas de trainee a l'ancienne place
+            q.move(80, 50)
+            time.sleep(1.5)
+            m = load(cap(q, 'pm', 'prisme-blanc-deplace'))
+            old = (cx - 1, cy - 1, cx + 17, cy + 25)
+            left = sum(1 for yy in range(old[1], old[3])
+                       for xx in range(old[0], old[2])
+                       if px(m, xx, yy) != (255, 255, 255))
+            check('prism blanc %s : aucune trainee a l ancienne place (%d '
+                  'pixels)' % (VGA, left), left == 0)
+            check('prism blanc %s : fleche a la nouvelle place' % VGA,
+                  prism_at(m, cx + 80, cy + 50))
+        else:
+            ok = all(v[1] >= 60 for v in seen.values())
+            tot = [cursor_stats(im, cx, cy) for im in shots[:1]]
+            nonblack = sum(1 for yy in range(22) for xx in range(15)
+                           if px(shots[0], cx + xx, cy + yy) != (0, 0, 0))
+            check('prism noir %s : facettes visibles et contrastees sur fond '
+                  'noir (%d pixels clairs)' % (VGA, nonblack),
+                  ok and nonblack >= 80)
+        q.quit()
 
 
 def similar(a, b, box):
@@ -303,24 +407,23 @@ def scen_bench(root):
             time.sleep(0.4)
             a = load(cap(q, 'cur', 'bench-curseur'))
             cx, cy = (560, 360) if VGA == 'std' else (640, 420)
-            check('bench %s HW : curseur de l unite visible (pointe blanche, '
-                  'corps noir)' % VGA,
-                  px(a, cx, cy) == (255, 255, 255) and
-                  px(a, cx + 1, cy + 2) == (0, 0, 0),
-                  (px(a, cx, cy), px(a, cx + 1, cy + 2)))
+            check('bench %s HW : curseur prisme de l unite visible' % VGA,
+                  prism_at(a, cx, cy), cursor_stats(a, cx, cy))
         q.wait('fin', 30)
         st = parse_stat(q.text())
         q.quit()
         if not check('bench %s %s : compteurs lus' % (VGA, mode), st):
             continue
         mv, lp = max(st['moves'], 1), max(st['loops'], 1)
-        sys_ = st['s0'] + st['s1'] + st['s2'] + st['s3'] + st['s4']
+        sys_ = (st['s0'] + st['s1'] + st['s2'] + st['s3'] + st['s4'] +
+                st.get('s12', 0))
         print('      %s %s : %d deplacements, %d tours, appels noyau %d '
               '(%.1f par tour, %.1f par deplacement), ioctl %d, pixels %d '
               '(%d par deplacement), recopies %d' %
               (VGA, mode, mv, lp, sys_, sys_ / lp, sys_ / mv, st['s9'],
                st['s7'], st['s7'] // mv, st['s5']))
-        check('bench %s %s : au plus 2,5 appels noyau par tour' % (VGA, mode),
+        check('bench %s %s : au plus 2,5 appels noyau par tour (heure murale '
+              'du curseur comprise)' % (VGA, mode),
               sys_ <= 2.5 * lp + 2 * mv)
         check('bench %s %s : moins de 600 pixels par deplacement' %
               (VGA, mode), st['s7'] // mv < 600)
@@ -342,7 +445,7 @@ root = build()
 for s in SCEN:
     {'prim': scen_prim, 'mouse': scen_mouse, 'geo': scen_geo,
      'dos': scen_dos, 'bench': scen_bench,
-     'robust': scen_robust}[s](root)
+     'robust': scen_robust, 'prism': scen_prism}[s](root)
 bad = [n for n, ok in RES if not ok]
 print('%d verification(s), %d echec(s)' % (len(RES), len(bad)))
 sys.exit(1 if bad else 0)

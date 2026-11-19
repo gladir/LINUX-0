@@ -23,14 +23,38 @@ Var
   GCurOn : Boolean;
 
 Const
-  GCurW = 12;
-  GCurH = 19;
-  GCurShape : Array[0..18] Of String[12] = (
+  GCurW = 15;                    { zone restauree par GCursorHide }
+  GCurH = 22;
+  { fleche "prisme" (meme dessin que l'unite Graph, TOOLS/L32GFX.PAS) :
+    '#' contour noir, H reflet, L clair, M moyen, D sombre ; point chaud en
+    (0,0) }
+  GCurPrism : Array[0..21] Of String[15] = (
+    '#..............', '##.............', '#H#............',
+    '#HM#...........', '#HMM#..........', '#HLMM#.........',
+    '#HLMMM#........', '#HLMMMM#.......', '#HLLMMMM#......',
+    '#HLLMMMMM#.....', '#HLLLMMMMM#....', '#HLLLMMMMMD#...',
+    '#HLLLLDDDDDD#..', '#HLLLLDD######.', '#HLL#LL#.......',
+    '#HL#.#D#.......', '#H#..#LD#......', '##...#LD#......',
+    '#.....#DD#.....', '......#LD#.....', '.......#DD#....',
+    '.......###.....');
+  { ancienne fleche (GFXPLAINCUR=1, k32setup.plaincursor) : X blanc, O noir }
+  GCurPlain : Array[0..18] Of String[12] = (
     'X...........', 'XX..........', 'X.X.........', 'X..X........',
     'X...X.......', 'X....X......', 'X.....X.....', 'X......X....',
     'X.......X...', 'X........X..', 'X.....XXXXX.', 'X..X..X.....',
     'X.X.X..X....', 'XX..X..X....', 'X....X..X...', '.....X..X...',
     '......X..X..', '......X..X..', '.......XX...');
+  { couleurs 0x00RRGGBB (claire, moyenne, sombre, reflet) pour rouge E02020,
+    vert 20C040, bleu 2060E8 : claire = base + (255 - base) * 0,40, sombre =
+    base * 0,60, reflet = base + (255 - base) * 0,75 (comme Graph) }
+  GCurCol : Array[0..11] Of LongInt = (
+    $EC7979, $E02020, $861313, $F7C7C7,
+    $79D98C, $20C040, $137326, $C7EFCF,
+    $79A0F1, $2060E8, $133A8B, $C7D7F9);
+
+Var
+  GPlain : Boolean;              { ancienne fleche blanche (comparaisons) }
+  GCurIdx : LongInt;             { couleur courante : seconde mod 3 }
 
 Function GRgb(R, G, B : LongInt) : LongInt;
 Begin
@@ -373,23 +397,63 @@ Begin
 End;
 
 Procedure GCursorShow(X, Y : LongInt);
-Var Row, Col, Xp, Yp : LongInt; C : Char;
+Var Row, Col, Xp, Yp, Base, Cl : LongInt; C : Char;
+    Pal : Array[0..3] Of LongInt;
 Begin
   If Not GOk Then Exit;
   GCurX := X; GCurY := Y;
+  If GPlain Then
+  Begin
+    For Row := 0 To 18 Do
+      For Col := 0 To 11 Do
+      Begin
+        C := GCurPlain[Row][Col + 1];
+        Xp := X + Col; Yp := Y + Row;
+        If (C <> '.') And (Xp >= 0) And (Xp < GW) And (Yp >= 0) And
+           (Yp < GH) Then
+        Begin
+          If C = 'X' Then MemL[0:GFb + Yp * GStride + Xp * 4] := $FFFFFF
+          Else MemL[0:GFb + Yp * GStride + Xp * 4] := 0;
+        End;
+      End;
+    GCurOn := True;
+    Exit;
+  End;
+  { couleur : seconde de l'horloge murale mod 3 (0 rouge, 1 vert, 2 bleu) }
+  GCurIdx := SysTime Mod 3;
+  Base := GCurIdx * 4;
+  Pal[0] := GCurCol[Base];
+  Pal[1] := GCurCol[Base + 1];
+  Pal[2] := GCurCol[Base + 2];
+  Pal[3] := GCurCol[Base + 3];
   For Row := 0 To GCurH - 1 Do
     For Col := 0 To GCurW - 1 Do
     Begin
-      C := GCurShape[Row][Col + 1];
+      C := GCurPrism[Row][Col + 1];
       Xp := X + Col; Yp := Y + Row;
       If (C <> '.') And (Xp >= 0) And (Xp < GW) And (Yp >= 0) And
          (Yp < GH) Then
       Begin
-        If C = 'X' Then MemL[0:GFb + Yp * GStride + Xp * 4] := $FFFFFF
-        Else MemL[0:GFb + Yp * GStride + Xp * 4] := 0;
+        Case C Of
+          'L' : Cl := Pal[0];
+          'M' : Cl := Pal[1];
+          'D' : Cl := Pal[2];
+          'H' : Cl := Pal[3];
+        Else Cl := 0;
+        End;
+        MemL[0:GFb + Yp * GStride + Xp * 4] := Cl;
       End;
     End;
   GCurOn := True;
+End;
+
+{ a appeler a chaque tour des boucles d'attente : si la seconde a change et
+  que le curseur est affiche, le redessine en place (meme silhouette : rien
+  a restaurer, ni trainee ni scintillement) }
+Procedure GCursorTick;
+Begin
+  If GCurOn And Not GPlain Then
+    If (SysTime Mod 3) <> GCurIdx Then GCursorShow(GCurX, GCurY);
 End;
 
 { ---- ouverture du peripherique ---- }
@@ -436,6 +500,8 @@ Begin
   GOpen := False;
   GOk := False;
   GCurOn := False;
+  GCurIdx := -1;
+  If SysGetEnv('GFXPLAINCUR') = '1' Then GPlain := True;
   GWhy := '';
   GFbFd := SysOpen('/dev/fb0', O_RDWR, 0);
   If GFbFd < 0 Then

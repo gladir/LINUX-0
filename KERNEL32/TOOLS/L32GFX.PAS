@@ -1595,13 +1595,13 @@ Begin
   End;
 End;
 
-{ un pixel directement dans la memoire video (curseur) }
-Procedure BgFbPix(X, Y, Idx : LongInt);
-Var A, V : LongInt;
+{ un pixel directement dans la memoire video (curseur) : valeur V deja au
+  format de l'ecran (BgPack) ; Idx : indice de couleur pour 8 bits }
+Procedure BgFbPixV(X, Y, V, Idx : LongInt);
+Var A : LongInt;
 Begin
   If (X < 0) Or (Y < 0) Or (X >= BgW) Or (Y >= BgH) Then Exit;
   A := BgFb + (BgOfy + Y) * BgStride + (BgOfx + X) * BgBytes;
-  V := BgFin[Idx And 15];
   Case BgBytes Of
     4 : MemL[0:A] := V;
     2 : MemW[0:A] := V And $FFFF;
@@ -1615,7 +1615,47 @@ Begin
   End;
 End;
 
+Procedure BgFbPix(X, Y, Idx : LongInt);
+Begin
+  BgFbPixV(X, Y, BgFin[Idx And 15], Idx);
+End;
+
 { ---- souris : etat (voir Intr 33h plus bas) ---- }
+
+Const
+  { fleche prisme : # contour noir, L facette claire, M moyenne, D sombre,
+    H reflet ; pointe (0,0) ; une des 3 couleurs primaires par seconde }
+  BgPrismW = 15;
+  BgPrismH = 22;
+  BgPrism : Array[0..21] Of String[15] = (
+    '#..............',
+    '##.............',
+    '#H#............',
+    '#HM#...........',
+    '#HMM#..........',
+    '#HLMM#.........',
+    '#HLMMM#........',
+    '#HLMMMM#.......',
+    '#HLLMMMM#......',
+    '#HLLMMMMM#.....',
+    '#HLLLMMMMM#....',
+    '#HLLLMMMMMD#...',
+    '#HLLLLDDDDDD#..',
+    '#HLLLLDD######.',
+    '#HLL#LL#.......',
+    '#HL#.#D#.......',
+    '#H#..#LD#......',
+    '##...#LD#......',
+    '#.....#DD#.....',
+    '......#LD#.....',
+    '.......#DD#....',
+    '.......###.....');
+  { couleurs 0x00RRGGBB : (claire, moyenne, sombre, reflet) x (rouge E02020,
+    vert 20C040, bleu 2060E8) }
+  BgPrismCol : Array[0..11] Of LongInt = (
+    $EC7979, $E02020, $861313, $F7C7C7,
+    $79D98C, $20C040, $137326, $C7EFCF,
+    $79A0F1, $2060E8, $133A8B, $C7D7F9);
 
 Const
   BgCurShape : Array[0..16] Of String[12] = (
@@ -1639,6 +1679,10 @@ Var
   BgAbsAct, BgNoPoll, BgNoCur : Boolean;
   BgAbsMs, BgAbsReal, BgAbsEv, BgAbsHold, BgPollErr, BgSkip, BgRelEv : LongInt;
   BgPollRes : LongInt;                { resultat du dernier poll }
+  { fleche prisme : taille, phase (seconde mod 3) affichee et courante }
+  BgCw, BgCh, BgCurPhase, BgCurDrawPh, BgHwPh, BgSecT, BgSecCnt : LongInt;
+  BgPlainCur : Boolean;
+  BgCurPix : Array[0..4] Of LongInt;  { # L M D H en pixels ecran }
   BgAbsPath, BgRelPath : String;
   { pilote : commandes de mise a jour et curseur materiel (ioctl 46F0h...) }
   BgHwUpd, BgHwCur, BgHwTried, BgHwOn, BgHwWant : Boolean;
@@ -1718,40 +1762,116 @@ Begin
   BgLastFl := BgLastPoll;
 End;
 
-Procedure BgCurDraw;
-Var R, C : LongInt; Ch : Char;
+{ phase de la couleur : secondes de l'heure murale modulo 3 (0 rouge, 1 vert,
+  2 bleu) ; une lecture de l'heure (gettimeofday) au plus 10 fois par seconde }
+Procedure BgSetPhase(Ph : LongInt);
+Var K : LongInt;
 Begin
-  For R := 0 To 16 Do
-    For C := 1 To 12 Do
-    Begin
-      Ch := BgCurShape[R][C];
-      If Ch = '#' Then BgFbPix(BgMx + C - 1, BgMy + R, 0)
-      Else If Ch = '.' Then BgFbPix(BgMx + C - 1, BgMy + R, 15);
-    End;
+  BgCurPhase := Ph;
+  BgCurPix[0] := BgPack(0);
+  For K := 0 To 3 Do BgCurPix[K + 1] := BgPack(BgPrismCol[Ph * 4 + K]);
+End;
+
+Procedure BgPhaseTick;
+Var Tv : Array[0..3] Of LongInt; Go : Boolean; D : Double;
+Begin
+  If BgPlainCur Or BgNoCur Or (BgCurVis < 1) Then Exit;
+  Go := True;
+  If (Not BgNoTsc) And (BgTscMs > 0) Then
+  Begin
+    D := BgTsc - BgSecT;
+    If D < 0 Then D := D + 4294967296.0;
+    Go := D >= 100.0 * BgTscMs;
+  End
+  Else
+  Begin
+    Inc(BgSecCnt);
+    If BgSecCnt < 8 Then Go := False Else BgSecCnt := 0;
+  End;
+  If Not Go Then Exit;
+  BgSecT := BgTsc;
+  Inc(BgSt[12]);
+  FillChar(Tv, SizeOf(Tv), 0);
+  LnxSys3(78, LongInt(@Tv), 0, 0);
+  If (Tv[0] Mod 3) <> BgCurPhase Then BgSetPhase(Tv[0] Mod 3);
+End;
+
+Procedure BgCurDraw;
+Var R, C, Pix : LongInt; Ch : Char;
+Begin
+  If BgPlainCur Or (BgBytes = 1) Then
+  Begin
+    For R := 0 To 16 Do
+      For C := 1 To 12 Do
+      Begin
+        Ch := BgCurShape[R][C];
+        If Ch = '#' Then BgFbPix(BgMx + C - 1, BgMy + R, 0)
+        Else If Ch = '.' Then BgFbPix(BgMx + C - 1, BgMy + R, 15);
+      End;
+    BgSt[7] := BgSt[7] + 204;
+  End
+  Else
+  Begin
+    For R := 0 To BgPrismH - 1 Do
+      For C := 1 To BgPrismW Do
+      Begin
+        Ch := BgPrism[R][C];
+        If Ch = '.' Then Continue;
+        If Ch = '#' Then Pix := BgCurPix[0]
+        Else If Ch = 'L' Then Pix := BgCurPix[1]
+        Else If Ch = 'M' Then Pix := BgCurPix[2]
+        Else If Ch = 'D' Then Pix := BgCurPix[3]
+        Else Pix := BgCurPix[4];
+        BgFbPixV(BgMx + C - 1, BgMy + R, Pix, 0);
+      End;
+    BgSt[7] := BgSt[7] + 200;
+  End;
   BgCurX := BgMx; BgCurY := BgMy;
+  BgCurDrawPh := BgCurPhase;
   Inc(BgSt[8]);
-  BgSt[7] := BgSt[7] + 204;
   BgCurDrawn := True;
 End;
 
 { curseur materiel : image (ARGB) puis position ; ioctl du pilote, sans
   effet (ENOTTY) sur un noyau qui ne les a pas }
 Procedure BgHwDefine;
-Var A : Array[0..5] Of LongInt; Px : Array[0..203] Of LongInt; R, C : LongInt;
-    Ch : Char;
+Var A : Array[0..5] Of LongInt; Px : Array[0..511] Of LongInt;
+    R, C, W, H, V : LongInt; Ch : Char;
 Begin
   BgHwTried := True;
   If BgMem Or (BgFd < 0) Then Exit;
-  For R := 0 To 16 Do
-    For C := 1 To 12 Do
-    Begin
-      Ch := BgCurShape[R][C];
-      If Ch = '#' Then Px[R * 12 + C - 1] := $FF000000
-      Else If Ch = '.' Then Px[R * 12 + C - 1] := $FFFFFFFF
-      Else Px[R * 12 + C - 1] := 0;
-    End;
-  A[0] := 12; A[1] := 17; A[2] := 0; A[3] := 0; A[4] := LongInt(@Px);
+  FillChar(Px, SizeOf(Px), 0);
+  If BgPlainCur Then
+  Begin
+    W := 12; H := 17;
+    For R := 0 To 16 Do
+      For C := 1 To 12 Do
+      Begin
+        Ch := BgCurShape[R][C];
+        If Ch = '#' Then Px[R * 12 + C - 1] := $FF000000
+        Else If Ch = '.' Then Px[R * 12 + C - 1] := $FFFFFFFF;
+      End;
+  End
+  Else
+  Begin
+    W := BgPrismW; H := BgPrismH;
+    For R := 0 To H - 1 Do
+      For C := 1 To W Do
+      Begin
+        Ch := BgPrism[R][C];
+        V := 0;
+        If Ch = '#' Then V := $FF000000
+        Else If Ch = 'L' Then V := $FF000000 Or BgPrismCol[BgCurPhase * 4]
+        Else If Ch = 'M' Then V := $FF000000 Or BgPrismCol[BgCurPhase * 4 + 1]
+        Else If Ch = 'D' Then V := $FF000000 Or BgPrismCol[BgCurPhase * 4 + 2]
+        Else If Ch = 'H' Then V := $FF000000 Or BgPrismCol[BgCurPhase * 4 + 3];
+        Px[R * W + C - 1] := V;
+      End;
+  End;
+  BgHwPh := BgCurPhase;
+  A[0] := W; A[1] := H; A[2] := 0; A[3] := 0; A[4] := LongInt(@Px);
   Inc(BgSt[9]);
+  BgHwCur := False;
   If SysIoctl(BgFd, $46F1, A) = 0 Then BgHwCur := True;
 End;
 
@@ -1791,11 +1911,15 @@ Begin
   Begin
     If (BgCurVis >= 1) <> BgHwOn Then BgCurChange := True
     Else If BgHwOn And ((BgHwX <> BgMx) Or (BgHwY <> BgMy)) Then
+      BgCurChange := True
+    Else If BgHwOn And (BgHwPh <> BgCurPhase) And (Not BgPlainCur) Then
       BgCurChange := True;
   End
   Else If BgCurDrawn Then
   Begin
     If (BgCurVis < 1) Or (BgCurX <> BgMx) Or (BgCurY <> BgMy) Then
+      BgCurChange := True
+    Else If (BgCurDrawPh <> BgCurPhase) And (Not BgPlainCur) Then
       BgCurChange := True;
   End
   Else If BgCurVis >= 1 Then BgCurChange := True;
@@ -1811,6 +1935,9 @@ Begin
   End;
   Any := False;
   Ux1 := 0; Uy1 := 0; Ux2 := -1; Uy2 := -1;
+  { curseur materiel : nouvelle image a chaque changement de couleur }
+  If BgHwCur And BgHwOn And (BgHwPh <> BgCurPhase) And (Not BgPlainCur) Then
+    BgHwDefine;
   If BgHwCur Then
   Begin
     If BgCurChange Then BgHwMove(BgCurVis >= 1);
@@ -1818,8 +1945,15 @@ Begin
   Else If BgCurDrawn And ((BgCurVis < 1) Or (BgCurX <> BgMx) Or
                           (BgCurY <> BgMy)) Then
   Begin
-    BgDirt(BgCurX, BgCurY, BgCurX + 12, BgCurY + 17);
+    BgDirt(BgCurX, BgCurY, BgCurX + BgCw, BgCurY + BgCh);
     BgCurDrawn := False;
+  End
+  Else If BgCurDrawn And (BgCurDrawPh <> BgCurPhase) And
+          (Not BgPlainCur) Then
+  Begin
+    { meme silhouette : seule la couleur change, aucune zone a recopier }
+    BgCurDrawn := False;
+    Inc(BgSt[13]);
   End;
   If BgDirty Then
   Begin
@@ -1857,12 +1991,12 @@ Begin
     Begin
       If BgMx < Ux1 Then Ux1 := BgMx;
       If BgMy < Uy1 Then Uy1 := BgMy;
-      If BgMx + 12 > Ux2 Then Ux2 := BgMx + 12;
-      If BgMy + 17 > Uy2 Then Uy2 := BgMy + 17;
+      If BgMx + BgCw > Ux2 Then Ux2 := BgMx + BgCw;
+      If BgMy + BgCh > Uy2 Then Uy2 := BgMy + BgCh;
     End
     Else
     Begin
-      Ux1 := BgMx; Uy1 := BgMy; Ux2 := BgMx + 12; Uy2 := BgMy + 17;
+      Ux1 := BgMx; Uy1 := BgMy; Ux2 := BgMx + BgCw; Uy2 := BgMy + BgCh;
       Any := True;
     End;
   End;
@@ -2119,6 +2253,7 @@ End;
 Procedure BgFlushDue;
 Begin
   If Not BgOk Then Exit;
+  BgPhaseTick;
   If Not (BgDirty Or BgCurChange) Then Exit;
   If BgElapsed(BgLastFl, 8) Then
   Begin
@@ -2141,6 +2276,7 @@ End;
 Procedure GfxFlush;
 Begin
   If BgMsOpen Or BgKbdUsed Then BgPoll(0);
+  If BgOk Then BgPhaseTick;
   BgFlush;
   BgLastFl := BgTsc;
 End;
@@ -2282,7 +2418,7 @@ Var I : LongInt; S, T : String;
 Begin
   If GetEnv('GFXSTAT') = '' Then Exit;
   S := 'GFXSTAT';
-  For I := 0 To 11 Do
+  For I := 0 To 13 Do
   Begin
     Str(BgSt[I], T);
     S := S + ' s' + BgNum(I) + '=' + T;
@@ -2504,6 +2640,22 @@ Begin
   End;
   { curseur : toujours present des InitGraph (au centre) sauf GFXNOCUR=1 }
   BgNoCur := GetEnv('GFXNOCUR') <> '';
+  BgPlainCur := GetEnv('GFXPLAINCUR') <> '';
+  If BgPlainCur Or (BgBytes = 1) Then
+  Begin
+    BgCw := 12; BgCh := 17;
+  End
+  Else
+  Begin
+    BgCw := BgPrismW; BgCh := BgPrismH;
+  End;
+  BgSecT := 0;
+  BgSecCnt := 8;
+  BgCurPhase := 0;
+  BgCurDrawPh := 0;
+  BgSetPhase(0);
+  BgCurVis := 1;
+  BgPhaseTick;
   If GetEnv('GFXNOPOLL') <> '' Then BgNoPoll := True;
   BgMouseOpen;
   If Not BgRange Then
@@ -3172,6 +3324,12 @@ End;
 
 { ---- outils de test ---- }
 
+{ couleur du curseur prisme : 0 rouge, 1 vert, 2 bleu (seconde murale mod 3) }
+Function GfxCursorPhase : LongInt;
+Begin
+  GfxCursorPhase := BgCurPhase;
+End;
+
 { le curseur de la souris est-il affiche ? }
 Function GfxCursorOn : Boolean;
 Begin
@@ -3191,7 +3349,9 @@ End;
 
 { compteurs : 0 poll, 1 lectures souris, 2 lectures clavier, 3 sommeils,
   4 heures lues, 5 recopies vers l'ecran, 6 lignes, 7 pixels, 8 curseurs
-  dessines, 9 ioctl du pilote, 10 BgTick, 11 paquets souris }
+  dessines, 9 ioctl du pilote, 10 BgTick, 11 paquets souris, 12 lectures
+  de l'heure murale (couleur du curseur), 13 curseurs redessines pour la
+  seule couleur }
 Function GfxStat(I : LongInt) : LongInt;
 Begin
   If (I >= 0) And (I <= 15) Then GfxStat := BgSt[I] Else GfxStat := 0;

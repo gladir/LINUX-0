@@ -27,6 +27,7 @@ WORK, ROOT, KERN, CAPDIR = sys.argv[1:5]
 SCEN = sys.argv[5:]
 LPC = os.environ.get('LPC', '/tmp/claude-0/work/k32/bin/lpc')
 RESULTS = []
+CURMASK = None               # (x, y) du curseur a ignorer dans px()
 
 
 def check(name, ok, detail=''):
@@ -96,7 +97,15 @@ def px(q, name, rgb, tol=10):
     im = Image.open(os.path.join(q.work, name + '.ppm')).convert('RGB')
     r0, g0, b0 = rgb
     n = 0
-    for (r, g, b) in im.getdata():
+    w = im.size[0]
+    for i, (r, g, b) in enumerate(im.getdata()):
+        if CURMASK:
+            # le curseur prisme change de couleur chaque seconde : sa boite
+            # (15 x 22 en CURMASK) est ignoree
+            x, y = i % w, i // w
+            if CURMASK[0] <= x < CURMASK[0] + 16 and \
+               CURMASK[1] <= y < CURMASK[1] + 23:
+                continue
         if abs(r - r0) <= tol and abs(g - g0) <= tol and abs(b - b0) <= tol:
             n += 1
     return n
@@ -460,6 +469,8 @@ reboot=halt
 def t_ui_fr():
     iso = build_iso('ui-fr', 'console=tty0 console=ttyS0 fb=1024x768 rw '
                     'k32setup.verbose=/dev/ttyS0')
+    global CURMASK
+    CURMASK = (512, 384)        # souris immobile au centre
     disk = new_disk('ui-fr', 700)
     q = qemu_cd('ui-fr', iso, disk)
     check('ui-fr : assistant lance au demarrage du CD (page 0)', page(q, 0, 90))
@@ -1310,10 +1321,11 @@ def t_pointer():
     from PIL import Image
     q.shot('c0')
     im = Image.open(os.path.join(q.work, 'c0.ppm')).convert('RGB')
-    blk = sum(1 for yy in range(384, 404) for xx in range(512, 526)
-              if im.getpixel((xx, yy)) == (255, 255, 255))
+    n = sum(1 for yy in range(384, 408) for xx in range(512, 528)
+            if sum(abs(c - d) for c, d in zip(im.getpixel((xx, yy)),
+                                              (243, 245, 249))) > 120)
     check('ptr : curseur dessine des l\'ouverture, au centre (%d pixels '
-          'blancs)' % blk, blk > 10)
+          'de curseur)' % n, n > 60)
     cap(q, 'c0', 'pointeur-01-ouverture')
     # noyau ou USB / VMMDev sont optionnels : activation a chaud
     serial_root(q, 'root')
@@ -1358,17 +1370,114 @@ def t_pointer():
     q.quit()
 
 
+# ------------------------------------------------ curseur prisme colore
+def t_cursor():
+    """curseur "prisme" : fleche a facettes dont la couleur primaire change
+    chaque seconde (rouge, vert, bleu) meme souris immobile ; contraste sur
+    le blanc de la liste ; pas de trainee ; ancienne fleche blanche avec
+    k32setup.plaincursor"""
+    iso = build_iso('cur', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'k32setup.verbose=/dev/ttyS0')
+    disk = new_disk('cur', 64)
+    qsock = os.path.join(WORK, 'cur.qmp')
+    if os.path.exists(qsock):
+        os.unlink(qsock)
+    q = Q(os.path.join(WORK, 'cur'), ['-cdrom', iso, '-boot', 'd', '-m',
+          '256', '-vga', 'std', '-device', 'pci-ohci,id=ohci', '-device',
+          'usb-tablet,bus=ohci.0', '-qmp', 'unix:%s,server,nowait' % qsock]
+          + drv_args(disk), serial_io=True)
+    qm = Qmp(qsock)
+    check('cur : assistant demarre (page de la langue)', page(q, 0, 120))
+    serial_root(q, 'root')
+    sh_run(q, '[ -w /proc/sys/k32/usb_enable ] && echo 1 > '
+           '/proc/sys/k32/usb_enable')
+    time.sleep(4)
+    # pointeur au milieu de la liste des langues (zone blanche, sous les
+    # lignes) ; la souris ne bouge plus ensuite
+    CX, CY = 300, 395
+    qm.abs(CX, CY)
+    time.sleep(1.0)
+    seen = []
+    first = {}
+    hist = []
+    stamps = []
+    for k in range(8):
+        stamps.append(time.time())      # instant de la capture
+        h, cnt, blk = q.cursor_hue('h%d' % k, CX, CY)
+        hist.append((h, cnt, blk))
+        seen.append(h)
+        if h and h not in first:
+            first[h] = 'h%d' % k
+        if len(first) == 3 and k >= 2:
+            break
+        time.sleep(1.2)
+    print('   teintes observees :', [x[0] for x in hist])
+    check('cur : souris immobile, 3 teintes dominantes differentes en '
+          'quelques secondes (rouge, vert, bleu : %s)' % sorted(first),
+          len(first) == 3)
+    pairs = [(seen[i], seen[i + 1]) for i in range(len(seen) - 1)
+             if seen[i] and seen[i + 1] and
+             1.1 < stamps[i + 1] - stamps[i] < 2.7]
+    check('cur : deux echantillons espaces de 1,1 a 2,7 s ont des teintes '
+          'differentes (%d paires)' % len(pairs),
+          len(pairs) >= 2 and all(a != b for a, b in pairs))
+    h0, cnt0, blk0 = hist[0]
+    check('cur : contour noir visible sur le blanc (%d pixels noirs, '
+          'facettes %s)' % (blk0, cnt0), blk0 >= 25 and max(cnt0.values())
+          >= 30)
+    for tint, nm in (('rouge', 'rouge'), ('vert', 'vert'), ('bleu', 'bleu')):
+        if tint in first:
+            p = q.ppm_to_png(first[tint])
+            if os.path.exists(p) and CAPDIR:
+                os.makedirs(CAPDIR, exist_ok=True)
+                subprocess.run(['cp', p, os.path.join(CAPDIR,
+                                'curseur-prisme-assistant-%s.png' % nm)])
+    # pas de trainee : apres un deplacement, l'ancienne zone est de nouveau
+    # blanche (fond de la liste) et le curseur est a la nouvelle place
+    qm.abs(CX + 120, CY)
+    time.sleep(0.8)
+    h1, cnt1, blk1 = q.cursor_hue('old', CX, CY)
+    h2, cnt2, blk2 = q.cursor_hue('new', CX + 120, CY)
+    check('cur : pas de trainee a l\'ancienne place (%s, %d noirs)' %
+          (cnt1, blk1), blk1 == 0 and max(cnt1.values()) == 0)
+    check('cur : curseur a la nouvelle place (%d noirs)' % blk2, blk2 >= 25)
+    # clic sur "Suivant" avec le curseur colore : pas de regression
+    qm.abs(752, 661)
+    time.sleep(0.6)
+    qm.click()
+    check('cur : clic absolu sur Suivant : page 1', page(q, 1, 20))
+    q.quit()
+    # ancienne fleche blanche : k32setup.plaincursor
+    iso = build_iso('curp', 'console=tty0 console=ttyS0 fb=1024x768 rw '
+                    'k32setup.verbose=/dev/ttyS0 k32setup.plaincursor')
+    disk = new_disk('curp', 64)
+    q = qemu_cd('curp', iso, disk)
+    page(q, 0, 120)
+    time.sleep(1)
+    q.shot('p0')
+    from PIL import Image
+    im = Image.open(os.path.join(q.work, 'p0.ppm')).convert('RGB')
+    wh = sum(1 for yy in range(384, 408) for xx in range(512, 528)
+             if im.getpixel((xx, yy)) == (255, 255, 255))
+    h, cnt, blk = q.cursor_hue('p1', 512, 384)
+    check('cur : k32setup.plaincursor : ancienne fleche blanche (%d pixels '
+          'blancs, aucune teinte %s)' % (wh, cnt),
+          wh >= 30 and max(cnt.values()) == 0 and blk == 0)
+    q.quit()
+
+
 ALL = {'tz': t_tz, 'auto-fr': t_auto_fr, 'auto-de': t_auto_de,
        'ui-fr': t_ui_fr, 'ui-de': t_ui_de, 'text': t_text,
        'refuse': t_refuse, 'virtio': t_virtio, 'exist': t_exist,
        'auto-log': t_auto_log, 'sata8g': t_sata8g, 'sata40g': t_sata40g,
        'fail': t_fail, 'reboot': t_reboot, 'reboot-noeject': t_reboot_noeject,
        'guard': t_guard, 'guard-reinstall': t_guard_reinstall,
-       'pointer': t_pointer}
+       'pointer': t_pointer, 'cursor': t_cursor}
 DEFAULT = [k for k in ALL if k not in ('sata8g', 'sata40g')]
 os.makedirs(WORK, exist_ok=True)
 for s in (SCEN or DEFAULT):
     print('=== ' + s, flush=True)
+    CURMASK = None
     try:
         ALL[s]()
     except Exception as e:                      # noqa

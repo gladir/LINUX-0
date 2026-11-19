@@ -30,3 +30,6 @@ endwait=5
 # reinstall=yes force l'installation malgre tout (efface le disque).
 #installedwait=5
 #reinstall=yes
+# curseur : fleche prisme coloree (defaut) ; plaincursor=yes = ancienne
+# fleche blanche (comparaisons d'images)
+#plaincursor=yes

@@ -43,6 +43,10 @@ Souris et clavier (VirtualBox, VMware, QEMU) :
   - Le clavier suffit pour tout l'assistant : Tab / Maj+Tab (champ suivant ou
     precedent), Entree (valider), Echap (annuler), fleches (listes), F1 (aide),
     F2 (shell de secours), F3 (mode texte). La souris n'est jamais necessaire.
+  - Le curseur est une fleche "prisme" (contour noir, facettes claire, moyenne
+    et sombre) dont la couleur primaire change chaque seconde : rouge, vert,
+    bleu, meme quand la souris ne bouge pas. Pour l'ancienne fleche blanche
+    (comparaisons d'images) : GFXPLAINCUR=1 ou k32setup.plaincursor.
   - Le pointeur est dessine des l'ouverture, au centre de l'ecran. Il suit
     la souris PS/2 (relative) ; si le systeme invite fournit un pointeur
     absolu (integration souris VirtualBox, tablette USB), celui-ci prend la

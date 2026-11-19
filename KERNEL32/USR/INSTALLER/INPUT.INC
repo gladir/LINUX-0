@@ -491,34 +491,47 @@ Begin
   End;
 End;
 
-{ attend un evenement au plus Ms millisecondes (Ms < 0 : sans limite) }
+{ attend un evenement au plus Ms millisecondes (Ms < 0 : sans limite) ;
+  l'attente est decoupee en tranches de 250 ms : a chacune, le curseur
+  prisme change de couleur si la seconde a change (GCursorTick) et les
+  pointeurs absolus apparus a chaud sont sondes (toutes les 0,5 s ; event2
+  n'annonce EV_ABS qu'apres le premier rapport valide du peripherique) }
 Procedure InPoll(Ms : LongInt);
-Var Pf : Array[0..23] Of LongInt; N, R, B, I, M : LongInt;
+Var Pf : Array[0..23] Of LongInt; N, R, B, I, M, Sl, Left : LongInt;
 Begin
   If InQh <> InQt Then Exit;
-  { pointeur absolu apparu a chaud (echo 1 > /proc/sys/k32/usb_enable) : un
-    balayage toutes les 0,5 s tant qu'aucun n'est ouvert (event2 n'annonce
-    EV_ABS qu'apres le premier rapport valide du peripherique) }
-  If InPtr And (InAbsN = 0) And (GetTickCount - InAbsScan > 500) Then
-    InAbsOpen;
-  If (Ms < 0) And InPtr And (InAbsN = 0) Then Ms := 500;
-  Pf[0] := InTtyFd; Pf[1] := 1;
-  N := 1;
-  M := -1;
-  If InMsFd >= 0 Then
-  Begin
-    Pf[2] := InMsFd; Pf[3] := 1;
-    M := N;
-    Inc(N);
-  End;
-  For I := 0 To InAbsN - 1 Do
-  Begin
-    Pf[N * 2] := InAbsFd[I]; Pf[N * 2 + 1] := 1;
-    Inc(N);
-  End;
-  If InRawP < InRawN Then R := 1
-  Else R := SysPoll(LongInt(@Pf), N, Ms);
-  If R <= 0 Then Exit;
+  Left := Ms;
+  Repeat
+    If InPtr And (InAbsN = 0) And (GetTickCount - InAbsScan > 500) Then
+      InAbsOpen;
+    Pf[0] := InTtyFd; Pf[1] := 1;
+    N := 1;
+    M := -1;
+    If InMsFd >= 0 Then
+    Begin
+      Pf[2] := InMsFd; Pf[3] := 1;
+      M := N;
+      Inc(N);
+    End;
+    For I := 0 To InAbsN - 1 Do
+    Begin
+      Pf[N * 2] := InAbsFd[I]; Pf[N * 2 + 1] := 1;
+      Inc(N);
+    End;
+    Sl := Left;
+    If InPtr And ((Sl < 0) Or (Sl > 250)) Then Sl := 250;
+    If InRawP < InRawN Then R := 1
+    Else R := SysPoll(LongInt(@Pf), N, Sl);
+    If R <= 0 Then
+    Begin
+      If InPtr Then GCursorTick;
+      If Left >= 0 Then
+      Begin
+        Left := Left - Sl;
+        If Left <= 0 Then Exit;
+      End;
+    End;
+  Until R > 0;
   If (InRawP < InRawN) Or ((Pf[1] Shr 16) <> 0) Then
   Begin
     If InMode = 1 Then
