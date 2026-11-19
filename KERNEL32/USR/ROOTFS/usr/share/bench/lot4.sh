@@ -91,5 +91,31 @@ else
   k32-input usb > ki4.txt 2>&1; chk 'k32-input usb sans sysctl : code 1' 1 $?
   has 'k32-input usb : message' ki4.txt 'absent ou non modifiable'
 fi
+# ---- ls : gros dossiers, tube / terminal ----
+mkdir -p $W/lsd; cd $W/lsd
+i=0; while [ $i -lt 1000 ]; do : > f$i; i=$((i+1)); done
+cd $W
+chk 'ls | wc -l : 1000 entrees (tube, une par ligne)' 1000 \
+  "$(ls lsd | wc -l | tr -d ' ')"
+chk 'ls -1 | wc -l : 1000' 1000 "$(ls -1 lsd | wc -l | tr -d ' ')"
+chk 'ls -l | wc -l : 1000' 1000 "$(ls -l lsd | wc -l | tr -d ' ')"
+chk 'ls -a | wc -l : 1002 (. et ..)' 1002 "$(ls -a lsd | wc -l | tr -d ' ')"
+chk 'ls -R | wc -l : 1000' 1000 "$(ls -R lsd | wc -l | tr -d ' ')"
+chk 'ls : tri alphabetique (premiere ligne)' f0 "$(ls lsd | head -1)"
+chk 'ls -r : tri inverse (premiere ligne)' f999 "$(ls -r lsd | head -1)"
+ls -C lsd > ls_c.txt
+[ "$(wc -l < ls_c.txt | tr -d ' ')" -lt 1000 ] &&
+  ok 'ls -C dans un tube : colonnes (moins de 1000 lignes)' ||
+  ko 'ls -C dans un tube' "$(wc -l < ls_c.txt)"
+script -q -c "ls lsd" ls_tty.txt > /dev/null 2>&1
+N=$(wc -l < ls_tty.txt | tr -d ' ')
+[ "$N" -gt 1 ] && [ "$N" -lt 400 ] &&
+  ok "ls sur un terminal : colonnes ($N lignes)" ||
+  ko 'ls sur un terminal : colonnes' "$N lignes"
+mkdir -p lsd300; cd lsd300
+i=0; while [ $i -lt 300 ]; do : > g$i; i=$((i+1)); done
+cd $W
+chk 'ls : 300 entrees (pas de coupure a 240)' 300 \
+  "$(ls lsd300 | wc -l | tr -d ' ')"
 echo "${SAVE:-terminal}" > /etc/k32/session
 echo "LOT4-FIN ok=$P ko=$F"

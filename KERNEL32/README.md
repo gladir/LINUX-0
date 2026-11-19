@@ -1971,6 +1971,16 @@ Retour VirtualBox : l'etape 12/13 restait a 3 % pendant plusieurs minutes (mkfs)
 * **Blocage** : une commande dont le compteur avance n'est plus consideree bloquee (`OpTimeout`).
 * Essai : `RUNINST.SH progress` (cle de preseed `mkfsslow=ms` : mkfs ext3 ralenti, operation de 60 s).
 
+### ls : tube et gros dossiers (`USR/LS.PAS`)
+
+`ls /tmp | wc -l` donnait 12 pour 120 entrees : `ls` mettait en colonnes de 80 meme dans un tube et
+tronquait silencieusement a 240 entrees. `USR/LS.PAS` (derive de `../LS.PAS`, qui reste portable)
+ecrit **une entree par ligne quand la sortie n'est pas un terminal** (`TCGETS` echoue), n'a plus
+de limite de 240 (500000 entrees, tri par fusion : 30000 fichiers en 1 s) et affiche
+`ls: liste tronquee` (code 1) au-dela. Famille verifiee : `du`, `tree`, `rm`, `mv`, `find` n'ont pas
+de tableau d'entrees. Essai : `lot4.sh` (dossier de 1000 fichiers : `ls`, `-1`, `-l`, `-a`, `-R`,
+tri, `-C` en tube, terminal via `script`, 300 entrees).
+
 ### Pointeur absolu et diagnostic des entrees (VirtualBox, tablette USB)
 
 Retour VirtualBox reel (noyau avec USB OHCI + VMMDev) : curseur absent, souris morte.
