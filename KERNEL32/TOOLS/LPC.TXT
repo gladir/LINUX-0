@@ -465,13 +465,35 @@ seule zone, dont l'ancienne et la nouvelle position), curseur de l'unite
   {x,y,w,h} (mise a jour VMware SVGA du rectangle : ACTIF par defaut, le premier
   appel supprime la mise a jour plein ecran periodique du noyau). Curseur
   MATERIEL (46F1h {w,h,hotx,hoty,pixels ARGB} puis 46F2h {x,y,on}, un ioctl par
-  deplacement, aucun pixel ecrit) : OPT-IN seulement, GFXHWCUR=1, car il n'est pas
-  visible dans une capture d'ecran ni verifie sous VirtualBox reel ; par defaut
+  deplacement, aucun pixel ecrit) : OPT-IN seulement, GFXHWCUR=1, car il n'est
+  pas visible dans une capture ni verifie sous VirtualBox reel ; par defaut
   le curseur de l'unite (Intr 33h AX=1) est dessine par le logiciel dans la
   memoire video, par-dessus l'image, jamais dans le tampon.
-- Entree absolue : /dev/input/event0..7 ayant EV_ABS ABS_X et ABS_Y (EVIOCGBIT,
-  EVIOCGABS) : position mise a l'echelle de la plage de la souris, BTN_LEFT /
-  BTN_RIGHT / BTN_MIDDLE / BTN_TOUCH ; repli /dev/input/mice. MOUSEREL=1 ignore
-  l'evdev ; MOUSEEVDEV=fichier et MOUSEABS=xmax,ymax pour les essais (UX14).
+- Sources de la souris (regle de robustesse, lot C1 apres retour VirtualBox) :
+  /dev/input/mice (relatif) est TOUJOURS lu ; en plus, un evdev
+  /dev/input/event0..7 ayant EV_ABS ABS_X et ABS_Y (EVIOCGBIT, EVIOCGABS ;
+  BTN_LEFT/RIGHT/MIDDLE/TOUCH) est lu en meme temps. La source absolue ne prend
+  la main qu'apres DEUX positions differentes (une source silencieuse, ou qui
+  repete la meme position, ne bloque jamais le relatif) ; tant qu'elle envoie de
+  nouvelles positions (derniere il y a moins de 2000 ms, GFXABSMS) elle pilote
+  le curseur (valeurs mises a l'echelle de la plage de la souris, fonctions
+  07h/08h) et les paquets relatifs sont ignores ; ensuite le relatif reprend
+  depuis la position courante, sans saut. MOUSEREL=1 ignore l'evdev ;
+  MOUSEDEV=fichier, MOUSEEVDEV=fichier, MOUSEABS=xmax,ymax pour les essais.
+- Curseur : affiche des InitGraph, au centre de l'ecran, meme sans aucune source
+  ni evenement (Intr 33h 02h le masque, 01h le montre, 00h l'affiche ;
+  GFXNOCUR=1 le desactive : programme qui dessine le sien, comparaison
+  d'images).
+- Poll : si le noyau refuse le poll (erreur), l'unite retire d'abord la source
+  absolue du poll, puis n'utilise plus poll (lectures directes, FIONREAD pour le
+  clavier, attente par tranches de 10 ms) ; GFXNOPOLL=1 force ce mode.
+  L'horloge du processeur (RDTSC) ne sert qu'a limiter la cadence (verifiee a
+  l'etalonnage, 16 refus de suite = un oui) ; Delay mesure sa duree avec l'heure
+  du systeme et ne peut donc pas se bloquer.
+- Journal : GFXSTAT=1 ecrit sur la sortie d'erreur les sources ouvertes
+  ("GFXSRC rel=/dev/input/mice abs=/dev/input/event2") a l'ouverture, puis les
+  compteurs et le nombre d'evenements par source (rel_octets, abs_evts,
+  abs_pos, abs_actif, poll_err) a la fin ; GfxSources, GfxCursorOn.
+  Tests : TESTS/C/UX15, TESTS/U/RUNGFX.SH robust.
 Limite : essai sous VirtualBox reel impossible ici (QEMU -vga vmware seulement :
 curseur materiel par registres, pas CURSOR_BYPASS_3, invisible dans screendump).

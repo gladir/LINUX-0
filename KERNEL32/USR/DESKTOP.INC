@@ -691,7 +691,7 @@ Begin
     End;
   End;
   GFlush;
-  If InMsFd >= 0 Then GCursorShow(InMx, InMy);
+  If InPtr Then GCursorShow(InMx, InMy);
   NeedDraw := False;
 End;
 
@@ -1146,7 +1146,7 @@ Begin
         EV_MOVE :
           Begin
             HandleMove(A, B);
-            If InMsFd >= 0 Then
+            If InPtr Then
             Begin
               GCursorHide;
               GCursorShow(A, B);

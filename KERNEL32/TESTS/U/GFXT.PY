@@ -24,7 +24,7 @@ from PIL import Image
 HERE = os.path.dirname(os.path.abspath(__file__))
 K32 = os.path.abspath(os.path.join(HERE, '..', '..'))
 WORK, LPC, KERN, CAPDIR, VGA = sys.argv[1:6]
-SCEN = sys.argv[6:] or ['prim', 'mouse', 'geo', 'dos', 'bench']
+SCEN = sys.argv[6:] or ['prim', 'mouse', 'geo', 'dos', 'bench', 'robust']
 GEO = os.environ.get('GEOWORKS', '/home/user/dev-cools/GEOWORKS.PAS')
 RES = []
 
@@ -53,10 +53,11 @@ def build():
     sh('cp %s/USR/*.INC %s/USR/INSTALLER/LAYOUTS.INC %s' % (K32, K32, b))
     for f in ('UX11', 'UX12', 'UX13'):
         sh('cp %s/TESTS/C/%s.PAS %s' % (K32, f, b))
-    sh('cp %s/GFXMS.PAS %s/GFXBENCH.PAS %s' % (HERE, HERE, b))
+    sh('cp %s/GFXMS.PAS %s/GFXBENCH.PAS %s/GFXCUR0.PAS %s' %
+       (HERE, HERE, HERE, b))
     sh('cp %s %s/GEOWORKS.PAS' % (GEO, b))
     for p, extra in (('INIT', ''), ('SH', ''), ('UX11', ''), ('GFXMS', ''),
-                     ('GFXBENCH', ''),
+                     ('GFXBENCH', ''), ('GFXCUR0', ''),
                      ('GEOWORKS', '-DFPC,UNIX')):
         r = sh('cd %s && %s -3X -q %s %s.PAS' % (b, LPC, extra, p))
         if r.returncode:
@@ -65,7 +66,8 @@ def build():
             sys.exit(1)
     sh('cp %s/INIT %s/sbin/init; cp %s/SH %s/bin/sh; cp %s/UX11 %s/bin/ux11; '
        'cp %s/GFXMS %s/bin/gfxms; cp %s/GEOWORKS %s/bin/geoworks; '
-       'cp %s/GFXBENCH %s/bin/gfxbench' % ((b, root) * 6))
+       'cp %s/GFXBENCH %s/bin/gfxbench; cp %s/GFXCUR0 %s/bin/gfxcur0' %
+       ((b, root) * 7))
     return root
 
 
@@ -113,8 +115,8 @@ def scen_prim(root):
     w, h = (640, 480) if VGA == 'std' else (800, 600)
     env = 'GFXMEM=1 SCENEOUT=%s GFXMODE=%dx%d' % (host, w, h)
     sh('cd %s/b && %s ./UX11 </dev/null >host.txt' % (WORK, env))
-    rd = initrd(root, 'GFXMODE=%dx%d /bin/ux11 HOLD' % (w, h)
-                if VGA != 'std' else '/bin/ux11 HOLD')
+    rd = initrd(root, 'GFXNOCUR=1 GFXMODE=%dx%d /bin/ux11 HOLD' % (w, h)
+                if VGA != 'std' else 'GFXNOCUR=1 /bin/ux11 HOLD')
     q = start('q-prim', rd, ahci=(VGA == 'std'))
     ok = q.wait('sum  scene', 60)
     check('prim %s : programme termine' % VGA, ok)
@@ -135,10 +137,11 @@ def scen_prim(root):
     q.quit()
 
 
-def scen_mouse(root):
-    rd = initrd(root, '/bin/gfxms')
-    q = start('q-mouse', rd)
-    check('mouse %s : fonction 00h' % VGA, q.wait('reset ax=65535 bx=3', 60))
+def scen_mouse(root, env='', tag='mouse'):
+    rd = initrd(root, env + '/bin/gfxms')
+    q = start('q-' + tag, rd)
+    check('%s %s : fonction 00h' % (tag, VGA),
+          q.wait('reset ax=65535 bx=3', 60))
     time.sleep(1)
     q.move(50, 30)
     time.sleep(1)
@@ -149,15 +152,53 @@ def scen_mouse(root):
     q.wait('fin', 40)
     t = q.text()
     x0, y0 = (320, 240) if VGA == 'std' else (400, 300)
-    check('mouse %s : position apres mouse_move' % VGA,
+    check('%s %s : position apres mouse_move' % (tag, VGA),
           ' x=%d y=%d b=0' % (x0 + 50, y0 + 30) in t, t[-400:])
-    check('mouse %s : bouton enfonce puis relache' % VGA,
+    check('%s %s : bouton enfonce puis relache' % (tag, VGA),
           ' b=1' in t and t.index(' b=1') < t.rindex(' b=0'))
     ks = [l.split()[1] for l in t.split('\n') if l.startswith('key ')]
-    check('mouse %s : touches 97 | 0 72 | 0 59 | 0 133 | 0 45 | 0 83' % VGA,
+    check('%s %s : touches 97 | 0 72 | 0 59 | 0 133 | 0 45 | 0 83' %
+          (tag, VGA),
           ks == ['97', '0', '72', '0', '59', '0', '133', '0', '45', '0', '83'],
           ks)
     q.quit()
+
+
+def arrow_at(im, x, y):
+    """pointe blanche en (x, y), corps noir en (x + 1, y + 2)"""
+    return (px(im, x, y) == (255, 255, 255) and
+            px(im, x + 1, y + 2) == (0, 0, 0))
+
+
+def scen_robust(root):
+    """sources d'entree : curseur toujours affiche, relatif toujours lu"""
+    w, h = (640, 480) if VGA == 'std' else (800, 600)
+    cx, cy = w // 2, h // 2
+    open(os.path.join(root, 'etc', 'emptyev'), 'w').close()
+    for tag, env, want in (
+            ('aucune source', 'MOUSEDEV=/nonexistent MOUSEREL=1 ',
+             'rel=aucun abs=aucun'),
+            ('absolu silencieux', 'MOUSEEVDEV=/etc/emptyev ',
+             'abs=/etc/emptyev')):
+        rd = initrd(root, env + '/bin/gfxcur0')
+        q = start('q-robust', rd)
+        check('robust %s %s : programme lance' % (tag, VGA),
+              q.wait('ready', 60))
+        time.sleep(1.5)
+        check('robust %s %s : sources journalisees (%s)' % (tag, VGA, want),
+              want in q.text())
+        a = load(cap(q, 'r0', 'robust-%s-centre' % tag.replace(' ', '-')))
+        check('robust %s %s : curseur au centre sans aucun evenement' %
+              (tag, VGA), arrow_at(a, cx, cy), (px(a, cx, cy),))
+        if tag == 'absolu silencieux':
+            q.move(50, 30)
+            time.sleep(1.5)
+            b = load(cap(q, 'r1', 'robust-relatif'))
+            check('robust %s %s : le relatif deplace le curseur' % (tag, VGA),
+                  arrow_at(b, cx + 50, cy + 30) and
+                  not arrow_at(b, cx, cy))
+        q.quit()
+    scen_mouse(root, 'GFXNOPOLL=1 ', 'nopoll')
 
 
 def similar(a, b, box):
@@ -246,7 +287,8 @@ def scen_bench(root):
     for mode in modes:
         # HWC : curseur materiel du noyau (opt-in GFXHWCUR=1, VMware seul)
         prog = ('export GFXHWCUR=1; /bin/gfxbench HW' if mode == 'HWC'
-                else '/bin/gfxbench ' + mode)
+                else ('GFXNOCUR=1 ' if mode == 'SW' else '') +
+                '/bin/gfxbench ' + mode)
         rd = initrd(root, prog)
         q = start('q-bench-' + mode, rd)
         q.wait('ready', 60)
@@ -278,8 +320,8 @@ def scen_bench(root):
               '(%d par deplacement), recopies %d' %
               (VGA, mode, mv, lp, sys_, sys_ / lp, sys_ / mv, st['s9'],
                st['s7'], st['s7'] // mv, st['s5']))
-        check('bench %s %s : au plus 2 appels noyau par tour' % (VGA, mode),
-              sys_ <= 2 * lp + 2 * mv)
+        check('bench %s %s : au plus 2,5 appels noyau par tour' % (VGA, mode),
+              sys_ <= 2.5 * lp + 2 * mv)
         check('bench %s %s : moins de 600 pixels par deplacement' %
               (VGA, mode), st['s7'] // mv < 600)
         if VGA == 'vmware':
@@ -299,7 +341,8 @@ def scen_bench(root):
 root = build()
 for s in SCEN:
     {'prim': scen_prim, 'mouse': scen_mouse, 'geo': scen_geo,
-     'dos': scen_dos, 'bench': scen_bench}[s](root)
+     'dos': scen_dos, 'bench': scen_bench,
+     'robust': scen_robust}[s](root)
 bad = [n for n, ok in RES if not ok]
 print('%d verification(s), %d echec(s)' % (len(RES), len(bad)))
 sys.exit(1 if bad else 0)

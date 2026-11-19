@@ -20,6 +20,12 @@ cp "$K32/KERNEL32.PAS" "$W/"
 (cd "$W" && "$LPC" -3K -q KERNEL32.PAS) || exit 1
 timeout 60 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out.txt" -display none \
   -m 64 -no-reboot -append "console=ttyS0 init=/bin/vboxtest k32vboxfake=1 k32power" 2>/dev/null
+timeout 60 qemu-system-i386 -kernel "$W/KERNEL32" -serial "file:$W/out2.txt" -display none \
+  -m 64 -no-reboot -append "console=ttyS0 init=/bin/vboxtest k32vboxfake=1 vboxrt k32power" 2>/dev/null
+tr -d '\r' < "$W/out2.txt" | grep -a "vbox:\|KTEST: vbox\|Oops\|panique"
+if grep -aq "KTEST: vbox.* FAIL" "$W/out2.txt" || ! grep -aq "KTEST: vbox DONE" "$W/out2.txt"; then
+  echo "RESULTAT : ECHEC (activation a chaud, traces dans $W)"; exit 1
+fi
 tr -d '\r' < "$W/out.txt" | grep -a "vbox:\|KTEST: vbox\|Oops\|panique"
 if grep -aq "KTEST: vbox.* FAIL" "$W/out.txt" || ! grep -aq "KTEST: vbox DONE" "$W/out.txt"; then
   echo "RESULTAT : ECHEC (traces dans $W)"; exit 1

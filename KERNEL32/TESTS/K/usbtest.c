@@ -1,91 +1,134 @@
 /* usbtest : pilote USB OHCI + HID (QEMU : -device pci-ohci avec usb-tablet,
    usb-kbd ou usb-mouse). RUNUSB.SH lance le noyau avec init=/bin/usbtest et
-   usbmode=abs | rel | prio, attend les marqueurs USB-READY-* sur le port
-   serie et injecte les evenements par QMP (input-send-event).
-     abs  : tablette (event2 EV_ABS 0..65535, boutons, molette) et clavier USB
-            (event0, tty, repetition)
-     rel  : souris USB (event1 et /dev/input/mice)
-     prio : tablette USB + VMMDev (simulation) : la tablette a priorite */
+   usbmode=..., attend les marqueurs USB-READY-* sur le port serie et injecte
+   les evenements par QMP (input-send-event).
+     def  : par defaut (sans usb=1 ni vboxga=1) rien n'est active : PS/2 seul
+     abs  : usb=1 ; tablette (event2 EV_ABS 0..65535 annonce apres le premier
+            rapport valide, boutons, molette) et clavier USB (event0, tty,
+            repetition) ; usbpoll=1 : sans IRQ (surveillance par le tick)
+     rt   : activation a chaud par /proc/sys/k32/usb_enable puis arret
+     rel  : usb=1 ; souris USB (event1 et /dev/input/mice)
+     prio : usb=1 + VMMDev simule : la premiere source valide reste la source
+     hot  : branchement et retrait a chaud (RUNUSB.SH lit le journal) */
 #include "ku.h"
 static int slurp(const char*p,char*s,int max){int fd=open(p,O_RDONLY,0),n;if(fd<0)return fd;n=read(fd,s,max-1);if(n<0)n=0;s[n]=0;close(fd);return n;}
 static int wr(const char*p,const char*s){int fd=open(p,O_WRONLY,0),n;if(fd<0)return fd;n=write(fd,s,strlen(s));close(fd);return n;}
 static int has(const char*h,const char*n){int i,l=strlen(n);for(i=0;h[i];i++)if(memcmp_(h+i,n,l)==0)return 1;return 0;}
 static void nap(long s,long ns){long ts[2];ts[0]=s;ts[1]=ns;nanosleep(ts,0);}
 struct ev{long sec,usec;unsigned short type,code;int value;};
-static int ndev(int fd){return fd;}
 static int abs_(int v){return v<0?-v:v;}
 static int mode_is(const char*m){char cl[512];int n=slurp("/proc/cmdline",cl,sizeof cl);(void)n;return has(cl,m);}
 static int wait_event2(void){int t,fd;for(t=0;t<100;t++){fd=open("/dev/input/event2",O_RDONLY|O_NONBLOCK,0);if(fd>=0)return fd;nap(0,100000000);}return -1;}
 static void drain(int fd){struct ev e;while(read(fd,&e,sizeof e)==sizeof e);}
+static int abs_announced(int fd){unsigned char bits[8];memset(bits,0,8);ioctl(fd,0x80084520,(long)bits);return (bits[0]&8)!=0;}
+static int kmsg_has(const char*s){static char km[65536];int kn=sc3(103,3,(long)km,sizeof km-1);if(kn<0)return 0;km[kn]=0;return has(km,s);}
+static int input_has(const char*s){static char b[4096];int n=slurp("/proc/k32input",b,sizeof b);return n>0&&has(b,s);}
 int main(void){
-  static char b[2048];int fd,n,i,t;unsigned char bits[8];
-  (void)ndev;
+  static char b[2048];int fd,n,i,t;
   if(!mode_is("usbmode=")){puts("  (usb : essai ignore, voir RUNUSB.SH)\n");return 0;}
-  /* le fil kusbd enumere les ports apres le demarrage : on attend event2 et
-     le nom de la tablette */
+  if(mode_is("usbmode=def")){
+    /* surs par defaut : ni VMMDev ni USB, donc ni GA, ni OHCI, ni event2 */
+    int e2=open("/dev/input/event2",O_RDONLY|O_NONBLOCK,0);
+    nap(3,0);
+    ktest("usb.def_no_event2",e2<0);
+    ktest("usb.def_input_usb_off",input_has("usb: inactif"));
+    ktest("usb.def_input_vmmdev_off",input_has("vmmdev: inactif"));
+    ktest("usb.def_no_usb_journal",!kmsg_has("usb: OHCI"));
+    {int n2=slurp("/proc/k32perf",b,sizeof b);ktest("usb.def_no_ohci_access",n2>0&&has(b,"ohci_reg_access 0 0"));}
+    ktest("usb.def_ps2_listed",input_has("ps2_souris:"));
+    puts("KTEST: usb DONE\n");
+    return ku_fail?1:0;
+  }
+  if(mode_is("usbmode=rt")){
+    /* activation puis arret a chaud */
+    int k,ok=0;
+    ktest("usb.rt_off_before",input_has("usb: inactif"));
+    ktest("usb.rt_enable",wr("/proc/sys/k32/usb_enable","1")>0);
+    for(k=0;k<100&&!ok;k++){if(input_has("usb_tuyau 0: tablette"))ok=1;else nap(0,100000000);}
+    ktest("usb.rt_enumerated",ok);
+    fd=wait_event2();
+    ktest("usb.rt_event2_exists",fd>=0);
+    if(fd<0)return 1;
+    ktest("usb.rt_abs_hidden_before_report",!abs_announced(fd));
+    puts("USB-READY-ABS\n");
+    ok=0;
+    for(k=0;k<150&&!ok;k++){if(abs_announced(fd))ok=1;else nap(0,100000000);}
+    ktest("usb.rt_abs_announced_after_report",ok);
+    ktest("usb.rt_source_usb",input_has("source_absolue_event2: usb"));
+    ktest("usb.rt_disable",wr("/proc/sys/k32/usb_enable","0")>0);
+    for(k=0;k<100;k++){if(input_has("usb: inactif"))break;nap(0,100000000);}
+    ktest("usb.rt_off_after",input_has("usb: inactif"));
+    ktest("usb.rt_abs_hidden_after_off",!abs_announced(fd)&&input_has("source_absolue_event2: aucune"));
+    puts("KTEST: usb DONE\n");
+    return ku_fail?1:0;
+  }
   if(mode_is("usbmode=abs")||mode_is("usbmode=prio")){
-    int ok=0;
+    int x=-1,y=-1,sy=0,k,ok=0;struct ev e;
     fd=wait_event2();
     ktest("usb.event2_exists",fd>=0);
     if(fd<0)return 1;
+    ktest("usb.abs_hidden_before_report",!abs_announced(fd));
+    puts("USB-READY-ABS\n");
+    for(k=0;k<150&&!sy;k++){
+      while(read(fd,&e,sizeof e)==sizeof e){
+        if(e.type==3&&e.code==0)x=e.value;
+        if(e.type==3&&e.code==1)y=e.value;
+        if(e.type==0&&e.code==0&&x>=0&&y>=0)sy=1;}
+      if(!sy)nap(0,100000000);}
+    ktest("usb.abs_x",abs_(x-16384)<=3);
+    ktest("usb.abs_y",abs_(y-32769)<=3);
+    ktest("usb.abs_syn",sy);
     for(t=0;t<100&&!ok;t++){n=ioctl(fd,0x80ff4506,(long)b);if(n>0&&has(b,"QEMU USB Tablet"))ok=1;else nap(0,100000000);}
     ktest("usb.tablet_name",ok);
-    memset(bits,0,8);ioctl(fd,0x80084520,(long)bits);
-    ktest("usb.evdev_has_abs",(bits[0]&2)!=0&&(bits[0]&8)!=0);
-    memset(bits,0,8);ioctl(fd,0x80084523,(long)bits);
-    ktest("usb.evdev_abs_xy",(bits[0]&3)==3);
+    ktest("usb.evdev_abs_announced",abs_announced(fd));
+    {unsigned char bits[8];memset(bits,0,8);ioctl(fd,0x80084523,(long)bits);
+     ktest("usb.evdev_abs_xy",(bits[0]&3)==3);}
     {unsigned char kb[64];memset(kb,0,64);ioctl(fd,0x80404521,(long)kb);
      ktest("usb.evdev_btn",(kb[0x110>>3]&1)==1);}
     {int ai[6];memset(ai,0,sizeof ai);ioctl(fd,0x80184540,(long)ai);
      ktest("usb.abs_range",ai[2]==65535&&ai[1]==0);}
     {unsigned short id[4]={0,0,0,0};ioctl(fd,0x80084502,(long)id);
      ktest("usb.evdev_id",id[0]==3&&id[1]==0x0627);}
+    ktest("usb.input_source_usb",input_has("source_absolue_event2: usb"));
+    ktest("usb.input_pipe_listed",input_has("usb_tuyau 0: tablette"));
+    if(mode_is("usbpoll=1")){
+      ktest("usb.poll_no_irq",input_has("IRQ recues 0,"));
+      ktest("usb.poll_by_tick",!input_has("traitee par le tick 0,"));
+    }
+    puts("USB-READY-MOVE2\n");
+    x=-1;y=-1;
+    for(k=0;k<150&&!(x>=65530&&y<=3&&y>=0);k++){
+      while(read(fd,&e,sizeof e)==sizeof e){
+        if(e.type==3&&e.code==0)x=e.value;
+        if(e.type==3&&e.code==1)y=e.value;}
+      nap(0,100000000);}
+    ktest("usb.abs_corner",x>=65530&&y>=0&&y<=3);
     if(mode_is("usbmode=prio")){
-      int x=-1,k,got=0;struct ev e;
-      ktest("usb.prio_journal",({static char km[32768];int kn=sc3(103,3,(long)km,sizeof km-1),ok2=0;
-        for(i=0;i+20<kn;i++)if(memcmp_(km+i,"usb: VMMDev ne four",19)==0)ok2=1;ok2;}));
+      /* la premiere source valide (la tablette) reste la source : les
+         positions de VMMDev (simulation) n'arrivent pas sur event2 */
+      int got=0;
+      ktest("usb.prio_vmmdev_listed",input_has("vmmdev: actif"));
       drain(fd);
       wr("/proc/sys/k32/vbox_sim_x","11111");
       wr("/proc/sys/k32/vbox_sim_y","22222");
-      for(k=0;k<8;k++){while(read(fd,&e,sizeof e)==sizeof e)if(e.type==3)got++;nap(0,100000000);}
+      for(k=0;k<10;k++){while(read(fd,&e,sizeof e)==sizeof e)if(e.type==3)got++;nap(0,100000000);}
       ktest("usb.prio_vmmdev_silent",got==0);
-      (void)x;
-      puts("USB-READY-ABS\n");
-    }else puts("USB-READY-ABS\n");
-    {int x=-1,y=-1,sy=0,k;struct ev e;
-     for(k=0;k<150&&!sy;k++){
-       while(read(fd,&e,sizeof e)==sizeof e){
-         if(e.type==3&&e.code==0)x=e.value;
-         if(e.type==3&&e.code==1)y=e.value;
-         if(e.type==0&&e.code==0&&x>=0&&y>=0)sy=1;}
-       if(!sy)nap(0,100000000);}
-     ktest("usb.abs_x",abs_(x-16384)<=3);
-     ktest("usb.abs_y",abs_(y-32769)<=3);
-     ktest("usb.abs_syn",sy);}
-    puts("USB-READY-MOVE2\n");
-    {int x=-1,y=-1,k;struct ev e;
-     for(k=0;k<150&&!(x>=65530&&y<=3&&y>=0);k++){
-       while(read(fd,&e,sizeof e)==sizeof e){
-         if(e.type==3&&e.code==0)x=e.value;
-         if(e.type==3&&e.code==1)y=e.value;}
-       nap(0,100000000);}
-     ktest("usb.abs_corner",x>=65530&&y>=0&&y<=3);}
-    if(mode_is("usbmode=prio")){puts("KTEST: usb DONE\n");return ku_fail?1:0;}
+      puts("KTEST: usb DONE\n");return ku_fail?1:0;}
     puts("USB-READY-BTN\n");
-    {int dn=0,up=0,k;struct ev e;
+    {int dn=0,up=0;
      for(k=0;k<150&&!up;k++){
        while(read(fd,&e,sizeof e)==sizeof e){
          if(e.type==1&&e.code==0x110){if(e.value==1)dn=1;else if(dn)up=1;}}
        if(!up)nap(0,100000000);}
      ktest("usb.button_left",dn&&up);}
     puts("USB-READY-WHEEL\n");
-    {int w=0,k;struct ev e;
+    {int w=0;
      for(k=0;k<150&&!w;k++){
        while(read(fd,&e,sizeof e)==sizeof e)if(e.type==2&&e.code==8)w+=e.value;
        if(!w)nap(0,100000000);}
      ktest("usb.wheel",w!=0);}
     /* clavier USB : event0 + tty */
-    {int e0=open("/dev/input/event0",O_RDONLY|O_NONBLOCK,0),mk=0,br=0,k,rep=0;struct ev e;char c[16];int tn=0;
+    {int e0=open("/dev/input/event0",O_RDONLY|O_NONBLOCK,0),mk=0,br=0,rep=0;char c[16];int tn=0;
      ktest("usb.event0_open",e0>=0);
      drain(e0);
      puts("USB-READY-KEY\n");
@@ -110,7 +153,6 @@ int main(void){
      close(e0);}
   }
   else if(mode_is("usbmode=hot")){
-    /* branchement et retrait a chaud : RUNUSB.SH regarde le journal */
     int k;
     puts("USB-READY-HOT\n");
     for(k=0;k<14;k++)nap(1,0);

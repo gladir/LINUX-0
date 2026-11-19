@@ -1022,6 +1022,26 @@ En mode graphique le noyau n'ecrit plus dans la memoire VGA texte (B8000h,
 MMIO : un VM-exit par ecriture ; `VgaHidden`) : la console texte vit dans
 `VcBuf` et est redessinee au retour en KD_TEXT ou en panique.
 
+**VirtualBox : VMMDev et USB sont ETEINTS par defaut (lot D7-13)** : le
+premier essai sous VirtualBox 7.0.6 (backup-65) a fait disparaitre le pointeur :
+annoncer des « Guest Additions » (ReportGuestInfo + GUEST_CAN_ABSOLUTE) fait
+passer l'hote en souris absolue et cacher son pointeur, et rien ne le
+remplacait cote invite. Par defaut le noyau n'envoie donc plus rien a VMMDev et
+ne touche pas au controleur OHCI : la souris est la PS/2 (`/dev/input/mice`,
+event1), comme avant. Activation : ligne de commande `vboxga=1` / `usb=1`, ou a
+chaud depuis un shell (Alt+F2) : `echo 1 > /proc/sys/k32/usb_enable` et
+`echo 1 > /proc/sys/k32/vbox_enable` (0 : arret, la PS/2 redevient la seule
+source). VMMDev annonce NEEDS_HOST_CURSOR : le pointeur de l'hote reste visible
+(`vboxcursor=0` pour le retirer). `/dev/input/event2` n'annonce EV_ABS qu'apres
+le premier rapport VALIDE (VMMDev ou tablette USB, la premiere reste la source ;
+GUEST_CAN_ABSOLUTE n'est plus jamais retire par precaution). `/proc/k32input` :
+etat des sources (PS/2, VMMDev, USB, tuyaux, compteurs) ; `dmesg` : lignes
+`usb:` / `vbox:` (descripteurs, 5 premiers rapports en hexadecimal, diagnostic
+automatique « aucun rapport recu » 3 s puis 20 s apres l'activation avec l'etat
+brut des ED/TD/HCCA). `usbpoll=1` : sans IRQ (surveillance par le tick).
+Raison reelle de la regression : inconnue (aucun journal du noyau cote
+VirtualBox) ; les hypotheses sont dans REPONSES_D7.md.
+
 **USB OHCI + HID, curseur materiel VMSVGA (lot D7-12)** : VirtualBox
 presente par defaut un controleur OHCI et une *tablette USB* comme pointeur.
 `UsbInit` detecte le controleur par sa classe PCI (0C0310), mappe ses
@@ -1040,10 +1060,10 @@ le meme chemin que le PS/2 : consoles, Alt+Fn, KbMode ; repetition par le tick,
 tablette absolue (axes X/Y absolus, boutons, molette) sur `/dev/input/event2`
 (EV_ABS ABS_X/ABS_Y ramenes a 0..65535, BTN_LEFT/RIGHT/MIDDLE, REL_WHEEL ;
 nom lu dans le descripteur de chaine, ex. « QEMU USB Tablet » ; bustype USB).
-**Priorite** documentee : tablette USB > VMMDev > PS/2 : une seule source
-alimente event2 (`AbsSrc`) ; quand la tablette est active VMMDev recoit
-SetMouseStatus sans GUEST_CAN_ABSOLUTE (l'hote n'envoie plus l'absolu par deux
-voies) ; le PS/2 relatif reste sur `/dev/input/mice`. Les rapports arrivent par
+**Source unique** : la premiere source qui livre un rapport absolu valide
+(tablette USB ou VMMDev) alimente event2 (`AbsSrc`), l'autre se tait (plus
+d'emission de SetMouseStatus sans GUEST_CAN_ABSOLUTE) ; le PS/2 relatif reste
+sur `/dev/input/mice` dans tous les cas. Les rapports arrivent par
 la file des TD termines du HCCA (en memoire) : au repos aucun acces de registre
 hors le balayage des ports ; ~2 acces de registre par rapport (lecture de
 `HcInterruptStatus` quand l'IRQ est redoublee + acquittement) contre ~16 pour
@@ -1883,6 +1903,31 @@ demarrait bien le systeme installe.
 * Essais (`RUNINST.SH reboot reboot-noeject guard guard-reinstall`) : disque et CD sur
   AHCI, preseed jusqu'a "Redemarrer", reset reel ; avec et sans ejection ; le systeme
   installe arrive dans le terminal, GNOME, KDE ou GEOWORKS ; Reinstaller ; `reinstall=yes`.
+
+### Pointeur absolu et diagnostic des entrees (VirtualBox, tablette USB)
+
+Retour VirtualBox reel (noyau avec USB OHCI + VMMDev) : curseur absent, souris morte.
+Cote programmes (`USR/INSTALLER/INPUT.INC`, partage par l'assistant et `K32DESK`) :
+
+* `InOpen` lit `/dev/input/mice` (PS/2 relatif) **et** les `/dev/input/event0..7` qui ont
+  `EV_ABS` avec `ABS_X` et `ABS_Y` (`EVIOCGBIT`, `EVIOCGABS` pour le maximum, evenements
+  `struct input_event` de 16 octets : `ABS_X/ABS_Y`, `BTN_LEFT/RIGHT/MIDDLE`, `SYN`).
+  Regle : le relatif sert tant qu'aucun evenement ABS reel n'est arrive (une position
+  nulle d'un hote sans pointeur ne compte pas) ; apres le premier, la position vient de
+  l'ABS (mise a l'echelle de l'ecran) et les boutons de l'une ou l'autre source comptent.
+* Le curseur est dessine **des l'ouverture**, au centre, meme sans aucun peripherique
+  (`InPtr`), et un pointeur absolu qui apparait a chaud
+  (`echo 1 > /proc/sys/k32/usb_enable`) est detecte en une demi-seconde (event2 n'annonce `EV_ABS` qu'apres son premier rapport : l'assistant re-sonde).
+* Le clavier seul suffit pour toute l'installation (Tab, Entree, Echap, F2 shell, F3).
+* `/bin/k32-input` (`USR/ROOTFS/bin/k32-input`, script sh) : `status`, `usb`, `vbox`, `ps2`,
+  `auto` (ecrivent `/proc/sys/k32/usb_enable` et `vbox_enable`), `log` (rapport dans
+  `/tmp/k32-input.txt` : noyau, `/proc/k32input`, sysctl, messages `usb:`/`vbox:`/`input`,
+  `/dev/input`, interruptions, lspci).
+* Essais : `RUNINST.SH pointer` (tablette USB `-device usb-tablet` pilotee par QMP
+  `input-send-event` : le moniteur texte `mouse_move` n'agit pas sur une tablette ;
+  curseur visible, clic absolu sur une liste et sur "Suivant", Entree seule, F2 puis
+  `k32-input log`) ; `RUNU.SH desk` (bureau GNOME : clic absolu sur Activites) ;
+  `lot4.sh` (`k32-input`).
 
 ### Lot E6 (suite 2) : strace, tcpdump, bc, dc, ed, script
 

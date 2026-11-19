@@ -39,6 +39,26 @@ KERNEL32/TOOLS/MKINSTALLCD.SH -o KERNEL32-INSTALL.ISO).
   (boutons : Demarrer / Reinstaller / Shell) ; retirer le CD dans les
   reglages de la machine pour un amorcage direct du disque.
 
+Souris et clavier (VirtualBox, VMware, QEMU) :
+  - Le clavier suffit pour tout l'assistant : Tab / Maj+Tab (champ suivant ou
+    precedent), Entree (valider), Echap (annuler), fleches (listes), F1 (aide),
+    F2 (shell de secours), F3 (mode texte). La souris n'est jamais necessaire.
+  - Le pointeur est dessine des l'ouverture, au centre de l'ecran. Il suit
+    la souris PS/2 (relative) ; si le systeme invite fournit un pointeur
+    absolu (integration souris VirtualBox, tablette USB), celui-ci prend la
+    main des son premier evenement reel.
+  - Si la souris ne repond pas : F2 (ou Alt+F2 depuis un bureau) ouvre un
+    shell ; la commande k32-input permet d'essayer a chaud :
+      k32-input status   etat des entrees (noyau, /proc/k32input, messages)
+      k32-input ps2      souris PS/2 seule (pilotes usb et vbox coupes)
+      k32-input usb      pilote USB (tablette) ; k32-input vbox : integration
+                         VirtualBox ; k32-input auto : les deux
+      k32-input log      ecrit un rapport lisible dans /tmp/k32-input.txt
+    Joindre ce rapport (cat /tmp/k32-input.txt) a tout signalement de souris.
+    (Les options usb / vbox / ps2 / auto ecrivent /proc/sys/k32/usb_enable
+    et vbox_enable : elles n'existent que sur un noyau qui les propose ; le
+    pointeur est alors detecte en une demi-seconde.)
+
 CAPTURES/ : captures d'ecran PNG de l'assistant (francais : fr-*, allemand :
   de-*, installations automatiques : auto-*, mode texte : text-*), prises par
   KERNEL32/TESTS/U/RUNINST.SH sous QEMU (screendump).

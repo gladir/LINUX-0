@@ -71,5 +71,25 @@ has 'plasma.desktop : Exec' /usr/share/xsessions/plasma.desktop \
   'Exec=/usr/bin/startplasma-x11'
 has 'applications/*.desktop' /usr/share/applications/k32-nano.desktop \
   '^Exec=nano'
+# ---- k32-input ----
+k32-input > ki0.txt; chk 'k32-input : usage, code 0' 0 $?
+has 'k32-input : usage' ki0.txt 'status|usb|vbox|ps2|auto|log'
+k32-input status > ki1.txt 2>&1; chk 'k32-input status : code 0' 0 $?
+has 'k32-input status : /proc/k32input' ki1.txt '=== /proc/k32input'
+has 'k32-input status : messages' ki1.txt '=== messages du noyau'
+k32-input log > ki2.txt 2>&1; chk 'k32-input log : code 0' 0 $?
+has 'k32-input log : rapport' /tmp/k32-input.txt '=== /dev/input'
+k32-input bogus 2> ki3.txt; chk 'k32-input mode invalide : code 2' 2 $?
+if [ -w /proc/sys/k32/usb_enable ]; then
+  OLDU=$(cat /proc/sys/k32/usb_enable); OLDV=$(cat /proc/sys/k32/vbox_enable)
+  k32-input ps2 > ki4.txt 2>&1
+  chk 'k32-input ps2 : usb_enable 0' 0 "$(cat /proc/sys/k32/usb_enable)"
+  k32-input vbox > ki4.txt 2>&1
+  chk 'k32-input vbox : vbox_enable 1' 1 "$(cat /proc/sys/k32/vbox_enable)"
+  echo $OLDU > /proc/sys/k32/usb_enable; echo $OLDV > /proc/sys/k32/vbox_enable
+else
+  k32-input usb > ki4.txt 2>&1; chk 'k32-input usb sans sysctl : code 1' 1 $?
+  has 'k32-input usb : message' ki4.txt 'absent ou non modifiable'
+fi
 echo "${SAVE:-terminal}" > /etc/k32/session
 echo "LOT4-FIN ok=$P ko=$F"

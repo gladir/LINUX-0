@@ -7,7 +7,8 @@
 #   (/dev/input/event2, EVIOCGABS, boutons, molette), clavier USB (event0, tty,
 #   repetition), souris relative (event1, /dev/input/mice), priorite de la
 #   tablette sur VMMDev (simulation). Les evenements sont injectes par QMP
-#   (input-send-event). Ne prouve RIEN contre VirtualBox.
+#   (input-send-event). Les pilotes sont eteints par defaut (usb=1 les active).
+#   Ne prouve RIEN contre VirtualBox.
 #     RUNUSB.SH [-n]   (-n : ne pas regenerer les programmes embarques)
 HERE=$(cd "$(dirname "$0")" && pwd)
 K32=$HERE/../..
@@ -97,10 +98,13 @@ PY
     FAIL=1; cp "$W/out.txt" "$W/out-$name.txt"
   fi
 }
-run abs "-device pci-ohci,id=ohci -device usb-tablet -device usb-kbd" "usbmode=abs" "ABS,MOVE2,BTN,WHEEL,KEY,REPEAT"
-run rel "-device pci-ohci,id=ohci -device usb-mouse" "usbmode=rel" "REL"
-run prio "-device pci-ohci,id=ohci -device usb-tablet" "usbmode=prio k32vboxfake=1" "ABS,MOVE2"
-run hot "-device pci-ohci,id=ohci -device usb-tablet" "usbmode=hot" "HOT"
+run def "-device pci-ohci,id=ohci -device usb-tablet -device usb-kbd" "usbmode=def" "WAIT"
+run abs "-device pci-ohci,id=ohci -device usb-tablet -device usb-kbd" "usb=1 usbmode=abs" "ABS,MOVE2,BTN,WHEEL,KEY,REPEAT"
+run abs_poll "-device pci-ohci,id=ohci -device usb-tablet -device usb-kbd" "usb=1 usbpoll=1 usbmode=abs" "ABS,MOVE2,BTN,WHEEL,KEY,REPEAT"
+run rt "-device pci-ohci,id=ohci -device usb-tablet" "usbmode=rt" "ABS"
+run rel "-device pci-ohci,id=ohci -device usb-mouse" "usb=1 usbmode=rel" "REL"
+run prio "-device pci-ohci,id=ohci -device usb-tablet" "usb=1 usbmode=prio k32vboxfake=1" "ABS,MOVE2"
+run hot "-device pci-ohci,id=ohci -device usb-tablet" "usb=1 usbmode=hot" "HOT"
 for pat in "usb: souris QEMU USB Mouse" "usb: port [0-9] : peripherique retire" "usb: clavier"; do
   if ! tr -d '\r' < "$W/out.txt" | grep -aq "$pat"; then echo "ECHEC hotplug : '$pat' absent"; FAIL=1; fi
 done

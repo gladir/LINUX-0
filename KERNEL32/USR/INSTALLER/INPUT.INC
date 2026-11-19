@@ -8,7 +8,13 @@
       ICI (majuscules, AltGr, verrouillage majuscules), donc immediatement et
       sans table du noyau. Sur un port serie ou sans VT, les octets sont lus
       tels quels (UTF-8 et sequences ANSI : fleches, Tab...). Souris :
-      /dev/input/mice (paquets PS/2 de trois octets), curseur logiciel.
+      /dev/input/mice (paquets PS/2 de trois octets) ET pointeurs absolus
+      /dev/input/event0..7 ayant EV_ABS ABS_X/ABS_Y (VirtualBox "mouse
+      integration", tablette USB : EVIOCGBIT, EVIOCGABS, struct input_event
+      de 16 octets). Regle : le relatif sert tant qu'aucun evenement ABS reel
+      n'est arrive ; apres le premier, la position vient de l'ABS (les
+      boutons de l'une ou l'autre source comptent). Le curseur est dessine
+      des l'ouverture, au centre, meme sans aucun peripherique.
       Evenements : touche (EV_KEY), clic (EV_CLICK, B=1 : double clic),
       deplacement (EV_MOVE). Inclure apres UIBASE.INC et LAYOUTS.INC.
 }
@@ -34,6 +40,14 @@ Var
   InRawN, InRawP : LongInt;
   InMsB : Array[0..2] Of Byte;
   InMsN : LongInt;
+  InPtr : Boolean;             { curseur affiche (souris demandee) }
+  InAbsFd : Array[0..7] Of LongInt;      { evdev avec ABS_X / ABS_Y }
+  InAbsMx, InAbsMy : Array[0..7] Of LongInt;   { valeurs maximales }
+  InAbsN : LongInt;
+  InAbsX, InAbsY, InBtnMs, InBtnAbs : LongInt;
+  InAbsOn : Boolean;           { un evenement ABS reel a ete recu }
+  InAbsSeen : Boolean;         { ABS en attente de validation (EV_SYN) }
+  InAbsScan : LongInt;         { dernier balayage des evdev (ticks) }
   InMx, InMy, InMBtn, InLastClk, InLastCx, InLastCy : LongInt;
   InMoved : Boolean;
   InIsVt : Boolean;
@@ -309,9 +323,39 @@ Begin
   End;
 End;
 
-{ lit les paquets de souris disponibles }
+{ nouvel etat des boutons (bits 0 gauche, 1 droit, 2 milieu) : un appui du
+  bouton gauche produit EV_CLICK (B >= 100000 : double clic) ; un
+  deplacement en attente est livre avant }
+Procedure InButtons(NewB : LongInt);
+Var Old : LongInt;
+Begin
+  Old := InMBtn;
+  InMBtn := NewB;
+  If ((InMBtn And 1) <> 0) And ((Old And 1) = 0) Then
+  Begin
+    If InMoved Then
+    Begin
+      InPush(EV_MOVE, InMx, InMy);
+      InMoved := False;
+    End;
+    If (GetTickCount - InLastClk < 450) And
+       (Abs(InMx - InLastCx) < 8) And (Abs(InMy - InLastCy) < 8) Then
+    Begin
+      InPush(EV_CLICK, InMx, InMy + 100000);
+      InLastClk := 0;
+    End
+    Else
+    Begin
+      InPush(EV_CLICK, InMx, InMy);
+      InLastClk := GetTickCount;
+      InLastCx := InMx; InLastCy := InMy;
+    End;
+  End;
+End;
+
+{ lit les paquets de souris disponibles (/dev/input/mice) }
 Procedure InMouseRead;
-Var N, I, B, Dx, Dy, Old : LongInt; Buf : Array[0..63] Of Byte;
+Var N, I, B, Dx, Dy : LongInt; Buf : Array[0..63] Of Byte;
 Begin
   N := SysRead(InMsFd, Buf, 63);
   If N <= 0 Then Exit;
@@ -328,36 +372,117 @@ Begin
       Dy := InMsB[2];
       If (InMsB[0] And $10) <> 0 Then Dx := Dx - 256;
       If (InMsB[0] And $20) <> 0 Then Dy := Dy - 256;
-      InMx := InMx + Dx;
-      InMy := InMy - Dy;
-      If InMx < 0 Then InMx := 0;
-      If InMy < 0 Then InMy := 0;
-      If InMx >= GW Then InMx := GW - 1;
-      If InMy >= GH Then InMy := GH - 1;
-      If (Dx <> 0) Or (Dy <> 0) Then InMoved := True;
-      Old := InMBtn;
-      InMBtn := InMsB[0] And 7;
-      If ((InMBtn And 1) <> 0) And ((Old And 1) = 0) Then
+      { position relative seulement tant que l'ABS n'a pas pris la main }
+      If Not InAbsOn Then
       Begin
-        If InMoved Then
-        Begin
-          InPush(EV_MOVE, InMx, InMy);
-          InMoved := False;
-        End;
-        If (GetTickCount - InLastClk < 450) And
-           (Abs(InMx - InLastCx) < 8) And (Abs(InMy - InLastCy) < 8) Then
-        Begin
-          InPush(EV_CLICK, InMx, InMy + 100000);
-          InLastClk := 0;
-        End
-        Else
-        Begin
-          InPush(EV_CLICK, InMx, InMy);
-          InLastClk := GetTickCount;
-          InLastCx := InMx; InLastCy := InMy;
-        End;
+        InMx := InMx + Dx;
+        InMy := InMy - Dy;
+        If InMx < 0 Then InMx := 0;
+        If InMy < 0 Then InMy := 0;
+        If InMx >= GW Then InMx := GW - 1;
+        If InMy >= GH Then InMy := GH - 1;
+        If (Dx <> 0) Or (Dy <> 0) Then InMoved := True;
       End;
+      InBtnMs := InMsB[0] And 7;
+      InButtons(InBtnMs Or InBtnAbs);
     End;
+  End;
+  If InMoved Then
+  Begin
+    InPush(EV_MOVE, InMx, InMy);
+    InMoved := False;
+  End;
+End;
+
+{ cherche les peripheriques d'entree evdev ayant ABS_X et ABS_Y : EVIOCGBIT
+  (types) puis EVIOCGBIT(EV_ABS) et EVIOCGABS pour le maximum }
+Procedure InAbsOpen;
+Var K, Fd, Mx, My : LongInt; Bits : Array[0..3] Of LongInt;
+    Ab : Array[0..7] Of LongInt; Nm : String;
+Begin
+  InAbsScan := GetTickCount;
+  For K := 0 To 7 Do
+  Begin
+    If InAbsN > 7 Then Break;
+    Nm := '/dev/input/event' + Chr(48 + K);
+    Fd := SysOpen(Nm, O_RDONLY Or O_NONBLOCK, 0);
+    If Fd < 0 Then Continue;
+    Bits[0] := 0;
+    If SysIoctlL(Fd, LongInt($80044520), LongInt(@Bits)) < 0 Then Bits[0] := 0;
+    If (Bits[0] And 8) = 0 Then
+    Begin
+      SysClose(Fd);
+      Continue;
+    End;
+    Bits[0] := 0;
+    If SysIoctlL(Fd, LongInt($80044523), LongInt(@Bits)) < 0 Then Bits[0] := 0;
+    If (Bits[0] And 3) <> 3 Then
+    Begin
+      SysClose(Fd);
+      Continue;
+    End;
+    Mx := 0; My := 0;
+    FillChar(Ab, SizeOf(Ab), 0);
+    If SysIoctlL(Fd, LongInt($80184540), LongInt(@Ab)) = 0 Then Mx := Ab[2];
+    FillChar(Ab, SizeOf(Ab), 0);
+    If SysIoctlL(Fd, LongInt($80184541), LongInt(@Ab)) = 0 Then My := Ab[2];
+    If Mx <= 0 Then Mx := 65535;
+    If My <= 0 Then My := 65535;
+    InAbsFd[InAbsN] := Fd;
+    InAbsMx[InAbsN] := Mx;
+    InAbsMy[InAbsN] := My;
+    Inc(InAbsN);
+  End;
+End;
+
+{ lit les evenements (struct input_event de 16 octets : type en 8, code en
+  10, valeur en 12) du pointeur absolu I }
+Procedure InAbsRead(I : LongInt);
+Var N, P, T, C, V : LongInt;
+    Bp : Array[0..255] Of Byte;
+Begin
+  N := SysRead(InAbsFd[I], Bp, 256);
+  If N < 16 Then Exit;
+  P := 0;
+  While P + 16 <= N Do
+  Begin
+    T := Bp[P + 8] Or (Bp[P + 9] Shl 8);
+    C := Bp[P + 10] Or (Bp[P + 11] Shl 8);
+    V := Bp[P + 12] Or (Bp[P + 13] Shl 8) Or (Bp[P + 14] Shl 16) Or
+         (Bp[P + 15] Shl 24);
+    If (T = 3) And (C = 0) Then
+    Begin
+      InAbsX := V; InAbsSeen := True;
+    End
+    Else If (T = 3) And (C = 1) Then
+    Begin
+      InAbsY := V; InAbsSeen := True;
+    End
+    Else If (T = 1) And (C >= $110) And (C <= $112) Then
+    Begin
+      If V <> 0 Then InBtnAbs := InBtnAbs Or (1 Shl (C - $110))
+      Else InBtnAbs := InBtnAbs And Not (1 Shl (C - $110));
+      InButtons(InBtnMs Or InBtnAbs);
+    End
+    Else If T = 0 Then
+    Begin
+      { fin de paquet : l'ABS prend la main au premier evenement reel (hors
+        position nulle d'un hote sans pointeur) }
+      If InAbsSeen Then
+        If InAbsOn Or (InAbsX <> 0) Or (InAbsY <> 0) Then
+        Begin
+          InAbsOn := True;
+          InMx := (InAbsX * (GW - 1)) Div InAbsMx[I];
+          InMy := (InAbsY * (GH - 1)) Div InAbsMy[I];
+          If InMx < 0 Then InMx := 0;
+          If InMy < 0 Then InMy := 0;
+          If InMx >= GW Then InMx := GW - 1;
+          If InMy >= GH Then InMy := GH - 1;
+          InMoved := True;
+        End;
+      InAbsSeen := False;
+    End;
+    P := P + 16;
   End;
   If InMoved Then
   Begin
@@ -368,15 +493,28 @@ End;
 
 { attend un evenement au plus Ms millisecondes (Ms < 0 : sans limite) }
 Procedure InPoll(Ms : LongInt);
-Var Pf : Array[0..3] Of LongInt; N, R, B : LongInt;
+Var Pf : Array[0..23] Of LongInt; N, R, B, I, M : LongInt;
 Begin
   If InQh <> InQt Then Exit;
+  { pointeur absolu apparu a chaud (echo 1 > /proc/sys/k32/usb_enable) : un
+    balayage toutes les 0,5 s tant qu'aucun n'est ouvert (event2 n'annonce
+    EV_ABS qu'apres le premier rapport valide du peripherique) }
+  If InPtr And (InAbsN = 0) And (GetTickCount - InAbsScan > 500) Then
+    InAbsOpen;
+  If (Ms < 0) And InPtr And (InAbsN = 0) Then Ms := 500;
   Pf[0] := InTtyFd; Pf[1] := 1;
   N := 1;
+  M := -1;
   If InMsFd >= 0 Then
   Begin
     Pf[2] := InMsFd; Pf[3] := 1;
-    N := 2;
+    M := N;
+    Inc(N);
+  End;
+  For I := 0 To InAbsN - 1 Do
+  Begin
+    Pf[N * 2] := InAbsFd[I]; Pf[N * 2 + 1] := 1;
+    Inc(N);
   End;
   If InRawP < InRawN Then R := 1
   Else R := SysPoll(LongInt(@Pf), N, Ms);
@@ -393,7 +531,13 @@ Begin
     Else
       InCooked;
   End;
-  If (N = 2) And ((Pf[3] Shr 16) <> 0) Then InMouseRead;
+  If M > 0 Then
+    If (Pf[M * 2 + 1] Shr 16) <> 0 Then InMouseRead;
+  For I := 0 To InAbsN - 1 Do
+  Begin
+    B := N - InAbsN + I;
+    If (Pf[B * 2 + 1] Shr 16) <> 0 Then InAbsRead(I);
+  End;
 End;
 
 Function InGet(Var K, A, B : LongInt; Ms : LongInt) : Boolean;
@@ -441,11 +585,16 @@ Begin
   If InIsVt Then
     If SysIoctlL(InTtyFd, $4B45, 2) = 0 Then InMode := 1;
   InMsFd := -1;
+  InAbsN := 0;
+  InAbsOn := False; InAbsSeen := False;
+  InBtnMs := 0; InBtnAbs := 0; InAbsX := 0; InAbsY := 0;
+  InPtr := WithMouse;
   If WithMouse Then
   Begin
     InMsFd := SysOpen('/dev/input/mice', O_RDONLY Or O_NONBLOCK, 0);
     If InMsFd < 0 Then InMsFd := SysOpen('/dev/psaux',
       O_RDONLY Or O_NONBLOCK, 0);
+    InAbsOpen;
   End;
   InMx := GW Div 2; InMy := GH Div 2; InMBtn := 0; InLastClk := 0;
 End;
@@ -460,4 +609,10 @@ Begin
     SysClose(InMsFd);
     InMsFd := -1;
   End;
+  While InAbsN > 0 Do
+  Begin
+    Dec(InAbsN);
+    SysClose(InAbsFd[InAbsN]);
+  End;
+  InPtr := False;
 End;
