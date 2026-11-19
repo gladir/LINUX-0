@@ -23,19 +23,20 @@ Var
   GCurOn : Boolean;
 
 Const
-  GCurW = 16;                    { zone restauree par GCursorHide }
-  GCurH = 23;
-  { fleche "prisme" : '#' contour noir, H reflet, L clair, M moyen, D sombre
-    (3 facettes) ; point chaud en (0,0) }
-  GCurPrism : Array[0..22] Of String[16] = (
-    '#...............', '##..............', '#M#.............',
-    '#MM#............', '#MMM#...........', '#MMMM#..........',
-    '#HMMMM#.........', '#HMMMMM#........', '#HMMMMMM#.......',
-    '#HMMMMMM#.......', '#HLMMMMMM#......', '#HLMMMMMMM#.....',
-    '#HLMMMMMMMM#....', '#HLMMMMMMMMM#...', '#HLLMMMMM#####..',
-    '#HLLDDDD#.......', '#HL##DDD#.......', '#H#..#DDD#......',
-    '##...#DDDD#.....', '#.....#DDD#.....', '......#DDDD#....',
-    '.......#DD##....', '.......###......');
+  GCurW = 15;                    { zone restauree par GCursorHide }
+  GCurH = 22;
+  { fleche "prisme" (meme dessin que l'unite Graph, TOOLS/L32GFX.PAS) :
+    '#' contour noir, H reflet, L clair, M moyen, D sombre ; point chaud en
+    (0,0) }
+  GCurPrism : Array[0..21] Of String[15] = (
+    '#..............', '##.............', '#H#............',
+    '#HM#...........', '#HMM#..........', '#HLMM#.........',
+    '#HLMMM#........', '#HLMMMM#.......', '#HLLMMMM#......',
+    '#HLLMMMMM#.....', '#HLLLMMMMM#....', '#HLLLMMMMMD#...',
+    '#HLLLLDDDDDD#..', '#HLLLLDD######.', '#HLL#LL#.......',
+    '#HL#.#D#.......', '#H#..#LD#......', '##...#LD#......',
+    '#.....#DD#.....', '......#LD#.....', '.......#DD#....',
+    '.......###.....');
   { ancienne fleche (GFXPLAINCUR=1, k32setup.plaincursor) : X blanc, O noir }
   GCurPlain : Array[0..18] Of String[12] = (
     'X...........', 'XX..........', 'X.X.........', 'X..X........',
@@ -43,8 +44,13 @@ Const
     'X.......X...', 'X........X..', 'X.....XXXXX.', 'X..X..X.....',
     'X.X.X..X....', 'XX..X..X....', 'X....X..X...', '.....X..X...',
     '......X..X..', '......X..X..', '.......XX...');
-  { couleurs primaires de base : rouge, vert, bleu (une par seconde) }
-  GCurBase : Array[0..2] Of LongInt = ($E02020, $20C040, $2060E8);
+  { couleurs 0x00RRGGBB (claire, moyenne, sombre, reflet) pour rouge E02020,
+    vert 20C040, bleu 2060E8 : claire = base + (255 - base) * 0,40, sombre =
+    base * 0,60, reflet = base + (255 - base) * 0,75 (comme Graph) }
+  GCurCol : Array[0..11] Of LongInt = (
+    $EC7979, $E02020, $861313, $F7C7C7,
+    $79D98C, $20C040, $137326, $C7EFCF,
+    $79A0F1, $2060E8, $133A8B, $C7D7F9);
 
 Var
   GPlain : Boolean;              { ancienne fleche blanche (comparaisons) }
@@ -413,14 +419,13 @@ Begin
     GCurOn := True;
     Exit;
   End;
-  { couleur : seconde de l'horloge murale mod 3 ; facettes = base eclaircie /
-    assombrie (clair, moyen, sombre) et reflet tres clair }
+  { couleur : seconde de l'horloge murale mod 3 (0 rouge, 1 vert, 2 bleu) }
   GCurIdx := SysTime Mod 3;
-  Base := GCurBase[GCurIdx];
-  Pal[0] := GMix($FFFFFF, Base, 45);
-  Pal[1] := Base;
-  Pal[2] := GMix(0, Base, 45);
-  Pal[3] := GMix($FFFFFF, Base, 70);
+  Base := GCurIdx * 4;
+  Pal[0] := GCurCol[Base];
+  Pal[1] := GCurCol[Base + 1];
+  Pal[2] := GCurCol[Base + 2];
+  Pal[3] := GCurCol[Base + 3];
   For Row := 0 To GCurH - 1 Do
     For Col := 0 To GCurW - 1 Do
     Begin

@@ -27,6 +27,7 @@ WORK, ROOT, KERN, CAPDIR = sys.argv[1:5]
 SCEN = sys.argv[5:]
 LPC = os.environ.get('LPC', '/tmp/claude-0/work/k32/bin/lpc')
 RESULTS = []
+CURMASK = None               # (x, y) du curseur a ignorer dans px()
 
 
 def check(name, ok, detail=''):
@@ -96,7 +97,15 @@ def px(q, name, rgb, tol=10):
     im = Image.open(os.path.join(q.work, name + '.ppm')).convert('RGB')
     r0, g0, b0 = rgb
     n = 0
-    for (r, g, b) in im.getdata():
+    w = im.size[0]
+    for i, (r, g, b) in enumerate(im.getdata()):
+        if CURMASK:
+            # le curseur prisme change de couleur chaque seconde : sa boite
+            # (15 x 22 en CURMASK) est ignoree
+            x, y = i % w, i // w
+            if CURMASK[0] <= x < CURMASK[0] + 16 and \
+               CURMASK[1] <= y < CURMASK[1] + 23:
+                continue
         if abs(r - r0) <= tol and abs(g - g0) <= tol and abs(b - b0) <= tol:
             n += 1
     return n
@@ -460,6 +469,8 @@ reboot=halt
 def t_ui_fr():
     iso = build_iso('ui-fr', 'console=tty0 console=ttyS0 fb=1024x768 rw '
                     'k32setup.verbose=/dev/ttyS0')
+    global CURMASK
+    CURMASK = (512, 384)        # souris immobile au centre
     disk = new_disk('ui-fr', 700)
     q = qemu_cd('ui-fr', iso, disk)
     check('ui-fr : assistant lance au demarrage du CD (page 0)', page(q, 0, 90))
@@ -1389,7 +1400,9 @@ def t_cursor():
     seen = []
     first = {}
     hist = []
+    stamps = []
     for k in range(8):
+        stamps.append(time.time())      # instant de la capture
         h, cnt, blk = q.cursor_hue('h%d' % k, CX, CY)
         hist.append((h, cnt, blk))
         seen.append(h)
@@ -1402,16 +1415,19 @@ def t_cursor():
     check('cur : souris immobile, 3 teintes dominantes differentes en '
           'quelques secondes (rouge, vert, bleu : %s)' % sorted(first),
           len(first) == 3)
-    check('cur : la teinte change d\'un echantillon a l\'autre (>= 1,2 s)',
-          all(a != b for a, b in zip(seen, seen[1:]) if a and b) and
-          sum(1 for a, b in zip(seen, seen[1:]) if a and b and a != b) >= 2)
+    pairs = [(seen[i], seen[i + 1]) for i in range(len(seen) - 1)
+             if seen[i] and seen[i + 1] and
+             1.1 < stamps[i + 1] - stamps[i] < 2.7]
+    check('cur : deux echantillons espaces de 1,1 a 2,7 s ont des teintes '
+          'differentes (%d paires)' % len(pairs),
+          len(pairs) >= 2 and all(a != b for a, b in pairs))
     h0, cnt0, blk0 = hist[0]
     check('cur : contour noir visible sur le blanc (%d pixels noirs, '
           'facettes %s)' % (blk0, cnt0), blk0 >= 25 and max(cnt0.values())
           >= 30)
     for tint, nm in (('rouge', 'rouge'), ('vert', 'vert'), ('bleu', 'bleu')):
         if tint in first:
-            p = os.path.join(WORK, 'cur', first[tint] + '.png')
+            p = q.ppm_to_png(first[tint])
             if os.path.exists(p) and CAPDIR:
                 os.makedirs(CAPDIR, exist_ok=True)
                 subprocess.run(['cp', p, os.path.join(CAPDIR,
@@ -1461,6 +1477,7 @@ DEFAULT = [k for k in ALL if k not in ('sata8g', 'sata40g')]
 os.makedirs(WORK, exist_ok=True)
 for s in (SCEN or DEFAULT):
     print('=== ' + s, flush=True)
+    CURMASK = None
     try:
         ALL[s]()
     except Exception as e:                      # noqa

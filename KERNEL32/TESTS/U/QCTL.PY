@@ -193,13 +193,32 @@ class Q:
     HUES = (('rouge', (0xE0, 0x20, 0x20)), ('vert', (0x20, 0xC0, 0x40)),
             ('bleu', (0x20, 0x60, 0xE8)))
 
+    def ppm_to_png(self, name, png_max=300000):
+        """PPM d'une capture -> PNG reduit (<= 300 Ko) du meme nom"""
+        from PIL import Image
+        im = Image.open(os.path.join(self.work, name + '.ppm')).convert('RGB')
+        png = os.path.join(self.work, name + '.png')
+        for colors in (256, 128, 64, 32):
+            im.quantize(colors=colors, method=Image.MEDIANCUT,
+                        dither=Image.NONE).save(png, optimize=True)
+            if os.path.getsize(png) <= png_max:
+                break
+        return png
+
     def cursor_hue(self, name, x, y, w=20, h=26):
         """capture, puis (teinte dominante, comptes par teinte, pixels noirs)
         des pixels de la zone (x, y, w, h) : teinte = base la plus proche
         quand la couleur est saturee (facette claire ou sombre incluse)"""
         import colorsys
-        ppm = self.shot(name)
         ppm = os.path.join(self.work, name + '.ppm')
+        if os.path.exists(ppm):
+            os.unlink(ppm)
+        self.cmd('screendump ' + ppm, 0.3)       # sans PNG : rapide
+        for _ in range(20):
+            if os.path.exists(ppm) and os.path.getsize(ppm) > 100:
+                break
+            time.sleep(0.1)
+        time.sleep(0.1)
         from PIL import Image
         im = Image.open(ppm).convert('RGB')
         cnt = {'rouge': 0, 'vert': 0, 'bleu': 0}
