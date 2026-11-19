@@ -9,6 +9,8 @@ ok   bouton de la source absolue
 ok   absolu ancien : le relatif reprend sans saut
 ok   position absolue repetee : le relatif continue
 ok   nouvelle position absolue
+ok   couleur du curseur : change toute seule (sans souris)
+ok   couleur du curseur : cycle de 3 teintes
 ok   fonction 02h masque le curseur
 ok   fonction 01h le montre
 ok   fonction 00h : curseur affiche

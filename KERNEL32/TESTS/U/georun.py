@@ -142,7 +142,8 @@ def shot_np(name):
     return os.path.join(WORK, name + TAG + '.ppm')
 
 
-CLOCK = ((520, 220, 600, 260),)           # horloge de l'ecran d'accueil
+# horloge de l'ecran d'accueil : 640x480 puis 800x600 (VMware)
+CLOCK = ((520, 220, 600, 260), (600, 280, 680, 320))
 HWCUR = bool(os.environ.get('GEOHW'))       # curseur materiel : hors capture
 
 
@@ -165,10 +166,66 @@ def cur_check(label, trail=True):
         q.cmd('mouse_move -60 -40', 0.2)
         time.sleep(1.5)
         pc = shot_np('curc')
-        t = diffpx(pa, pc, CLOCK)       # la minute de l'horloge change
+        # la minute de l'horloge change ; la fleche prisme change de couleur
+        # chaque seconde (meme silhouette) : sa boite est ignoree
+        t = diffpx(pa, pc, CLOCK + ((298, 198, 318, 226),))
         ok = ok and t == 0
         extra = ', trainee %d px' % t
     check('curseur visible : %s (%d px changes%s)' % (label, d, extra), ok)
+
+
+PRISM = {0: [(236, 121, 121), (224, 32, 32), (134, 19, 19), (247, 199, 199)],
+         1: [(121, 217, 140), (32, 192, 64), (19, 115, 38), (199, 239, 207)],
+         2: [(121, 160, 241), (32, 96, 232), (19, 58, 139), (199, 215, 249)]}
+
+
+def find_white(ppm, bw=26, bh=30):
+    """coin haut gauche d'un bloc blanc pur bw x bh de l'ecran, ou None"""
+    from PIL import Image
+    import numpy
+    a = numpy.asarray(Image.open(ppm).convert('RGB')).astype(int)
+    white = (a == 255).all(axis=2)
+    ii = numpy.pad(white.astype(int).cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    for y in range(0, white.shape[0] - bh, 4):
+        for x in range(0, white.shape[1] - bw, 4):
+            if ii[y + bh, x + bw] - ii[y, x + bw] - ii[y + bh, x] + \
+               ii[y, x] == bw * bh:
+                return x, y
+    return None
+
+
+def prism_check(label):
+    """la fleche prisme au-dessus d'une zone blanche : contour noir et
+    facettes visibles ; capture d'exemple IMAGE/CAPTURES/curseur-prisme-
+    geoworks.png"""
+    from PIL import Image
+    p = shot_np('pr0')
+    pos = find_white(p)
+    if pos is None:
+        print('%-52s SKIP' % ('fleche prisme (%s) : pas de zone blanche' %
+                              label))
+        return
+    x, y = pos[0] + 4, pos[1] + 4
+    goto(x, y)
+    time.sleep(0.8)
+    png = shot('prisme-' + re.sub('[^a-z0-9]+', '-', label.lower()).strip('-'))
+    im = Image.open(png).convert('RGB')
+    black = 0
+    hue = 0
+    for j in range(22):
+        for i in range(15):
+            c = im.getpixel((x + i, y + j))
+            if c == (0, 0, 0):
+                black += 1
+            if any(c in cols for cols in PRISM.values()):
+                hue += 1
+    check('fleche prisme (%s) : contour noir et facettes sur fond blanc '
+          '(%d noirs, %d facettes)' % (label, black, hue),
+          black >= 30 and hue >= 60)
+    if label.startswith('GeoWrite'):
+        c = im.crop((x - 20, y - 14, x + 60, y + 46)).resize((320, 240),
+                                                              Image.NEAREST)
+        c.save(os.path.join(CAP, 'curseur-prisme-geoworks.png'))
 
 
 def click_at(x, y, wait=1.5):
@@ -390,6 +447,8 @@ for arg, name, label, acts in APPS:
            diffpx(p0, p) > 5000))
     if arg == 'CALC':
         cur_check('fenetre ouverte (Calculatrice)')
+    if arg == 'WRITE':
+        prism_check('GeoWrite (page blanche)')
     if arg == 'NOTEPAD':
         cur_check('menu ouvert (Notepad)', False)
     if acts:

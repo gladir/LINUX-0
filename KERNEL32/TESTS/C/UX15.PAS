@@ -16,7 +16,7 @@ Uses Crt, Graph, Dos;
 
 Var
   R : Registers;
-  Fr, Fa, Gd, Gm : LongInt;
+  Fr, Fa, Gd, Gm, P0, P1, P2, K : LongInt;
 
 Procedure Chk(Const Nm : String; Ok : Boolean);
 Begin
@@ -100,6 +100,26 @@ Begin
   Ev(0, 0, 0);
   Get;
   Chk('nouvelle position absolue', (R.CX = 383) And (R.DX = 239));
+  { couleur du curseur prisme : une teinte primaire par seconde, sans
+    mouvement de la souris : rouge -> vert -> bleu (seconde murale mod 3) }
+  P0 := GfxCursorPhase;
+  K := 0;
+  While (GfxCursorPhase = P0) And (K < 80) Do
+  Begin
+    Delay(100);
+    Inc(K);
+  End;
+  P1 := GfxCursorPhase;
+  K := 0;
+  While (GfxCursorPhase = P1) And (K < 80) Do
+  Begin
+    Delay(100);
+    Inc(K);
+  End;
+  P2 := GfxCursorPhase;
+  Chk('couleur du curseur : change toute seule (sans souris)', P1 <> P0);
+  Chk('couleur du curseur : cycle de 3 teintes', (P1 = (P0 + 1) Mod 3) And
+      (P2 = (P1 + 1) Mod 3) And (P2 <> P0));
   R.AX := 2;
   Intr($33, R);
   Chk('fonction 02h masque le curseur', Not GfxCursorOn);

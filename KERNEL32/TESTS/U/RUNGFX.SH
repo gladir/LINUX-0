@@ -5,7 +5,7 @@
 # @description: Essais QEMU de l'unite Graph, de la souris et du clavier de
 #   LPC -3X (voir GFXT.PY) : cartes -vga std (avec un disque ich9-ahci) puis
 #   -vga vmware. Captures PNG dans IMAGE/CAPTURES.
-#     RUNGFX.SH [scenario...]     scenarios : prim mouse geo dos bench robust (tous)
+#     RUNGFX.SH [scenario...]     scenarios : prim mouse geo dos bench robust prism (tous)
 #   Variables : LPC, KSRC (source du noyau), W (travail), GEOWORKS (source de
 #   GEOWORKS.PAS, defaut /home/user/dev-cools/GEOWORKS.PAS).
 HERE=$(cd "$(dirname "$0")" && pwd)

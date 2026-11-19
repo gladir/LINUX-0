@@ -480,6 +480,17 @@ seule zone, dont l'ancienne et la nouvelle position), curseur de l'unite
   07h/08h) et les paquets relatifs sont ignores ; ensuite le relatif reprend
   depuis la position courante, sans saut. MOUSEREL=1 ignore l'evdev ;
   MOUSEDEV=fichier, MOUSEEVDEV=fichier, MOUSEABS=xmax,ymax pour les essais.
+- Aspect du curseur : fleche PRISME de 15 x 22 pixels (pointe = point chaud
+  (0,0)), contour noir de 1 pixel, facettes claire / moyenne / sombre et reflet,
+  dont la teinte primaire change CHAQUE SECONDE : rouge E02020, vert 20C040,
+  bleu 2060E8 (seconde de l'heure murale modulo 3, meme sans mouvement de la
+  souris ; seule la fleche est redessinee, aucune zone du fond n'est recopiee ;
+  une lecture de l'heure au plus 10 fois par seconde, compteur GfxStat 12 ;
+  compteur 13 : redessins de la seule couleur). Meme dessin et memes couleurs
+  dans l'installateur et les bureaux (DEMANDES_E6.md). Curseur materiel : image
+  ARGB redefinie a chaque changement de couleur. GFXPLAINCUR=1 : ancienne
+  fleche blanche 12 x 17 (tests d'images) ; GfxCursorPhase : 0 rouge, 1 vert,
+  2 bleu. Ecrans 8 bits : ancienne fleche.
 - Curseur : affiche des InitGraph, au centre de l'ecran, meme sans aucune source
   ni evenement (Intr 33h 02h le masque, 01h le montre, 00h l'affiche ;
   GFXNOCUR=1 le desactive : programme qui dessine le sien, comparaison

@@ -1918,6 +1918,14 @@ Cote programmes (`USR/INSTALLER/INPUT.INC`, partage par l'assistant et `K32DESK`
 * Le curseur est dessine **des l'ouverture**, au centre, meme sans aucun peripherique
   (`InPtr`), et un pointeur absolu qui apparait a chaud
   (`echo 1 > /proc/sys/k32/usb_enable`) est detecte en une demi-seconde (event2 n'annonce `EV_ABS` qu'apres son premier rapport : l'assistant re-sonde).
+* **Curseur prisme** (`GCursorShow`, `GCursorTick` dans `GFX.INC`) : fleche 16x23, point chaud
+  (0,0), contour noir de 1 px (visible sur les listes blanches), 3 facettes (clair a gauche,
+  moyen, sombre en bas) plus un reflet ; la couleur primaire change chaque seconde
+  (rouge `E02020`, vert `20C040`, bleu `2060E8`, index = seconde murale mod 3), **meme souris
+  immobile** : `InPoll` attend par tranches de 250 ms et appelle `GCursorTick`, qui redessine
+  seulement la silhouette en place (ni fond a recopier, ni trainee). `GFXPLAINCUR=1`,
+  `k32setup.plaincursor` ou `plaincursor=yes` (preseed) gardent l'ancienne fleche blanche.
+  Essais : `RUNINST.SH cursor`, `RUNU.SH desk` (bureaux GNOME et KDE).
 * Le clavier seul suffit pour toute l'installation (Tab, Entree, Echap, F2 shell, F3).
 * `/bin/k32-input` (`USR/ROOTFS/bin/k32-input`, script sh) : `status`, `usb`, `vbox`, `ps2`,
   `auto` (ecrivent `/proc/sys/k32/usb_enable` et `vbox_enable`), `log` (rapport dans

@@ -22,6 +22,8 @@
 #              preseed reinstall=yes (pas de garde-fou)
 #     pointer  tablette USB (pointeur absolu, QMP) : curseur visible des
 #              l'ouverture, clics absolus, clavier seul, F2 + k32-input
+#     cursor   curseur prisme : 3 teintes souris immobile, contraste sur le
+#              blanc, pas de trainee, k32setup.plaincursor (ancienne fleche)
 #     tz       fuseaux horaires (TZif, heure d'ete) contre l'hote
 #     auto-fr  installation automatique (preseed) en francais, guide, ext4+swap
 #     auto-de  idem en allemand, manuel : ext3 + swap + /home, horloge locale

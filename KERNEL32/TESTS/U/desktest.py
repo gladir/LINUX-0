@@ -140,17 +140,32 @@ def run_boot(mode, tag, bar, panel, tablet=False):
                    '/proc/sys/k32/usb_enable')
         time.sleep(5)
         qm = Qmp(qsock)
-        n0 = px(q, 'ta', (0x24, 0x5a, 0x91), 14)
-        qm.abs(50, 12)                  # "Activites" (barre du haut)
-        time.sleep(0.5)
-        qm.click()
-        time.sleep(1.5)
-        n1 = px(q, 'tb', (0x24, 0x5a, 0x91), 14)
-        cap(q, 'tb', tag + '-boot-01b-activites-tablette')
-        check(tag + ' : tablette (pointeur absolu) : clic sur Activites '
-              'change l\'ecran (%d -> %d)' % (n0, n1), abs(n1 - n0) > 5000)
-        qm.click()                      # referme la vue
-        time.sleep(1)
+        if mode == 'gnome':
+            n0 = px(q, 'ta', (0x24, 0x5a, 0x91), 14)
+            qm.abs(50, 12)                  # "Activites" (barre du haut)
+            time.sleep(0.5)
+            qm.click()
+            time.sleep(1.5)
+            n1 = px(q, 'tb', (0x24, 0x5a, 0x91), 14)
+            cap(q, 'tb', tag + '-boot-01b-activites-tablette')
+            check(tag + ' : tablette (pointeur absolu) : clic sur Activites '
+                  'change l\'ecran (%d -> %d)' % (n0, n1), abs(n1 - n0) > 5000)
+            qm.click()                      # referme la vue
+            time.sleep(1)
+    if tablet:
+        # curseur prisme : la couleur change chaque seconde, souris immobile
+        qm.abs(400, 300)                # fenetre Terminal (fond sombre)
+        time.sleep(1.0)
+        seen = []
+        for k in range(8):
+            hh, cnt, blk = q.cursor_hue('h%d' % k, 400, 300)
+            seen.append(hh)
+            if len(set(x for x in seen if x)) == 3 and k >= 2:
+                break
+            time.sleep(1.2)
+        check(tag + ' : curseur prisme : 3 teintes differentes souris '
+              'immobile (%s)' % seen, len(set(x for x in seen if x)) == 3)
+        cap(q, 'hc', tag + '-curseur-prisme')
     if bar:
         check(tag + ' : bureau lance par init sur tty1 (fond Adwaita)',
               px(q, 'p1', (0x24, 0x5a, 0x91), 14) > 20000)
@@ -203,7 +218,7 @@ def run_boot(mode, tag, bar, panel, tablet=False):
 
 def main():
     run_boot('gnome', 'bgnome', (0, 0, 0), None, True)
-    run_boot('kde', 'bkde', None, (0x23, 0x26, 0x29))
+    run_boot('kde', 'bkde', None, (0x23, 0x26, 0x29), True)
 
 main()
 print('DESK-FIN ok=%d ko=%d' % (ok, ko))

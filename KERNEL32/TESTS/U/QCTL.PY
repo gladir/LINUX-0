@@ -188,6 +188,41 @@ class Q:
             print('shot:', e)
             return ppm
 
+    # teintes du curseur "prisme" : bases rouge, vert, bleu (facettes = bases
+    # eclaircies ou assombries : on classe par la teinte dominante)
+    HUES = (('rouge', (0xE0, 0x20, 0x20)), ('vert', (0x20, 0xC0, 0x40)),
+            ('bleu', (0x20, 0x60, 0xE8)))
+
+    def cursor_hue(self, name, x, y, w=20, h=26):
+        """capture, puis (teinte dominante, comptes par teinte, pixels noirs)
+        des pixels de la zone (x, y, w, h) : teinte = base la plus proche
+        quand la couleur est saturee (facette claire ou sombre incluse)"""
+        import colorsys
+        ppm = self.shot(name)
+        ppm = os.path.join(self.work, name + '.ppm')
+        from PIL import Image
+        im = Image.open(ppm).convert('RGB')
+        cnt = {'rouge': 0, 'vert': 0, 'bleu': 0}
+        blk = 0
+        for yy in range(y, min(y + h, im.size[1])):
+            for xx in range(x, min(x + w, im.size[0])):
+                r, g, b = im.getpixel((xx, yy))
+                if (r, g, b) == (0, 0, 0):
+                    blk += 1
+                    continue
+                hh, ss, vv = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                if ss < 0.35 or vv < 0.25:
+                    continue
+                d = hh * 360
+                if d < 25 or d > 335:
+                    cnt['rouge'] += 1
+                elif 110 <= d <= 160:
+                    cnt['vert'] += 1
+                elif 205 <= d <= 235:
+                    cnt['bleu'] += 1
+        best = max(cnt, key=cnt.get)
+        return (best if cnt[best] >= 15 else None), cnt, blk
+
     def quit(self):
         try:
             self.cmd('quit', 0.2)

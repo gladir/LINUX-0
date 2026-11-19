@@ -94,7 +94,7 @@ Begin
     Delay(4);
   End;
   Write('stat moves=', Mv, ' loops=', Loops);
-  For I := 0 To 11 Do Write(' s', I, '=', GfxStat(I));
+  For I := 0 To 13 Do Write(' s', I, '=', GfxStat(I));
   WriteLn;
   CloseGraph;
   WriteLn('fin');
